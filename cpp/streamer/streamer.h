@@ -2,16 +2,14 @@
 
 #include <stddef.h>
 
-#include "common/device/device.h"
+#include "streamer/device.h"
 #include "common/submission/submission_id.h"
 
 namespace runai::llm::streamer
 {
 
-#ifdef _RUNAI_STREAMER_SO
-    #define _RUNAI_EXTERN_C extern "C"
-#else
-    #define _RUNAI_EXTERN_C
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 typedef void (*RunaiFileListCallback)(const char* path, size_t file_size, void* user_data);
@@ -29,11 +27,11 @@ typedef void (*RunaiFileListCallback)(const char* path, size_t file_size, void* 
 //                                   for object storage. Minimums are enforced - 2 MiB and 5 MiB respectively
 // Worker pools are created lazily, one per backend actually used.
 
-_RUNAI_EXTERN_C int runai_start(void ** streamer /* return parameter */);
+int runai_start(void ** streamer /* return parameter */);
 
 // destroys streamer object
 
-_RUNAI_EXTERN_C void runai_end(void * streamer);
+void runai_end(void * streamer);
 
 // Set the streamer's object-storage credentials as a general key/value dictionary (param_keys /
 // param_values / num_params). Keys are the plugin's canonical config-parameter names (e.g.
@@ -41,7 +39,7 @@ _RUNAI_EXTERN_C void runai_end(void * streamer);
 // carried through to the backend. Credentials are streamer-scoped and set once: setting the same
 // credentials again returns Success; a different set after the first returns CredentialsAlreadySet (create
 // a new streamer for a different identity). Call this before submitting object-storage reads / listing.
-_RUNAI_EXTERN_C int runai_set_credentials(
+int runai_set_credentials(
     void * streamer,
     const char ** param_keys,
     const char ** param_values,
@@ -66,7 +64,7 @@ _RUNAI_EXTERN_C int runai_set_credentials(
 // Optional. Without it the streamer reads RUNAI_STREAMER_FS_STRATEGY, defaulting to the synchronous
 // reader. Object-storage reads are unaffected: the strategy names a filesystem engine, and a
 // submission that reads object storage never consults it.
-_RUNAI_EXTERN_C int runai_set_fs_strategy(
+int runai_set_fs_strategy(
     void * streamer,
     const char * candidates
 );
@@ -107,7 +105,7 @@ _RUNAI_EXTERN_C int runai_set_fs_strategy(
 //                      identifies the submission; use it to demux responses from
 //                      runai_response. If the call fails after the submission was committed,
 //                      its responses are still delivered and can be drained by this id.
-_RUNAI_EXTERN_C int runai_request(
+int runai_request(
     void * streamer,
     SubmissionId * out_submission_id /* return parameter */,
     unsigned num_files,
@@ -126,7 +124,7 @@ _RUNAI_EXTERN_C int runai_request(
 //  timeout_ms        : max time to wait for a response; 0 blocks indefinitely.
 // ret is the truthful per-range code (Success or a specific error), TimedOut on timeout, or
 // FinishedError on teardown.
-_RUNAI_EXTERN_C int runai_response(
+int runai_response(
     void * streamer,
     SubmissionId * out_submission_id /* return parameter */,
     unsigned * file_index /* return parameter */,
@@ -135,7 +133,7 @@ _RUNAI_EXTERN_C int runai_response(
     unsigned timeout_ms
 );
 
-_RUNAI_EXTERN_C const char * runai_response_str(int response_code);
+const char * runai_response_str(int response_code);
 
 // The block a caller must lay destinations out at for THESE paths, so reads can be served with
 // O_DIRECT.
@@ -162,7 +160,7 @@ _RUNAI_EXTERN_C const char * runai_response_str(int response_code);
 //             a long-lived streamer would otherwise keep it for the life of the process.
 //
 // ret is Success, or UnknownError when nothing could be measured. It does not fail a submission.
-_RUNAI_EXTERN_C int runai_probe_direct_block_size(
+int runai_probe_direct_block_size(
     void *        streamer,
     const char ** paths,
     unsigned      num_paths,
@@ -189,7 +187,7 @@ _RUNAI_EXTERN_C int runai_probe_direct_block_size(
 //       }, &result);
 //
 // allow_patterns / ignore_patterns are fnmatch(3) patterns; NULL means no filter.
-_RUNAI_EXTERN_C int runai_list_files(
+int runai_list_files(
     void *                   streamer,
     const char *             prefix,
     int                      is_recursive,
@@ -200,5 +198,9 @@ _RUNAI_EXTERN_C int runai_list_files(
     RunaiFileListCallback    callback,
     void *                   user_data
 );
+
+#ifdef __cplusplus
+}   // extern "C"
+#endif
 
 } // namespace runai::llm::streamer

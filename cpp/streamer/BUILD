@@ -5,15 +5,14 @@ runai_portable_so(
     srcs = ["streamer.h",
             "streamer.cc",
     ],
-    deps = ["//streamer/impl", "//common/device", "//common/submission", "//posix_io/alignment"],
+    deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
     ldscript = ":streamer.ldscript",
-    defines = ["_RUNAI_STREAMER_SO"],
     linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"]
 )
 
 runai_cc_auto_library(
     name = "streamer",
-    deps = ["//streamer/impl", "//common/device", "//common/submission", "//posix_io/alignment"],
+    deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
 )
 
 runai_cc_test(

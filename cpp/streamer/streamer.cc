@@ -22,7 +22,7 @@ namespace runai::llm::streamer
 
 // Creates a streamer object; see streamer.h for the configuration environment variables.
 
-_RUNAI_EXTERN_C int runai_start(void ** streamer)
+int runai_start(void ** streamer)
 {
     // verify configuration
     std::unique_ptr<impl::Config> config;
@@ -48,7 +48,7 @@ _RUNAI_EXTERN_C int runai_start(void ** streamer)
 
 // destroys streamer object
 
-_RUNAI_EXTERN_C void runai_end(void * streamer)
+void runai_end(void * streamer)
 {
     try
     {
@@ -132,7 +132,7 @@ int submit_request(impl::Streamer * s,
 // keys; see common::s3::Credentials). Set-once and thread-safe: the same credentials may be set repeatedly
 // (Success); a different set after the first returns CredentialsAlreadySet. Credentials are streamer-scoped -
 // the read/list entry points use whatever was set here.
-_RUNAI_EXTERN_C int runai_set_credentials(
+int runai_set_credentials(
     void * streamer,
     const char ** param_keys,
     const char ** param_values,
@@ -159,7 +159,7 @@ _RUNAI_EXTERN_C int runai_set_credentials(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_set_fs_strategy(
+int runai_set_fs_strategy(
     void * streamer,
     const char * candidates)
 {
@@ -184,7 +184,7 @@ _RUNAI_EXTERN_C int runai_set_fs_strategy(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_request(
+int runai_request(
     void * streamer,
     SubmissionId * out_submission_id,
     unsigned num_files,
@@ -229,7 +229,7 @@ _RUNAI_EXTERN_C int runai_request(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_response(
+int runai_response(
     void * streamer,
     SubmissionId * out_submission_id,
     unsigned * file_index,
@@ -267,7 +267,7 @@ _RUNAI_EXTERN_C int runai_response(
 
 const char * unexpected_error = "Unexpected error occured";
 
-_RUNAI_EXTERN_C int runai_probe_direct_block_size(
+int runai_probe_direct_block_size(
     void *        streamer,
     const char ** paths,
     unsigned      num_paths,
@@ -322,7 +322,7 @@ _RUNAI_EXTERN_C int runai_probe_direct_block_size(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C const char * runai_response_str(int response_code)
+const char * runai_response_str(int response_code)
 {
     try
     {
@@ -335,7 +335,7 @@ _RUNAI_EXTERN_C const char * runai_response_str(int response_code)
     return unexpected_error;
 }
 
-_RUNAI_EXTERN_C int runai_list_files(
+int runai_list_files(
     void *                streamer,
     const char *          prefix,
     int                   is_recursive,

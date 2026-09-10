@@ -10,7 +10,7 @@
 #include <vector>
 #include "utils/fd/fd.h"
 #include "utils/logging/logging.h"
-#include "common/device/device.h"
+#include "streamer/device.h"
 #include "common/response_code/response_code.h"
 #include "common/submission/submission_id.h"
 
