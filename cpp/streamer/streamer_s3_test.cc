@@ -8,6 +8,7 @@
 
 #include "common/backend_api/object_storage/object_storage.h"
 #include "common/response_code/response_code.h"
+#include "common/submission/submission_id.h"
 #include "common/s3_credentials/s3_credentials.h"
 
 #include "utils/logging/logging.h"

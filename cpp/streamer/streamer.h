@@ -3,7 +3,7 @@
 #include <stddef.h>
 
 #include "streamer/device.h"
-#include "common/submission/submission_id.h"
+#include "streamer/submission_id.h"
 
 namespace runai::llm::streamer
 {
@@ -107,7 +107,7 @@ int runai_set_fs_strategy(
 //                      its responses are still delivered and can be drained by this id.
 int runai_request(
     void * streamer,
-    SubmissionId * out_submission_id /* return parameter */,
+    NvFileStreamerSubmissionId * out_submission_id /* return parameter */,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
@@ -126,7 +126,7 @@ int runai_request(
 // FinishedError on teardown.
 int runai_response(
     void * streamer,
-    SubmissionId * out_submission_id /* return parameter */,
+    NvFileStreamerSubmissionId * out_submission_id /* return parameter */,
     unsigned * file_index /* return parameter */,
     unsigned * index /* return parameter */,
     int * submission_done /* return parameter */,

@@ -74,7 +74,7 @@ namespace
 // that no array is dereferenced before it has been checked - in particular paths[i] is checked before
 // being used to construct a std::string.
 int submit_request(impl::Streamer * s,
-                   SubmissionId * out_submission_id,
+                   NvFileStreamerSubmissionId * out_submission_id,
                    unsigned num_files,
                    const char ** paths, unsigned * num_ranges,
                    size_t * range_offsets, size_t * range_sizes, void ** range_dsts,
@@ -186,7 +186,7 @@ int runai_set_fs_strategy(
 
 int runai_request(
     void * streamer,
-    SubmissionId * out_submission_id,
+    NvFileStreamerSubmissionId * out_submission_id,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
@@ -231,7 +231,7 @@ int runai_request(
 
 int runai_response(
     void * streamer,
-    SubmissionId * out_submission_id,
+    NvFileStreamerSubmissionId * out_submission_id,
     unsigned * file_index,
     unsigned * index,
     int * submission_done,

@@ -10,6 +10,7 @@
 #include <set>
 
 #include "common/response_code/response_code.h"
+#include "common/submission/submission_id.h"
 
 #include "utils/logging/logging.h"
 #include "utils/random/random.h"

@@ -1,20 +1,15 @@
 #pragma once
 
-#include <cstdint>
+#include "streamer/submission_id.h"
 
 namespace runai::llm::streamer
 {
 
-// Identifier for one runai_request submission: assigned by SubmissionsMgr (returned from runai_request),
-// stamped on every response, and echoed by runai_response so a shared responder can be demuxed across
-// concurrent submissions. Part of the streamer's public C API contract (hence the runai::llm::streamer
-// namespace, not ::common).
+// The C API's submission id under the name the C++ layers use.
 //
-// It lives here, in a dependency-free leaf under common/, rather than in the //streamer C-API package
-// because the lower layers that carry it - common::Response, SubmissionsMgr, Batch - sit below the C API
-// and must name it without depending on the streamer package (which would invert the layering; //common
-// is also shared with the object-storage plugins). 64-bit so the id space is effectively unbounded;
-// callers treat it as an opaque token. 0 is reserved as the "none" value (the Response default).
-using SubmissionId = std::uint64_t;
+// The alias lives here, in a dependency-free leaf under common/, so that the lower layers carrying the
+// id - common::Response, SubmissionsMgr, Batch, AsyncIoStats - can name it without including the whole
+// C API header, which would invert the layering.
+using SubmissionId = NvFileStreamerSubmissionId;
 
 } // namespace runai::llm::streamer

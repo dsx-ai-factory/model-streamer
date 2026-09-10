@@ -214,7 +214,7 @@ extern "C" int runai_set_fs_strategy(
 
 extern "C" int runai_request(
     void * streamer,
-    SubmissionId * out_submission_id,
+    NvFileStreamerSubmissionId * out_submission_id,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
@@ -276,7 +276,7 @@ extern "C" int runai_request(
 
 extern "C" int runai_response(
     void * streamer,
-    SubmissionId * out_submission_id,
+    NvFileStreamerSubmissionId * out_submission_id,
     unsigned * file_index,
     unsigned * index,
     int * submission_done,
