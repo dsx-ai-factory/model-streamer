@@ -3,44 +3,44 @@
 
 #include <ostream>
 
+#include "streamer/response_code.h"
+
 namespace runai::llm::streamer::common
 {
 
+// The C++ name for each published code. Every value comes from <streamer/response_code.h>, so the two
+// cannot drift: a code is added there first, and named here.
 enum class ResponseCode : int
 {
-    Success           = 0,
+    Success                  = NV_FILE_STREAMER_RESPONSE_SUCCESS,
 
-    FinishedError,
-    FileAccessError,
-    EofError,
-    S3NotSupported,
-    GlibcPrerequisite,
-    InsufficientFdLimit,
-    InvalidParameterError,
-    EmptyRequestError,
-    BusyError,
-    CaFileNotFound,
-    UnknownError,
-    ObjPluginLoadError,
-    GCSNotSupported,
-    AzureBlobNotSupported,
-    FileTruncatedError,
-    TimedOut,
-    UnsupportedBackendMix,
-    CredentialsAlreadySet,
-    RetryableFileAccessError,
+    FinishedError            = NV_FILE_STREAMER_RESPONSE_FINISHED_ERROR,
+    FileAccessError          = NV_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR,
+    EofError                 = NV_FILE_STREAMER_RESPONSE_EOF_ERROR,
+    S3NotSupported           = NV_FILE_STREAMER_RESPONSE_S3_NOT_SUPPORTED,
+    GlibcPrerequisite        = NV_FILE_STREAMER_RESPONSE_GLIBC_PREREQUISITE,
+    InsufficientFdLimit      = NV_FILE_STREAMER_RESPONSE_INSUFFICIENT_FD_LIMIT,
+    InvalidParameterError    = NV_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR,
+    EmptyRequestError        = NV_FILE_STREAMER_RESPONSE_EMPTY_REQUEST_ERROR,
+    BusyError                = NV_FILE_STREAMER_RESPONSE_BUSY_ERROR,
+    CaFileNotFound           = NV_FILE_STREAMER_RESPONSE_CA_FILE_NOT_FOUND,
+    UnknownError             = NV_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR,
+    ObjPluginLoadError       = NV_FILE_STREAMER_RESPONSE_OBJ_PLUGIN_LOAD_ERROR,
+    GCSNotSupported          = NV_FILE_STREAMER_RESPONSE_GCS_NOT_SUPPORTED,
+    AzureBlobNotSupported    = NV_FILE_STREAMER_RESPONSE_AZURE_BLOB_NOT_SUPPORTED,
+    FileTruncatedError       = NV_FILE_STREAMER_RESPONSE_FILE_TRUNCATED_ERROR,
+    TimedOut                 = NV_FILE_STREAMER_RESPONSE_TIMED_OUT,
+    UnsupportedBackendMix    = NV_FILE_STREAMER_RESPONSE_UNSUPPORTED_BACKEND_MIX,
+    CredentialsAlreadySet    = NV_FILE_STREAMER_RESPONSE_CREDENTIALS_ALREADY_SET,
+    RetryableFileAccessError = NV_FILE_STREAMER_RESPONSE_RETRYABLE_FILE_ACCESS_ERROR,
 
     // Filesystem strategy problems. Two codes, because the operator has to do something different
     // for each one: set the value once, or add a candidate the host can serve.
     //
     // Both used to report UnsupportedBackendMix, whose message is about mixing S3, GCS and Azure.
     // That sent the reader to object storage for a problem that has nothing to do with it.
-    //
-    // APPENDED here, before __Max, so the numbers of the codes above do not move. They cross the C
-    // ABI, and a compiled caller holds the old numbers. RetryableFileAccessError is already released
-    // and keeps its number, so these two follow it rather than displacing it.
-    FsStrategyConflict,
-    FsStrategyUnavailable,
+    FsStrategyConflict       = NV_FILE_STREAMER_RESPONSE_FS_STRATEGY_CONFLICT,
+    FsStrategyUnavailable    = NV_FILE_STREAMER_RESPONSE_FS_STRATEGY_UNAVAILABLE,
 
     // One mount's asynchronous reader failed permanently, mid-run - io_uring_submit or io_getevents
     // returned an error that is not backpressure.
@@ -58,11 +58,10 @@ enum class ResponseCode : int
     //
     // ONE code for both engines. The decision it drives is the same whichever one failed; which engine
     // it was, and with what errno, is in the log.
-    FsAsyncEngineError,
+    FsAsyncEngineError       = NV_FILE_STREAMER_RESPONSE_FS_ASYNC_ENGINE_ERROR,
 
-    // The submission named a device this build cannot serve. Appended, like the codes above, so no
-    // released number moves.
-    UnsupportedDeviceType,
+    // The submission named a device this build cannot serve.
+    UnsupportedDeviceType    = NV_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE,
 
     __Max,
 };
