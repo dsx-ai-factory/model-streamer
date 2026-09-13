@@ -12,57 +12,10 @@
 #include "streamer/impl/streamer/streamer.h"
 #include "posix_io/alignment/alignment.h"
 
+// The C API is defined at file scope, where streamer.h declares it. The helper below is the only part
+// that is ours to name, so it keeps the namespace.
 namespace runai::llm::streamer
 {
-
-// Library for reading files concurrently into host memory buffers
-// A single submission (runai_request) may cover many files, and many submissions may be in flight at
-// once - each response carries the id of the submission it belongs to
-// NOT THREAD SAFE - caller must not send requests and responses in parallel
-
-// Creates a streamer object; see streamer.h for the configuration environment variables.
-
-int runai_start(void ** streamer)
-{
-    // verify configuration
-    std::unique_ptr<impl::Config> config;
-    try
-    {
-        config = std::make_unique<impl::Config>();
-    }
-    catch(...)
-    {
-        return static_cast<int>(common::ResponseCode::InvalidParameterError);
-    }
-
-    try
-    {
-        *streamer = new impl::Streamer(*config);
-    }
-    catch(...)
-    {
-        return static_cast<int>(common::ResponseCode::UnknownError);
-    }
-    return static_cast<int>(common::ResponseCode::Success);
-}
-
-// destroys streamer object
-
-void runai_end(void * streamer)
-{
-    try
-    {
-        auto s = static_cast<impl::Streamer *>(streamer);
-        if (s != nullptr)
-        {
-            delete s;
-        }
-    }
-    catch(...)
-    {
-    }
-}
-
 namespace
 {
 
@@ -127,6 +80,58 @@ int submit_request(impl::Streamer * s,
 }
 
 } // namespace
+}  // namespace runai::llm::streamer
+
+using namespace runai::llm::streamer;
+
+// Library for reading files concurrently into host memory buffers
+// A single submission (runai_request) may cover many files, and many submissions may be in flight at
+// once - each response carries the id of the submission it belongs to
+// NOT THREAD SAFE - caller must not send requests and responses in parallel
+
+// Creates a streamer object; see streamer.h for the configuration environment variables.
+
+int runai_start(void ** streamer)
+{
+    // verify configuration
+    std::unique_ptr<impl::Config> config;
+    try
+    {
+        config = std::make_unique<impl::Config>();
+    }
+    catch(...)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+
+    try
+    {
+        *streamer = new impl::Streamer(*config);
+    }
+    catch(...)
+    {
+        return static_cast<int>(common::ResponseCode::UnknownError);
+    }
+    return static_cast<int>(common::ResponseCode::Success);
+}
+
+// destroys streamer object
+
+void runai_end(void * streamer)
+{
+    try
+    {
+        auto s = static_cast<impl::Streamer *>(streamer);
+        if (s != nullptr)
+        {
+            delete s;
+        }
+    }
+    catch(...)
+    {
+    }
+}
+
 
 // Set the streamer's object-storage credentials as a general key/value dictionary (canonical config-param
 // keys; see common::s3::Credentials). Set-once and thread-safe: the same credentials may be set repeatedly
@@ -374,5 +379,3 @@ int runai_list_files(
     }
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
-
-} // namespace runai::llm::streamer

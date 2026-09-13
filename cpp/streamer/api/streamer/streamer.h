@@ -1,12 +1,14 @@
-#pragma once
+#ifndef NV_FILE_STREAMER_STREAMER_H
+#define NV_FILE_STREAMER_STREAMER_H
+
+// Plain C that also compiles as C++, because this header ships in the SDK tarball and a C program
+// must be able to include it.
 
 #include <stddef.h>
 
 #include "streamer/device.h"
+#include "streamer/response_code.h"
 #include "streamer/submission_id.h"
-
-namespace runai::llm::streamer
-{
 
 #ifdef __cplusplus
 extern "C" {
@@ -203,4 +205,4 @@ int runai_list_files(
 }   // extern "C"
 #endif
 
-} // namespace runai::llm::streamer
+#endif // NV_FILE_STREAMER_STREAMER_H
