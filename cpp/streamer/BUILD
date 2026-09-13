@@ -2,9 +2,7 @@ load("//:rules.bzl", "runai_portable_so", "runai_cc_test", "runai_cc_auto_librar
 
 runai_portable_so(
     name = "libstreamer.so",
-    srcs = ["streamer.h",
-            "streamer.cc",
-    ],
+    srcs = ["streamer.cc"],
     deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
     ldscript = ":streamer.ldscript",
     linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"]
