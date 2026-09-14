@@ -96,7 +96,7 @@ Each pull request should meet the following requirements:
 
 ## Getting Help
 Need support or have a question? We're here to help:
-- Report issues or ask questions by [opening an issue on GitHub](https://github.com/run-ai/runai-model-streamer/issues).
+- Report issues or ask questions by [opening an issue on GitHub](https://github.com/dsx-ai-factory/runai-model-streamer/issues).
 
 ## License
 By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
