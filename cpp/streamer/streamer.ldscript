@@ -13,15 +13,15 @@
 #   and marks everything local, so no libaio symbol is exported. libstreamer-mock.so does not link
 #   libaio, so it does not use this node.
 #
-# RUNAI_STREAMER_1.0
+# RUNAI_FILE_STREAMER_1.0
 #   Our node. It needs a name because ld does not allow an anonymous tag next to a named one. Our
-#   symbols become runai_file_streamer_start@@RUNAI_STREAMER_1.0 instead of plain runai_file_streamer_start.
+#   symbols become runai_file_streamer_start@@RUNAI_FILE_STREAMER_1.0 instead of plain runai_file_streamer_start.
 #
 #   Nothing depends on the name today: we load the library with dlopen, Python uses ctypes.CDLL, and
 #   dlsym ignores symbol versions. This changes when we ship streamer.h and libstreamer.so for other
-#   programs to link against. Such a program records runai_file_streamer_start@RUNAI_STREAMER_1.0 in its own
+#   programs to link against. Such a program records runai_file_streamer_start@RUNAI_FILE_STREAMER_1.0 in its own
 #   binary, and the name becomes a contract - rename or remove it and those programs stop loading.
-#   We name it now because this is the last free moment.
+#   The name is still free to change until the first tarball goes out.
 #
 # The number is the ABI generation, not the release version. Do not raise it for a new release.
 #
@@ -31,10 +31,10 @@
 #
 # Add nodes; never rename or remove them:
 #
-#   new exported symbol   Add a node such as RUNAI_STREAMER_1.1 with only the new symbols. Old
+#   new exported symbol   Add a node such as RUNAI_FILE_STREAMER_1.1 with only the new symbols. Old
 #                         programs keep using their own node.
 #
-#   incompatible change   Add RUNAI_STREAMER_2.0 next to this one and keep the old implementation
+#   incompatible change   Add RUNAI_FILE_STREAMER_2.0 next to this one and keep the old implementation
 #   to an existing        under the old node, as glibc does with memcpy@GLIBC_2.2.5 and
 #   symbol                memcpy@@GLIBC_2.14. Only the @@ node is the default, so new programs link
 #                         against the new symbol and old ones keep the old symbol.
@@ -43,7 +43,7 @@
 # use anonymous scripts, export only obj_*, and do not link libaio.
 LIBAIO_0.4 { local: *; };
 
-RUNAI_STREAMER_1.0 {
+RUNAI_FILE_STREAMER_1.0 {
     global:
         runai_file_streamer_start;
         runai_file_streamer_end;
