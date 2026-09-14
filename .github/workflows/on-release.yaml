@@ -29,8 +29,8 @@ jobs:
     - name: Build package
       uses: devcontainers/ci@v0.3
       with:
-        imageName: ghcr.io/run-ai/runai-model-streamer/devcontainer
-        cacheFrom: ghcr.io/run-ai/runai-model-streamer/devcontainer
+        imageName: ghcr.io/${{ github.repository }}/devcontainer
+        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
           PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build

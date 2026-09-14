@@ -29,6 +29,6 @@ jobs:
     - name: Build and push devcontainer image
       uses: devcontainers/ci@v0.3
       with:
-        imageName: ghcr.io/run-ai/runai-model-streamer/devcontainer
-        cacheFrom: ghcr.io/run-ai/runai-model-streamer/devcontainer
+        imageName: ghcr.io/${{ github.repository }}/devcontainer
+        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: always
