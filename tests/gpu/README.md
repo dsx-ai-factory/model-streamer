@@ -1,9 +1,20 @@
 # Nightly GPU tests
 
-The `Nightly GPU tests` workflow runs on pull requests, daily at **00:17 UTC**,
-and through manual `workflow_dispatch` runs. It requires access to runner group
+The `Nightly GPU tests` workflow runs on pushes to trusted `pull-request/<number>`
+branches, daily at **00:17 UTC**, and through manual `workflow_dispatch` runs.
+It requires access to runner group
 `nv-gpu-amd64-t4-2gpu`, label `linux-amd64-gpu-t4-latest-2`.
 Scheduled runs begin once the workflow is on the repository's default branch.
+
+NVIDIA's self-hosted runners reject `pull_request` and `pull_request_target`
+events. A trusted repository member must review the PR and copy its exact head
+commit to `pull-request/<number>` in the source repository. The push-triggered
+workflow then reports its checks on that same commit, including on the PR.
+The [pull request testing guide](https://docs.gha-runners.nvidia.com/platform/onboarding/pull-request-testing/)
+documents this process. It can be automated with
+[copy-pr-bot](https://docs.gha-runners.nvidia.com/platform/apps/copy-pr-bot/),
+which must be installed and enabled through `.github/copy-pr-bot.yaml` on the
+default branch. Adding that configuration only to a PR does not enable the bot.
 
 The GPU devcontainer reuses the build Dockerfile and enables GPU passthrough,
 2 GiB of shared memory for NCCL, and the existing io_uring seccomp setting.
