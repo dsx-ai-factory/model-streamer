@@ -179,14 +179,17 @@ int runai_file_streamer_probe_direct_block_size(
 // where path is the full object URI and file_size is the size in bytes.
 // user_data is passed through to every callback invocation unchanged.
 //
-// Example:
-//   struct Result { std::vector<std::pair<std::string,size_t>> files; };
-//   Result result;
+// Example (C99; printf needs <stdio.h>):
+//   static void on_file(const char * path, size_t file_size, void * user_data)
+//   {
+//       unsigned * count = (unsigned *)user_data;
+//       *count += 1;
+//       printf("%s (%zu bytes)\n", path, file_size);
+//   }
+//
+//   unsigned count = 0;
 //   runai_file_streamer_list_files(streamer, "s3://my-bucket/models/", 1,
-//       nullptr, 0, nullptr, 0,
-//       [](const char* p, size_t sz, void* ud) {
-//           static_cast<Result*>(ud)->files.emplace_back(p, sz);
-//       }, &result);
+//                                  NULL, 0, NULL, 0, on_file, &count);
 //
 // allow_patterns / ignore_patterns are fnmatch(3) patterns; NULL means no filter.
 int runai_file_streamer_list_files(
