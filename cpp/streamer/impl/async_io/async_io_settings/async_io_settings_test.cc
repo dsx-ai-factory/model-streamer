@@ -128,7 +128,7 @@ TEST(AsyncIoSettings, Chunk_Below_The_Ceiling_Is_Untouched)
 }
 
 // The ordering trap this class exists for. Python writes PROCESS_GROUP_SIZE inside stream_files(),
-// long after runai_start() built the Config - so a settings object built with the Config would read
+// long after runai_file_streamer_start() built the Config - so a settings object built with the Config would read
 // the unset default of 1 and skip the division entirely.
 TEST(AsyncIoSettings, Reads_The_Group_Size_When_Constructed_Not_When_Config_Was)
 {

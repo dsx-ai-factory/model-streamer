@@ -1,5 +1,5 @@
-#ifndef NV_FILE_STREAMER_STREAMER_H
-#define NV_FILE_STREAMER_STREAMER_H
+#ifndef RUNAI_FILE_STREAMER_STREAMER_H
+#define RUNAI_FILE_STREAMER_STREAMER_H
 
 // Plain C that also compiles as C++, because this header ships in the SDK tarball and a C program
 // must be able to include it.
@@ -14,10 +14,10 @@
 extern "C" {
 #endif
 
-typedef void (*RunaiFileListCallback)(const char* path, size_t file_size, void* user_data);
+typedef void (*RunaiFileStreamerFileListCallback)(const char* path, size_t file_size, void* user_data);
 
 // Library for reading files concurrently into host memory buffers
-// A single submission (runai_request) may cover many files, and many submissions may be in flight at
+// A single submission (runai_file_streamer_request) may cover many files, and many submissions may be in flight at
 // once - each response carries the id of the submission it belongs to
 // NOT THREAD SAFE - caller must not send requests and responses in parallel
 
@@ -29,11 +29,11 @@ typedef void (*RunaiFileListCallback)(const char* path, size_t file_size, void* 
 //                                   for object storage. Minimums are enforced - 2 MiB and 5 MiB respectively
 // Worker pools are created lazily, one per backend actually used.
 
-int runai_start(void ** streamer /* return parameter */);
+int runai_file_streamer_start(void ** streamer /* return parameter */);
 
 // destroys streamer object
 
-void runai_end(void * streamer);
+void runai_file_streamer_end(void * streamer);
 
 // Set the streamer's object-storage credentials as a general key/value dictionary (param_keys /
 // param_values / num_params). Keys are the plugin's canonical config-parameter names (e.g.
@@ -41,7 +41,7 @@ void runai_end(void * streamer);
 // carried through to the backend. Credentials are streamer-scoped and set once: setting the same
 // credentials again returns Success; a different set after the first returns CredentialsAlreadySet (create
 // a new streamer for a different identity). Call this before submitting object-storage reads / listing.
-int runai_set_credentials(
+int runai_file_streamer_set_credentials(
     void * streamer,
     const char ** param_keys,
     const char ** param_values,
@@ -57,7 +57,7 @@ int runai_set_credentials(
 // fallback nobody asked for. A list the host cannot serve is an error too, not a quiet fall-through
 // to the synchronous reader; include sync_buffered to allow that explicitly.
 //
-// Streamer-scoped and SET ONCE, like runai_set_credentials: the same value again returns Success, a
+// Streamer-scoped and SET ONCE, like runai_file_streamer_set_credentials: the same value again returns Success, a
 // different value returns FsStrategyConflict. A list this host cannot serve returns
 // FsStrategyUnavailable. The list is resolved on the first filesystem
 // submission, and any different value after that is rejected too - by then an engine has been built
@@ -66,7 +66,7 @@ int runai_set_credentials(
 // Optional. Without it the streamer reads RUNAI_STREAMER_FS_STRATEGY, defaulting to the synchronous
 // reader. Object-storage reads are unaffected: the strategy names a filesystem engine, and a
 // submission that reads object storage never consults it.
-int runai_set_fs_strategy(
+int runai_file_streamer_set_fs_strategy(
     void * streamer,
     const char * candidates
 );
@@ -92,31 +92,31 @@ int runai_set_fs_strategy(
 //   - a ZERO-SIZED range still gets its own response (it is completed immediately, without reaching
 //     storage), so it must be counted like any other;
 //   - a file with num_ranges[f] == 0 contributes no responses, and is otherwise accepted.
-// Size the response loop by that sum. runai_response blocks indefinitely at timeout_ms = 0, so a
+// Size the response loop by that sum. runai_file_streamer_response blocks indefinitely at timeout_ms = 0, so a
 // caller that skips zero-sized ranges when counting waits for a response that has already been
 // delivered. A submission with sum(num_ranges) == 0 owes nothing and completes immediately.
 //
 // DEVICE - one per submission, so every destination in it lives on the same device. A load that
 // scatters across several GPUs is sent as several submissions, which run together and are drained by
-// their own ids. Only NV_FILE_STREAMER_DEVICE_CPU is served today; anything else returns UnsupportedDeviceType and
+// their own ids. Only RUNAI_FILE_STREAMER_DEVICE_CPU is served today; anything else returns UnsupportedDeviceType and
 // commits nothing, so no responses are owed for it.
 //
-// Credentials are NOT passed here - set them once via runai_set_credentials.
+// Credentials are NOT passed here - set them once via runai_file_streamer_set_credentials.
 //  out_submission_id : always set to this submission's id once one is assigned, and left 0 only
 //                      if the call fails before that (e.g. invalid parameters). On Success it
 //                      identifies the submission; use it to demux responses from
-//                      runai_response. If the call fails after the submission was committed,
+//                      runai_file_streamer_response. If the call fails after the submission was committed,
 //                      its responses are still delivered and can be drained by this id.
-int runai_request(
+int runai_file_streamer_request(
     void * streamer,
-    NvFileStreamerSubmissionId * out_submission_id /* return parameter */,
+    RunaiFileStreamerSubmissionId * out_submission_id /* return parameter */,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
     size_t * range_offsets,
     size_t * range_sizes,
     void ** range_dsts,
-    NvFileStreamerDevice device
+    RunaiFileStreamerDevice device
 );
 
 // Multi-request response. Returns the next ready range from any in-flight submission.
@@ -126,16 +126,16 @@ int runai_request(
 //  timeout_ms        : max time to wait for a response; 0 blocks indefinitely.
 // ret is the truthful per-range code (Success or a specific error), TimedOut on timeout, or
 // FinishedError on teardown.
-int runai_response(
+int runai_file_streamer_response(
     void * streamer,
-    NvFileStreamerSubmissionId * out_submission_id /* return parameter */,
+    RunaiFileStreamerSubmissionId * out_submission_id /* return parameter */,
     unsigned * file_index /* return parameter */,
     unsigned * index /* return parameter */,
     int * submission_done /* return parameter */,
     unsigned timeout_ms
 );
 
-const char * runai_response_str(int response_code);
+const char * runai_file_streamer_response_str(int response_code);
 
 // The block a caller must lay destinations out at for THESE paths, so reads can be served with
 // O_DIRECT.
@@ -145,7 +145,7 @@ const char * runai_response_str(int response_code);
 // report it. Cached per mount on this streamer, so a 200-shard model costs one probe.
 //
 // FILESYSTEM paths only - object-storage URIs are skipped, since they name no mount and never reach
-// O_DIRECT. A submission cannot legally mix the two (runai_request rejects that with
+// O_DIRECT. A submission cannot legally mix the two (runai_file_streamer_request rejects that with
 // UnsupportedBackendMix), but this is called before any submission exists, so URIs are skipped rather
 // than treated as an error.
 //
@@ -162,7 +162,7 @@ const char * runai_response_str(int response_code);
 //             a long-lived streamer would otherwise keep it for the life of the process.
 //
 // ret is Success, or UnknownError when nothing could be measured. It does not fail a submission.
-int runai_probe_direct_block_size(
+int runai_file_streamer_probe_direct_block_size(
     void *        streamer,
     const char ** paths,
     unsigned      num_paths,
@@ -171,8 +171,8 @@ int runai_probe_direct_block_size(
 
 // List files at the given object storage prefix.
 //
-// streamer is a handle from runai_start; listing reuses its object-storage clients, backend handle and
-// credentials (set once via runai_set_credentials) rather than creating throwaway ones.
+// streamer is a handle from runai_file_streamer_start; listing reuses its object-storage clients, backend handle and
+// credentials (set once via runai_file_streamer_set_credentials) rather than creating throwaway ones.
 //
 // For each matching entry the callback is invoked as:
 //   callback(path, file_size, user_data)
@@ -182,14 +182,14 @@ int runai_probe_direct_block_size(
 // Example:
 //   struct Result { std::vector<std::pair<std::string,size_t>> files; };
 //   Result result;
-//   runai_list_files(streamer, "s3://my-bucket/models/", 1,
+//   runai_file_streamer_list_files(streamer, "s3://my-bucket/models/", 1,
 //       nullptr, 0, nullptr, 0,
 //       [](const char* p, size_t sz, void* ud) {
 //           static_cast<Result*>(ud)->files.emplace_back(p, sz);
 //       }, &result);
 //
 // allow_patterns / ignore_patterns are fnmatch(3) patterns; NULL means no filter.
-int runai_list_files(
+int runai_file_streamer_list_files(
     void *                   streamer,
     const char *             prefix,
     int                      is_recursive,
@@ -197,7 +197,7 @@ int runai_list_files(
     unsigned                 num_allow_patterns,
     const char **            ignore_patterns,
     unsigned                 num_ignore_patterns,
-    RunaiFileListCallback    callback,
+    RunaiFileStreamerFileListCallback    callback,
     void *                   user_data
 );
 
@@ -205,4 +205,4 @@ int runai_list_files(
 }   // extern "C"
 #endif
 
-#endif // NV_FILE_STREAMER_STREAMER_H
+#endif // RUNAI_FILE_STREAMER_STREAMER_H

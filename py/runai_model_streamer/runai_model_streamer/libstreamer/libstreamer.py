@@ -1,8 +1,8 @@
 from runai_model_streamer.libstreamer import (
     dll,
     t_streamer,
-    NvFileStreamerDevice,
-    NV_FILE_STREAMER_DEVICE_CPU,
+    RunaiFileStreamerDevice,
+    RUNAI_FILE_STREAMER_DEVICE_CPU,
 )
 from typing import Callable, Dict, List, Optional, Tuple
 import ctypes
@@ -172,7 +172,7 @@ def runai_request(
         # Always the host. range_dsts point into the ring's numpy buffer (requests_iterator.py,
         # `self._raw = np.empty(...)`), and the move to the caller's device happens afterwards in
         # FileStreamer.get_chunks, so the C layer is never asked for anything but CPU.
-        NvFileStreamerDevice(NV_FILE_STREAMER_DEVICE_CPU, 0),
+        RunaiFileStreamerDevice(RUNAI_FILE_STREAMER_DEVICE_CPU, 0),
     )
     if error_code != SUCCESS_ERROR_CODE:
         raise ValueError(

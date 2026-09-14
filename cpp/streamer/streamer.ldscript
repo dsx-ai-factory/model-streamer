@@ -15,11 +15,11 @@
 #
 # RUNAI_STREAMER_1.0
 #   Our node. It needs a name because ld does not allow an anonymous tag next to a named one. Our
-#   symbols become runai_start@@RUNAI_STREAMER_1.0 instead of plain runai_start.
+#   symbols become runai_file_streamer_start@@RUNAI_STREAMER_1.0 instead of plain runai_file_streamer_start.
 #
 #   Nothing depends on the name today: we load the library with dlopen, Python uses ctypes.CDLL, and
 #   dlsym ignores symbol versions. This changes when we ship streamer.h and libstreamer.so for other
-#   programs to link against. Such a program records runai_start@RUNAI_STREAMER_1.0 in its own
+#   programs to link against. Such a program records runai_file_streamer_start@RUNAI_STREAMER_1.0 in its own
 #   binary, and the name becomes a contract - rename or remove it and those programs stop loading.
 #   We name it now because this is the last free moment.
 #
@@ -45,14 +45,14 @@ LIBAIO_0.4 { local: *; };
 
 RUNAI_STREAMER_1.0 {
     global:
-        runai_start;
-        runai_end;
-        runai_set_credentials;
-        runai_set_fs_strategy;
-        runai_request;
-        runai_response;
-        runai_response_str;
-        runai_probe_direct_block_size;
-        runai_list_files;
+        runai_file_streamer_start;
+        runai_file_streamer_end;
+        runai_file_streamer_set_credentials;
+        runai_file_streamer_set_fs_strategy;
+        runai_file_streamer_request;
+        runai_file_streamer_response;
+        runai_file_streamer_response_str;
+        runai_file_streamer_probe_direct_block_size;
+        runai_file_streamer_list_files;
     local: *;
 };

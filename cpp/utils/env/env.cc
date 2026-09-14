@@ -23,7 +23,7 @@ namespace
 // Rejected, not defaulted. A wrong value that is quietly replaced is a typo nobody finds.
 // RUNAI_STREAMER_CONCURRENCY=-1 would ask for UINT_MAX threads, and a negative process group size
 // divides Azure concurrency down to one. This throws the same exception "abc" already throws, so
-// runai_start answers InvalidParameterError and the message names the variable.
+// runai_file_streamer_start answers InvalidParameterError and the message names the variable.
 unsigned long parse_unsigned(const std::string & variable, const std::string & s)
 {
     const auto first = s.find_first_not_of(" \t\n\v\f\r");

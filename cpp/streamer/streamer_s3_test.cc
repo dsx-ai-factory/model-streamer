@@ -62,15 +62,15 @@ inline int submit(void * streamer, unsigned num_files, const char ** paths, size
     }
 
     SubmissionId submission_id = 0;
-    return runai_request(streamer, &submission_id, num_files, paths, num_ranges.data(),
-                         range_offsets.data(), range_sizes.data(), range_dsts.data(), NvFileStreamerDevice{});
+    return runai_file_streamer_request(streamer, &submission_id, num_files, paths, num_ranges.data(),
+                         range_offsets.data(), range_sizes.data(), range_dsts.data(), RunaiFileStreamerDevice{});
 }
 
 inline int next_response(void * streamer, unsigned * file_index, unsigned * index)
 {
     SubmissionId submission_id = 0;
     int submission_done = 0;
-    return runai_response(streamer, &submission_id, file_index, index, &submission_done, RESPONSE_TIMEOUT_MS);
+    return runai_file_streamer_response(streamer, &submission_id, file_index, index, &submission_done, RESPONSE_TIMEOUT_MS);
 }
 
 struct StreamerTest : ::testing::Test
@@ -142,7 +142,7 @@ struct StreamerTest : ::testing::Test
     std::string s3_path;
     common::s3::Credentials credentials;
 
-    // Apply `credentials` to the streamer (credentials are streamer-scoped, set once via runai_set_credentials).
+    // Apply `credentials` to the streamer (credentials are streamer-scoped, set once via runai_file_streamer_set_credentials).
     static void apply_credentials(void * streamer, const common::s3::Credentials & credentials)
     {
         std::vector<const char *> keys, values;
@@ -151,7 +151,7 @@ struct StreamerTest : ::testing::Test
             keys.push_back(entry.first.c_str());
             values.push_back(entry.second.c_str());
         }
-        runai_set_credentials(streamer, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
+        runai_file_streamer_set_credentials(streamer, keys.data(), values.data(), static_cast<unsigned>(keys.size()));
     }
 
     unsigned num_files;
@@ -180,7 +180,7 @@ TEST_F(StreamerTest, Async_Read)
 
     bool use_credentials = utils::random::boolean();
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     if (use_credentials)
@@ -226,12 +226,12 @@ TEST_F(StreamerTest, Async_Read)
         EXPECT_EQ(expected_response[file_index].count(r), 1);
         expected_response[file_index].erase(r);
     }
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
 
-// End-to-end: credentials set via runai_set_credentials must reach the plugin's obj_create_client as the
+// End-to-end: credentials set via runai_file_streamer_set_credentials must reach the plugin's obj_create_client as the
 // client config (credentials -> initial_params, endpoint -> endpoint_url). The s3 mock records the config
 // of the last created client so we can assert the exact values arrived.
 TEST_F(StreamerTest, Credentials_Reach_Plugin)
@@ -245,7 +245,7 @@ TEST_F(StreamerTest, Credentials_Reach_Plugin)
     const common::s3::Credentials known("AKIAEXAMPLE", "secret-123", "token-456", "us-west-2", "https://s3.example.com");
 
     void * streamer;
-    EXPECT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     apply_credentials(streamer, known);
 
@@ -272,7 +272,7 @@ TEST_F(StreamerTest, Credentials_Reach_Plugin)
         }
     }
 
-    // every credential applied via runai_set_credentials reached obj_create_client's client config; endpoint
+    // every credential applied via runai_file_streamer_set_credentials reached obj_create_client's client config; endpoint
     // is carried as endpoint_url, the other fields as initial_params under their canonical keys
     auto expect_config = [&](const char * key, const char * value)
     {
@@ -289,7 +289,7 @@ TEST_F(StreamerTest, Credentials_Reach_Plugin)
     expect_config("region", "us-west-2");
     expect_config("endpoint_url", "https://s3.example.com");
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
@@ -309,7 +309,7 @@ TEST_F(StreamerTest, Object_Storage_Ignores_The_Filesystem_Strategy)
     auto mock_cleanup = dylib.dlsym<void(*)()>("runai_mock_s3_cleanup");
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     const auto res = submit(streamer,
                             num_files,
@@ -330,7 +330,7 @@ TEST_F(StreamerTest, Object_Storage_Ignores_The_Filesystem_Strategy)
         EXPECT_EQ(next_response(streamer, &file_index, &r), static_cast<int>(common::ResponseCode::Success));
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
 }
 
@@ -349,7 +349,7 @@ TEST_F(StreamerTest, Async_Read_Bounded_By_Window)
     set_window(window_chunks * min_chunk);
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     auto res = submit(streamer,
                     num_files,
@@ -385,7 +385,7 @@ TEST_F(StreamerTest, Async_Read_Bounded_By_Window)
     EXPECT_LE(peak, window_chunks);
     EXPECT_GT(peak, 0u);
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
@@ -407,7 +407,7 @@ TEST_F(StreamerTest, Async_Read_Per_File_Error_Isolation)
     set_failing_path(s3_paths[failing_file].c_str());
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     auto res = submit(streamer,
                     num_files,
@@ -455,7 +455,7 @@ TEST_F(StreamerTest, Async_Read_Per_File_Error_Isolation)
         }
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
@@ -473,7 +473,7 @@ TEST_F(StreamerTest, Async_Read_Batched_Completions)
     utils::temp::Env max_responses("RUNAI_STREAMER_INTERNAL_MAX_RESPONSES", 64UL);
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     auto res = submit(streamer,
                     num_files,
@@ -504,7 +504,7 @@ TEST_F(StreamerTest, Async_Read_Batched_Completions)
     // at least one wait returned more than one completion (batch drain was actually exercised)
     EXPECT_GT(max_events_per_wait(), 1u);
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
@@ -526,7 +526,7 @@ TEST_F(StreamerTest, Async_Read_Tolerates_Finished_Sentinel)
     set_append_sentinel(true);
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     auto res = submit(streamer,
                     num_files,
@@ -558,7 +558,7 @@ TEST_F(StreamerTest, Async_Read_Tolerates_Finished_Sentinel)
         EXPECT_TRUE(expected_response[i].empty());
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     mock_cleanup();
     EXPECT_EQ(verify_mock(), 0);
 }
@@ -578,7 +578,7 @@ TEST_F(StreamerTest, Increase_Insufficient_Fd_Limit)
         const auto insufficient_fd_limit = utils::random::number<rlim_t>(50, concurrency * 64 -1);
         utils::FdLimitSetter fd_limit(insufficient_fd_limit);
         void * streamer;
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
         if (use_credentials)
@@ -606,7 +606,7 @@ TEST_F(StreamerTest, Increase_Insufficient_Fd_Limit)
         }
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
-        runai_end(streamer);
+        runai_file_streamer_end(streamer);
         EXPECT_EQ(verify_mock(), 0);
 
         // verify that fd limit was restored
@@ -627,7 +627,7 @@ TEST_F(StreamerTest, Stop_Before_Async_Read)
     for (bool use_credentials : { true, false })
     {
         void * streamer;
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
         stop_mock();
@@ -662,7 +662,7 @@ TEST_F(StreamerTest, Stop_Before_Async_Read)
         EXPECT_EQ(next_response(streamer, &file_index, &r), static_cast<int>(common::ResponseCode::FinishedError));
 
         LOG(INFO) << "******************************* Ending streamer";
-        runai_end(streamer);
+        runai_file_streamer_end(streamer);
         EXPECT_EQ(verify_mock(), 0);
 
         mock_cleanup();
@@ -684,7 +684,7 @@ TEST_F(StreamerTest, End_During_Async_Read)
         mock_response_time(delay_ms);
 
         void * streamer;
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
         if (use_credentials)
@@ -713,7 +713,7 @@ TEST_F(StreamerTest, End_During_Async_Read)
 
         ::usleep(utils::random::number(300));
 
-        runai_end(streamer);
+        runai_file_streamer_end(streamer);
 
         EXPECT_EQ(verify_mock(), 0);
 
@@ -729,7 +729,7 @@ TEST_F(StreamerTest, Multiple_Files)
     set_backend_shutdown_policy(utils::random::boolean() ? common::backend_api::ObjectShutdownPolicy_t::OBJECT_SHUTDOWN_POLICY_ON_STREAMER_SHUTDOWN : common::backend_api::ObjectShutdownPolicy_t::OBJECT_SHUTDOWN_POLICY_ON_PROCESS_EXIT);
 
     void * streamer;
-    EXPECT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     auto res = submit(streamer,
                              num_files,
@@ -760,7 +760,7 @@ TEST_F(StreamerTest, Multiple_Files)
         expected_response[file_index].erase(r);
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     EXPECT_EQ(verify_mock(), 0);
 }
 
@@ -788,7 +788,7 @@ TEST_F(StreamerTest, Filesystem_And_Object_Storage_Submissions_Coexist)
         size_t size = fs_data.size();
 
         SubmissionId submission_id = 0;
-        EXPECT_EQ(runai_request(streamer, &submission_id, 1, &path, &num_ranges, &offset, &size, &dst_ptr, NvFileStreamerDevice{}),
+        EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges, &offset, &size, &dst_ptr, RunaiFileStreamerDevice{}),
                   static_cast<int>(common::ResponseCode::Success));
 
         unsigned file_index = 0;
@@ -819,12 +819,12 @@ TEST_F(StreamerTest, Filesystem_And_Object_Storage_Submissions_Coexist)
     };
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     read_filesystem(streamer);
     read_object_storage(streamer);
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     EXPECT_EQ(verify_mock(), 0);
 }
 
@@ -840,7 +840,7 @@ TEST_F(StreamerTest, Object_Storage_Then_Filesystem_Submission)
     utils::temp::File fs_file(fs_data);
 
     void * streamer;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     // object storage first - this is what creates the object-storage pool (via the plugin lock)
     EXPECT_EQ(submit(streamer, num_files, file_names.data(), file_offsets.data(), sizes.data(),
@@ -869,7 +869,7 @@ TEST_F(StreamerTest, Object_Storage_Then_Filesystem_Submission)
         size_t size = fs_data.size();
 
         SubmissionId submission_id = 0;
-        EXPECT_EQ(runai_request(streamer, &submission_id, 1, &path, &n_ranges, &offset, &size, &dst_ptr, NvFileStreamerDevice{}),
+        EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &n_ranges, &offset, &size, &dst_ptr, RunaiFileStreamerDevice{}),
                   static_cast<int>(common::ResponseCode::Success));
 
         unsigned file_index = 0;
@@ -879,7 +879,7 @@ TEST_F(StreamerTest, Object_Storage_Then_Filesystem_Submission)
         EXPECT_EQ(dst, std::vector<unsigned char>(fs_data.begin(), fs_data.end()));
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     EXPECT_EQ(verify_mock(), 0);
 }
 
@@ -891,12 +891,12 @@ TEST_F(StreamerTest, Multiple_Files_Error)
     set_backend_shutdown_policy(utils::random::boolean() ? common::backend_api::ObjectShutdownPolicy_t::OBJECT_SHUTDOWN_POLICY_ON_STREAMER_SHUTDOWN : common::backend_api::ObjectShutdownPolicy_t::OBJECT_SHUTDOWN_POLICY_ON_PROCESS_EXIT);
 
     const auto error_code = common::ResponseCode::FileAccessError;
-    // Scoped to the reads only, released before runai_end below: the injected code reaches every mock entry
+    // Scoped to the reads only, released before runai_file_streamer_end below: the injected code reaches every mock entry
     // point, so leaving it set across teardown injects failures into the shutdown path too.
     auto env_rc = std::make_unique<utils::temp::Env>("RUNAI_STREAMER_S3_MOCK_RESPONSE_CODE", static_cast<int>(error_code));
 
     void * streamer;
-    EXPECT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
 
     auto res = submit(streamer,
@@ -929,14 +929,14 @@ TEST_F(StreamerTest, Multiple_Files_Error)
     }
 
     env_rc.reset();   // stop injecting failures before the streamer tears the backend down
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     EXPECT_EQ(verify_mock(), 0);
 }
 
 namespace
 {
 
-// Collects the (path, size) pairs delivered to the runai_list_files callback
+// Collects the (path, size) pairs delivered to the runai_file_streamer_list_files callback
 struct ListFilesResult
 {
     std::vector<std::pair<std::string, size_t>> files;
@@ -964,8 +964,8 @@ TEST_F(StreamerTest, ListFiles_S3_ReturnsEntriesAndCleansUp)
 
     ListFilesResult result;
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
-    auto res = runai_list_files(streamer, "s3://bucket/models/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    auto res = runai_file_streamer_list_files(streamer, "s3://bucket/models/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
 
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
     ASSERT_EQ(result.files.size(), 2u);
@@ -979,7 +979,7 @@ TEST_F(StreamerTest, ListFiles_S3_ReturnsEntriesAndCleansUp)
     EXPECT_EQ(by_path["s3://bucket/models/b.bin"], 222u);
 
     // S3Cleanup ran on Streamer destruction: clients released and backend closed
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     EXPECT_EQ(verify_mock(), 0);
     EXPECT_TRUE(is_shutdown());
 }
@@ -997,9 +997,9 @@ TEST_F(StreamerTest, ListFiles_S3_AppliesPatternFilters)
 
     ListFilesResult result;
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
-    auto res = runai_list_files(streamer, "s3://bucket/m/", 1, allow.data(), allow.size(), nullptr, 0, list_files_collect, &result);
-    runai_end(streamer);
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    auto res = runai_file_streamer_list_files(streamer, "s3://bucket/m/", 1, allow.data(), allow.size(), nullptr, 0, list_files_collect, &result);
+    runai_file_streamer_end(streamer);
 
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
     ASSERT_EQ(result.files.size(), 1u);
@@ -1018,15 +1018,15 @@ TEST_F(StreamerTest, ListFiles_S3_ForwardsIsRecursive)
 
     ListFilesResult result;
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
-    runai_list_files(streamer, "s3://bucket/x/", 0, nullptr, 0, nullptr, 0, list_files_collect, &result);
+    runai_file_streamer_list_files(streamer, "s3://bucket/x/", 0, nullptr, 0, nullptr, 0, list_files_collect, &result);
     EXPECT_EQ(last_is_recursive(), 0);
 
-    runai_list_files(streamer, "s3://bucket/x/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
+    runai_file_streamer_list_files(streamer, "s3://bucket/x/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
     EXPECT_EQ(last_is_recursive(), 1);
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST_F(StreamerTest, ListFiles_S3_ErrorPropagates)
@@ -1042,9 +1042,9 @@ TEST_F(StreamerTest, ListFiles_S3_ErrorPropagates)
 
     ListFilesResult result;
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
-    auto res = runai_list_files(streamer, "s3://bucket/x/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
-    runai_end(streamer);
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    auto res = runai_file_streamer_list_files(streamer, "s3://bucket/x/", 1, nullptr, 0, nullptr, 0, list_files_collect, &result);
+    runai_file_streamer_end(streamer);
 
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::FileAccessError));
     EXPECT_TRUE(result.files.empty());

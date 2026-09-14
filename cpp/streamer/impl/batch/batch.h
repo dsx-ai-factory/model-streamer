@@ -92,7 +92,7 @@ struct Batch
 
   bool is_object_storage() const;
 
-  // id of the owning submission (one runai_request call); stamped on every response
+  // id of the owning submission (one runai_file_streamer_request call); stamped on every response
   SubmissionId submission_id = 0;
 
   unsigned workload_index;

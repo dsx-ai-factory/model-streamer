@@ -153,7 +153,7 @@ TEST(Getenv_Unsigned_long, Sanity)
 // anywhere. RUNAI_STREAMER_CONCURRENCY=-1 would ask for a huge thread count; Config::to_concurrency
 // caps that one now, but a refusal here names the variable instead of quietly serving the ceiling.
 //
-// So it throws, exactly as "a" does, and runai_start turns that into InvalidParameterError.
+// So it throws, exactly as "a" does, and runai_file_streamer_start turns that into InvalidParameterError.
 TEST(Getenv_Unsigned_long, Negative)
 {
     for (const auto text : { "-1", "-4", " -1" })

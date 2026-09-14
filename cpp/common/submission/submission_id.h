@@ -10,6 +10,6 @@ namespace runai::llm::streamer
 // The alias lives here, in a dependency-free leaf under common/, so that the lower layers carrying the
 // id - common::Response, SubmissionsMgr, Batch, AsyncIoStats - can name it without including the whole
 // C API header, which would invert the layering.
-using SubmissionId = NvFileStreamerSubmissionId;
+using SubmissionId = RunaiFileStreamerSubmissionId;
 
 } // namespace runai::llm::streamer

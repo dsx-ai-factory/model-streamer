@@ -62,7 +62,7 @@ Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_by
     object_storage_retry_timeout(object_storage_retry_timeout_seconds)
 {
     // Resolved here, with the other configuration, so a malformed RUNAI_STREAMER_DIRECT_BLOCK fails
-    // like every other malformed variable: runai_start builds a Config first and turns any failure
+    // like every other malformed variable: runai_file_streamer_start builds a Config first and turns any failure
     // into InvalidParameterError, while a failure in the Streamer that follows becomes UnknownError.
     //
     // It has to be forced, because the value lives behind a cached static and is otherwise resolved

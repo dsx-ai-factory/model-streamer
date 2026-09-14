@@ -12,35 +12,35 @@ namespace runai::llm::streamer::common
 // cannot drift: a code is added there first, and named here.
 enum class ResponseCode : int
 {
-    Success                  = NV_FILE_STREAMER_RESPONSE_SUCCESS,
+    Success                  = RUNAI_FILE_STREAMER_RESPONSE_SUCCESS,
 
-    FinishedError            = NV_FILE_STREAMER_RESPONSE_FINISHED_ERROR,
-    FileAccessError          = NV_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR,
-    EofError                 = NV_FILE_STREAMER_RESPONSE_EOF_ERROR,
-    S3NotSupported           = NV_FILE_STREAMER_RESPONSE_S3_NOT_SUPPORTED,
-    GlibcPrerequisite        = NV_FILE_STREAMER_RESPONSE_GLIBC_PREREQUISITE,
-    InsufficientFdLimit      = NV_FILE_STREAMER_RESPONSE_INSUFFICIENT_FD_LIMIT,
-    InvalidParameterError    = NV_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR,
-    EmptyRequestError        = NV_FILE_STREAMER_RESPONSE_EMPTY_REQUEST_ERROR,
-    BusyError                = NV_FILE_STREAMER_RESPONSE_BUSY_ERROR,
-    CaFileNotFound           = NV_FILE_STREAMER_RESPONSE_CA_FILE_NOT_FOUND,
-    UnknownError             = NV_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR,
-    ObjPluginLoadError       = NV_FILE_STREAMER_RESPONSE_OBJ_PLUGIN_LOAD_ERROR,
-    GCSNotSupported          = NV_FILE_STREAMER_RESPONSE_GCS_NOT_SUPPORTED,
-    AzureBlobNotSupported    = NV_FILE_STREAMER_RESPONSE_AZURE_BLOB_NOT_SUPPORTED,
-    FileTruncatedError       = NV_FILE_STREAMER_RESPONSE_FILE_TRUNCATED_ERROR,
-    TimedOut                 = NV_FILE_STREAMER_RESPONSE_TIMED_OUT,
-    UnsupportedBackendMix    = NV_FILE_STREAMER_RESPONSE_UNSUPPORTED_BACKEND_MIX,
-    CredentialsAlreadySet    = NV_FILE_STREAMER_RESPONSE_CREDENTIALS_ALREADY_SET,
-    RetryableFileAccessError = NV_FILE_STREAMER_RESPONSE_RETRYABLE_FILE_ACCESS_ERROR,
+    FinishedError            = RUNAI_FILE_STREAMER_RESPONSE_FINISHED_ERROR,
+    FileAccessError          = RUNAI_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR,
+    EofError                 = RUNAI_FILE_STREAMER_RESPONSE_EOF_ERROR,
+    S3NotSupported           = RUNAI_FILE_STREAMER_RESPONSE_S3_NOT_SUPPORTED,
+    GlibcPrerequisite        = RUNAI_FILE_STREAMER_RESPONSE_GLIBC_PREREQUISITE,
+    InsufficientFdLimit      = RUNAI_FILE_STREAMER_RESPONSE_INSUFFICIENT_FD_LIMIT,
+    InvalidParameterError    = RUNAI_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR,
+    EmptyRequestError        = RUNAI_FILE_STREAMER_RESPONSE_EMPTY_REQUEST_ERROR,
+    BusyError                = RUNAI_FILE_STREAMER_RESPONSE_BUSY_ERROR,
+    CaFileNotFound           = RUNAI_FILE_STREAMER_RESPONSE_CA_FILE_NOT_FOUND,
+    UnknownError             = RUNAI_FILE_STREAMER_RESPONSE_UNKNOWN_ERROR,
+    ObjPluginLoadError       = RUNAI_FILE_STREAMER_RESPONSE_OBJ_PLUGIN_LOAD_ERROR,
+    GCSNotSupported          = RUNAI_FILE_STREAMER_RESPONSE_GCS_NOT_SUPPORTED,
+    AzureBlobNotSupported    = RUNAI_FILE_STREAMER_RESPONSE_AZURE_BLOB_NOT_SUPPORTED,
+    FileTruncatedError       = RUNAI_FILE_STREAMER_RESPONSE_FILE_TRUNCATED_ERROR,
+    TimedOut                 = RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT,
+    UnsupportedBackendMix    = RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_BACKEND_MIX,
+    CredentialsAlreadySet    = RUNAI_FILE_STREAMER_RESPONSE_CREDENTIALS_ALREADY_SET,
+    RetryableFileAccessError = RUNAI_FILE_STREAMER_RESPONSE_RETRYABLE_FILE_ACCESS_ERROR,
 
     // Filesystem strategy problems. Two codes, because the operator has to do something different
     // for each one: set the value once, or add a candidate the host can serve.
     //
     // Both used to report UnsupportedBackendMix, whose message is about mixing S3, GCS and Azure.
     // That sent the reader to object storage for a problem that has nothing to do with it.
-    FsStrategyConflict       = NV_FILE_STREAMER_RESPONSE_FS_STRATEGY_CONFLICT,
-    FsStrategyUnavailable    = NV_FILE_STREAMER_RESPONSE_FS_STRATEGY_UNAVAILABLE,
+    FsStrategyConflict       = RUNAI_FILE_STREAMER_RESPONSE_FS_STRATEGY_CONFLICT,
+    FsStrategyUnavailable    = RUNAI_FILE_STREAMER_RESPONSE_FS_STRATEGY_UNAVAILABLE,
 
     // One mount's asynchronous reader failed permanently, mid-run - io_uring_submit or io_getevents
     // returned an error that is not backpressure.
@@ -58,10 +58,10 @@ enum class ResponseCode : int
     //
     // ONE code for both engines. The decision it drives is the same whichever one failed; which engine
     // it was, and with what errno, is in the log.
-    FsAsyncEngineError       = NV_FILE_STREAMER_RESPONSE_FS_ASYNC_ENGINE_ERROR,
+    FsAsyncEngineError       = RUNAI_FILE_STREAMER_RESPONSE_FS_ASYNC_ENGINE_ERROR,
 
     // The submission named a device this build cannot serve.
-    UnsupportedDeviceType    = NV_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE,
+    UnsupportedDeviceType    = RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE,
 
     __Max,
 };

@@ -42,7 +42,7 @@ struct Credentials
     void to_object_client_config(std::vector<common::backend_api::ObjectConfigParam_t> & config) const;
 
     // Value equality over the whole dictionary. Used by the streamer to detect a second
-    // runai_set_credentials call that changes the (already-applied) credentials.
+    // runai_file_streamer_set_credentials call that changes the (already-applied) credentials.
     bool operator==(const Credentials & other) const;
     bool operator!=(const Credentials & other) const;
 

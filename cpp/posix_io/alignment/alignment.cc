@@ -30,7 +30,7 @@ size_t usable(size_t block)
 // and on an empty string, and a fatal ASSERT fires on trailing garbage like "4096x".
 //
 // That is what every other numeric variable already does - RUNAI_STREAMER_CONCURRENCY=abc makes
-// runai_start return InvalidParameterError - and a typo must not be answered by quietly serving a
+// runai_file_streamer_start return InvalidParameterError - and a typo must not be answered by quietly serving a
 // different value. An operator who mistypes this is told at start, rather than getting a block they
 // did not ask for and a load that is slower for reasons nothing reports.
 unsigned long configured_direct_block()
@@ -49,7 +49,7 @@ size_t usable_direct_block(unsigned long configured)
     {
         // REJECTED, not replaced. An earlier version fell back to DirectBlockSize with a warning, and
         // that hides the typo it exists to catch: the operator asked for 3000, got 65536, and nothing
-        // they would read says so. Failing here surfaces as InvalidParameterError from runai_start,
+        // they would read says so. Failing here surfaces as InvalidParameterError from runai_file_streamer_start,
         // which is what every other malformed variable already does.
         LOG(ERROR) << "RUNAI_STREAMER_DIRECT_BLOCK=" << configured << " is not usable: it must be a"
                    << " power of two and at least 512";

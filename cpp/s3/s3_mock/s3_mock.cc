@@ -25,7 +25,7 @@ std::set<common::backend_api::ObjectClientHandle_t> __mock_clients;
 std::map<common::backend_api::ObjectClientHandle_t /* client */, std::set<common::backend_api::ObjectRequestId_t /* request id */>> __mock_client_requests;
 std::set<common::backend_api::ObjectClientHandle_t> __mock_unused;
 // config (credentials + endpoint) received by the last obj_create_client; endpoint_url is stored under the
-// key "endpoint_url". Lets tests assert credentials arrive from runai_set_credentials all the way here.
+// key "endpoint_url". Lets tests assert credentials arrive from runai_file_streamer_set_credentials all the way here.
 std::map<std::string, std::string> __mock_last_client_config;
 unsigned __mock_response_time_ms = 0;
 std::mutex __mutex;
@@ -202,7 +202,7 @@ common::backend_api::ResponseCode_t obj_create_client(
     const auto guard = std::unique_lock<std::mutex>(__mutex);
 
     // capture the credentials/config this client is created with, so tests can verify they arrived from
-    // runai_set_credentials through the C++ layer to the plugin. Copy the strings (the config array is the
+    // runai_file_streamer_set_credentials through the C++ layer to the plugin. Copy the strings (the config array is the
     // caller's temporary).
     __mock_last_client_config.clear();
     if (client_initial_config != nullptr)

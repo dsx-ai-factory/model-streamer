@@ -102,7 +102,7 @@ class BackendPools
     // object-storage submission records the plugin and builds the pool; a later submission with a different
     // plugin returns UnsupportedBackendMix (and builds nothing). The lock enforces the single-plugin
     // constraint (the s3_wrapper backend handle is a process-wide static). Credentials are streamer-scoped
-    // (set once via runai_set_credentials), not per submission, so nothing credential-related is locked here.
+    // (set once via runai_file_streamer_set_credentials), not per submission, so nothing credential-related is locked here.
     // The ObjectStorageWorkers are plugin-agnostic (they dispatch by URI). Creating the pool here - always
     // called before dispatch - keeps it off the per-workload push path. Thread-safe.
     common::ResponseCode lock_object_plugin(Plugin plugin);

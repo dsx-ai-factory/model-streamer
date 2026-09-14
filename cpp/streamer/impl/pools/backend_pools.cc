@@ -147,7 +147,7 @@ common::ResponseCode BackendPools::lock_object_plugin(Plugin plugin)
     // Fast path (no mutex): once the lock is fully established - plugin recorded AND pool created, published
     // together via _ready_plugin - a matching submission needs nothing more. The acquire pairs with the
     // release below, so observing _ready_plugin here guarantees the pool exists and is safe to dispatch to.
-    // (Credentials are streamer-scoped, set once via runai_set_credentials - not per submission - so there is
+    // (Credentials are streamer-scoped, set once via runai_file_streamer_set_credentials - not per submission - so there is
     // nothing credential-related to lock here.)
     const int ready = _ready_plugin.load(std::memory_order_acquire);
     if (ready != -1)
