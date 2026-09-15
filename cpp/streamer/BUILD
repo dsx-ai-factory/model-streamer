@@ -5,7 +5,11 @@ runai_portable_so(
     srcs = ["streamer.cc"],
     deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
     ldscript = ":streamer.ldscript",
-    linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"]
+    linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"],
+    # So //streamer/api:c_api_so_test can link the shipped artifact - the only way to exercise
+    # streamer.ldscript, which applies to this target alone. Granted to that package only: linking
+    # the streamer anywhere else would put a second copy of it in the same process.
+    visibility = ["//streamer/api:__pkg__"],
 )
 
 runai_cc_auto_library(

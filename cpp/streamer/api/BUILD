@@ -22,3 +22,18 @@ cc_test(
     linkopts = ["-lpthread", "-ldl", "-lrt", "-lm"],
     deps = ["//streamer:streamer"],
 )
+
+# The same source against the SHARED object, which is what a consumer actually links.
+#
+# Not a duplicate of the target above. That one links the static library, so it proves C linkage and
+# nothing else. Only this one passes through streamer.ldscript, where `local: *` hides everything not
+# listed under `global:`. A function can have correct C linkage and still be missing from that list -
+# the static test passes, the consumer cannot link. Adding an entry point means editing the ldscript,
+# and nothing else checks that it was done.
+cc_test(
+    name = "c_api_so_test",
+    srcs = ["c_api_test.c", "//streamer:libstreamer.so"],
+    copts = ["-std=c99", "-Wall", "-Wextra", "-pedantic"],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../../streamer"],
+    deps = ["//streamer/api"],
+)
