@@ -49,6 +49,35 @@ constexpr std::array<const char *, static_cast<size_t>(ResponseCode::__Max)> __m
     "The requested device type is not supported by this build of the streamer; only RUNAI_FILE_STREAMER_DEVICE_CPU can be read into",
 };
 
+// The published numbers ARE the contract: a compiled caller holds them, and Python hardcodes four of
+// them by value (libstreamer.py). Pinned here so renumbering fails the build instead of silently
+// changing what an existing caller reads.
+//
+// The last code is pinned too, which is what catches an INSERTION - inserting anywhere shifts every
+// code after it, and the last one always moves.
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_SUCCESS == 0, "published response code changed");
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_FINISHED_ERROR == 1, "published response code changed");
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR == 2, "published response code changed");
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT == 16, "published response code changed");
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE == 23, "published response code changed");
+
+// A short list is NOT a compile error on its own: std::array value-initializes the rest to nullptr,
+// and description() would hand that to a caller who builds a std::string from it.
+constexpr bool every_code_has_a_message()
+{
+    for (const auto * message : __messages)
+    {
+        if (message == nullptr)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(every_code_has_a_message(), "a ResponseCode has no entry in __messages");
+
+
 const char * description(int response_code)
 {
     if (response_code < 0 || response_code >= static_cast<int>(ResponseCode::__Max))
