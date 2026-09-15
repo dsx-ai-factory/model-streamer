@@ -46,7 +46,7 @@ class LibstreamerDLLWrapper:
         ]
         self.fn_runai_set_credentials.restype = ctypes.c_int
 
-        # Multi-request submit: credentials are streamer-scoped (runai_set_credentials), not passed here; the
+        # Multi-request submit: credentials are streamer-scoped (runai_file_streamer_set_credentials), not passed here; the
         # assigned submission id is returned via out_submission_id.
         self.fn_runai_request = self.lib.runai_file_streamer_request
         self.fn_runai_request.argtypes = [
