@@ -683,6 +683,63 @@ class TestPartitionForRank(unittest.TestCase):
                 partition_for_rank([FileChunks.contiguous(1, "a.st", 0, [10])], 2, 0)
 
 
+class TestPartitionWithGappedInput(unittest.TestCase):
+    """partition.py must not assume its input is contiguous end to end.
+
+    A tensor_names filter (SafetensorsStreamer.stream_files) builds exactly this shape: one range
+    per KEPT tensor, each at its own real absolute file offset, with gaps where excluded tensors'
+    bytes sit. No existing fixture here produces that - TestPartitionRandomised's _random_model
+    always advances with `cursor += size` (see its _random_model), so every FileChunks it builds is
+    gapless by construction. This class is the missing confirmation: partition_for_rank only ever
+    reads offsets/sizes as opaque work-unit sizes (see partition_for_rank's own docstring) and never
+    checks adjacency, so it should handle a gapped list exactly like a packed one - these tests
+    check that claim rather than assume it.
+    """
+
+    POLICIES = ("chunks", "files", "spans")
+
+    def _gapped_requests(self) -> List[FileChunks]:
+        # Five kept tensors out of what was originally a longer, evenly-spaced file. Offsets
+        # 0, 10, 30, 35, 80 in the first file: each gap between one range's end and the next
+        # range's start (e.g. 10+15=25, but the next range starts at 30) stands in for a tensor
+        # tensor_names excluded.
+        return [
+            FileChunks(id=1, path="model-00001.safetensors", offsets=[0, 10, 30, 35, 80], sizes=[10, 15, 5, 40, 20]),
+            FileChunks(id=2, path="model-00002.safetensors", offsets=[5, 200], sizes=[3, 7]),
+        ]
+
+    def test_every_kept_range_is_assigned_exactly_once(self):
+        requests = self._gapped_requests()
+        expected = Counter(
+            (request.id, index)
+            for request in requests
+            for index in range(len(request.sizes))
+        )
+        for policy in self.POLICIES:
+            with patch.dict(os.environ, {"RUNAI_STREAMER_PARTITION_POLICY": policy}):
+                for ranks in (1, 2, 3):
+                    produced = Counter()
+                    for rank in range(ranks):
+                        for _, source_map in partition_for_rank(requests, ranks, rank).partition:
+                            produced.update((origin[0], origin[1]) for origin in source_map.values())
+                    with self.subTest(policy=policy, ranks=ranks):
+                        self.assertEqual(produced, expected)
+
+    def test_byte_totals_and_chunk_count_are_preserved(self):
+        requests = self._gapped_requests()
+        total_bytes = sum(r.total_size() for r in requests)
+        total_chunks = sum(len(r.sizes) for r in requests)
+        for policy in self.POLICIES:
+            with patch.dict(os.environ, {"RUNAI_STREAMER_PARTITION_POLICY": policy}):
+                for ranks in (1, 2, 3):
+                    mine = partition_for_rank(requests, ranks, 0)
+                    with self.subTest(policy=policy, ranks=ranks):
+                        # The gaps themselves are never assigned to anyone - only the kept
+                        # tensors' own bytes count, which is what this equality confirms.
+                        self.assertEqual(sum(mine.sizes_by_rank), total_bytes)
+                        self.assertEqual(mine.total_chunks, total_chunks)
+
+
 class TestRunCount(unittest.TestCase):
     """The number that prices direct I/O: how many sequential reads a rank's share becomes.
 

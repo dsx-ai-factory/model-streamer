@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Iterator, Optional
+from typing import Collection, Iterator, Optional
 import torch
 import glob
 import os
@@ -235,17 +235,23 @@ class SafetensorsStreamer:
             s3_credentials : Optional[S3Credentials] = None,
             device: Optional[str] = "cpu",
             is_distributed: bool = False,
+            tensor_names: Optional[Collection[str]] = None,
         ) -> None:
-        return self.stream_files([path], s3_credentials, device, is_distributed)
+        return self.stream_files([path], s3_credentials, device, is_distributed, tensor_names)
 
- 
+
     def stream_files(
             self,
             paths: List[str],
             s3_credentials : Optional[S3Credentials] = None,
             device: Optional[str] = "cpu",
-            is_distributed: bool = False, 
+            is_distributed: bool = False,
+            tensor_names: Optional[Collection[str]] = None,
         ) -> None:
+        # None = no filter (today's behavior). Empty = certainly a caller bug, reject it up front.
+        if tensor_names is not None and len(tensor_names) == 0:
+            raise ValueError("tensor_names must not be empty - pass None to load every tensor")
+
         self.files_to_tensors_metadata = {}
         self.total_size = 0
         self.device_str = device
@@ -259,18 +265,42 @@ class SafetensorsStreamer:
         # metadata is created on cpu and each process reads it individually
         safetensors_metadatas = safetensors_pytorch.prepare_request(self.file_streamer, paths, s3_credentials)
 
+        # Accumulates across every file - a name only counts as "unknown" if it matched in NONE
+        # of them, not just the one being processed right now.
+        found_names = set() if tensor_names is not None else None
+
         for i in range(len(paths)):
             (file_offset, tensors_metadata, tensor_sizes) = safetensors_metadatas[i]
             path = paths[i]
-            self.files_to_tensors_metadata[i] = tensors_metadata
-            self.total_size += sum(tensor_sizes)
-            file_stream_requests.append(FileChunks.contiguous(i, path, file_offset, tensor_sizes))
+
+            if tensor_names is None:
+                self.files_to_tensors_metadata[i] = tensors_metadata
+                self.total_size += sum(tensor_sizes)
+                file_stream_requests.append(FileChunks.contiguous(i, path, file_offset, tensor_sizes))
+                continue
+
+            # Filtered tensors may have gaps between them, so compute each one's absolute file
+            # offset directly instead of the cumulative walk FileChunks.contiguous() does.
+            kept_metadata = [tm for tm in tensors_metadata if tm.name in tensor_names]
+            found_names.update(tm.name for tm in kept_metadata)
+            kept_offsets = [file_offset + tm.offsets.start for tm in kept_metadata]
+            kept_sizes = [tm.get_bytesize() for tm in kept_metadata]
+
+            self.files_to_tensors_metadata[i] = kept_metadata
+            self.total_size += sum(kept_sizes)
+            file_stream_requests.append(FileChunks(i, path, kept_offsets, kept_sizes))
+
+        if tensor_names is not None:
+            missing = set(tensor_names) - found_names
+            if missing:
+                raise ValueError(f"tensor_names not found in checkpoint: {sorted(missing)}")
 
         self.file_streamer.stream_files(
             file_stream_requests,
             credentials=s3_credentials,
             device=device,
             is_distributed=is_distributed,
+            tensor_names=tensor_names,
         )
         self._log_ring()
 
