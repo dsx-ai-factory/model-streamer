@@ -1,6 +1,6 @@
 ## Overview
 
-Run:ai Model Streamer is a Python SDK designed to enhance model loading times, supporting several model formats (e.g., SafeTensors) as well as various storage types (network file systems, S3, Disk, etc.).
+Model Streamer is a Python SDK designed to enhance model loading times, supporting several model formats (e.g., SafeTensors) as well as various storage types (network file systems, S3, Disk, etc.).
 
 The Streamer uses multiple threads to read tensors concurrently from a file in some file or object storage to a dedicated buffer in the CPU memory. Every tensor is given an identifier that subsequently is used by the application to load the tensor to the GPU memory. This way the application can load tensors from the CPU memory to the GPU memory while other tensors are being read from storage to the CPU memory.
 
