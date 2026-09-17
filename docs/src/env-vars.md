@@ -315,7 +315,7 @@ String (e.g. `blob.core.chinacloudapi.cn`, `blob.core.usgovcloudapi.net`)
 
 > **Experimental** — This feature is under active development and may change in future releases.
 
-Controls whether the Azure Blob cache provider is enabled. When a compatible cache provider package (e.g., `tachyon-client`) is installed alongside `runai-model-streamer`, the streamer auto-discovers and loads it at runtime to accelerate model loading from Azure Blob Storage via a distributed cache.
+Controls whether the Azure Blob cache provider is enabled. When a compatible cache provider package (e.g., `dacs-client`) is installed alongside `runai-model-streamer`, the streamer auto-discovers and loads it at runtime to accelerate model loading from Azure Blob Storage via a distributed cache.
 
 Set to `0` to disable the cache provider entirely, even if the package is installed. This is the recommended way to disable caching in case of issues.
 
