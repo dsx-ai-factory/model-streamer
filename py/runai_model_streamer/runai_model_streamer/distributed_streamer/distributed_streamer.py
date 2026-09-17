@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Iterator, Optional, Tuple
+from typing import Collection, List, Iterator, Optional, Tuple
 import torch
 import torch.distributed as dist
 import os
@@ -141,12 +141,41 @@ class DistributedStreamer:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
                 self.is_distributed = False
 
+    def _assert_tensor_names_match_across_ranks(self, tensor_names: Optional[Collection[str]]) -> None:
+        """tensor_names is filtered locally, per rank, before any of this runs - nothing else
+        checks every rank was asked for the same set. A mismatch desyncs how much each rank
+        partitions and reads, which desyncs the broadcast loop below - at best a confusing failure
+        well downstream, at worst silently wrong tensors with no error at all. Caught here,
+        immediately, against the world group every rank already shares, before any of the
+        expensive partition/read/broadcast work starts.
+
+        Compared as a canonical sorted tuple - tensor_names is documented as a set, so the
+        caller's order or container type (list/set/tuple) must never trigger a false mismatch.
+
+        # TODO: generalize. Any rank that raises before reaching a collective call strands the
+        # other ranks here too (bounded only by RUNAI_STREAMER_DIST_TIMEOUT) - e.g. a rank-local
+        # unknown/duplicate-name error can still fire before this check runs. Fix: have risky
+        # per-rank steps catch their outcome and sync it across ranks before proceeding, instead
+        # of only doing that for tensor_names.
+        """
+        canonical = tuple(sorted(set(tensor_names))) if tensor_names is not None else None
+        world_size = dist.get_world_size()
+        gathered = [None] * world_size
+        dist.all_gather_object(gathered, canonical)
+        distinct = set(gathered)
+        if len(distinct) > 1:
+            raise ValueError(
+                "tensor_names must be identical on every rank for distributed streaming - "
+                f"got {len(distinct)} different values across {world_size} ranks."
+            )
+
     def stream_files(
             self,
             file_stream_requests: List[FileChunks],
             credentials: Optional[S3Credentials],
             device: str,
             is_distributed: bool,
+            tensor_names: Optional[Collection[str]] = None,
     ) -> None:
 
         # Cleared before dispatch, so a call that builds no ring - or raises before it does - reports
@@ -157,6 +186,9 @@ class DistributedStreamer:
 
         # check if distributed streaming can be used
         self.set_is_distributed(is_distributed, device)
+
+        if self.is_distributed:
+            self._assert_tensor_names_match_across_ranks(tensor_names)
 
         if not self.is_distributed:
             self.file_streamer.stream_files(file_stream_requests, credentials, device)

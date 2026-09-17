@@ -139,6 +139,36 @@ def compatibility_test_cases(backend_class, scheme, bucket_name):
             if not equal:
                 self.fail(f"Tensor mismatch: {message}")
 
+        def test_safetensors_streamer_with_tensor_names(self):
+            file_path = create_random_safetensors(self.temp_dir)
+            self.server.upload_file(self.bucket_name, "", file_path)
+
+            with safe_open(file_path, framework="pt", device="cpu") as f:
+                all_names = list(f.keys())
+            # A genuine subset when the generator produced more than one tensor - MIN_NUM_TENSORS
+            # is 1, so this must not assume there is more than one to split.
+            requested = set(all_names[: max(1, len(all_names) // 2)])
+
+            our = {}
+            with SafetensorsStreamer() as run_sf:
+                run_sf.stream_file(
+                    f"{self.scheme}://{self.bucket_name}/model.safetensors", None, "cpu",
+                    tensor_names=requested,
+                )
+                for name, tensor in run_sf.get_tensors():
+                    our[name] = tensor.clone()
+
+            self.assertEqual(set(our.keys()), requested)
+
+            their = {}
+            with safe_open(file_path, framework="pt", device="cpu") as f:
+                for name in requested:
+                    their[name] = f.get_tensor(name)
+
+            equal, message = tensor_maps_are_equal(our, their)
+            if not equal:
+                self.fail(f"Tensor mismatch: {message}")
+
         def _upload_positional_file(self, filename, bytesize, seed):
             """Write a position-encoded file locally, upload it, and return (url, local content)."""
             content = positional_bytes(bytesize, seed)
@@ -394,15 +424,13 @@ def compatibility_test_cases(backend_class, scheme, bucket_name):
             # 2. Upload the corrupted file
             self.server.upload_file(self.bucket_name, "", file_path)
 
-            # 3. Stream and expect a ValueError during iteration
+            # 3. stream_file() itself must reject this eagerly - it lists the object and
+            # validates its physical size against the header before ever reading a tensor.
             with SafetensorsStreamer() as run_sf:
-                # The stream_file call might succeed (it only reads the header),
-                # but the iteration MUST fail when it hits the EOF in the body.
-                run_sf.stream_file(f"{self.scheme}://{self.bucket_name}/{filename}", None, "cpu")
-                
-                with self.assertRaises(ValueError):
-                    for name, tensor in run_sf.get_tensors():
-                        pass
+                with self.assertRaisesRegex(ValueError, "truncated"):
+                    run_sf.stream_file(
+                        f"{self.scheme}://{self.bucket_name}/{filename}", None, "cpu"
+                    )
 
         def test_list_files(self):
             file_paths = [create_random_files(self.temp_dir) for _ in range(FILE_COUNT)]
