@@ -639,6 +639,40 @@ class TestSafetensorsStreamer(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does_not_exist"):
                 streamer.stream_file(path, None, "cpu", tensor_names={"A", "does_not_exist"})
 
+    def _make_single_tensor_file(self, filename, tensor_name):
+        header_dict = {tensor_name: {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]}}
+        json_str = json.dumps(header_dict)
+        return self.create_corrupted_safetensors(filename, len(json_str), json_str, b"\x01" * 10)
+
+    def test_duplicate_tensor_name_across_files_raises_when_filtered(self):
+        # Only requesting a specific list of names carries the expectation of getting exactly
+        # one tensor per name - a name appearing in two files makes that ambiguous.
+        path1 = self._make_single_tensor_file("dup1.st", "A")
+        path2 = self._make_single_tensor_file("dup2.st", "A")
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "A"):
+                streamer.stream_files([path1, path2], None, "cpu", tensor_names={"A"})
+
+    def test_duplicate_tensor_name_across_files_allowed_when_not_filtered(self):
+        # No filter means "load the whole model as a whole" - no per-name expectation to violate.
+        path1 = self._make_single_tensor_file("dup1.st", "A")
+        path2 = self._make_single_tensor_file("dup2.st", "A")
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path1, path2], None, "cpu")
+            names = [name for name, _ in streamer.get_tensors()]
+        self.assertEqual(names, ["A", "A"])
+
+    def test_distinct_names_across_files_with_filter_load_fine(self):
+        path1 = self._make_single_tensor_file("distinct1.st", "A")
+        path2 = self._make_single_tensor_file("distinct2.st", "B")
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path1, path2], None, "cpu", tensor_names={"A", "B"})
+            names = {name for name, _ in streamer.get_tensors()}
+        self.assertEqual(names, {"A", "B"})
+
     def test_tensor_names_does_not_bypass_header_validation_for_excluded_tensor(self):
         """A corrupted tensor elsewhere in the header must still fail the load, even when
         tensor_names never asks for it - one corruption undermines trust in the whole offset

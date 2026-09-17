@@ -151,6 +151,12 @@ class DistributedStreamer:
 
         Compared as a canonical sorted tuple - tensor_names is documented as a set, so the
         caller's order or container type (list/set/tuple) must never trigger a false mismatch.
+
+        # TODO: generalize. Any rank that raises before reaching a collective call strands the
+        # other ranks here too (bounded only by RUNAI_STREAMER_DIST_TIMEOUT) - e.g. a rank-local
+        # unknown/duplicate-name error can still fire before this check runs. Fix: have risky
+        # per-rank steps catch their outcome and sync it across ranks before proceeding, instead
+        # of only doing that for tensor_names.
         """
         canonical = tuple(sorted(tensor_names)) if tensor_names is not None else None
         world_size = dist.get_world_size()

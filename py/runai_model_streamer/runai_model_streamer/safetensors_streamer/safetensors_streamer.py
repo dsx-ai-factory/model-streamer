@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Collection, Iterator, Optional
+from collections import Counter
 import torch
 import glob
 import os
@@ -268,6 +269,9 @@ class SafetensorsStreamer:
         # Accumulates across every file - a name only counts as "unknown" if it matched in NONE
         # of them, not just the one being processed right now.
         found_names = set() if tensor_names is not None else None
+        # Every kept name, WITH duplicates - only tensor_names carries the expectation of one
+        # tensor per requested name, so this is never tracked for the unfiltered load.
+        all_kept_names: List[str] = [] if tensor_names is not None else None
 
         for i in range(len(paths)):
             (file_offset, tensors_metadata, tensor_sizes) = safetensors_metadatas[i]
@@ -283,6 +287,7 @@ class SafetensorsStreamer:
             # offset directly instead of the cumulative walk FileChunks.contiguous() does.
             kept_metadata = [tm for tm in tensors_metadata if tm.name in tensor_names]
             found_names.update(tm.name for tm in kept_metadata)
+            all_kept_names.extend(tm.name for tm in kept_metadata)
             kept_offsets = [file_offset + tm.offsets.start for tm in kept_metadata]
             kept_sizes = [tm.get_bytesize() for tm in kept_metadata]
 
@@ -294,6 +299,15 @@ class SafetensorsStreamer:
             missing = set(tensor_names) - found_names
             if missing:
                 raise ValueError(f"tensor_names not found in checkpoint: {sorted(missing)}")
+
+            # Cheap common-case gate (set() is a single C-level pass, faster than a manual loop -
+            # measured). Only pay for finding WHICH names collided when the gate actually trips.
+            if len(set(all_kept_names)) != len(all_kept_names):
+                counts = Counter(all_kept_names)
+                duplicates = sorted(name for name, count in counts.items() if count > 1)
+                raise ValueError(
+                    f"tensor_names requested tensors that appear in more than one file: {duplicates}"
+                )
 
         self.file_streamer.stream_files(
             file_stream_requests,
