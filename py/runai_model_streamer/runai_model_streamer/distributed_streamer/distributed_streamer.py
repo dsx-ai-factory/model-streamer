@@ -158,7 +158,7 @@ class DistributedStreamer:
         # per-rank steps catch their outcome and sync it across ranks before proceeding, instead
         # of only doing that for tensor_names.
         """
-        canonical = tuple(sorted(tensor_names)) if tensor_names is not None else None
+        canonical = tuple(sorted(set(tensor_names))) if tensor_names is not None else None
         world_size = dist.get_world_size()
         gathered = [None] * world_size
         dist.all_gather_object(gathered, canonical)

@@ -85,13 +85,13 @@ def _validate_physical_length(path: str, expected_total_bytes: int, actual_bytes
     if actual_bytes < expected_total_bytes:
         raise ValueError(
             f"Corrupted File: '{path}' is truncated - header declares {expected_total_bytes} "
-            f"bytes of tensor data but the file is only {actual_bytes} bytes."
+            f"total bytes but the file is only {actual_bytes} bytes."
         )
     if actual_bytes > expected_total_bytes:
         raise ValueError(
             f"Corrupted File: '{path}' has {actual_bytes} bytes but the header only declares "
-            f"{expected_total_bytes} bytes of tensor data - {actual_bytes - expected_total_bytes} "
-            f"extra trailing bytes."
+            f"a total file size of {expected_total_bytes} bytes - "
+            f"{actual_bytes - expected_total_bytes} extra trailing bytes."
         )
 
 
@@ -115,6 +115,14 @@ class SafetensorsMetadata:
         # from the header's key order via the stable sort, and if the real tensor happened to come first
         # the gap check below would compute 16 + 32 > 16 and reject a perfectly good file as overlapping.
         self.tensors_metadata.sort(key=lambda x: (x.offsets.start, x.get_bytesize()))
+
+        # The pairwise loop below only compares CONSECUTIVE tensors, so it can't catch the
+        # first one starting away from byte 0 of the data section.
+        if self.tensors_metadata and self.tensors_metadata[0].offsets.start != 0:
+            raise ValueError(
+                f"Corrupted File: Tensor '{self.tensors_metadata[0].name}' does not start at the "
+                f"beginning of the data section (starts at {self.tensors_metadata[0].offsets.start})."
+            )
 
         for i in range(len(self.tensors_metadata)):
             current_tensor = self.tensors_metadata[i]
@@ -188,12 +196,11 @@ class SafetensorsMetadata:
         results = []
         for i in range(len(filenames)):
             smeta = SafetensorsMetadata(metadatas[i], header_sizes[i] + SAFETENSORS_HEADER_BUFFER_SIZE)
-            # Sum of declared sizes: the pairwise gap/overlap check above only ever compares
-            # CONSECUTIVE tensors, so a gap between the data section's start and the FIRST tensor
-            # is never checked anywhere else.
-            total_declared_bytes = sum(tm.get_bytesize() for tm in smeta.tensors_metadata)
+            # SafetensorsMetadata guarantees the first tensor starts at 0 and no gaps follow, so
+            # the last tensor's end is the full declared data size.
+            last_end = smeta.tensors_metadata[-1].offsets.end if smeta.tensors_metadata else 0
             actual_bytes = _get_actual_file_size(filenames[i], fs.file_streamer)
-            _validate_physical_length(filenames[i], smeta.offset + total_declared_bytes, actual_bytes)
+            _validate_physical_length(filenames[i], smeta.offset + last_end, actual_bytes)
             results.append(smeta)
         return results
 

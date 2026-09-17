@@ -384,20 +384,26 @@ class TestSafetensorsStreamer(unittest.TestCase):
     def test_gap_before_the_first_tensor_raises(self):
         """The pairwise gap/overlap check only ever compares CONSECUTIVE tensors to each other -
         it never checks that the first tensor (by sorted offset) starts exactly at the data
-        section's beginning. A header claiming the first tensor starts at byte 5, when the data
-        section actually starts at byte 0, leaves 5 unaccounted-for bytes that only a
-        sum-of-declared-sizes length check catches.
+        section's beginning.
+
+        Exactly 10 physical bytes on disk here, matching the tensor's own declared size - a
+        length check based on the SUM of declared sizes cannot tell this apart from a valid
+        file, since the totals match exactly. Only an explicit check that the first tensor
+        starts at offset 0 catches it. Getting this wrong is silent, not a crash: the read for
+        offset 5 would succeed (using whatever bytes happen to sit past the true end of a 10
+        byte file) and hand back wrong data with no error at all.
         """
         header_dict = {
             "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [5, 15]},
         }
         json_str = json.dumps(header_dict)
-        # Physically: 5 bytes of untracked padding, then the 10 declared bytes.
-        data = (b"\xff" * 5) + (b"\x00" * 10)
+        # Only the tensor's own 10 bytes - no padding, so sum(sizes) == physical byte count
+        # despite the offset being wrong.
+        data = b"\x00" * 10
         path = self.create_corrupted_safetensors("leading_gap.st", len(json_str), json_str, data)
 
         with SafetensorsStreamer() as streamer:
-            with self.assertRaisesRegex(ValueError, "extra"):
+            with self.assertRaisesRegex(ValueError, "start"):
                 streamer.stream_file(path, None, "cpu")
 
     # -------------------------------------------------------------------------
