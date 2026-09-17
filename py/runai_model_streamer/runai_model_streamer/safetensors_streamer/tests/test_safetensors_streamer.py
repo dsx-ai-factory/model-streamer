@@ -6,10 +6,23 @@ import json
 import tempfile
 import shutil
 import humanize
+from unittest.mock import patch
 from safetensors import safe_open
 from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
     SafetensorsStreamer,
 )
+from runai_model_streamer.safetensors_streamer import safetensors_pytorch
+from runai_model_streamer.file_streamer.file_streamer import FileStreamer
+
+
+def _list_files_stub(entries):
+    """Returns a side_effect for mock runai_list_files that fires the callback with given
+    (path, size) pairs - same shape as the stub in file_streamer/tests/test_list_files.py,
+    kept local so this file stays self-contained."""
+    def stub(streamer, prefix, callback, is_recursive=True, allow_patterns=None, ignore_patterns=None):
+        for path, size in entries:
+            callback(path, size)
+    return stub
 
 # Constants for binary generation
 HEADER_SIZE_FORMAT = "<Q"  # Little-endian unsigned long long (8 bytes)
@@ -386,6 +399,85 @@ class TestSafetensorsStreamer(unittest.TestCase):
         with SafetensorsStreamer() as streamer:
             with self.assertRaisesRegex(ValueError, "extra"):
                 streamer.stream_file(path, None, "cpu")
+
+    # -------------------------------------------------------------------------
+    # LENGTH CHECK, SPLIT: pure comparison vs. information gathering.
+    # _validate_physical_length is pure. _get_actual_file_size does the I/O, tested against a
+    # real FileStreamer with runai_list_files patched, same pattern as test_list_files.py.
+    # -------------------------------------------------------------------------
+
+    def test_validate_physical_length_matches_succeeds(self):
+        safetensors_pytorch._validate_physical_length("any/path", 100, 100)
+
+    def test_validate_physical_length_too_short_raises(self):
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            safetensors_pytorch._validate_physical_length("any/path", 100, 90)
+
+    def test_validate_physical_length_too_long_raises(self):
+        with self.assertRaisesRegex(ValueError, "extra"):
+            safetensors_pytorch._validate_physical_length("any/path", 100, 110)
+
+    def test_validate_physical_length_unknown_actual_bytes_skips(self):
+        # actual_bytes=None means "couldn't be determined" (see _get_actual_file_size) - nothing
+        # to compare against, so this must not raise.
+        safetensors_pytorch._validate_physical_length("any/path", 100, None)
+
+    def test_get_actual_file_size_local_path(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_dir, "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+        size = safetensors_pytorch._get_actual_file_size(file_path, FileStreamer())
+        self.assertEqual(size, os.path.getsize(file_path))
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_object_storage_exact_match(self, mock_rlf):
+        path = "s3://bucket/model.safetensors"
+        mock_rlf.side_effect = _list_files_stub([(path, 1234)])
+        size = safetensors_pytorch._get_actual_file_size(path, FileStreamer())
+        self.assertEqual(size, 1234)
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_gcs_path_is_functional(self, mock_rlf):
+        # is_gs_path() must route gs:// through the same object-storage branch as S3 - the C++
+        # backend dispatch (runai_list_files) is already generic across schemes.
+        path = "gs://bucket/model.safetensors"
+        mock_rlf.side_effect = _list_files_stub([(path, 1234)])
+        size = safetensors_pytorch._get_actual_file_size(path, FileStreamer())
+        self.assertEqual(size, 1234)
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_azure_path_is_functional(self, mock_rlf):
+        # Same for is_azure_path() / az://.
+        path = "az://container/model.safetensors"
+        mock_rlf.side_effect = _list_files_stub([(path, 1234)])
+        size = safetensors_pytorch._get_actual_file_size(path, FileStreamer())
+        self.assertEqual(size, 1234)
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_object_storage_ignores_prefix_collision(self, mock_rlf):
+        # list_files does PREFIX matching - a sibling key sharing this path as a prefix (e.g. an
+        # index file) must not be mistaken for the file itself.
+        path = "s3://bucket/model.safetensors"
+        mock_rlf.side_effect = _list_files_stub([
+            (path + ".index.json", 5),
+            (path, 1234),
+        ])
+        size = safetensors_pytorch._get_actual_file_size(path, FileStreamer())
+        self.assertEqual(size, 1234)
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_object_storage_no_exact_match_returns_none(self, mock_rlf):
+        path = "s3://bucket/model.safetensors"
+        mock_rlf.side_effect = _list_files_stub([])
+        self.assertIsNone(safetensors_pytorch._get_actual_file_size(path, FileStreamer()))
+
+    @patch("runai_model_streamer.file_streamer.file_streamer.runai_list_files")
+    def test_get_actual_file_size_object_storage_listing_error_returns_none(self, mock_rlf):
+        # Best-effort: a listing failure must not block a load whose header we already read.
+        mock_rlf.side_effect = RuntimeError("network blip")
+        path = "s3://bucket/model.safetensors"
+        self.assertIsNone(safetensors_pytorch._get_actual_file_size(path, FileStreamer()))
 
     def test_holes_between_tensors(self):
         """
