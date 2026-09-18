@@ -1,0 +1,58 @@
+name: Nightly GPU tests
+
+on:
+  # NVIDIA runners only accept PR code after a trusted upstream push.
+  push:
+    branches:
+      - 'pull-request/[0-9]+'
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: nightly-gpu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gpu-tests:
+    runs-on:
+      group: nv-gpu-amd64-t4-2gpu
+      labels: linux-amd64-gpu-t4-latest-2
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check runner GPUs
+        run: nvidia-smi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and test with two GPUs
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/devcontainer.gpu.json
+          imageName: ghcr.io/dsx-ai-factory/runai-model-streamer/devcontainer-gpu
+          cacheFrom: ghcr.io/run-ai/runai-model-streamer/devcontainer
+          push: never
+          runCmd: bash tests/gpu/run.sh
+
+      - name: Upload GPU test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-logs
+          path: test-results/gpu/
+          if-no-files-found: warn
+          retention-days: 14

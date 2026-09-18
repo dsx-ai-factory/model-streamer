@@ -1,0 +1,14 @@
+{
+    "name": "RunAI Model Streamer GPU tests",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "features": {
+        "ghcr.io/devcontainers-community/features/bazel:1": {}
+    },
+    "runArgs": [
+        "--gpus", "all",
+        "--shm-size=2g",
+        "--security-opt", "seccomp=unconfined"
+    ]
+}
