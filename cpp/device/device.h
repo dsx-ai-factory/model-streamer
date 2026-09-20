@@ -91,8 +91,9 @@ class Device
     // Fills alignment padding without a round trip through the host.
     virtual common::ResponseCode memset_async(void * dst, unsigned char value, size_t bytesize, StreamHandle stream) = 0;
 
-    // The vendor's own text for the last failure, for the log next to our own code. Never null.
-    virtual const char * last_error() const = 0;
+    // There is no last_error(): one device is shared by every worker thread, so a remembered
+    // error would be a race and would report another thread's failure. A backend logs the
+    // vendor's own code and message where they happen, and returns a ResponseCode here.
 };
 
 // The loaded driver, and the devices it can open.
