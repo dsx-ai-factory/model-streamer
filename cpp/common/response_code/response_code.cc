@@ -47,6 +47,11 @@ constexpr std::array<const char *, static_cast<size_t>(ResponseCode::__Max)> __m
     "None of the filesystem read strategies in the list can be served on this host; add sync_buffered to the list to allow the synchronous reader",
     "The asynchronous filesystem reader for this mount failed and will not be used again; the storage itself is healthy, and re-requesting these ranges reads them through the synchronous reader",
     "The requested device type is not supported by this build of the streamer; only RUNAI_FILE_STREAMER_DEVICE_CPU can be read into",
+    "No usable device is present: the device driver could not be loaded, or it reports no devices",
+    "There is no device with the requested ordinal",
+    "An allocation on the device path was refused - device memory, or host memory to be pinned; ask for less, or release what is already held",
+    "The transfer to the device failed; these ranges were not written and the destination is unchanged",
+    "The device driver failed; the driver and the installed libraries do not agree, or the context is gone",
 };
 
 // The published numbers ARE the contract: a compiled caller holds them, and Python hardcodes four of
@@ -60,6 +65,7 @@ static_assert(RUNAI_FILE_STREAMER_RESPONSE_FINISHED_ERROR == 1, "published respo
 static_assert(RUNAI_FILE_STREAMER_RESPONSE_FILE_ACCESS_ERROR == 2, "published response code changed");
 static_assert(RUNAI_FILE_STREAMER_RESPONSE_TIMED_OUT == 16, "published response code changed");
 static_assert(RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE == 23, "published response code changed");
+static_assert(RUNAI_FILE_STREAMER_RESPONSE_DEVICE_DRIVER_ERROR == 28, "published response code changed");
 
 // A short list is NOT a compile error on its own: std::array value-initializes the rest to nullptr,
 // and description() would hand that to a caller who builds a std::string from it.

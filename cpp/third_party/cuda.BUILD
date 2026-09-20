@@ -5,5 +5,6 @@ cc_library(
     name = "cuda_headers",
     hdrs = ["include/cuda.h"],
     includes = ["include"],
-    visibility = ["//visibility:public"],
+    # Only the CUDA backend may see cuda.h: nothing above cpp/device/ includes a vendor header.
+    visibility = ["@//device/cuda:__subpackages__"],
 )
