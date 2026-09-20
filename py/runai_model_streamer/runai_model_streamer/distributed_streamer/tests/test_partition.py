@@ -684,25 +684,14 @@ class TestPartitionForRank(unittest.TestCase):
 
 
 class TestPartitionWithGappedInput(unittest.TestCase):
-    """partition.py must not assume its input is contiguous end to end.
-
-    A tensor_names filter (SafetensorsStreamer.stream_files) builds exactly this shape: one range
-    per KEPT tensor, each at its own real absolute file offset, with gaps where excluded tensors'
-    bytes sit. No existing fixture here produces that - TestPartitionRandomised's _random_model
-    always advances with `cursor += size` (see its _random_model), so every FileChunks it builds is
-    gapless by construction. This class is the missing confirmation: partition_for_rank only ever
-    reads offsets/sizes as opaque work-unit sizes (see partition_for_rank's own docstring) and never
-    checks adjacency, so it should handle a gapped list exactly like a packed one - these tests
-    check that claim rather than assume it.
+    """tensor_names filtering produces gapped FileChunks (ranges with holes where excluded
+    tensors sat) - no existing fixture here covers that. Confirms partition_for_rank handles it.
     """
 
     POLICIES = ("chunks", "files", "spans")
 
     def _gapped_requests(self) -> List[FileChunks]:
-        # Five kept tensors out of what was originally a longer, evenly-spaced file. Offsets
-        # 0, 10, 30, 35, 80 in the first file: each gap between one range's end and the next
-        # range's start (e.g. 10+15=25, but the next range starts at 30) stands in for a tensor
-        # tensor_names excluded.
+        # Offsets 0, 10, 30, 35, 80: each gap stands in for an excluded tensor.
         return [
             FileChunks(id=1, path="model-00001.safetensors", offsets=[0, 10, 30, 35, 80], sizes=[10, 15, 5, 40, 20]),
             FileChunks(id=2, path="model-00002.safetensors", offsets=[5, 200], sizes=[3, 7]),

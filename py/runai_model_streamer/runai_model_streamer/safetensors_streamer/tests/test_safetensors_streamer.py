@@ -308,15 +308,8 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 pass
 
     def test_truncated_tensor_data(self):
-        """
-        Test a valid header with missing/truncated tensor data - the file is physically
-        shorter than the header declares.
-
-        Now caught eagerly, at stream_file() time (a whole-file length check: header's declared
-        total data bytes vs the file's actual size on disk), not lazily whenever get_tensors()
-        happens to reach the short tensor. Local filesystem only - object storage size probing
-        is not wired up here.
-        """
+        """File physically shorter than the header declares - caught eagerly at stream_file()
+        time. Local filesystem only; object storage isn't checked (see issue #197)."""
         # Header claims 100 bytes of data (U8 x 100)
         header_dict = {
             "test_tensor": {
@@ -346,13 +339,9 @@ class TestSafetensorsStreamer(unittest.TestCase):
                     f.get_tensor(k)
 
     def test_file_longer_than_header_declares_raises(self):
-        """The mirror image of truncation: extra trailing bytes the header never accounted for.
-
-        Not a truncation, not an overlap, not a gap - the header is perfectly self-consistent and
-        every declared tensor reads fine. But bytes exist on disk that no tensor claims, which
-        means the file does not match its own header - worth rejecting up front rather than
-        silently ignoring however many bytes got appended.
-        """
+        """Local filesystem only (see issue #197 for object storage). Extra trailing bytes the
+        header never accounted for - every declared tensor still reads fine, but the file no
+        longer matches its own header."""
         header_dict = {
             "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
         }
@@ -367,17 +356,10 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 streamer.stream_file(path, None, "cpu")
 
     def test_gap_before_the_first_tensor_raises(self):
-        """The pairwise gap/overlap check only ever compares CONSECUTIVE tensors to each other -
-        it never checks that the first tensor (by sorted offset) starts exactly at the data
-        section's beginning.
-
-        Exactly 10 physical bytes on disk here, matching the tensor's own declared size - a
-        length check based on the SUM of declared sizes cannot tell this apart from a valid
-        file, since the totals match exactly. Only an explicit check that the first tensor
-        starts at offset 0 catches it. Getting this wrong is silent, not a crash: the read for
-        offset 5 would succeed (using whatever bytes happen to sit past the true end of a 10
-        byte file) and hand back wrong data with no error at all.
-        """
+        """The pairwise gap/overlap check only compares CONSECUTIVE tensors - it can't catch the
+        first one starting away from offset 0. Undetected, this is silent wrong data, not a
+        crash: offset 5 with 10 physical bytes would just read past the true end and return
+        garbage."""
         header_dict = {
             "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [5, 15]},
         }
@@ -527,19 +509,13 @@ class TestSafetensorsStreamer(unittest.TestCase):
         self.assertEqual(set(our.keys()), their_names)
 
     def test_tensor_names_filters_to_requested_subset(self):
-        """Three tensors laid back to back on disk - A, B, C, 10 bytes each, filled with the
-        bytes 1, 2, 3 respectively:
+        """A, B, C - 10 bytes each, values 1/2/3:
 
             byte offset:   0        10       20       30
                            |--A: 1s--|--B: 2s--|--C: 3s--|
 
-        Request only A and C - B, in the MIDDLE, is skipped. This is deliberately NOT the first or
-        last tensor: the remaining A+C bytes are no longer back to back on disk, which is exactly
-        the layout that would break a naive "walk sizes cumulatively from the start" offset
-        calculation (see FileChunks.contiguous). If the filter's offset math were wrong, this test
-        would read C's tensor starting 10 bytes too early - i.e. it would come back full of 2s
-        (B's data) instead of 3s.
-        """
+        Request A and C, skipping B in the MIDDLE - breaks a naive cumulative offset walk.
+        Wrong math would read C starting 10 bytes early, returning B's 2s instead of C's 3s."""
         header_dict = {
             "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
             "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
@@ -626,7 +602,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
     def test_tensor_names_does_not_bypass_header_validation_for_excluded_tensor(self):
         """A corrupted tensor elsewhere in the header must still fail the load, even when
         tensor_names never asks for it - one corruption undermines trust in the whole offset
-        table, not just the tensor it touches. See test_overlapping_tensors for the base case."""
+        table, not just the tensor it touches."""
         header_dict = {
             "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
             "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
@@ -642,12 +618,9 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 streamer.stream_file(path, None, "cpu", tensor_names={"A"})
 
     def test_tensor_names_excluding_a_truncated_tensor_no_longer_avoids_its_error(self):
-        """Superseded by the whole-file length check added in test_file_longer_than_header_declares_raises
-        / test_truncated_tensor_data: truncation is now caught eagerly, for the whole file, before
-        tensor_names filtering ever runs - same "validate everything regardless of filter" policy as
-        test_tensor_names_does_not_bypass_header_validation_for_excluded_tensor, just extended from
-        internal header self-consistency to physical file length. Excluding the truncated tensor no
-        longer saves the load, on purpose."""
+        """Local filesystem only (see issue #197 for object storage). Truncation is caught
+        eagerly, for the whole file, before tensor_names filtering ever runs - excluding the
+        truncated tensor no longer avoids the error, on purpose."""
         header_dict = {
             "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
             "B": {"dtype": "U8", "shape": [100], "data_offsets": [10, 110]},
