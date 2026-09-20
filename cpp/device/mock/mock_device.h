@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <map>
+#include <mutex>
 #include <vector>
 
 #include "device/device.h"
@@ -17,7 +19,9 @@ namespace runai::llm::streamer::device
 // and read what landed. Streams and events are tokens: what matters about them here is that they
 // are created, used and destroyed in the right number and the right order.
 //
-// NOT THREAD SAFE. Tests drive it from their own thread.
+// THREAD SAFE, unlike the real backend's needs: a StreamWaiter calls event_synchronize from its own
+// thread while the test thread is still acquiring buffers. Counters are atomic so a test may read
+// them without waiting for the threads to be quiet.
 class MockDevice : public Device
 {
  public:
@@ -48,13 +52,13 @@ class MockDevice : public Device
 
     // --- what a test asserts on ---
 
-    unsigned bind_calls = 0;
-    unsigned host_allocs = 0;            // one per SLAB, not per buffer
-    unsigned host_frees = 0;
-    unsigned events_created = 0;
-    unsigned events_destroyed = 0;
-    unsigned event_syncs = 0;
-    unsigned copies = 0;
+    std::atomic<unsigned> bind_calls{0};
+    std::atomic<unsigned> host_allocs{0};       // one per SLAB, not per buffer
+    std::atomic<unsigned> host_frees{0};
+    std::atomic<unsigned> events_created{0};
+    std::atomic<unsigned> events_destroyed{0};
+    std::atomic<unsigned> event_syncs{0};
+    std::atomic<unsigned> copies{0};
 
     std::vector<size_t> host_alloc_sizes;   // in order, so slab sizing is checkable
     std::vector<void *> live_host;          // allocated and not yet freed
@@ -64,11 +68,15 @@ class MockDevice : public Device
     // Fail the Nth host_alloc, counting from 1. Zero means never.
     unsigned fail_host_alloc_at = 0;
 
+    // Make every event_synchronize report a failed copy.
+    std::atomic<bool> fail_event_synchronize{false};
+
     // An event answers NotReady until marked ready, so a reaping order can be forced.
     void set_ready(EventHandle event, bool ready);
     void set_all_ready(bool ready);
 
  private:
+    mutable std::mutex _mutex;
     std::map<EventHandle, bool> _ready;
     unsigned _next_token = 1;
 };
