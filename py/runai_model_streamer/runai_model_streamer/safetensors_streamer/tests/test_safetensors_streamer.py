@@ -10,6 +10,7 @@ from safetensors import safe_open
 from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
     SafetensorsStreamer,
 )
+from runai_model_streamer.safetensors_streamer import safetensors_pytorch
 
 # Constants for binary generation
 HEADER_SIZE_FORMAT = "<Q"  # Little-endian unsigned long long (8 bytes)
@@ -131,8 +132,8 @@ class TestSafetensorsStreamer(unittest.TestCase):
 
             # Now the model read on the empty rank. Both patches reproduce distributed_streamer.py
             # exactly: is_distributed True (the fallback checks need a real process group otherwise),
-            # and the empty-partition early return, which sets reading_from_storage False and returns
-            # without touching the FileStreamer.
+            # and the empty-partition early return, which sets reading_from_storage False and
+            # returns without touching the FileStreamer.
             def empty_partition(*_args, **_kwargs):
                 streamer.distributed_streamer.reading_from_storage = False
 
@@ -307,10 +308,8 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 pass
 
     def test_truncated_tensor_data(self):
-        """
-        Test a valid header with missing/truncated tensor data.
-        Verifies that create_torch_tensor raises ValueError if buffer size mismatch.
-        """
+        """File physically shorter than the header declares - caught eagerly at stream_file()
+        time. Local filesystem only; object storage isn't checked (see issue #197)."""
         # Header claims 100 bytes of data (U8 x 100)
         header_dict = {
             "test_tensor": {
@@ -320,21 +319,16 @@ class TestSafetensorsStreamer(unittest.TestCase):
             }
         }
         json_str = json.dumps(header_dict)
-        
+
         # We only provide 10 bytes of actual data instead of 100
         truncated_data = b"\x00" * 10
         path = self.create_corrupted_safetensors("truncated_body.st", len(json_str), json_str, truncated_data)
 
-        # 1. Validate our Streamer
+        # 1. Validate our Streamer - stream_file() itself must now reject this, before any
+        # tensor is actually read.
         with SafetensorsStreamer() as streamer:
-            # stream_file reads the header (which is fine)
-            streamer.stream_file(path, None, "cpu")
-            
-            # get_tensors attempts to read the body. 
-            # If truncation occurs, the buffer check in create_torch_tensor MUST fail.
-            with self.assertRaises(ValueError):
-                for _ in streamer.get_tensors():
-                    pass
+            with self.assertRaisesRegex(ValueError, "truncated"):
+                streamer.stream_file(path, None, "cpu")
 
         # 2. Validate HF safetensors library behavior
         # HF safetensors validates file size against header claims on open/mmap.
@@ -343,6 +337,79 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 # If it doesn't fail on open, try to access data
                 for k in f.keys():
                     f.get_tensor(k)
+
+    def test_file_longer_than_header_declares_raises(self):
+        """Local filesystem only (see issue #197 for object storage). Extra trailing bytes the
+        header never accounted for - every declared tensor still reads fine, but the file no
+        longer matches its own header."""
+        header_dict = {
+            "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+        }
+        json_str = json.dumps(header_dict)
+        # Header declares exactly 10 bytes of data; write 25 - 15 bytes of unexplained trailing
+        # garbage past what the header says the file should contain.
+        bloated_data = b"\x00" * 25
+        path = self.create_corrupted_safetensors("bloated.st", len(json_str), json_str, bloated_data)
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "extra"):
+                streamer.stream_file(path, None, "cpu")
+
+    def test_gap_before_the_first_tensor_raises(self):
+        """The pairwise gap/overlap check only compares CONSECUTIVE tensors - it can't catch the
+        first one starting away from offset 0. Undetected, this is silent wrong data, not a
+        crash: offset 5 with 10 physical bytes would just read past the true end and return
+        garbage."""
+        header_dict = {
+            "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [5, 15]},
+        }
+        json_str = json.dumps(header_dict)
+        # Only the tensor's own 10 bytes - no padding, so sum(sizes) == physical byte count
+        # despite the offset being wrong.
+        data = b"\x00" * 10
+        path = self.create_corrupted_safetensors("leading_gap.st", len(json_str), json_str, data)
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "start"):
+                streamer.stream_file(path, None, "cpu")
+
+    # -------------------------------------------------------------------------
+    # LENGTH CHECK, SPLIT: pure comparison vs. information gathering.
+    # _validate_physical_length is pure. _get_actual_file_size does the I/O - local filesystem
+    # only (object storage removed, see the linked issue).
+    # -------------------------------------------------------------------------
+
+    def test_validate_physical_length_matches_succeeds(self):
+        safetensors_pytorch._validate_physical_length("any/path", 100, 100)
+
+    def test_validate_physical_length_too_short_raises(self):
+        with self.assertRaisesRegex(ValueError, "truncated"):
+            safetensors_pytorch._validate_physical_length("any/path", 100, 90)
+
+    def test_validate_physical_length_too_long_raises(self):
+        with self.assertRaisesRegex(ValueError, "extra"):
+            safetensors_pytorch._validate_physical_length("any/path", 100, 110)
+
+    def test_validate_physical_length_unknown_actual_bytes_skips(self):
+        # actual_bytes=None means "couldn't be determined" (see _get_actual_file_size) - nothing
+        # to compare against, so this must not raise.
+        safetensors_pytorch._validate_physical_length("any/path", 100, None)
+
+    def test_get_actual_file_size_local_path(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_dir, "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+        size = safetensors_pytorch._get_actual_file_size(file_path)
+        self.assertEqual(size, os.path.getsize(file_path))
+
+    def test_get_actual_file_size_object_storage_is_not_checked(self):
+        # Deliberately not implemented (removed after review - see the linked issue for the
+        # planned zero-extra-request fix): every object-storage scheme must return None, not
+        # attempt a listing call.
+        self.assertIsNone(safetensors_pytorch._get_actual_file_size("s3://bucket/model.safetensors"))
+        self.assertIsNone(safetensors_pytorch._get_actual_file_size("gs://bucket/model.safetensors"))
+        self.assertIsNone(safetensors_pytorch._get_actual_file_size("az://container/model.safetensors"))
 
     def test_holes_between_tensors(self):
         """
@@ -418,6 +485,155 @@ class TestSafetensorsStreamer(unittest.TestCase):
             
             self.assertTrue(torch.all(tFirst.eq(1)))
             self.assertTrue(torch.all(tSecond.eq(2)))
+
+    # -------------------------------------------------------------------------
+    # TENSOR_NAMES FILTER TESTS
+    # -------------------------------------------------------------------------
+
+    def test_tensor_names_none_preserves_default_behavior(self):
+        """tensor_names=None must be byte-for-byte identical to today's default (no filter)."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_dir, "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+
+        our = {}
+        with SafetensorsStreamer() as run_sf:
+            run_sf.stream_file(file_path, None, "cpu", tensor_names=None)
+            for name, tensor in run_sf.get_tensors():
+                our[name] = tensor.clone()
+
+        with safe_open(file_path, framework="pt", device="cpu") as f:
+            their_names = set(f.keys())
+
+        self.assertEqual(set(our.keys()), their_names)
+
+    def test_tensor_names_filters_to_requested_subset(self):
+        """A, B, C - 10 bytes each, values 1/2/3:
+
+            byte offset:   0        10       20       30
+                           |--A: 1s--|--B: 2s--|--C: 3s--|
+
+        Request A and C, skipping B in the MIDDLE - breaks a naive cumulative offset walk.
+        Wrong math would read C starting 10 bytes early, returning B's 2s instead of C's 3s."""
+        header_dict = {
+            "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+            "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
+            "C": {"dtype": "U8", "shape": [10], "data_offsets": [20, 30]},
+        }
+        json_str = json.dumps(header_dict)
+        tensor_data = (b"\x01" * 10) + (b"\x02" * 10) + (b"\x03" * 10)  # A=1s, B=2s, C=3s
+        path = self.create_corrupted_safetensors("subset.st", len(json_str), json_str, tensor_data)
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_file(path, None, "cpu", tensor_names={"A", "C"})
+            tensors = {}
+            for name, tensor in streamer.get_tensors():
+                tensors[name] = tensor.clone()
+
+        # B was never requested - it must not appear at all, not even with wrong/empty data.
+        self.assertNotIn("B", tensors)
+        self.assertEqual(set(tensors.keys()), {"A", "C"})
+
+        # And the two we DID request must have their own, correct bytes - not each other's,
+        # and not B's.
+        self.assertTrue(torch.all(tensors["A"].eq(1)))
+        self.assertTrue(torch.all(tensors["C"].eq(3)))
+
+    def test_tensor_names_empty_set_raises(self):
+        """An explicitly empty tensor_names must raise - None means 'no filter', set() means
+        'load nothing', which is never useful and almost certainly a caller bug."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_dir, "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaises(ValueError):
+                streamer.stream_file(file_path, None, "cpu", tensor_names=set())
+
+    def test_tensor_names_unknown_name_raises(self):
+        """A name not present in the checkpoint must raise, naming the problem, not silently
+        return fewer tensors than requested."""
+        header_dict = {
+            "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+        }
+        json_str = json.dumps(header_dict)
+        path = self.create_corrupted_safetensors("unknown_name.st", len(json_str), json_str, b"\x01" * 10)
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "does_not_exist"):
+                streamer.stream_file(path, None, "cpu", tensor_names={"A", "does_not_exist"})
+
+    def _make_single_tensor_file(self, filename, tensor_name):
+        header_dict = {tensor_name: {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]}}
+        json_str = json.dumps(header_dict)
+        return self.create_corrupted_safetensors(filename, len(json_str), json_str, b"\x01" * 10)
+
+    def test_duplicate_tensor_name_across_files_raises_when_filtered(self):
+        # Only requesting a specific list of names carries the expectation of getting exactly
+        # one tensor per name - a name appearing in two files makes that ambiguous.
+        path1 = self._make_single_tensor_file("dup1.st", "A")
+        path2 = self._make_single_tensor_file("dup2.st", "A")
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "A"):
+                streamer.stream_files([path1, path2], None, "cpu", tensor_names={"A"})
+
+    def test_duplicate_tensor_name_across_files_allowed_when_not_filtered(self):
+        # No filter means "load the whole model as a whole" - no per-name expectation to violate.
+        path1 = self._make_single_tensor_file("dup1.st", "A")
+        path2 = self._make_single_tensor_file("dup2.st", "A")
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path1, path2], None, "cpu")
+            names = [name for name, _ in streamer.get_tensors()]
+        self.assertEqual(names, ["A", "A"])
+
+    def test_distinct_names_across_files_with_filter_load_fine(self):
+        path1 = self._make_single_tensor_file("distinct1.st", "A")
+        path2 = self._make_single_tensor_file("distinct2.st", "B")
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path1, path2], None, "cpu", tensor_names={"A", "B"})
+            names = {name for name, _ in streamer.get_tensors()}
+        self.assertEqual(names, {"A", "B"})
+
+    def test_tensor_names_does_not_bypass_header_validation_for_excluded_tensor(self):
+        """A corrupted tensor elsewhere in the header must still fail the load, even when
+        tensor_names never asks for it - one corruption undermines trust in the whole offset
+        table, not just the tensor it touches."""
+        header_dict = {
+            "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+            "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
+            "C": {"dtype": "U8", "shape": [10], "data_offsets": [15, 25]},
+        }
+        json_str = json.dumps(header_dict)
+        path = self.create_corrupted_safetensors("filtered_overlap.st", len(json_str), json_str, b"\x00" * 25)
+
+        with SafetensorsStreamer() as streamer:
+            # Only A is requested - B and C (the overlapping pair) are excluded - but the load
+            # must still fail, because the header as a whole is corrupted.
+            with self.assertRaisesRegex(ValueError, "overlaps with next tensor"):
+                streamer.stream_file(path, None, "cpu", tensor_names={"A"})
+
+    def test_tensor_names_excluding_a_truncated_tensor_no_longer_avoids_its_error(self):
+        """Local filesystem only (see issue #197 for object storage). Truncation is caught
+        eagerly, for the whole file, before tensor_names filtering ever runs - excluding the
+        truncated tensor no longer avoids the error, on purpose."""
+        header_dict = {
+            "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+            "B": {"dtype": "U8", "shape": [100], "data_offsets": [10, 110]},
+        }
+        json_str = json.dumps(header_dict)
+        # A's 10 bytes are all present; B claims 100 bytes but only 10 more are on disk.
+        tensor_data = (b"\x01" * 10) + (b"\x00" * 10)
+        path = self.create_corrupted_safetensors("filtered_truncated.st", len(json_str), json_str, tensor_data)
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "truncated"):
+                streamer.stream_file(path, None, "cpu", tensor_names={"A"})
+
 
 if __name__ == "__main__":
     unittest.main()

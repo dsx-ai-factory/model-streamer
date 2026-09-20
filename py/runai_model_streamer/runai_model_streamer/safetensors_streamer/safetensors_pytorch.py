@@ -1,10 +1,11 @@
 from __future__ import annotations
+import os
 import torch
 import struct
 import json
 from typing import List, Tuple, Optional, Any
 from runai_model_streamer.distributed_streamer.distributed_streamer import (DistributedStreamer, FileChunks)
-from runai_model_streamer.s3_utils.s3_utils import S3Credentials
+from runai_model_streamer.s3_utils.s3_utils import S3Credentials, is_s3_path, is_gs_path, is_azure_path
 
 SAFETENSORS_DATA_OFFSETS_KEY = "data_offsets"
 SAFETENSORS_NAME_KEY = "name"
@@ -59,6 +60,33 @@ def get_safetensors_dtype_map() -> dict:
 
 safetensors_to_torch_dtype = get_safetensors_dtype_map()
 
+
+def _get_actual_file_size(path: str) -> Optional[int]:
+    """Physical size of path, local filesystem only. Object storage not checked - costs extra
+    requests on the hot loading path either way; see issue #197 for the zero-cost fix."""
+    if is_s3_path(path) or is_gs_path(path) or is_azure_path(path):
+        return None
+    return os.path.getsize(path)
+
+
+def _validate_physical_length(path: str, expected_total_bytes: int, actual_bytes: Optional[int]) -> None:
+    """Compares the header's declared total against the file's actual size. Pure - actual_bytes
+    is resolved by the caller; None means unknown, nothing to check."""
+    if actual_bytes is None:
+        return
+    if actual_bytes < expected_total_bytes:
+        raise ValueError(
+            f"Corrupted File: '{path}' is truncated - header declares {expected_total_bytes} "
+            f"total bytes but the file is only {actual_bytes} bytes."
+        )
+    if actual_bytes > expected_total_bytes:
+        raise ValueError(
+            f"Corrupted File: '{path}' has {actual_bytes} bytes but the header only declares "
+            f"a total file size of {expected_total_bytes} bytes - "
+            f"{actual_bytes - expected_total_bytes} extra trailing bytes."
+        )
+
+
 class SafetensorsMetadata:
     def __init__(self, blob: Any, offset: int) -> None:
         self.offset = offset
@@ -79,6 +107,14 @@ class SafetensorsMetadata:
         # from the header's key order via the stable sort, and if the real tensor happened to come first
         # the gap check below would compute 16 + 32 > 16 and reject a perfectly good file as overlapping.
         self.tensors_metadata.sort(key=lambda x: (x.offsets.start, x.get_bytesize()))
+
+        # The pairwise loop below only compares CONSECUTIVE tensors, so it can't catch the
+        # first one starting away from byte 0 of the data section.
+        if self.tensors_metadata and self.tensors_metadata[0].offsets.start != 0:
+            raise ValueError(
+                f"Corrupted File: Tensor '{self.tensors_metadata[0].name}' does not start at the "
+                f"beginning of the data section (starts at {self.tensors_metadata[0].offsets.start})."
+            )
 
         for i in range(len(self.tensors_metadata)):
             current_tensor = self.tensors_metadata[i]
@@ -149,9 +185,16 @@ class SafetensorsMetadata:
             if isinstance(e, ValueError): raise e
             raise ValueError(f"Streamer failed to read header body (likely truncated file): {str(e)}")
 
-        return [SafetensorsMetadata(
-            metadatas[i], header_sizes[i] + SAFETENSORS_HEADER_BUFFER_SIZE
-        ) for i in range(len(filenames))] 
+        results = []
+        for i in range(len(filenames)):
+            smeta = SafetensorsMetadata(metadatas[i], header_sizes[i] + SAFETENSORS_HEADER_BUFFER_SIZE)
+            # SafetensorsMetadata guarantees the first tensor starts at 0 and no gaps follow, so
+            # the last tensor's end is the full declared data size.
+            last_end = smeta.tensors_metadata[-1].offsets.end if smeta.tensors_metadata else 0
+            actual_bytes = _get_actual_file_size(filenames[i])
+            _validate_physical_length(filenames[i], smeta.offset + last_end, actual_bytes)
+            results.append(smeta)
+        return results
 
 class SafetensorMetadata:
     def __init__(self, name: str, safetensorMetadata: Any) -> None:

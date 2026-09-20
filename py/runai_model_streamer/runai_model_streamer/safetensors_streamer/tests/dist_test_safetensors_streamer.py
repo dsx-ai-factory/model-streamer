@@ -88,5 +88,53 @@ class TestDistributedSafetensorsStreamer(unittest.TestCase):
 
 
 
+class TestTensorNamesDistributedFiltering(unittest.TestCase):
+    """tensor_names is filtered LOCALLY, per rank - there is no cross-rank check that every rank
+    was asked for the same set (see usage.md: callers must ensure this themselves, or risk a hang
+    bounded by RUNAI_STREAMER_DIST_TIMEOUT). This class only covers same-selection behavior.
+    """
+
+    # The real names baked into test_files/test.safetensors.
+    ALL_NAMES = [
+        "tensor1.bfloat16", "tensor1.bool", "tensor1.float16", "tensor1.float32", "tensor1.float64",
+        "tensor1.int16", "tensor1.int32", "tensor1.int64", "tensor1.int8", "tensor1.uint8",
+    ]
+
+    ENV_VARS = {
+        "RUNAI_STREAMER_DIST": "1",
+        "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rank = dist.get_rank()
+        cls.world_size = dist.get_world_size()
+
+    def setUp(self):
+        dist.barrier()
+
+    def tearDown(self):
+        dist.barrier()
+
+    def _file_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_files", "test.safetensors")
+
+    def test_same_set_different_order_and_collection_type_succeeds(self):
+        # Same 3 names on both ranks, but as different collection types in different orders - the
+        # doc is explicit that tensor_names is "treated as a set", so this must succeed identically
+        # to the same-order case, not be flagged as a mismatch.
+        names = [self.ALL_NAMES[2], self.ALL_NAMES[0], self.ALL_NAMES[1]]
+        my_names = names if self.rank == 0 else set(reversed(names))
+
+        with unittest.mock.patch.dict(os.environ, self.ENV_VARS):
+            with SafetensorsStreamer() as run_sf:
+                run_sf.stream_file(self._file_path(), None, "cpu", True, tensor_names=my_names)
+                our = {}
+                for name, tensor in run_sf.get_tensors():
+                    our[name] = tensor.clone().detach()
+
+        self.assertEqual(set(our.keys()), set(names))
+
+
 if __name__ == "__main__":
     unittest.main()
