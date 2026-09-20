@@ -201,13 +201,16 @@ TEST_F(CudaDeviceTest, StreamsDoNotSynchroniseWithTheCallersDefaultStream)
     EXPECT_EQ(Recorded::stream_flags, static_cast<unsigned>(CU_STREAM_NON_BLOCKING));
 }
 
-TEST_F(CudaDeviceTest, EventsCarryNoTiming)
+// Untimed because nothing reads a duration, and BLOCKING_SYNC because a thread waiting on one of
+// these otherwise spins in the driver - 100% of a core against 1%, at the same wall time.
+TEST_F(CudaDeviceTest, EventsAreUntimedAndDoNotSpin)
 {
     CudaDevice device(_lib, 0, the_context, PinnedMode::Allocate);
 
     EventHandle event = nullptr;
     ASSERT_EQ(device.event_create(event), common::ResponseCode::Success);
     EXPECT_EQ(Recorded::event_flags & CU_EVENT_DISABLE_TIMING, static_cast<unsigned>(CU_EVENT_DISABLE_TIMING));
+    EXPECT_EQ(Recorded::event_flags & CU_EVENT_BLOCKING_SYNC, static_cast<unsigned>(CU_EVENT_BLOCKING_SYNC));
 }
 
 // Work still running is not an error: this is how a reader asks whether a staging buffer is free.

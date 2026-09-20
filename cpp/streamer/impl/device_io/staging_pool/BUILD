@@ -2,6 +2,10 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 
 runai_cc_auto_library(
     name = "staging_pool",
+    # Only the streamer reaches the device path. runai_cc_library defaults to public, so
+    # this has to be stated per target - a package() in the parent BUILD does not reach
+    # sub-packages.
+    visibility = ["//streamer:__subpackages__"],
     deps = [
         "//device",
         "//utils/logging",

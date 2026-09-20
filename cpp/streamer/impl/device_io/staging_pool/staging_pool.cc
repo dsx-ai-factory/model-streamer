@@ -1,4 +1,4 @@
-#include "streamer/impl/staging_pool/staging_pool.h"
+#include "streamer/impl/device_io/staging_pool/staging_pool.h"
 
 #include <algorithm>
 #include <utility>
