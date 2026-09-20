@@ -314,7 +314,6 @@ class SafetensorsStreamer:
             credentials=s3_credentials,
             device=device,
             is_distributed=is_distributed,
-            tensor_names=tensor_names,
         )
         self._log_ring()
 

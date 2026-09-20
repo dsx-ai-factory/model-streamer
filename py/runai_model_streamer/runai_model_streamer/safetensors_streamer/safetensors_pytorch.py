@@ -61,19 +61,11 @@ def get_safetensors_dtype_map() -> dict:
 safetensors_to_torch_dtype = get_safetensors_dtype_map()
 
 
-def _get_actual_file_size(path: str, file_streamer: Any) -> Optional[int]:
-    """Physical size of path, or None if unknown. Object storage reuses file_streamer's already
-    resolved credentials/open handle via list_files(). Best-effort - a listing miss or failure
-    returns None rather than raising."""
+def _get_actual_file_size(path: str) -> Optional[int]:
+    """Physical size of path, local filesystem only. Object storage not checked - costs extra
+    requests on the hot loading path either way; see issue #197 for the zero-cost fix."""
     if is_s3_path(path) or is_gs_path(path) or is_azure_path(path):
-        try:
-            entries = file_streamer.list_files(path, is_recursive=False)
-        except Exception:
-            return None
-        # Prefix match, not exact - "model.safetensors" would also match
-        # "model.safetensors.index.json", so require an exact path match.
-        matches = [size for entry_path, size in entries if entry_path == path]
-        return matches[0] if matches else None
+        return None
     return os.path.getsize(path)
 
 
@@ -199,7 +191,7 @@ class SafetensorsMetadata:
             # SafetensorsMetadata guarantees the first tensor starts at 0 and no gaps follow, so
             # the last tensor's end is the full declared data size.
             last_end = smeta.tensors_metadata[-1].offsets.end if smeta.tensors_metadata else 0
-            actual_bytes = _get_actual_file_size(filenames[i], fs.file_streamer)
+            actual_bytes = _get_actual_file_size(filenames[i])
             _validate_physical_length(filenames[i], smeta.offset + last_end, actual_bytes)
             results.append(smeta)
         return results

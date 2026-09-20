@@ -424,13 +424,15 @@ def compatibility_test_cases(backend_class, scheme, bucket_name):
             # 2. Upload the corrupted file
             self.server.upload_file(self.bucket_name, "", file_path)
 
-            # 3. stream_file() itself must reject this eagerly - it lists the object and
-            # validates its physical size against the header before ever reading a tensor.
+            # 3. Stream and expect a ValueError during iteration
             with SafetensorsStreamer() as run_sf:
-                with self.assertRaisesRegex(ValueError, "truncated"):
-                    run_sf.stream_file(
-                        f"{self.scheme}://{self.bucket_name}/{filename}", None, "cpu"
-                    )
+                # The stream_file call might succeed (it only reads the header),
+                # but the iteration MUST fail when it hits the EOF in the body.
+                run_sf.stream_file(f"{self.scheme}://{self.bucket_name}/{filename}", None, "cpu")
+
+                with self.assertRaises(ValueError):
+                    for name, tensor in run_sf.get_tensors():
+                        pass
 
         def test_list_files(self):
             file_paths = [create_random_files(self.temp_dir) for _ in range(FILE_COUNT)]

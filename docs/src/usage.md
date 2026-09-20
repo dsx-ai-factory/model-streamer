@@ -118,7 +118,7 @@ To enable global mode, set `RUNAI_STREAMER_DIST_GLOBAL=1`.
 
 When using `tensor_names` (see [Loading a subset of tensors](#loading-a-subset-of-tensors-tensor_names)) with `is_distributed=True`, every rank must be given the exact same set of names - distributed streaming assumes every rank is reading the same selection from the checkpoint.
 
-Model Streamer checks this automatically before distributed work starts and raises a clear error if ranks disagree. If the mismatch also causes one rank to fail earlier for an unrelated reason (for example, an unknown or duplicate name that only affects that rank), that rank can exit before the check runs, and the other ranks instead see a timeout error (`RUNAI_STREAMER_DIST_TIMEOUT`, default 600 seconds). Either way, the safest practice is to compute `tensor_names` identically on every rank (e.g. derive it from the same source, such as a shard index).
+> **Warning:** This is not checked or enforced. If ranks are given different `tensor_names`, the most likely outcome is a **hang**, not a clean error: ranks end up needing a different number of broadcast rounds, so a rank that finishes early leaves the others waiting on a collective operation that will never complete, until it times out (`RUNAI_STREAMER_DIST_TIMEOUT`, default 600 seconds). Compute `tensor_names` identically on every rank (e.g. derive it from the same source, such as a shard index) - do not rely on this being caught for you.
 
 #### Streaming from S3
 

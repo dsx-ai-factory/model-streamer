@@ -88,14 +88,10 @@ class TestDistributedSafetensorsStreamer(unittest.TestCase):
 
 
 
-class TestTensorNamesCrossRankConsistency(unittest.TestCase):
-    """tensor_names is filtered LOCALLY, per rank, before DistributedStreamer.stream_files() ever
-    runs - nothing today checks every rank was asked for the same set. A mismatch means each rank
-    partitions a differently sized workload, which is exactly the shape of a distributed collective
-    deadlock: one rank's broadcast loop exits before another's, so ranks still inside dist.broadcast()
-    block forever waiting on a peer that already left. RUNAI_STREAMER_DIST_TIMEOUT is set short here
-    so a real hang fails loudly (a timeout RuntimeError from the group itself) instead of hanging the
-    whole torchrun run.
+class TestTensorNamesDistributedFiltering(unittest.TestCase):
+    """tensor_names is filtered LOCALLY, per rank - there is no cross-rank check that every rank
+    was asked for the same set (see usage.md: callers must ensure this themselves, or risk a hang
+    bounded by RUNAI_STREAMER_DIST_TIMEOUT). This class only covers same-selection behavior.
     """
 
     # The real names baked into test_files/test.safetensors.
@@ -107,7 +103,6 @@ class TestTensorNamesCrossRankConsistency(unittest.TestCase):
     ENV_VARS = {
         "RUNAI_STREAMER_DIST": "1",
         "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
-        "RUNAI_STREAMER_DIST_TIMEOUT": "15",
     }
 
     @classmethod
@@ -123,27 +118,6 @@ class TestTensorNamesCrossRankConsistency(unittest.TestCase):
 
     def _file_path(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_files", "test.safetensors")
-
-    def test_different_count_across_ranks_raises_not_hangs(self):
-        # Rank 0 asks for 5 tensors, rank 1 asks for 3 - a plain size mismatch.
-        my_names = set(self.ALL_NAMES[:5]) if self.rank == 0 else set(self.ALL_NAMES[:3])
-
-        with unittest.mock.patch.dict(os.environ, self.ENV_VARS):
-            with SafetensorsStreamer() as run_sf:
-                with self.assertRaises(Exception):
-                    run_sf.stream_file(self._file_path(), None, "cpu", True, tensor_names=my_names)
-
-    def test_same_count_different_membership_across_ranks_raises_not_hangs(self):
-        # Both ranks ask for 3 tensors, and share 2 of them - same size, genuinely different sets.
-        if self.rank == 0:
-            my_names = {self.ALL_NAMES[0], self.ALL_NAMES[1], self.ALL_NAMES[2]}
-        else:
-            my_names = {self.ALL_NAMES[0], self.ALL_NAMES[1], self.ALL_NAMES[5]}
-
-        with unittest.mock.patch.dict(os.environ, self.ENV_VARS):
-            with SafetensorsStreamer() as run_sf:
-                with self.assertRaises(Exception):
-                    run_sf.stream_file(self._file_path(), None, "cpu", True, tensor_names=my_names)
 
     def test_same_set_different_order_and_collection_type_succeeds(self):
         # Same 3 names on both ranks, but as different collection types in different orders - the
