@@ -110,8 +110,13 @@ std::string run_scenario(const Scenario & scenario, unsigned seed)
                     return;
                 }
 
+                // The shared pool waits; the lock-free one returns and lets the caller retry.
+                // Both are exercised, since the scenario picks the pool by consumer count.
                 StagingBuffer buffer;
-                if (pool->acquire(buffer) != common::ResponseCode::Success)
+                const auto code = shared
+                    ? static_cast<SharedStagingPool *>(pool.get())->acquire(buffer)
+                    : pool->try_acquire(buffer);
+                if (code != common::ResponseCode::Success)
                 {
                     fail("acquire failed");
                     return;

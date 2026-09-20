@@ -40,9 +40,13 @@ struct StagingBuffer
 // InstantTensor's `chunk_id % io_depth` does, would make the oldest chunk the one whose buffer is
 // reused and block buffers that are already free.
 //
-// ONE CONSUMER: acquire() from one thread only. release() may be called from another - the reaper -
-// which is why the free list is two atomics rather than a lock. For a pool shared by several
-// readers, use SharedStagingPool.
+// ONE CONSUMER, ONE PRODUCER: try_acquire() from one thread, release() from another. That is why
+// the free list is two atomics rather than a lock.
+//
+// The streamer uses SharedStagingPool instead, because it cannot know in advance how many devices a
+// run will touch: one waiting thread per stream means one producer per device, and a promise of
+// "only ever one device" that the caller could break would be silent corruption rather than a loud
+// failure. This class is the cheaper shape for a case where that is known.
 class StagingPool
 {
  public:
@@ -66,12 +70,12 @@ class StagingPool
     StagingPool(const StagingPool &) = delete;
     StagingPool & operator=(const StagingPool &) = delete;
 
-    // A free buffer. Registers another slab when none is free and the ceiling allows.
+    // A free buffer. Registers another slab when none is free and the ceiling allows. NEVER waits.
     //
     // Success with an INVALID buffer means every buffer is in flight. It is not an error: an async
     // engine treats it as one more reason not to submit and falls through to waiting for
     // completions, which is the backpressure that bounds pinned memory.
-    virtual common::ResponseCode acquire(StagingBuffer & out);
+    virtual common::ResponseCode try_acquire(StagingBuffer & out);
 
     // Hand a buffer back once its copy has landed. The reaper calls this.
     virtual void release(const StagingBuffer & buffer);
@@ -116,23 +120,32 @@ class StagingPool
     std::atomic<size_t> _tail{0};
 };
 
-// The same pool for several readers, as the synchronous threadpool needs: its threads have nothing
-// else to do while they wait, so acquire() blocks here rather than returning nothing.
+// The pool the streamer uses: several producers, several consumers, or both.
 //
-// The lock is affordable because the free list is touched once per BUFFER - hundreds of times a
-// second - not once per copy.
+// Several PRODUCERS because there is a waiting thread per stream, and an engine copying to two
+// devices has two. Several CONSUMERS in the synchronous threadpool, where many threads read.
+//
+// The lock is affordable because the free list is touched once per BUFFER, not once per copy: at
+// 16 MiB buffers that is a few thousand times a second against a mutex of about 20 ns, or roughly
+// a hundredth of a percent of a core.
+//
+// Locking and waiting are separate: try_acquire() takes the lock and returns, acquire() takes the
+// lock and waits. An async engine wants the first, because it has I/O to wait for instead.
 class SharedStagingPool : public StagingPool
 {
  public:
     using StagingPool::StagingPool;
 
-    // Waits until a buffer is free or the pool can grow. Returns an invalid buffer only when
-    // stopped.
-    common::ResponseCode acquire(StagingBuffer & out) override;
+    // Locks, never waits. For a caller with something else to do.
+    common::ResponseCode try_acquire(StagingBuffer & out) override;
+
+    // Waits until a buffer is free or the pool can grow. An invalid buffer means stopped.
+    common::ResponseCode acquire(StagingBuffer & out);
+
     void release(const StagingBuffer & buffer) override;
 
-    // Wakes every waiter, which then gets an invalid buffer. Needed for shutdown, or acquire()
-    // waits for a reaper that has already stopped.
+    // Wakes every waiter, which then gets an invalid buffer. Without it a waiter sleeps for a
+    // reaper that has already stopped.
     void stop();
 
  private:

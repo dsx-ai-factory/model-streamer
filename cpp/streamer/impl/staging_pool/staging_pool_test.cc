@@ -54,7 +54,7 @@ TEST_F(StagingPoolTest, OneRegistrationPerSlab)
     StagingPool pool(_mock, params(16));
 
     StagingBuffer first;
-    ASSERT_EQ(pool.acquire(first), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(first), common::ResponseCode::Success);
     ASSERT_TRUE(first.valid());
 
     EXPECT_EQ(_mock->host_allocs, 1u);
@@ -71,7 +71,7 @@ TEST_F(StagingPoolTest, BuffersAreCarvedFromTheSlabInOrder)
     for (unsigned i = 0; i < 4; ++i)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
         taken.push_back(buffer);
     }
@@ -93,7 +93,7 @@ TEST_F(StagingPoolTest, GrowsOnDemandAndStopsAtTheCeiling)
     for (unsigned i = 0; i < 6; ++i)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid()) << "buffer " << i;
         taken.push_back(buffer);
     }
@@ -104,7 +104,7 @@ TEST_F(StagingPoolTest, GrowsOnDemandAndStopsAtTheCeiling)
     EXPECT_EQ(_mock->host_alloc_sizes[1], 2 * Buffer);
 
     StagingBuffer none;
-    ASSERT_EQ(pool.acquire(none), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(none), common::ResponseCode::Success);
     EXPECT_FALSE(none.valid()) << "at the ceiling with everything in flight, acquire yields nothing";
     EXPECT_EQ(_mock->host_allocs, 2u) << "a refused acquire must not register another slab";
 }
@@ -119,7 +119,7 @@ TEST_F(StagingPoolTest, ReleaseOrderDoesNotMatter)
     for (unsigned i = 0; i < 4; ++i)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         taken.push_back(buffer);
     }
 
@@ -132,7 +132,7 @@ TEST_F(StagingPoolTest, ReleaseOrderDoesNotMatter)
     for (unsigned i = 0; i < 4; ++i)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
         again.push_back(buffer.data);
     }
@@ -152,17 +152,17 @@ TEST_F(StagingPoolTest, AReleasedBufferIsHandedOutAgain)
     StagingPool pool(_mock, params(1, Buffer));
 
     StagingBuffer first;
-    ASSERT_EQ(pool.acquire(first), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(first), common::ResponseCode::Success);
     ASSERT_TRUE(first.valid());
 
     StagingBuffer none;
-    ASSERT_EQ(pool.acquire(none), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(none), common::ResponseCode::Success);
     ASSERT_FALSE(none.valid());
 
     pool.release(first);
 
     StagingBuffer again;
-    ASSERT_EQ(pool.acquire(again), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(again), common::ResponseCode::Success);
     ASSERT_TRUE(again.valid());
     EXPECT_EQ(again.data, first.data);
     EXPECT_EQ(_mock->host_allocs, 1u) << "reuse, not another registration";
@@ -175,7 +175,7 @@ TEST_F(StagingPoolTest, TheBufferCarriesItsOwnEvent)
     StagingPool pool(_mock, params(4));
 
     StagingBuffer buffer;
-    ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
     ASSERT_NE(buffer.event, nullptr);
 
     device::Status status = device::Status::NotReady;
@@ -194,7 +194,7 @@ TEST_F(StagingPoolTest, AFailedRegistrationIsReported)
     StagingPool pool(_mock, params(4));
 
     StagingBuffer buffer;
-    EXPECT_EQ(pool.acquire(buffer), common::ResponseCode::DeviceOutOfMemory);
+    EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::DeviceOutOfMemory);
     EXPECT_FALSE(buffer.valid());
     EXPECT_EQ(pool.created(), 0u);
 }
@@ -208,7 +208,7 @@ TEST_F(StagingPoolTest, TeardownDestroysEveryEventAndFreesEverySlab)
         for (unsigned i = 0; i < 6; ++i)
         {
             StagingBuffer buffer;
-            ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+            ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         }
         EXPECT_EQ(_mock->events_created, 6u);
         EXPECT_EQ(_mock->host_allocs, 2u);
@@ -259,7 +259,7 @@ TEST_F(StagingPoolTest, ConsumerAndProducerRunOnDifferentThreads)
     while (taken < rounds)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         if (!buffer.valid())
         {
             continue;   // everything is in flight; the reaper will hand one back

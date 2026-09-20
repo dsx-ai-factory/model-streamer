@@ -103,7 +103,7 @@ common::ResponseCode StagingPool::grow()
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode StagingPool::acquire(StagingBuffer & out)
+common::ResponseCode StagingPool::try_acquire(StagingBuffer & out)
 {
     out = StagingBuffer{};
 
@@ -147,13 +147,19 @@ unsigned StagingPool::slabs() const
     return static_cast<unsigned>(_slabs.size());
 }
 
+common::ResponseCode SharedStagingPool::try_acquire(StagingBuffer & out)
+{
+    const std::lock_guard<std::mutex> guard(_mutex);
+    return StagingPool::try_acquire(out);
+}
+
 common::ResponseCode SharedStagingPool::acquire(StagingBuffer & out)
 {
     std::unique_lock<std::mutex> lock(_mutex);
 
     while (true)
     {
-        const auto code = StagingPool::acquire(out);
+        const auto code = StagingPool::try_acquire(out);
         if (code != common::ResponseCode::Success || out.valid() || _stopped)
         {
             return code;
