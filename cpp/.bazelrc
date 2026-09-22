@@ -26,5 +26,26 @@ build:aarch64 --copt="-march=armv8-a+crc+crypto"
 build:x86_64 --platform_suffix=x86_64
 build:x86_64 --platforms=@toolchain//:x86_64
 
+# ThreadSanitizer. Combine with an architecture config:
+#
+#     bazel test //utils/... --config=x86_64 --config=tsan
+#
+# -O1 rather than the default opt: TSAN needs the frame pointers and inlining limits to report a
+# useful stack, and the race is in the synchronisation rather than in what the optimiser does to it.
+build:tsan --copt=-fsanitize=thread
+build:tsan --copt=-fno-omit-frame-pointer
+build:tsan --copt=-g
+build:tsan --copt=-O1
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --platform_suffix=tsan
+# A sanitized build is a different binary, so it needs its own test timeout headroom.
+test:tsan --test_timeout=300,600,1800,3600
+# The sanitizer maps its shadow at fixed addresses, which fails on a kernel with
+# vm.mmap_rnd_bits=32 - the default on 6.8. Running with ASLR off is the supported workaround.
+test:tsan --run_under='setarch --addr-no-randomize'
+# Tests that dlopen an object-storage plugin. The sanitized binary does not resolve the $ORIGIN in
+# its RUNPATH, so the plugin is not found - a harness limit, not a property of the code under test.
+test:tsan --test_tag_filters=-no_tsan
+
 # Azurite testing support (enables AZURE_STORAGE_ACCOUNT_KEY for local testing)
 build:azurite --define azurite_testing=true
