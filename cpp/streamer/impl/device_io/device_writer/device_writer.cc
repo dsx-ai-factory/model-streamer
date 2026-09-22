@@ -7,7 +7,7 @@
 namespace runai::llm::streamer::impl
 {
 
-DeviceWriter::DeviceWriter(std::shared_ptr<device::Backend> backend, StagingPool::Params params) :
+DeviceWriter::DeviceWriter(BackendFactory backend, StagingPool::Params params) :
     _backend(std::move(backend)),
     _params(params)
 {
@@ -23,7 +23,7 @@ DeviceWriter::Channels::~Channels()
     _targets.clear();
 }
 
-common::ResponseCode DeviceWriter::Channels::open(device::Backend & backend,
+common::ResponseCode DeviceWriter::Channels::open(const BackendFactory & backend,
                                                   const StagingPool::Params & params,
                                                   unsigned ordinal,
                                                   Target ** out)
@@ -37,8 +37,17 @@ common::ResponseCode DeviceWriter::Channels::open(device::Backend & backend,
         return common::ResponseCode::Success;
     }
 
+    if (_opened == nullptr)
+    {
+        _opened = backend != nullptr ? backend() : nullptr;
+        if (_opened == nullptr)
+        {
+            return common::ResponseCode::DeviceUnavailable;
+        }
+    }
+
     Target target;
-    auto code = backend.open_device(ordinal, target.device);
+    auto code = _opened->open_device(ordinal, target.device);
     if (code != common::ResponseCode::Success)
     {
         return code;
@@ -82,13 +91,8 @@ common::ResponseCode DeviceWriter::open(unsigned ordinal, Channel & out)
 {
     out = nullptr;
 
-    if (_backend == nullptr)
-    {
-        return common::ResponseCode::DeviceUnavailable;
-    }
-
     Target * target = nullptr;
-    const auto code = _channels.open(*_backend, _params, ordinal, &target);
+    const auto code = _channels.open(_backend, _params, ordinal, &target);
     if (code != common::ResponseCode::Success)
     {
         return code;

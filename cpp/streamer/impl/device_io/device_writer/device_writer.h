@@ -34,8 +34,16 @@ namespace runai::llm::streamer::impl
 // ONE COPY PER BUFFER. Reading works in blocks and a tensor never appears in the read path, so one
 // read has one contiguous destination. There is nothing to coalesce and no ordering to require.
 //
-// NOTHING EXISTS until the first take(): no pinned memory, no stream, no thread, no driver call. A
-// load whose destinations are all host memory never reaches here at all.
+// NOTHING EXISTS until the first open(): no pinned memory, no stream, no thread, and no driver.
+//
+// The backend arrives as a FACTORY rather than a pointer, because obtaining one is itself a driver
+// call. Measured on a host with a driver: dlopen 1.5 ms and cuInit 117 ms in a process that has not
+// used CUDA. A caller that has - vLLM, through torch - pays 0.15 ms instead, since both are
+// idempotent. Taking a factory means a host-only load pays neither, and a machine with no GPU does
+// not log a missing driver on every run.
+//
+// So every reader can own one of these unconditionally. That is the point: a backend does not have
+// to decide whether it might see a device before it has seen one.
 class DeviceWriter
 {
  public:
@@ -46,7 +54,11 @@ class DeviceWriter
     // targets are never removed, and a std::map keeps its references stable across inserts.
     using Channel = const void *;
 
-    DeviceWriter(std::shared_ptr<device::Backend> backend, StagingPool::Params params);
+    // Asked for the backend on the first open() and never again. Returning null means there is no
+    // device on this machine, which open() reports as DeviceUnavailable.
+    using BackendFactory = std::function<std::shared_ptr<device::Backend>()>;
+
+    DeviceWriter(BackendFactory backend, StagingPool::Params params);
 
     // Stops every waiter, so every buffer is back before the pool is destroyed.
     //
@@ -137,7 +149,9 @@ class DeviceWriter
 
         // Opens `ordinal` if it is not open, building the pool on the first call. Returns the
         // target to use for it.
-        common::ResponseCode open(device::Backend & backend,
+        // Calls `backend` only if it has not already got one, so the driver is reached once per
+        // writer rather than once per device.
+        common::ResponseCode open(const BackendFactory & backend,
                                   const StagingPool::Params & params,
                                   unsigned ordinal,
                                   Target ** out);
@@ -150,6 +164,9 @@ class DeviceWriter
      private:
         mutable std::mutex _mutex;
 
+        // Obtained from the factory on the first open(), then reused.
+        std::shared_ptr<device::Backend> _opened;
+
         // Every waiter holds a share of this, so the pool cannot go while one is still returning
         // buffers to it. That used to rest on the order these two are declared in - a rule a
         // reordered member would break in silence.
@@ -158,7 +175,7 @@ class DeviceWriter
         std::map<unsigned, Target> _targets;
     };
 
-    const std::shared_ptr<device::Backend> _backend;
+    const BackendFactory _backend;
     const StagingPool::Params _params;
     Channels _channels;
 };
