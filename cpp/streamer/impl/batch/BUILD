@@ -3,6 +3,7 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "batch",
     deps = [
+        "//common/device",
         "//streamer/impl/chunk_splitter",
         "//common/responder",
         "//common/shared_queue",

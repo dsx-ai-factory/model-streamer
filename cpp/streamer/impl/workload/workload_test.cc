@@ -1,4 +1,5 @@
 #include "streamer/impl/workload/workload.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 #include <memory>
@@ -118,7 +119,7 @@ TEST(Workload, Sanity)
 
             Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
                             request[transfer.file_index].path, s3_params,
-                            transfer.range_sizes, transfer.first_range_index);
+                            transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
             for (size_t j = 0; j < batches.size(); ++j)
             {
@@ -222,7 +223,7 @@ TEST(Workload, Stopped)
 
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
                         request[transfer.file_index].path, s3_params,
-                        transfer.range_sizes, transfer.first_range_index);
+                        transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
         for (size_t j = 0; j < batches.size(); ++j)
         {
@@ -263,6 +264,33 @@ TEST(Workload, Stopped)
 
     auto r = responder->pop();
     EXPECT_EQ(r.ret, common::ResponseCode::FinishedError);
+}
+
+// A worker reads the destination off whichever batch a completed chunk belongs to, so a workload has
+// to be homogeneous in it - the same rule the backend kind already has.
+TEST(Workload, Refuses_Batches_For_Different_Devices)
+{
+    auto config = std::make_shared<Config>(false /* do not force minimum */);
+    auto responder = std::make_shared<common::Responder>(0, common::QueueMode::PERSISTENT);
+    common::s3::S3ClientWrapper::Params s3_params;
+
+    auto batch_for = [&](common::Device device)
+    {
+        return Batch(1 /* submission */, 0 /* workload */, 0 /* file */, "/tmp/file", s3_params,
+                     Tasks{}, responder, config, 4096, device);
+    };
+
+    Workload workload;
+    ASSERT_EQ(workload.add_batch(batch_for(common::Device::cuda(0))), common::ResponseCode::Success);
+    EXPECT_EQ(workload.device(), common::Device::cuda(0));
+
+    EXPECT_EQ(workload.add_batch(batch_for(common::Device::cuda(1))),
+              common::ResponseCode::InvalidParameterError);
+    EXPECT_EQ(workload.add_batch(batch_for(common::Device::host())),
+              common::ResponseCode::InvalidParameterError);
+    EXPECT_EQ(workload.add_batch(batch_for(common::Device::cuda(0))), common::ResponseCode::Success);
+
+    EXPECT_EQ(workload.size(), 2u) << "only the agreeing batches were kept";
 }
 
 }; // namespace runai::llm::streamer::impl

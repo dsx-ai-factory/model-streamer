@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <vector>
+#include "common/device/device.h"
 #include "streamer/impl/batch/batch.h"
 #include "common/response_code/response_code.h"
 
@@ -44,6 +45,10 @@ struct Workload
 
     bool is_object_storage() const;
 
+    // Where this workload's destinations live. Taken from its first batch, and every later one must
+    // agree - see verify_batch. Host for an empty workload, which has nowhere to copy to anyway.
+    common::Device device() const;
+
     // The batches, in insertion order. There is no index to look one up by: a file whose ranges are not all
     // contiguous yields several ContiguousTransfers, hence several Batches, and two of them can be assigned
     // to the same workload - so position is NOT a file index. Every consumer iterates, and each batch
@@ -63,6 +68,7 @@ struct Workload
 
     std::vector<Batch> _batches;
     bool _is_object_storage = false;
+    common::Device _device;
 };
 
 }; // namespace runai::llm::streamer::impl

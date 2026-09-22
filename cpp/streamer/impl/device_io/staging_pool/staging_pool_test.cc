@@ -38,7 +38,7 @@ class StagingPoolTest : public ::testing::Test
 
 // Nothing is pinned until a buffer is asked for, so a load with no device destination costs
 // nothing at all.
-TEST_F(StagingPoolTest, AllocatesNothingUntilAsked)
+TEST_F(StagingPoolTest, Allocates_Nothing_Until_Asked)
 {
     StagingPool pool(_mock, params(16));
 
@@ -49,7 +49,7 @@ TEST_F(StagingPoolTest, AllocatesNothingUntilAsked)
 
 // One registration covers a whole slab, not one per buffer - the fixed per-call cost is the reason
 // slabs exist.
-TEST_F(StagingPoolTest, OneRegistrationPerSlab)
+TEST_F(StagingPoolTest, One_Registration_Per_Slab)
 {
     StagingPool pool(_mock, params(16));
 
@@ -63,7 +63,7 @@ TEST_F(StagingPoolTest, OneRegistrationPerSlab)
     EXPECT_EQ(_mock->events_created, 4u); // one event per buffer, created with it
 }
 
-TEST_F(StagingPoolTest, BuffersAreCarvedFromTheSlabInOrder)
+TEST_F(StagingPoolTest, Buffers_Are_Carved_From_The_Slab_In_Order)
 {
     StagingPool pool(_mock, params(4));
 
@@ -85,7 +85,7 @@ TEST_F(StagingPoolTest, BuffersAreCarvedFromTheSlabInOrder)
 }
 
 // The pool grows only when a buffer is actually needed, so a small load never reaches the ceiling.
-TEST_F(StagingPoolTest, GrowsOnDemandAndStopsAtTheCeiling)
+TEST_F(StagingPoolTest, Grows_On_Demand_And_Stops_At_The_Ceiling)
 {
     StagingPool pool(_mock, params(6));   // ceiling is not a multiple of the slab
 
@@ -111,7 +111,7 @@ TEST_F(StagingPoolTest, GrowsOnDemandAndStopsAtTheCeiling)
 
 // Buffers are interchangeable, so returning them in an order unrelated to how they were taken is
 // not a case the pool has to handle - which is what makes out-of-order read completion free.
-TEST_F(StagingPoolTest, ReleaseOrderDoesNotMatter)
+TEST_F(StagingPoolTest, Release_Order_Does_Not_Matter)
 {
     StagingPool pool(_mock, params(4));
 
@@ -147,7 +147,7 @@ TEST_F(StagingPoolTest, ReleaseOrderDoesNotMatter)
     EXPECT_EQ(again, expected) << "every buffer came back, whatever order they were returned in";
 }
 
-TEST_F(StagingPoolTest, AReleasedBufferIsHandedOutAgain)
+TEST_F(StagingPoolTest, A_Released_Buffer_Is_Handed_Out_Again)
 {
     StagingPool pool(_mock, params(1, Buffer));
 
@@ -170,7 +170,7 @@ TEST_F(StagingPoolTest, AReleasedBufferIsHandedOutAgain)
 
 // A returned buffer must be usable immediately. A pool that handed back a buffer whose copy had
 // not landed would corrupt the next read into it.
-TEST_F(StagingPoolTest, TheBufferCarriesItsOwnEvent)
+TEST_F(StagingPoolTest, The_Buffer_Carries_Its_Own_Event)
 {
     StagingPool pool(_mock, params(4));
 
@@ -187,7 +187,7 @@ TEST_F(StagingPoolTest, TheBufferCarriesItsOwnEvent)
     EXPECT_EQ(status, device::Status::NotReady);
 }
 
-TEST_F(StagingPoolTest, AFailedRegistrationIsReported)
+TEST_F(StagingPoolTest, A_Failed_Registration_Is_Reported)
 {
     _mock->fail_host_alloc_at = 1;
 
@@ -202,7 +202,7 @@ TEST_F(StagingPoolTest, AFailedRegistrationIsReported)
 // A slab whose first event fails yields no usable buffer. Keeping it and reporting success makes
 // acquire() ask again, and grow() allocate another slab that fails the same way - pinned memory
 // growing without bound under exactly the condition that made the event fail.
-TEST_F(StagingPoolTest, ASlabThatYieldsNoBufferIsFreedAndReported)
+TEST_F(StagingPoolTest, A_Slab_That_Yields_No_Buffer_Is_Freed_And_Reported)
 {
     _mock->fail_event_create_from = 1;
 
@@ -222,7 +222,7 @@ TEST_F(StagingPoolTest, ASlabThatYieldsNoBufferIsFreedAndReported)
 }
 
 // A slab whose LATER events fail still yields the buffers it managed to build, so it is kept.
-TEST_F(StagingPoolTest, ASlabThatYieldsSomeBuffersIsKept)
+TEST_F(StagingPoolTest, A_Slab_That_Yields_Some_Buffers_Is_Kept)
 {
     _mock->fail_event_create_from = 3;      // two succeed, the rest fail
 
@@ -243,7 +243,7 @@ TEST_F(StagingPoolTest, ASlabThatYieldsSomeBuffersIsKept)
 
 // Events first, then the memory they refer to. The other order frees pinned pages the driver may
 // still be writing into.
-TEST_F(StagingPoolTest, TeardownDestroysEveryEventAndFreesEverySlab)
+TEST_F(StagingPoolTest, Teardown_Destroys_Every_Event_And_Frees_Every_Slab)
 {
     {
         StagingPool pool(_mock, params(6));
@@ -264,7 +264,7 @@ TEST_F(StagingPoolTest, TeardownDestroysEveryEventAndFreesEverySlab)
 
 // The reaper returns buffers from its own thread while the worker takes them. Two atomics and no
 // lock, so this is the test that would catch a broken memory ordering.
-TEST_F(StagingPoolTest, ConsumerAndProducerRunOnDifferentThreads)
+TEST_F(StagingPoolTest, Consumer_And_Producer_Run_On_Different_Threads)
 {
     StagingPool pool(_mock, params(4));
 
@@ -319,7 +319,7 @@ TEST_F(StagingPoolTest, ConsumerAndProducerRunOnDifferentThreads)
 }
 
 // The synchronous threadpool's threads have nothing else to do, so they wait rather than spin.
-TEST_F(StagingPoolTest, SharedPoolBlocksUntilABufferComesBack)
+TEST_F(StagingPoolTest, Shared_Pool_Blocks_Until_A_Buffer_Comes_Back)
 {
     SharedStagingPool pool(_mock, params(1, Buffer));
 
@@ -346,7 +346,7 @@ TEST_F(StagingPoolTest, SharedPoolBlocksUntilABufferComesBack)
 }
 
 // Without this, a waiter sleeps for a reaper that has already stopped.
-TEST_F(StagingPoolTest, StopWakesAWaiter)
+TEST_F(StagingPoolTest, Stop_Wakes_A_Waiter)
 {
     SharedStagingPool pool(_mock, params(1, Buffer));
 

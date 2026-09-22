@@ -3,10 +3,12 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "streamer",
     deps = [
+        "//common/device",
         "//streamer/impl/assigner",
         "//streamer/impl/config/config",
         "//streamer/impl/batches",
         "//streamer/impl/workload",
+        "//streamer/impl/filesystem_worker",
         "//streamer/impl/object_storage_worker",
         "//streamer/impl/request",
         "//streamer/impl/submissions:submissions_mgr",

@@ -52,25 +52,25 @@ bool eventually(const std::function<bool()> & holds)
 
 // A load whose destinations are all host memory never issues a copy, so it never enqueues, so no
 // thread exists and no driver call is made.
-TEST_F(StreamWaiterTest, StartsNoThreadUntilTheFirstCopy)
+TEST_F(StreamWaiterTest, Starts_No_Thread_Until_The_First_Copy)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(4));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     EXPECT_FALSE(waiter.running());
     EXPECT_EQ(_mock->bind_calls, 0u);
 }
 
-TEST_F(StreamWaiterTest, TheThreadStartsOnTheFirstEnqueue)
+TEST_F(StreamWaiterTest, The_Thread_Starts_On_The_First_Enqueue)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(4));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
     ASSERT_TRUE(buffer.valid());
 
-    waiter.enqueue(buffer, nullptr);
+    waiter.enqueue(pool, buffer, nullptr);
 
     EXPECT_TRUE(eventually([&]() { return waiter.completed() == 1u; }));
     EXPECT_TRUE(waiter.running());
@@ -80,10 +80,10 @@ TEST_F(StreamWaiterTest, TheThreadStartsOnTheFirstEnqueue)
 }
 
 // What the waiter is for: the buffer must be back in the pool once its copy has landed.
-TEST_F(StreamWaiterTest, ABufferComesBackAfterItsCopy)
+TEST_F(StreamWaiterTest, A_Buffer_Comes_Back_After_Its_Copy)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(1));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
@@ -93,7 +93,7 @@ TEST_F(StreamWaiterTest, ABufferComesBackAfterItsCopy)
     ASSERT_FALSE(none.valid()) << "the only buffer is out";
 
     std::atomic<int> reported{-1};
-    waiter.enqueue(buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+    waiter.enqueue(pool, buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
     EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::Success);
@@ -106,14 +106,14 @@ TEST_F(StreamWaiterTest, ABufferComesBackAfterItsCopy)
 
 // The event is what is waited on, not the stream: waiting on the stream would drain everything
 // queued on it rather than this one buffer's copy, which is what keeps the pipeline at depth.
-TEST_F(StreamWaiterTest, ItWaitsOnTheEventNotTheStream)
+TEST_F(StreamWaiterTest, It_Waits_On_The_Event_Not_The_Stream)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(2));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
-    waiter.enqueue(buffer, nullptr);
+    waiter.enqueue(pool, buffer, nullptr);
 
     ASSERT_TRUE(eventually([&]() { return waiter.completed() == 1u; }));
     EXPECT_EQ(_mock->event_syncs, 1u);
@@ -121,10 +121,10 @@ TEST_F(StreamWaiterTest, ItWaitsOnTheEventNotTheStream)
 
 // Order is kept, because one stream executes in issue order: waiting on the head is exact, and
 // nothing behind it can have landed first.
-TEST_F(StreamWaiterTest, CompletionsAreReportedInIssueOrder)
+TEST_F(StreamWaiterTest, Completions_Are_Reported_In_Issue_Order)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(8));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     std::mutex order_lock;
     std::vector<unsigned> order;
@@ -134,7 +134,7 @@ TEST_F(StreamWaiterTest, CompletionsAreReportedInIssueOrder)
         StagingBuffer buffer;
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
-        waiter.enqueue(buffer, [&, i](common::ResponseCode)
+        waiter.enqueue(pool, buffer, [&, i](common::ResponseCode)
             {
                 const std::lock_guard<std::mutex> guard(order_lock);
                 order.push_back(i);
@@ -152,10 +152,10 @@ TEST_F(StreamWaiterTest, CompletionsAreReportedInIssueOrder)
 }
 
 // A buffer lost on an error path is a deadlock that arrives later, so it comes back either way.
-TEST_F(StreamWaiterTest, AFailedCopyStillReturnsItsBuffer)
+TEST_F(StreamWaiterTest, A_Failed_Copy_Still_Returns_Its_Buffer)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(1));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
@@ -163,7 +163,7 @@ TEST_F(StreamWaiterTest, AFailedCopyStillReturnsItsBuffer)
     _mock->fail_event_synchronize = true;
 
     std::atomic<int> reported{-1};
-    waiter.enqueue(buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+    waiter.enqueue(pool, buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
     EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceTransferError);
@@ -174,18 +174,18 @@ TEST_F(StreamWaiterTest, AFailedCopyStillReturnsItsBuffer)
 }
 
 // The pool's teardown assumes every buffer is back, so stopping must drain rather than abandon.
-TEST_F(StreamWaiterTest, StopWaitsForWhatIsAlreadyQueued)
+TEST_F(StreamWaiterTest, Stop_Waits_For_What_Is_Already_Queued)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(4));
 
     {
-        StreamWaiter waiter(_mock, pool);
+        StreamWaiter waiter(_mock);
         for (unsigned i = 0; i < 4; ++i)
         {
             StagingBuffer buffer;
             ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid());
-            waiter.enqueue(buffer, nullptr);
+            waiter.enqueue(pool, buffer, nullptr);
         }
         waiter.stop();
         EXPECT_EQ(waiter.completed(), 4u) << "drained, not abandoned";
@@ -203,10 +203,10 @@ TEST_F(StreamWaiterTest, StopWaitsForWhatIsAlreadyQueued)
 // The contract that replaced the refusal path: stopping drains, so the pool gets every buffer back
 // and the caller of each enqueue was told. A violation - enqueueing after stop - is a caller bug
 // that ASSERT reports, not a case this class handles.
-TEST_F(StreamWaiterTest, EveryEnqueuedBufferIsReturnedByTheTimeStopReturns)
+TEST_F(StreamWaiterTest, Every_Enqueued_Buffer_Is_Returned_By_The_Time_Stop_Returns)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(4));
-    StreamWaiter waiter(_mock, pool);
+    StreamWaiter waiter(_mock);
 
     std::atomic<unsigned> reported{0};
     for (unsigned i = 0; i < 4; ++i)
@@ -214,7 +214,7 @@ TEST_F(StreamWaiterTest, EveryEnqueuedBufferIsReturnedByTheTimeStopReturns)
         StagingBuffer buffer;
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
-        waiter.enqueue(buffer, [&](common::ResponseCode) { ++reported; });
+        waiter.enqueue(pool, buffer, [&](common::ResponseCode) { ++reported; });
     }
 
     waiter.stop();
@@ -228,11 +228,11 @@ TEST_F(StreamWaiterTest, EveryEnqueuedBufferIsReturnedByTheTimeStopReturns)
     }
 }
 
-TEST_F(StreamWaiterTest, DestructionStopsAThreadThatWasNeverUsed)
+TEST_F(StreamWaiterTest, Destruction_Stops_A_Thread_That_Was_Never_Used)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(4));
     {
-        StreamWaiter waiter(_mock, pool);
+        StreamWaiter waiter(_mock);
     }
     SUCCEED() << "no thread was started, so none had to be joined";
 }

@@ -174,9 +174,6 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         // Chunks, not tasks. Every chunk completes exactly once, and every non-empty task is in
         // exactly one chunk - so all chunks done already means all tasks answered, and the zero-sized
         // ones (answered at enqueue, and able to sit inside a span) never enter the arithmetic.
-        //
-        // ObjectStorageWorker counts tasks because there a task spans several chunks. After the task
-        // cut ours is the inverse, so the counter inverts with it.
         size_t remaining_chunks = 0;
         std::map<unsigned, common::ResponseCode> error_by_file_index;   // first error per file
     };

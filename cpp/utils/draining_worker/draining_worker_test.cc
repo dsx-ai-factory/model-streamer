@@ -31,7 +31,7 @@ bool eventually(const std::function<bool()> & holds)
 } // namespace
 
 // An object that is never used costs nothing: no thread, and no handler call.
-TEST(DrainingWorker, StartsNothingUntilTheFirstPush)
+TEST(DrainingWorker, Starts_Nothing_Until_The_First_Push)
 {
     std::atomic<unsigned> handled{0};
     DrainingWorker<unsigned> worker([&](unsigned &&) { ++handled; });
@@ -41,7 +41,7 @@ TEST(DrainingWorker, StartsNothingUntilTheFirstPush)
     EXPECT_EQ(handled.load(), 0u);
 }
 
-TEST(DrainingWorker, TheThreadStartsOnTheFirstPush)
+TEST(DrainingWorker, The_Thread_Starts_On_The_First_Push)
 {
     std::atomic<unsigned> handled{0};
     DrainingWorker<unsigned> worker([&](unsigned &&) { ++handled; });
@@ -52,7 +52,7 @@ TEST(DrainingWorker, TheThreadStartsOnTheFirstPush)
 }
 
 // One thread over a FIFO, so the handler sees what was pushed, in the order it was pushed.
-TEST(DrainingWorker, MessagesAreHandledInOrder)
+TEST(DrainingWorker, Messages_Are_Handled_In_Order)
 {
     std::mutex lock;
     std::vector<unsigned> seen;
@@ -79,7 +79,7 @@ TEST(DrainingWorker, MessagesAreHandledInOrder)
 
 // The whole reason this type exists rather than ThreadPool: a queued message is a promise to
 // somebody, so stopping must finish it rather than drop it.
-TEST(DrainingWorker, StopHandlesWhatIsAlreadyQueued)
+TEST(DrainingWorker, Stop_Handles_What_Is_Already_Queued)
 {
     std::atomic<unsigned> handled{0};
     std::atomic<bool> release{false};
@@ -107,7 +107,7 @@ TEST(DrainingWorker, StopHandlesWhatIsAlreadyQueued)
     EXPECT_EQ(worker.handled(), 16u);
 }
 
-TEST(DrainingWorker, TheDestructorDrainsToo)
+TEST(DrainingWorker, The_Destructor_Drains_Too)
 {
     std::atomic<unsigned> handled{0};
     {
@@ -122,7 +122,7 @@ TEST(DrainingWorker, TheDestructorDrainsToo)
 
 // Stopping twice must not push a second sentinel or join twice. That is the only job the stopped
 // flag still has - it no longer guards ordering against push.
-TEST(DrainingWorker, StoppingTwiceIsHarmless)
+TEST(DrainingWorker, Stopping_Twice_Is_Harmless)
 {
     std::atomic<unsigned> handled{0};
     DrainingWorker<unsigned> worker([&](unsigned &&) { ++handled; });
@@ -135,7 +135,7 @@ TEST(DrainingWorker, StoppingTwiceIsHarmless)
     EXPECT_FALSE(worker.running());
 }
 
-TEST(DrainingWorker, StopIsIdempotentAndSafeWhenUnused)
+TEST(DrainingWorker, Stop_Is_Idempotent_And_Safe_When_Unused)
 {
     DrainingWorker<unsigned> worker([](unsigned &&) {});
 
@@ -145,7 +145,7 @@ TEST(DrainingWorker, StopIsIdempotentAndSafeWhenUnused)
 }
 
 // The sentinel is a queue entry, not a message, and must not be handed to the handler.
-TEST(DrainingWorker, TheSentinelNeverReachesTheHandler)
+TEST(DrainingWorker, The_Sentinel_Never_Reaches_The_Handler)
 {
     std::atomic<unsigned> handled{0};
     DrainingWorker<std::string> worker([&](std::string && value)

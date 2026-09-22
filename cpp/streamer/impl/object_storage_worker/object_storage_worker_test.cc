@@ -1,4 +1,5 @@
 #include "streamer/impl/object_storage_worker/object_storage_worker.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 
@@ -102,7 +103,7 @@ struct Submission
             common::s3::S3ClientWrapper::Params params(uri, credentials, config->s3_block_bytesize, config->s3_concurrency);
 
             Batches batches(submission_id, file_idx, transfer.tasks, config, responder, paths[file_idx], params,
-                            transfer.range_sizes, transfer.first_range_index);
+                            transfer.range_sizes, transfer.first_range_index, common::Device::host());
             for (size_t j = 0; j < batches.size(); ++j)
             {
                 workloads[batches[j].workload_index].add_batch(std::move(batches[j]));
@@ -313,7 +314,7 @@ TEST_F(ObjectStorageWorkerTest, Small_Ranges_Are_Packed_Into_One_Read)
         common::s3::S3ClientWrapper::Params params(uri, credentials, config->s3_block_bytesize, config->s3_concurrency);
 
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                        path, params, transfer.range_sizes, transfer.first_range_index);
+                        path, params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
         for (size_t j = 0; j < batches.size(); ++j)
         {
             workloads[batches[j].workload_index].add_batch(std::move(batches[j]));

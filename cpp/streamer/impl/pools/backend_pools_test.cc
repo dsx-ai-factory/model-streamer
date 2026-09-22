@@ -22,11 +22,18 @@ using Pool = BackendPools::Pool;
 
 namespace
 {
-// Empty workloads (size() == 0) are a no-op in execute(), so this filesystem handler just exercises lazy
+// Empty workloads (size() == 0) are a no-op in execute(), so this filesystem worker just exercises lazy
 // pool creation/reuse without needing the full batch/reader machinery.
-void run(Workload && workload, std::atomic<bool> & stopped)
+struct RunWorker : utils::Worker<Workload>
 {
-    workload.execute(stopped);
+    void execute(Workload && workload, std::atomic<bool> & stopped) override { workload.execute(stopped); }
+    void drain(std::atomic<bool> &) override {}
+    bool idle() const override { return true; }
+};
+
+std::unique_ptr<utils::Worker<Workload>> run()
+{
+    return std::make_unique<RunWorker>();
 }
 
 // The object-storage pool is a per-worker pool; these tests exercise pool lifecycle, not worker behavior,

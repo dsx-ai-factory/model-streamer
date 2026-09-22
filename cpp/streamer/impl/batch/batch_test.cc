@@ -1,4 +1,5 @@
 #include "streamer/impl/batch/batch.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 #include <utility>
@@ -53,7 +54,7 @@ TEST(Batch, Finished_Until)
     const auto config = std::make_shared<Config>();
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     // execute part of the tasks
 
@@ -125,7 +126,7 @@ TEST(Read, Sanity)
     }
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     std::atomic<bool> stopped(false);
     EXPECT_NO_THROW(batch.execute(stopped));
@@ -169,7 +170,7 @@ TEST(Read, Empty_Range)
     tasks.push_back(Task(request, start, 0 /* size */, 0 /* destination offset */));
 
     Batch batch(utils::random::number(), utils::random::number(), file_index, path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     EXPECT_EQ(batch.total_bytes(), 0);
 
@@ -227,7 +228,7 @@ TEST(Read, Error)
     }
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     std::atomic<bool> stopped(false);
     EXPECT_NO_THROW(batch.execute(stopped));
@@ -278,7 +279,7 @@ TEST(Read, Already_Stopped)
     }
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     std::atomic<bool> stopped(true);
     EXPECT_NO_THROW(batch.execute(stopped));
@@ -342,7 +343,7 @@ TEST(Read, Stopped_During_Read)
     }
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     std::atomic<bool> stopped(false);
 
@@ -435,7 +436,7 @@ TEST(Batch, Handle_Error_After_Completion_Is_Silent)
     tasks.push_back(Task(request, start, size, 0));
 
     Batch batch(utils::random::number(), utils::random::number(), utils::random::number(), file.path, params, std::move(tasks), responder, config,
-                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize);
+                params.valid() ? config->s3_block_bytesize : config->fs_async_chunk_bytesize, common::Device::host());
 
     std::atomic<bool> stopped(false);
     EXPECT_NO_THROW(batch.execute(stopped));

@@ -134,7 +134,7 @@ class CudaDeviceTest : public ::testing::Test
 
 } // namespace
 
-TEST_F(CudaDeviceTest, BindThreadMakesThisDevicesContextCurrent)
+TEST_F(CudaDeviceTest, Bind_Thread_Makes_This_Devices_Context_Current)
 {
     CudaDevice device(_lib, 3, the_context, PinnedMode::Allocate);
 
@@ -142,7 +142,7 @@ TEST_F(CudaDeviceTest, BindThreadMakesThisDevicesContextCurrent)
     EXPECT_EQ(Recorded::current_context, the_context);
 }
 
-TEST_F(CudaDeviceTest, AllocateModeAsksTheDriverForPinnedMemory)
+TEST_F(CudaDeviceTest, Allocate_Mode_Asks_The_Driver_For_Pinned_Memory)
 {
     CudaDevice device(_lib, 0, the_context, PinnedMode::Allocate);
 
@@ -158,7 +158,7 @@ TEST_F(CudaDeviceTest, AllocateModeAsksTheDriverForPinnedMemory)
 
 // Page-locking works on whole pages, and the PORTABLE flag is what makes registered memory pinned
 // for every context - cuda.h promises that for allocated memory but not for registered memory.
-TEST_F(CudaDeviceTest, RegisterModePinsWholePagesAndIsPortable)
+TEST_F(CudaDeviceTest, Register_Mode_Pins_Whole_Pages_And_Is_Portable)
 {
     CudaDevice device(_lib, 0, the_context, PinnedMode::Register);
 
@@ -180,7 +180,7 @@ TEST_F(CudaDeviceTest, RegisterModePinsWholePagesAndIsPortable)
 
 // The host memory is ours until registration succeeds; a failure must not hand back a pointer the
 // caller would then try to free through the driver.
-TEST_F(CudaDeviceTest, RegisterFailureReturnsNoPointer)
+TEST_F(CudaDeviceTest, Register_Failure_Returns_No_Pointer)
 {
     Recorded::register_result = CUDA_ERROR_OUT_OF_MEMORY;
 
@@ -192,7 +192,7 @@ TEST_F(CudaDeviceTest, RegisterFailureReturnsNoPointer)
     EXPECT_EQ(Recorded::unregister_calls, 0u);
 }
 
-TEST_F(CudaDeviceTest, StreamsDoNotSynchroniseWithTheCallersDefaultStream)
+TEST_F(CudaDeviceTest, Streams_Do_Not_Synchronise_With_The_Callers_Default_Stream)
 {
     CudaDevice device(_lib, 0, the_context, PinnedMode::Allocate);
 
@@ -203,7 +203,7 @@ TEST_F(CudaDeviceTest, StreamsDoNotSynchroniseWithTheCallersDefaultStream)
 
 // Untimed because nothing reads a duration, and BLOCKING_SYNC because a thread waiting on one of
 // these otherwise spins in the driver - 100% of a core against 1%, at the same wall time.
-TEST_F(CudaDeviceTest, EventsAreUntimedAndDoNotSpin)
+TEST_F(CudaDeviceTest, Events_Are_Untimed_And_Do_Not_Spin)
 {
     CudaDevice device(_lib, 0, the_context, PinnedMode::Allocate);
 
@@ -214,7 +214,7 @@ TEST_F(CudaDeviceTest, EventsAreUntimedAndDoNotSpin)
 }
 
 // Work still running is not an error: this is how a reader asks whether a staging buffer is free.
-TEST_F(CudaDeviceTest, NotReadyIsSuccess)
+TEST_F(CudaDeviceTest, Not_Ready_Is_Success)
 {
     Recorded::query_result = CUDA_ERROR_NOT_READY;
 
@@ -231,7 +231,7 @@ TEST_F(CudaDeviceTest, NotReadyIsSuccess)
 
 // A failed query must not report Ready. Whoever reads the status first would otherwise reuse a
 // staging buffer whose copy never landed.
-TEST_F(CudaDeviceTest, FailedQueryNeverReportsReady)
+TEST_F(CudaDeviceTest, Failed_Query_Never_Reports_Ready)
 {
     Recorded::query_result = CUDA_ERROR_INVALID_CONTEXT;
 
@@ -246,7 +246,7 @@ TEST_F(CudaDeviceTest, FailedQueryNeverReportsReady)
     EXPECT_EQ(status, Status::NotReady);
 }
 
-TEST_F(CudaDeviceTest, AFailedCopyIsATransferError)
+TEST_F(CudaDeviceTest, A_Failed_Copy_Is_A_Transfer_Error)
 {
     Recorded::copy_result = CUDA_ERROR_LAUNCH_FAILED;
 
@@ -255,7 +255,7 @@ TEST_F(CudaDeviceTest, AFailedCopyIsATransferError)
     EXPECT_EQ(device.memcpy_h2d_async(nullptr, nullptr, 16, nullptr), common::ResponseCode::DeviceTransferError);
 }
 
-TEST_F(CudaDeviceTest, ReleasesTheRetainedContextOnce)
+TEST_F(CudaDeviceTest, Releases_The_Retained_Context_Once)
 {
     {
         CudaDevice device(_lib, 7, the_context, PinnedMode::Allocate);
@@ -263,7 +263,7 @@ TEST_F(CudaDeviceTest, ReleasesTheRetainedContextOnce)
     EXPECT_EQ(Recorded::release_calls, 1u);
 }
 
-TEST_F(CudaDeviceTest, DeviceCountIsReported)
+TEST_F(CudaDeviceTest, Device_Count_Is_Reported)
 {
     CudaBackend backend(_lib);
 
@@ -274,7 +274,7 @@ TEST_F(CudaDeviceTest, DeviceCountIsReported)
 
 // The context is retained once per ordinal and the device is shared. Retaining again per caller
 // would leave each one with its own table and its own pinned buffers.
-TEST_F(CudaDeviceTest, OneDevicePerOrdinal)
+TEST_F(CudaDeviceTest, One_Device_Per_Ordinal)
 {
     CudaBackend backend(_lib);
 
@@ -291,7 +291,7 @@ TEST_F(CudaDeviceTest, OneDevicePerOrdinal)
     EXPECT_EQ(Recorded::retain_calls, 2u);
 }
 
-TEST_F(CudaDeviceTest, OpenDeviceReportsADriverFailure)
+TEST_F(CudaDeviceTest, Open_Device_Reports_A_Driver_Failure)
 {
     Recorded::retain_result = CUDA_ERROR_INVALID_CONTEXT;
 
@@ -307,12 +307,12 @@ TEST_F(CudaDeviceTest, OpenDeviceReportsADriverFailure)
 //
 // Passes with or without a driver present: with none, backend() returns nullptr both times, which
 // is the other thing worth asserting - a machine with no CUDA gets an answer, not a crash.
-TEST(Backend, IsTheSameInstanceEveryTime)
+TEST(Backend, Is_The_Same_Instance_Every_Time)
 {
     EXPECT_EQ(backend().get(), backend().get());
 }
 
-TEST(PinnedMode, ReadFromTheEnvironment)
+TEST(PinnedMode, Read_From_The_Environment)
 {
     const std::string variable = "RUNAI_STREAMER_PINNED_MEMORY_MODE";
 

@@ -1,4 +1,5 @@
 #include "streamer/impl/batches/batches.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 #include <memory>
@@ -108,7 +109,7 @@ TEST(Batches, Sanity)
             EXPECT_LE(transfer.tasks.size(), config->concurrency);
 
             Batches batches(utils::random::number(), file_idx, transfer.tasks, config, responder,
-                            request[file_idx].path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                            request[file_idx].path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
             // execute tasks
             for (unsigned i = 0; i < batches.size(); ++i)
@@ -200,7 +201,7 @@ TEST(Batches, Tasks_Are_Cut_At_Chunk_Boundaries)
 
     const auto & transfer = assigner.transfers().front();
     Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
     ASSERT_EQ(batches.size(), 1);
 
@@ -261,7 +262,7 @@ TEST(Batches, Small_Ranges_Are_Not_Cut)
     Assigner assigner(request, config);
     const auto & transfer = assigner.transfers().front();
     Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
     ASSERT_EQ(batches.size(), 1);
     EXPECT_EQ(batches[0].tasks.size(), sizes.size());
@@ -297,7 +298,7 @@ TEST(Batches, Object_Storage_Cuts_At_Its_Own_Chunk_Size)
 
     const auto & transfer = assigner.transfers().front();
     Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                    uri, s3_params, transfer.range_sizes, transfer.first_range_index);
+                    uri, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
     ASSERT_EQ(batches.size(), 1);
 
@@ -334,7 +335,7 @@ TEST(Batches, Batch_Carries_Chunks_Covering_Whole_Tasks)
 
     const auto & transfer = assigner.transfers().front();
     Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
     ASSERT_EQ(batches.size(), 1);
     const auto & batch = batches[0];
@@ -381,7 +382,7 @@ TEST(Batches, Zero_Sized_Batch_Has_No_Chunks)
 
     const auto & transfer = assigner.transfers().front();
     Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                    request[0].path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
     ASSERT_EQ(batches.size(), 1);
     EXPECT_GT(batches[0].tasks.size(), 0) << "the ranges still owe a response each";
@@ -424,7 +425,7 @@ TEST(Batches, Failed_Reader)
         EXPECT_LE(transfer.tasks.size(), config->concurrency);
 
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                        file_path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                        file_path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
     }
     catch(const common::Exception & e)
     {
@@ -496,7 +497,7 @@ TEST(Batches, Zero_Size_Request)
         EXPECT_LE(transfer.tasks.size(), config->concurrency);
 
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                        file.path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                        file.path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
         // execute tasks
         for (unsigned i = 0; i < batches.size(); ++i)
@@ -540,6 +541,38 @@ TEST(Batches, Zero_Size_Request)
     for (auto byte : covered)
     {
         EXPECT_EQ(byte, 1);
+    }
+}
+
+// The device is per SUBMISSION, and a worker reads it off whichever batch a completed chunk belongs
+// to - so every batch a submission produces must carry the same one.
+TEST(Batches, Every_Batch_Carries_The_Submissions_Device)
+{
+    const auto device = common::Device::cuda(utils::random::number(0, 8));
+
+    auto config = std::make_shared<Config>(false /* do not force minimum */);
+    auto responder = std::make_shared<common::Responder>(0, common::QueueMode::PERSISTENT);
+    common::s3::S3ClientWrapper::Params s3_params;
+
+    // Three workers' slices of one transfer, which is one batch each - built by hand so the count
+    // does not depend on how the Assigner happens to divide a file.
+    constexpr size_t Slice = 4096;
+    const std::vector<size_t> range_sizes = { Slice, Slice, Slice };
+    std::vector<char> buffer(3 * Slice);
+
+    std::vector<FileReadTask> tasks;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        tasks.emplace_back(0 /* workload */, 0 /* file */, i * Slice, Slice, buffer.data() + i * Slice);
+    }
+
+    Batches batches(utils::random::number(), 0, tasks, config, responder, "/tmp/does-not-need-to-exist",
+                    s3_params, range_sizes, 0, device);
+
+    ASSERT_EQ(batches.size(), 3u) << "one batch per worker, so the check is not vacuous";
+    for (unsigned i = 0; i < batches.size(); ++i)
+    {
+        EXPECT_EQ(batches[i].device, device) << "batch " << i;
     }
 }
 

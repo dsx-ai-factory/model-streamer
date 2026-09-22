@@ -174,7 +174,7 @@ common::ResponseCode SharedStagingPool::acquire(StagingBuffer & out)
         }
 
         // Everything is in flight and the pool is at its ceiling. These threads have nothing else
-        // to do, unlike an async engine's worker, so they wait for the reaper rather than spin.
+        // to do, unlike an async engine's worker, so they wait for the StreamWaiter rather than spin.
         _ready.wait(lock);
     }
 }

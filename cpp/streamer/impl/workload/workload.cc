@@ -32,6 +32,7 @@ common::ResponseCode Workload::add_batch(Batch && batch)
     if (size() == 0)
     {
         _is_object_storage = batch.is_object_storage();
+        _device = batch.device;
     }
     else if  (auto res = verify_batch(batch); res != common::ResponseCode::Success)
     {
@@ -48,6 +49,11 @@ bool Workload::is_object_storage() const
     return _is_object_storage;
 }
 
+common::Device Workload::device() const
+{
+    return _device;
+}
+
 void Workload::fail(common::ResponseCode code)
 {
     for (auto & batch : _batches)
@@ -61,6 +67,17 @@ common::ResponseCode Workload::verify_batch(const Batch & batch)
     if (batch.is_object_storage() != is_object_storage())
     {
          LOG(ERROR) << "Workload contains paths of different storage backends";
+
+        return common::ResponseCode::InvalidParameterError;
+    }
+
+    // A worker reads the destination off whichever batch a completed chunk belongs to, so a mixed
+    // workload would copy to the wrong device rather than fail. One submission names one device, so
+    // it cannot happen today - which was also true of the backend mix above, until it was not.
+    if (batch.device != device())
+    {
+        LOG(ERROR) << "Workload contains batches for different devices: " << device()
+                   << " and " << batch.device;
 
         return common::ResponseCode::InvalidParameterError;
     }
