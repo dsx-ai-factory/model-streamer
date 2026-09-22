@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <algorithm>
 #include <mutex>
 
@@ -89,6 +90,8 @@ common::ResponseCode MockDevice::device_free(void * ptr)
 
 common::ResponseCode MockDevice::stream_create(StreamHandle & stream)
 {
+    ++streams_created;
+
     const std::lock_guard<std::mutex> guard(_mutex);
     stream = token(_next_token++);
     return common::ResponseCode::Success;
@@ -96,6 +99,7 @@ common::ResponseCode MockDevice::stream_create(StreamHandle & stream)
 
 common::ResponseCode MockDevice::stream_destroy(StreamHandle)
 {
+    ++streams_destroyed;
     return common::ResponseCode::Success;
 }
 
@@ -118,6 +122,12 @@ common::ResponseCode MockDevice::stream_wait_event(StreamHandle, EventHandle)
 common::ResponseCode MockDevice::event_create(EventHandle & event)
 {
     const std::lock_guard<std::mutex> guard(_mutex);
+
+    if (fail_event_create_from != 0 && events_created + 1 >= fail_event_create_from)
+    {
+        return common::ResponseCode::DeviceOutOfMemory;
+    }
+
     ++events_created;
     event = token(_next_token++);
     // A never-recorded event is an empty set of work, so it queries ready - which is the correct
@@ -194,6 +204,55 @@ void MockDevice::set_all_ready(bool ready)
     {
         entry.second = ready;
     }
+}
+
+MockBackend::MockBackend(unsigned device_count) :
+    _count(device_count)
+{
+}
+
+Capabilities MockBackend::capabilities() const
+{
+    Capabilities capabilities;
+    capabilities.pinned_host_memory = true;
+    capabilities.device_to_device = true;
+    return capabilities;
+}
+
+common::ResponseCode MockBackend::device_count(unsigned & count) const
+{
+    count = _count;
+    return common::ResponseCode::Success;
+}
+
+common::ResponseCode MockBackend::open_device(unsigned ordinal, std::shared_ptr<Device> & device)
+{
+    ++opens;
+
+    if (fail_open_device_at != 0 && opens == fail_open_device_at)
+    {
+        return common::ResponseCode::InvalidDevice;
+    }
+
+    if (ordinal >= _count)
+    {
+        return common::ResponseCode::InvalidDevice;
+    }
+
+    auto & held = _devices[ordinal];
+    if (held == nullptr)
+    {
+        held = std::make_shared<MockDevice>();
+    }
+
+    device = held;
+    return common::ResponseCode::Success;
+}
+
+std::shared_ptr<MockDevice> MockBackend::opened(unsigned ordinal) const
+{
+    const auto it = _devices.find(ordinal);
+    return it != _devices.end() ? it->second : nullptr;
 }
 
 } // namespace runai::llm::streamer::device

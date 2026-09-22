@@ -199,6 +199,48 @@ TEST_F(StagingPoolTest, AFailedRegistrationIsReported)
     EXPECT_EQ(pool.created(), 0u);
 }
 
+// A slab whose first event fails yields no usable buffer. Keeping it and reporting success makes
+// acquire() ask again, and grow() allocate another slab that fails the same way - pinned memory
+// growing without bound under exactly the condition that made the event fail.
+TEST_F(StagingPoolTest, ASlabThatYieldsNoBufferIsFreedAndReported)
+{
+    _mock->fail_event_create_from = 1;
+
+    StagingPool pool(_mock, params(8, 4 * Buffer));
+
+    for (unsigned attempt = 0; attempt < 5; ++attempt)
+    {
+        StagingBuffer buffer;
+        EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::DeviceOutOfMemory) << "attempt " << attempt;
+        EXPECT_FALSE(buffer.valid());
+    }
+
+    EXPECT_EQ(pool.created(), 0u);
+    EXPECT_EQ(_mock->host_allocs, 5u) << "one slab per attempt, and no more";
+    EXPECT_EQ(_mock->host_frees, 5u) << "each unusable slab was freed at once, not held to teardown";
+    EXPECT_TRUE(_mock->live_host.empty());
+}
+
+// A slab whose LATER events fail still yields the buffers it managed to build, so it is kept.
+TEST_F(StagingPoolTest, ASlabThatYieldsSomeBuffersIsKept)
+{
+    _mock->fail_event_create_from = 3;      // two succeed, the rest fail
+
+    StagingPool pool(_mock, params(8, 4 * Buffer));
+
+    StagingBuffer first;
+    ASSERT_EQ(pool.try_acquire(first), common::ResponseCode::Success);
+    EXPECT_TRUE(first.valid());
+
+    StagingBuffer second;
+    ASSERT_EQ(pool.try_acquire(second), common::ResponseCode::Success);
+    EXPECT_TRUE(second.valid());
+
+    EXPECT_EQ(pool.created(), 2u) << "the two buffers whose events were made";
+    EXPECT_EQ(_mock->host_allocs, 1u);
+    EXPECT_EQ(_mock->host_frees, 0u) << "the slab is in use, so it stays";
+}
+
 // Events first, then the memory they refer to. The other order frees pinned pages the driver may
 // still be writing into.
 TEST_F(StagingPoolTest, TeardownDestroysEveryEventAndFreesEverySlab)

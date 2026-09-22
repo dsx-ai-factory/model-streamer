@@ -28,7 +28,7 @@ class StreamWaiter
     // Called with the copy's result. Success means those bytes are on the device.
     using Completion = std::function<void(common::ResponseCode)>;
 
-    StreamWaiter(std::shared_ptr<device::Device> device, StagingPool & pool);
+    StreamWaiter(std::shared_ptr<device::Device> device, std::shared_ptr<StagingPool> pool);
 
     // Waits for what is queued, then ends the thread, so every buffer is back in the pool before
     // this returns - the pool's own teardown assumes exactly that.
@@ -64,7 +64,11 @@ class StreamWaiter
     void wait_for(Entry && entry);
 
     const std::shared_ptr<device::Device> _device;
-    StagingPool & _pool;
+
+    // Shared, not borrowed: this returns buffers to the pool, so the pool must outlive it. Holding
+    // a reference would leave that to whoever declared the two, which is the kind of rule a
+    // reordered member breaks in silence.
+    const std::shared_ptr<StagingPool> _pool;
 
     // Touched only by the worker's own thread, so it needs no synchronisation.
     bool _thread_bound = false;
