@@ -22,9 +22,9 @@
 namespace runai::llm::streamer::impl
 {
 
-// A single chunk of a task's range, submitted as one ranged read. The owning task is not stored here:
-// it is recovered from the async handle via the worker's _inflight map (the same lookup the completion
-// path uses), keeping a single source of truth for the chunk -> task mapping.
+// One ranged read, covering a span of WHOLE tasks - the batch's own chunk (Batch::chunks), cut where
+// the tasks were. The span is not stored here: it is recovered from the async handle via the worker's
+// _inflight map, the same lookup the completion path uses.
 struct ObjectChunk
 {
     common::backend_api::ObjectRequestId_t handle;   // unique async handle, inside the owning workload's block
@@ -65,13 +65,13 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // EmptyRequestError, client build failure -> _reader_error, otherwise -> UnknownError).
     void discard(Workload && workload) override;
 
-    // Split each task of the workload into ObjectChunks (enqueued into the window) and register per-task
-    // tracking so completions route back to the owning task/batch. Zero-size tasks complete immediately.
+    // Enqueue the batches' chunks into the window and register per-task tracking so completions route
+    // back to the owning tasks/batch. Zero-size tasks complete immediately: they belong to no chunk.
     // If an allocation here throws (OOM), the worker aborts its in-flight workloads as UnknownError rather
     // than leaving them unfinalized - see the catch in the definition; OOM requires the caller to abort anyway.
     void enqueue(Workload && workload) override;
 
-    // Fire one chunk's async read (or short-circuit a chunk whose task has already failed).
+    // Fire one chunk's async read.
     void submit(const ObjectChunk & chunk) override;
 
     // Promote due retries to the front of the capacity queue before the base selects chunks to submit.

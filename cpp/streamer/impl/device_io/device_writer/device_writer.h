@@ -13,37 +13,19 @@
 namespace runai::llm::streamer::impl
 {
 
-// Everything one reader needs to get bytes onto a device: the staging buffers, a stream per device,
-// and a waiter per stream.
+// The copy path onto a device: a stream per device, and a thread per stream waiting on it.
 //
-// ONE PER READER - an async engine, or the synchronous threadpool - because the pool is sized by
-// what that reader can keep in flight, and a second pool would be memory nobody asked for.
+// ONE PER STREAMER. A device gets one stream however many workers copy to it, which costs nothing:
+// H2D throughput was flat from 1 to 16 streams on an H200 and a B200.
 //
-// The reader sees three calls:
+// It owns NO buffers - those belong to a worker, sized by that worker's window. Hence the pool
+// argument to write(): this class cannot know whose buffer it has. See DeviceWriterClient.
 //
-//     open(ordinal)   once, when it learns which device a submission names
-//     take()          per buffer: one to read into, or nothing when they are all in flight
-//     write(...)      per buffer: hand it back with where its bytes belong
+// NOTHING EXISTS until the first open(): no stream, no thread, no driver.
 //
-// It never sees a stream, an event or the pool.
-//
-// open() is separate so that the per-BUFFER calls take no lock of this class's own. Everything a
-// copy needs is behind the handle, and the only concurrency left on that path is the pool's, which
-// SharedStagingPool already handles.
-//
-// ONE COPY PER BUFFER. Reading works in blocks and a tensor never appears in the read path, so one
-// read has one contiguous destination. There is nothing to coalesce and no ordering to require.
-//
-// NOTHING EXISTS until the first open(): no pinned memory, no stream, no thread, and no driver.
-//
-// The backend arrives as a FACTORY rather than a pointer, because obtaining one is itself a driver
-// call. Measured on a host with a driver: dlopen 1.5 ms and cuInit 117 ms in a process that has not
-// used CUDA. A caller that has - vLLM, through torch - pays 0.15 ms instead, since both are
-// idempotent. Taking a factory means a host-only load pays neither, and a machine with no GPU does
-// not log a missing driver on every run.
-//
-// So every reader can own one of these unconditionally. That is the point: a backend does not have
-// to decide whether it might see a device before it has seen one.
+// The backend is a FACTORY because obtaining one is itself a driver call - dlopen 1.5 ms plus cuInit
+// 117 ms in a process that has not used CUDA, against 0.15 ms in one that has (vLLM, through torch).
+// A host-only load then pays neither, and a machine with no GPU logs no missing driver.
 class DeviceWriter
 {
  public:
@@ -58,54 +40,35 @@ class DeviceWriter
     // device on this machine, which open() reports as DeviceUnavailable.
     using BackendFactory = std::function<std::shared_ptr<device::Backend>()>;
 
-    DeviceWriter(BackendFactory backend, StagingPool::Params params);
+    explicit DeviceWriter(BackendFactory backend);
 
-    // Stops every waiter, so every buffer is back before the pool is destroyed.
+    // Stops every waiter, so every buffer is back in its pool before this returns.
     //
-    // PRECONDITION: no take() or write() may be in flight, and no channel may be used afterwards.
-    // The reader stops reading before it drops its writer, which every caller does anyway. This is
-    // the ordinary rule that an object cannot be destroyed while a call is running on it - stated
-    // because the stream is freed here, and a write() racing with this would use a dead handle.
-    //
-    // A copy already ENQUEUED is fine and needs no such care: the waiter drains first, and cuda.h
-    // says a destroyed stream releases its resources only once its work has completed.
+    // A write() cannot race with it: every client holds a share of the writer, so this runs only
+    // after the last one is gone. An already ENQUEUED copy is fine too - the waiter drains first,
+    // and cuda.h says a destroyed stream frees its resources once its work completes.
     ~DeviceWriter();
 
     DeviceWriter(const DeviceWriter &) = delete;
     DeviceWriter & operator=(const DeviceWriter &) = delete;
 
-    // Opens a device and returns the handle to use for it. Called once per device, not per buffer.
-    //
-    // This is also what builds the pool, because pinned memory is allocated through a device's
-    // context and this is the first call that knows one. Later devices reuse the same buffers:
-    // both pinned modes give memory that every context can reach.
+    // Opens a device, or returns the channel already opened for it. Idempotent: workers of the same
+    // device share its stream and its waiter.
     common::ResponseCode open(unsigned device_ordinal, Channel & out);
 
-    // A buffer to read into. An INVALID buffer means every one is in flight: not an error, and the
-    // reader treats it as one more reason to wait for I/O instead of submitting.
-    //
-    // Takes only the pool's lock. It needs the channel because the pool hangs off it, which also
-    // makes "open before you take" impossible to get wrong rather than an error to report.
-    common::ResponseCode take(Channel channel, StagingBuffer & out);
+    // So a client can allocate pinned memory, which needs a context. Null for a null channel.
+    std::shared_ptr<device::Device> device(Channel channel) const;
 
-    // Copies `bytesize` bytes from the front of `buffer` to `destination` on `channel`, then gives
-    // the buffer back once that copy has landed.
+    // Copies `bytesize` bytes from the front of `buffer` to `destination`, then returns the buffer to
+    // `pool` once that copy has landed. Returns as soon as the copy is ENQUEUED.
     //
-    // Returns as soon as the copy is ENQUEUED.
+    // `on_done` is called exactly when this returns Success, from the waiter's thread. On any error
+    // the return value is the only report, so a caller is never told twice.
     //
-    // `on_done` is called EXACTLY WHEN this returns Success, later and from the waiter's thread.
-    // On any error the return value is the only report, so a caller is never told twice and never
-    // left waiting for a completion that is not coming.
-    //
-    // The buffer is ours from the call onwards and comes back whatever happens - a buffer lost on
-    // an error path is a deadlock that arrives later.
-    //
-    // The single exception is a NULL channel, which is a caller bug rather than a case to plan for:
-    // open() sets the handle to null and fills it only on success, so a null one means its error
-    // was ignored. Reaching it here needs a valid channel to have obtained the buffer and a
-    // different, null one passed to write. There is no pool to return the buffer to without a
-    // channel, so the caller keeps it, and the log says so.
+    // The buffer is ours from here and comes back whatever happens - one lost on an error path is a
+    // deadlock that arrives later. The one exception is a null pool: nowhere to give it back to.
     common::ResponseCode write(Channel channel,
+                               std::shared_ptr<StagingPool> pool,
                                const StagingBuffer & buffer,
                                size_t bytesize,
                                void * destination,
@@ -113,53 +76,33 @@ class DeviceWriter
 
     // Diagnostics.
     unsigned devices() const;
-    unsigned buffers() const;
 
  private:
     // One device's stream and the waiter that drains it. Created the first time that device is
     // opened, and never removed - which is what lets a Channel stay valid for the writer's life.
     struct Target
     {
-        // No destructor and no hand-written moves: unique_ptr frees the stream exactly once and
-        // leaves a moved-from Target holding nothing, which matters because targets are moved
-        // into a map.
+        // No destructor and no hand-written moves: unique_ptr frees the stream exactly once and a
+        // moved-from Target holds nothing, which matters because targets are moved into a map.
         //
-        // Member order does NOT matter here, which is worth saying because it looks as though it
-        // should. Destroying a stream that still has work is defined: cuda.h says the call returns
-        // at once and the stream's resources are freed when its work completes. And the waiter
-        // never touches the stream after the copy is enqueued - it waits on the EVENT, which is a
-        // separate object. Inverting these two members changes nothing.
+        // Member order does NOT matter, though it looks as though it should: destroying a stream
+        // with pending work is defined (cuda.h), and the waiter waits on the event, not the stream.
         std::shared_ptr<device::Device> device;
         device::OwnedStream stream;
         std::unique_ptr<StreamWaiter> waiter;
-
-        // The one pool, shared by every device. Reached through the handle, so the per-buffer path
-        // needs neither a lock nor an atomic: a caller cannot hold a handle without having gone
-        // through open(), and open() holds the lock while it writes this.
-        std::shared_ptr<SharedStagingPool> pool;
     };
 
-    // Everything that is BUILT ONCE and afterwards only read, together with the lock that guards
-    // the building. Its own type so the lock's job is visible: it protects creation, and is never
-    // taken on the per-buffer path.
+    // Built once, then only read, with the lock that guards the building. Its own type so the lock's
+    // job is visible: it protects creation and is never taken on the per-buffer path.
     class Channels
     {
      public:
         ~Channels();
 
-        // Opens `ordinal` if it is not open, building the pool on the first call. Returns the
-        // target to use for it.
-        // Calls `backend` only if it has not already got one, so the driver is reached once per
-        // writer rather than once per device.
-        common::ResponseCode open(const BackendFactory & backend,
-                                  const StagingPool::Params & params,
-                                  unsigned ordinal,
-                                  Target ** out);
+        // Calls `backend` only if it has not already got one - the driver is reached once per writer.
+        common::ResponseCode open(const BackendFactory & backend, unsigned ordinal, Target ** out);
 
-        // Devices opened, and buffers the pool has created. Diagnostics, and the only reason
-        // anything outside asks this type a question at all - the pool itself never leaves.
         unsigned count() const;
-        unsigned created() const;
 
      private:
         mutable std::mutex _mutex;
@@ -167,16 +110,10 @@ class DeviceWriter
         // Obtained from the factory on the first open(), then reused.
         std::shared_ptr<device::Backend> _opened;
 
-        // Every waiter holds a share of this, so the pool cannot go while one is still returning
-        // buffers to it. That used to rest on the order these two are declared in - a rule a
-        // reordered member would break in silence.
-        std::shared_ptr<SharedStagingPool> _pool;
-
         std::map<unsigned, Target> _targets;
     };
 
     const BackendFactory _backend;
-    const StagingPool::Params _params;
     Channels _channels;
 };
 

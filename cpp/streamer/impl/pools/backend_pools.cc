@@ -14,12 +14,12 @@
 namespace runai::llm::streamer::impl
 {
 
-BackendPools::BackendPools(Handler filesystem_handler,
+BackendPools::BackendPools(WorkerFactory filesystem_factory,
                            AsyncWorkerFactory filesystem_async_factory,
                            WorkerFactory object_storage_factory,
                            unsigned filesystem_size,
                            unsigned object_storage_size) :
-    _filesystem_handler(std::move(filesystem_handler)),
+    _filesystem_factory(std::move(filesystem_factory)),
     _filesystem_async_factory(std::move(filesystem_async_factory)),
     _object_storage_factory(std::move(object_storage_factory)),
     _filesystem_size(filesystem_size),
@@ -49,7 +49,7 @@ void BackendPools::push(Pool pool, Workload && workload)
     // filesystem has no plugin to wait for, so create its pool lazily on first use
     std::call_once(_filesystem_once, [this]()
     {
-        _filesystem_pool = std::make_unique<utils::ThreadPool<Workload>>(_filesystem_handler, _filesystem_size);
+        _filesystem_pool = std::make_unique<utils::ThreadPool<Workload>>(_filesystem_factory, _filesystem_size);
     });
     _filesystem_pool->push(std::move(workload));
 }

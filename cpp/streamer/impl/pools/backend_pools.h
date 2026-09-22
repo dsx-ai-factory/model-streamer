@@ -57,12 +57,13 @@ class BackendPools
     // engine dies.
     using AsyncWorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t device, size_t block, unsigned depth)>;
 
-    // filesystem_handler: the stateless synchronous handler for the filesystem pool.
+    // filesystem_factory: builds a FileSystemWorker per thread. Per worker rather than a stateless
+    // handler because a worker owns a DeviceWriterClient, which is not thread safe.
     // object_storage_factory: builds a per-worker ObjectStorageWorker for the object-storage pool (async,
     // each worker owns its in-flight window).
     // filesystem_async_factory builds the AsyncIoWorker; its pool is always one thread, so no size is
     // taken for it.
-    BackendPools(Handler filesystem_handler,
+    BackendPools(WorkerFactory filesystem_factory,
                  AsyncWorkerFactory filesystem_async_factory,
                  WorkerFactory object_storage_factory,
                  unsigned filesystem_size,
@@ -127,7 +128,7 @@ class BackendPools
     bool async_pool_used() const;
 
  private:
-    Handler _filesystem_handler;
+    WorkerFactory _filesystem_factory;
     AsyncWorkerFactory _filesystem_async_factory;
     WorkerFactory _object_storage_factory;
     unsigned _filesystem_size;

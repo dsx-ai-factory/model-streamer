@@ -30,7 +30,7 @@ struct StagingBuffer
     bool valid() const { return data != nullptr; }
 };
 
-// Pinned host buffers for one reader, created on demand and reused for the streamer's lifetime.
+// Pinned host buffers for one worker, created on demand and reused for the streamer's lifetime.
 //
 // Buffers are not created one at a time. The pool registers a SLAB and cuts buffers out of it,
 // because creation carries a fixed per-call cost: on a B200, 16 MiB registers at 3.43 GB/s against
@@ -65,8 +65,8 @@ class StagingPool
     // wait is for.
     //
     // Every buffer must already be back: the streamer drains its in-flight requests before teardown
-    // anyway, and the reaper must be stopped. The destructor synchronises every event rather than
-    // tracking which are outstanding, because that bookkeeping is exactly what would be racy.
+    // anyway, and the waiter must be stopped. It synchronises every event rather than tracking which
+    // are outstanding, because that bookkeeping is exactly what would be racy.
     virtual ~StagingPool();
 
     StagingPool(const StagingPool &) = delete;
@@ -79,7 +79,7 @@ class StagingPool
     // completions, which is the backpressure that bounds pinned memory.
     virtual common::ResponseCode try_acquire(StagingBuffer & out);
 
-    // Hand a buffer back once its copy has landed. The reaper calls this.
+    // Hand a buffer back once its copy has landed. The StreamWaiter calls this.
     virtual void release(const StagingBuffer & buffer);
 
     // Diagnostics. Not synchronised - call from the acquiring thread.
@@ -112,7 +112,7 @@ class StagingPool
     std::vector<device::OwnedEvent> _events;
 
     // Buffers that exist but have never been handed out. Consumer only, so growth - which happens
-    // inside acquire() - never writes to the ring below and never becomes a second producer.
+    // inside try_acquire() - never writes to the ring below and never becomes a second producer.
     unsigned _next_new = 0;
 
     // Returned buffers, as a ring. `_head` is written only by the consumer and `_tail` only by the
@@ -123,14 +123,11 @@ class StagingPool
     std::atomic<size_t> _tail{0};
 };
 
-// The pool the streamer uses: several producers, several consumers, or both.
-//
-// Several PRODUCERS because there is a waiting thread per stream, and an engine copying to two
-// devices has two. Several CONSUMERS in the synchronous threadpool, where many threads read.
+// The pool the streamer uses: one consumer, several PRODUCERS. There is a waiting thread per stream,
+// so a worker copying to two devices has two threads returning buffers to its pool.
 //
 // The lock is affordable because the free list is touched once per BUFFER, not once per copy: at
-// 16 MiB buffers that is a few thousand times a second against a mutex of about 20 ns, or roughly
-// a hundredth of a percent of a core.
+// 16 MiB buffers that is a few thousand times a second against a mutex of about 20 ns.
 //
 // Locking and waiting are separate: try_acquire() takes the lock and returns, acquire() takes the
 // lock and waits. An async engine wants the first, because it has I/O to wait for instead.
@@ -147,8 +144,8 @@ class SharedStagingPool : public StagingPool
 
     void release(const StagingBuffer & buffer) override;
 
-    // Wakes every waiter, which then gets an invalid buffer. Without it a waiter sleeps for a
-    // reaper that has already stopped.
+    // Wakes every acquire(), which then gets an invalid buffer. Without it one sleeps for a
+    // StreamWaiter that has already stopped.
     void stop();
 
  private:

@@ -1,4 +1,5 @@
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 
@@ -86,7 +87,7 @@ struct Fixture
         for (const auto & transfer : assigner.transfers())
         {
             Batches batches(1 /* submission */, transfer.file_index, transfer.tasks, config, responder,
-                            batch_path, params, transfer.range_sizes, transfer.first_range_index);
+                            batch_path, params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
             for (size_t i = 0; i < batches.size(); ++i)
             {
                 out.add_batch(std::move(batches[i]));

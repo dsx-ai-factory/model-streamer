@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "common/device/device.h"
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
 #include "common/s3_credentials/s3_credentials.h"
@@ -33,7 +34,14 @@ int submit_request(impl::Streamer * s,
                    size_t * range_offsets, size_t * range_sizes, void ** range_dsts,
                    RunaiFileStreamerDevice device)
 {
-    // Rejected before anything is committed, so a submission this build cannot serve owes no responses.
+    // Both checks come before anything is committed, so a submission this build cannot serve owes no
+    // responses. Malformed first: an ordinal that was never valid is the caller's mistake whatever
+    // this build supports, and the impl-side Device is unsigned, so nothing below could represent it.
+    if (device.type == RUNAI_FILE_STREAMER_DEVICE_CUDA && device.id < 0)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidDevice);
+    }
+
     if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU)
     {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
@@ -76,7 +84,11 @@ int submit_request(impl::Streamer * s,
         base += n;
     }
 
-    return static_cast<int>(s->async_request(request, out_submission_id));
+    common::Device destination;
+    destination.type = static_cast<common::DeviceType>(device.type);
+    destination.id = static_cast<unsigned>(device.id);
+
+    return static_cast<int>(s->async_request(request, destination, out_submission_id));
 }
 
 } // namespace

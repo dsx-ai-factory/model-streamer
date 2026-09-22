@@ -5,7 +5,7 @@
 namespace runai::llm::streamer::utils
 {
 
-TEST(Deque, TryPop)
+TEST(Deque, Try_Pop)
 {
     Deque<int> deque;
     int out = 0;
@@ -27,7 +27,7 @@ TEST(Deque, TryPop)
     EXPECT_FALSE(deque.try_pop(out));
 }
 
-TEST(Deque, TryPopAfterStopReturnsFalse)
+TEST(Deque, Try_Pop_After_Stop_Returns_False)
 {
     Deque<int> deque;
     deque.push(7);

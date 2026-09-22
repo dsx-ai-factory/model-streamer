@@ -13,6 +13,7 @@
 #include "utils/threadpool/threadpool.h"
 #include "utils/fdlimit/fdlimit.h"
 
+#include "common/device/device.h"
 #include "common/responder/responder.h"
 #include "common/s3_credentials/s3_credentials.h"
 #include "streamer/impl/config/config/config.h"
@@ -63,8 +64,11 @@ struct Streamer
     // in the file, contiguous in memory, or ordered.
     // Exactly one response is issued per range, including for a zero-sized range (which is completed
     // immediately without reaching storage). A file with no ranges contributes no responses.
+    // `device` is where every destination of this submission lives - one device per submission, so a
+    // load spanning several GPUs submits once per GPU.
     common::ResponseCode async_request(
       std::vector<FileRanges> & request,
+      common::Device device,
       SubmissionId * out_submission_id = nullptr);
 
     // Consume the next ready sub-range response over the persistent responder. Blocks up to timeout_ms

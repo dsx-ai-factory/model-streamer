@@ -6,6 +6,7 @@
 #include <vector>
 #include <ostream>
 
+#include "common/device/device.h"
 #include "common/submission/submission_id.h"
 #include "common/responder/responder.h"
 #include "common/storage_uri/storage_uri.h"
@@ -69,7 +70,8 @@ struct Batch
         const Tasks && tasks,
         std::shared_ptr<common::Responder> responder,
         std::shared_ptr<const Config> config,
-        size_t chunk_bytesize);
+        size_t chunk_bytesize,
+        common::Device device);
 
   // total number of requested bytes
   size_t total_bytes() const;
@@ -94,6 +96,13 @@ struct Batch
 
   // id of the owning submission (one runai_file_streamer_request call); stamped on every response
   SubmissionId submission_id = 0;
+
+  // Where this batch's destinations live. Per submission, so every batch of one agrees; carried here
+  // because a worker reaches a batch from a completed chunk and nothing else is in scope.
+  //
+  // NO DEFAULT ARGUMENT in the constructor, for the same reason chunk_bytesize has none: defaulting
+  // to the host would have a worker write device pointers as if they were host memory.
+  common::Device device;
 
   unsigned workload_index;
 

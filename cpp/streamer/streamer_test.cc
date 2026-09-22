@@ -793,4 +793,49 @@ TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+// The device is validated HERE, before any batch exists and before the caller is owed a response.
+TEST(Device, Is_Validated_At_The_Boundary)
+{
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    const size_t bytesize = 128;
+    auto data = utils::random::buffer(bytesize);
+    utils::temp::File file(data);
+
+    std::vector<char> buffer(bytesize);
+    const char * path = file.path.c_str();
+    unsigned num_ranges = 1;
+    size_t offset = 0;
+    size_t size = bytesize;
+    void * dst = buffer.data();
+
+    RunaiFileStreamerDevice device;
+    device.type = RUNAI_FILE_STREAMER_DEVICE_CUDA;
+    device.id = 0;
+
+    SubmissionId submission_id = 0;
+    EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
+                                          &offset, &size, &dst, device),
+              static_cast<int>(common::ResponseCode::UnsupportedDeviceType));
+
+    // A negative ordinal is the caller's mistake whatever this build supports, and is reported as
+    // such rather than as an unsupported type.
+    device.id = -1;
+    EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
+                                          &offset, &size, &dst, device),
+              static_cast<int>(common::ResponseCode::InvalidDevice));
+
+    // A zeroed struct is the host, and is served.
+    EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
+                                          &offset, &size, &dst, RunaiFileStreamerDevice{}),
+              static_cast<int>(common::ResponseCode::Success));
+
+    unsigned file_index = 0;
+    unsigned index = 0;
+    EXPECT_EQ(next_response(streamer, &file_index, &index), static_cast<int>(common::ResponseCode::Success));
+
+    runai_file_streamer_end(streamer);
+}
+
 }; // namespace runai::llm::streamer

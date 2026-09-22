@@ -24,8 +24,8 @@ namespace runai::llm::streamer::utils
 //
 // CapacityWorker<Request, Chunk> (in capacity_worker.h) is the reusable implementation of this interface
 // for async backends: it owns a CapacityQueue and implements execute/drain/idle as the submit+drain
-// interleave pattern, leaving concrete workers just the backend hooks. Backends that don't need a window
-// (filesystem) don't use Worker at all - they use ThreadPool's stateless Handler constructor instead.
+// interleave pattern, leaving concrete workers just the backend hooks. A backend with no window - the
+// synchronous filesystem reader - implements Worker directly, with a no-op drain and idle() true.
 template <typename Request>
 struct Worker
 {
@@ -47,14 +47,14 @@ struct Worker
 // thread management, push() and the stop-and-join teardown; they differ only in what each thread runs:
 //
 //  * Stateless (Handler ctor): each thread pops one request and calls a shared handler - the classic
-//    thread pool. Used for synchronous work (filesystem reads; the s3/gcs plugins' own internal pools).
+//    thread pool. Used where a thread needs no state of its own.
 //
 //  * Per-worker (WorkerFactory ctor): each thread owns a Worker (built by the factory) and drives its own
 //    loop - pull the next request without blocking and hand it to the worker, else drain the worker's tail
 //    a batch at a time, else park on the blocking pop. This lets a worker interleave a newly arrived
-//    request with async work still in flight (see worker_routine). Used for object storage, where the
-//    workers are CapacityWorkers. The factory builds concrete workers (upcast to unique_ptr<Worker<Request>>),
-//    so the pool stays agnostic of the worker's queue/chunk types.
+//    request with async work still in flight (see worker_routine). Used by every streamer backend: the
+//    async ones to interleave, the synchronous one because its thread owns a DeviceWriterClient. The
+//    factory upcasts to unique_ptr<Worker<Request>>, so the pool stays agnostic of the worker's types.
 template <typename Request>
 struct ThreadPool
 {

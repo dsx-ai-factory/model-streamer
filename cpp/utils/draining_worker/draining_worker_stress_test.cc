@@ -123,7 +123,7 @@ std::string run_scenario(const Scenario & scenario)
 //
 //     bazel test //utils/draining_worker:draining_worker_stress_test \
 //                --runs_per_test=10000 --nocache_test_results
-TEST(DrainingWorkerStress, RandomTrafficAndStops)
+TEST(DrainingWorkerStress, Random_Traffic_And_Stops)
 {
     const char * const run = ::getenv("TEST_RUN_NUMBER");
     const unsigned seed = run != nullptr

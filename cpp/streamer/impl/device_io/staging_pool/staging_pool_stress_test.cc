@@ -228,12 +228,12 @@ std::string run_scenario(const Scenario & scenario, unsigned seed)
 
 // ONE scenario per run, seeded differently each time. The repetition is the runner's job:
 //
-//     bazel test //device/staging:staging_pool_stress_test --runs_per_test=1000 \
+//     bazel test //streamer/impl/device_io/staging_pool:staging_pool_stress_test --runs_per_test=1000 \
 //                --nocache_test_results
 //
 // A fresh process per run means a different heap layout and a different scheduling pattern, which
 // a loop inside one process does not give. Bazel also names the run that failed.
-TEST(StagingPoolStress, RandomTrafficAcrossThreads)
+TEST(StagingPoolStress, Random_Traffic_Across_Threads)
 {
     // TEST_RUN_NUMBER is set by bazel under --runs_per_test, so a failure names a seed that
     // reproduces it. Falling back to random_device keeps a bare run from repeating one scenario.

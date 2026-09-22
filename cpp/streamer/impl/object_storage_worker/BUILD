@@ -41,6 +41,9 @@ runai_cc_test(
 
 runai_cc_test(
     name = "object_storage_worker_test",
+    # Excluded from --config=tsan: this test dlopens libstreamers3.so, and the sanitized
+    # binary does not resolve the $ORIGIN in its RUNPATH, so the plugin is not found.
+    tags = ["no_tsan"],
     srcs = ["object_storage_worker_test.cc"],
     deps = [
         ":object_storage_worker",

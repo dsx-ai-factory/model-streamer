@@ -12,43 +12,42 @@ namespace runai::llm::streamer::impl
 
 // Waits for the copies issued on ONE stream, and gives their buffers back.
 //
-// It BLOCKS on each event rather than polling. That is only affordable because the events carry
-// CU_EVENT_BLOCKING_SYNC: waiting on a 29 ms copy costs 1% of a core with that flag and 100%
-// without, at the same wall time (measured on an H200 and a B200). Blocking also removes the poll
-// interval, so a completion is reported the moment it lands rather than on the next tick.
+// It BLOCKS on each event rather than polling, which is affordable only because the events carry
+// CU_EVENT_BLOCKING_SYNC: a 29 ms wait costs 1% of a core with that flag and 100% without, at the
+// same wall time (H200 and B200). Blocking also removes the poll interval.
 //
-// ONE PER STREAM, not one per reader. A thread blocked on one stream cannot delay another stream's
-// completions, which is what makes blocking safe here.
+// ONE PER STREAM, so a thread blocked on one stream cannot delay another's completions.
 //
-// The thread starts on the FIRST enqueue. Nothing is created for a load whose destinations are all
-// host memory, because such a load never issues a copy and so never enqueues.
+// The thread starts on the FIRST enqueue, so a host-only load creates nothing.
 class StreamWaiter
 {
  public:
     // Called with the copy's result. Success means those bytes are on the device.
     using Completion = std::function<void(common::ResponseCode)>;
 
-    StreamWaiter(std::shared_ptr<device::Device> device, std::shared_ptr<StagingPool> pool);
+    explicit StreamWaiter(std::shared_ptr<device::Device> device);
 
-    // Waits for what is queued, then ends the thread, so every buffer is back in the pool before
-    // this returns - the pool's own teardown assumes exactly that.
+    // Waits for what is queued, so every buffer is back in its pool before this returns - which a
+    // pool's own teardown assumes.
     ~StreamWaiter();
 
     StreamWaiter(const StreamWaiter &) = delete;
     StreamWaiter & operator=(const StreamWaiter &) = delete;
 
-    // Hand over a buffer whose copy has been issued and whose event has been recorded. Starts the
-    // thread the first time it is called.
+    // Hand over a buffer whose copy has been issued and whose event recorded, with the pool to
+    // return it to. Starts the thread the first time it is called.
     //
-    // Call it immediately after event_record and nothing in between: the window where another
-    // thread can interleave on a shared stream is what decides how long a buffer is held.
-    void enqueue(const StagingBuffer & buffer, Completion on_done);
+    // The pool comes per buffer because one stream serves every worker of its device, and each has
+    // its own pool.
+    //
+    // Call it immediately after event_record: the gap is how long another thread can interleave on
+    // the shared stream, and so how long the buffer is held.
+    void enqueue(std::shared_ptr<StagingPool> pool, const StagingBuffer & buffer, Completion on_done);
 
     // Waits for what is already queued, then ends the thread.
     //
-    // PRECONDITION: no enqueue may be in flight. The engine stops issuing copies before it stops
-    // its waiter, which every caller does anyway, so nothing pays for a guarantee against a case
-    // that cannot arise.
+    // PRECONDITION: no enqueue may be in flight. A worker stops issuing copies before its waiter is
+    // stopped, so nothing pays for a guarantee against a case that cannot arise.
     void stop();
 
     bool running() const;
@@ -57,6 +56,8 @@ class StreamWaiter
  private:
     struct Entry
     {
+        // Shared, not borrowed: the pool must outlive the copy, whatever its worker does meanwhile.
+        std::shared_ptr<StagingPool> pool;
         StagingBuffer buffer;
         Completion on_done;
     };
@@ -64,11 +65,6 @@ class StreamWaiter
     void wait_for(Entry && entry);
 
     const std::shared_ptr<device::Device> _device;
-
-    // Shared, not borrowed: this returns buffers to the pool, so the pool must outlive it. Holding
-    // a reference would leave that to whoever declared the two, which is the kind of rule a
-    // reordered member breaks in silence.
-    const std::shared_ptr<StagingPool> _pool;
 
     // Touched only by the worker's own thread, so it needs no synchronisation.
     bool _thread_bound = false;
