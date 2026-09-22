@@ -19,15 +19,12 @@ StagingPool::~StagingPool()
 {
     // Every event, not just those believed outstanding: a ready event returns at once, and tracking
     // which are in flight is the bookkeeping that would be racy.
+    //
+    // Only the WAIT is here. The events and the slabs are freed by their owners, in the member
+    // order below - which is why this function cannot forget one.
     for (const auto & buffer : _buffers)
     {
         _device->event_synchronize(buffer.event);
-        _device->event_destroy(buffer.event);
-    }
-
-    for (const auto & slab : _slabs)
-    {
-        _device->host_free(slab.base);
     }
 }
 
@@ -71,35 +68,46 @@ common::ResponseCode StagingPool::grow()
     unsigned per_slab = static_cast<unsigned>(_params.slab_bytesize / _params.buffer_bytesize);
     per_slab = std::min(std::max(per_slab, 1u), room);
 
-    Slab slab;
-    slab.bytesize = static_cast<size_t>(per_slab) * _params.buffer_bytesize;
+    const size_t bytesize = static_cast<size_t>(per_slab) * _params.buffer_bytesize;
 
-    const auto code = _device->host_alloc(slab.bytesize, &slab.base);
+    void * base = nullptr;
+    const auto code = _device->host_alloc(bytesize, &base);
     if (code != common::ResponseCode::Success)
     {
         return code;
     }
 
+    // Owned from here, so every path out of this function frees it - including a throw.
+    _slabs.emplace_back(base, device::PinnedDeleter{_device});
+
     for (unsigned i = 0; i < per_slab; ++i)
     {
         StagingBuffer buffer;
-        buffer.data = static_cast<char *>(slab.base) + static_cast<size_t>(i) * _params.buffer_bytesize;
+        buffer.data = static_cast<char *>(base) + static_cast<size_t>(i) * _params.buffer_bytesize;
         buffer.bytesize = _params.buffer_bytesize;
         buffer.index = static_cast<unsigned>(_buffers.size());
 
         const auto event = _device->event_create(buffer.event);
         if (event != common::ResponseCode::Success)
         {
-            // The slab is kept: its earlier buffers are already usable, and freeing it now would
-            // invalidate them.
-            _slabs.push_back(slab);
-            return _buffers.empty() ? event : common::ResponseCode::Success;
+            if (i != 0)
+            {
+                // Earlier buffers of this slab are usable, so it stays and the caller gets one.
+                return common::ResponseCode::Success;
+            }
+
+            // Nothing in this slab can be used. Free it and SAY SO: reporting success here would
+            // send acquire() round again, and grow() would allocate another slab that fails the
+            // same way - pinned memory growing without bound under the very condition that made
+            // the event fail.
+            _slabs.pop_back();
+            return event;
         }
 
+        _events.emplace_back(buffer.event, device::EventDeleter{_device});
         _buffers.push_back(buffer);
     }
 
-    _slabs.push_back(slab);
     return common::ResponseCode::Success;
 }
 

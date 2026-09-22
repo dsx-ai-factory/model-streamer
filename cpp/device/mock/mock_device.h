@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -55,6 +56,8 @@ class MockDevice : public Device
     std::atomic<unsigned> bind_calls{0};
     std::atomic<unsigned> host_allocs{0};       // one per SLAB, not per buffer
     std::atomic<unsigned> host_frees{0};
+    std::atomic<unsigned> streams_created{0};
+    std::atomic<unsigned> streams_destroyed{0};
     std::atomic<unsigned> events_created{0};
     std::atomic<unsigned> events_destroyed{0};
     std::atomic<unsigned> event_syncs{0};
@@ -71,6 +74,9 @@ class MockDevice : public Device
     // Make every event_synchronize report a failed copy.
     std::atomic<bool> fail_event_synchronize{false};
 
+    // Fail every event_create from the Nth onwards, counting from 1. Zero means never.
+    unsigned fail_event_create_from = 0;
+
     // An event answers NotReady until marked ready, so a reaping order can be forced.
     void set_ready(EventHandle event, bool ready);
     void set_all_ready(bool ready);
@@ -79,6 +85,28 @@ class MockDevice : public Device
     mutable std::mutex _mutex;
     std::map<EventHandle, bool> _ready;
     unsigned _next_token = 1;
+};
+
+// A test double for Backend: hands out MockDevices by ordinal and remembers them, as the real one
+// caches a retained context per device.
+class MockBackend : public Backend
+{
+ public:
+    explicit MockBackend(unsigned device_count = 4);
+
+    Capabilities capabilities() const override;
+    common::ResponseCode device_count(unsigned & count) const override;
+    common::ResponseCode open_device(unsigned ordinal, std::shared_ptr<Device> & device) override;
+
+    // The device handed out for an ordinal, so a test can read its counters. Null if never opened.
+    std::shared_ptr<MockDevice> opened(unsigned ordinal) const;
+
+    unsigned opens = 0;                 // calls, not distinct devices
+    unsigned fail_open_device_at = 0;   // fail the Nth open_device, counting from 1. Zero means never
+
+ private:
+    const unsigned _count;
+    std::map<unsigned, std::shared_ptr<MockDevice>> _devices;
 };
 
 } // namespace runai::llm::streamer::device

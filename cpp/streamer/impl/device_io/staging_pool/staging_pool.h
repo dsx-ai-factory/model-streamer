@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "device/device.h"
+#include "device/owned/owned.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -59,8 +60,9 @@ class StagingPool
 
     StagingPool(std::shared_ptr<device::Device> device, Params params);
 
-    // Destroys every event, then frees the slabs - pinned memory must not be freed while the driver
-    // may still be writing into it.
+    // Waits for every event, then lets the owners below free the events and the slabs. Pinned
+    // memory must not be freed while the driver may still be writing into it, which is what the
+    // wait is for.
     //
     // Every buffer must already be back: the streamer drains its in-flight requests before teardown
     // anyway, and the reaper must be stopped. The destructor synchronises every event rather than
@@ -100,13 +102,14 @@ class StagingPool
  private:
     common::ResponseCode grow();
 
-    struct Slab
-    {
-        void * base = nullptr;
-        size_t bytesize = 0;
-    };
-
-    std::vector<Slab> _slabs;
+    // The handles this pool owns. Held as owners rather than freed by hand in the destructor, so a
+    // throw part-way through grow() cannot leak an event or a slab, and so the rule that they are
+    // released is a property of the type rather than of one function being written correctly.
+    //
+    // A StagingBuffer carries a BORROWED copy of its event handle: it is a value handed to callers,
+    // so it cannot own anything.
+    std::vector<device::OwnedPinned> _slabs;
+    std::vector<device::OwnedEvent> _events;
 
     // Buffers that exist but have never been handed out. Consumer only, so growth - which happens
     // inside acquire() - never writes to the ring below and never becomes a second producer.

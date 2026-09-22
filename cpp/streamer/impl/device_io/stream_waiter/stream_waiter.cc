@@ -7,9 +7,9 @@
 namespace runai::llm::streamer::impl
 {
 
-StreamWaiter::StreamWaiter(std::shared_ptr<device::Device> device, StagingPool & pool) :
+StreamWaiter::StreamWaiter(std::shared_ptr<device::Device> device, std::shared_ptr<StagingPool> pool) :
     _device(std::move(device)),
-    _pool(pool),
+    _pool(std::move(pool)),
     _worker([this](Entry && entry) { wait_for(std::move(entry)); })
 {
 }
@@ -44,7 +44,7 @@ void StreamWaiter::wait_for(Entry && entry)
 
     // Returned even when the copy failed. A buffer lost on an error path is a deadlock that arrives
     // later.
-    _pool.release(entry.buffer);
+    _pool->release(entry.buffer);
 }
 
 void StreamWaiter::stop()

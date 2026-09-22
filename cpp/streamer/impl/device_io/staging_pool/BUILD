@@ -8,6 +8,7 @@ runai_cc_auto_library(
     visibility = ["//streamer:__subpackages__"],
     deps = [
         "//device",
+        "//device/owned",
         "//utils/logging",
     ],
 )
