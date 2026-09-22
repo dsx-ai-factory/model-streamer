@@ -45,7 +45,15 @@ bool eventually(const std::function<bool()> & holds)
 class DeviceWriterTest : public ::testing::Test
 {
  protected:
+    // The writer asks for a backend rather than holding one, so the count below is what a test
+    // watches to see whether the driver was reached at all.
+    DeviceWriter::BackendFactory factory()
+    {
+        return [this]() { ++_factory_calls; return _backend; };
+    }
+
     std::shared_ptr<device::MockBackend> _backend = std::make_shared<device::MockBackend>();
+    std::atomic<unsigned> _factory_calls{0};
 };
 
 } // namespace
@@ -54,8 +62,9 @@ class DeviceWriterTest : public ::testing::Test
 // device, no pinned memory, no stream, no thread.
 TEST_F(DeviceWriterTest, CostsNothingUntilTheFirstOpen)
 {
-    DeviceWriter writer(_backend, params(8));
+    DeviceWriter writer(factory(), params(8));
 
+    EXPECT_EQ(_factory_calls.load(), 0u) << "the driver was reached before any device was asked for";
     EXPECT_EQ(_backend->opens, 0u);
     EXPECT_EQ(writer.devices(), 0u);
     EXPECT_EQ(writer.buffers(), 0u);
@@ -63,7 +72,7 @@ TEST_F(DeviceWriterTest, CostsNothingUntilTheFirstOpen)
 
 TEST_F(DeviceWriterTest, OpenBuildsTheStreamAndThePool)
 {
-    DeviceWriter writer(_backend, params(4, 4 * Buffer));
+    DeviceWriter writer(factory(), params(4, 4 * Buffer));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -82,7 +91,7 @@ TEST_F(DeviceWriterTest, OpenBuildsTheStreamAndThePool)
 // A device is opened once. Asking again gives the same channel, not a second stream and waiter.
 TEST_F(DeviceWriterTest, OpeningTwiceGivesTheSameChannel)
 {
-    DeviceWriter writer(_backend, params(4));
+    DeviceWriter writer(factory(), params(4));
 
     DeviceWriter::Channel first = nullptr;
     DeviceWriter::Channel again = nullptr;
@@ -96,7 +105,7 @@ TEST_F(DeviceWriterTest, OpeningTwiceGivesTheSameChannel)
 // The reader hands over a buffer and a place; everything else is the writer's business.
 TEST_F(DeviceWriterTest, WriteCopiesAndReturnsTheBuffer)
 {
-    DeviceWriter writer(_backend, params(1));
+    DeviceWriter writer(factory(), params(1));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -128,7 +137,7 @@ TEST_F(DeviceWriterTest, WriteCopiesAndReturnsTheBuffer)
 // is split, and nothing depends on what the bytes contain.
 TEST_F(DeviceWriterTest, OneBufferIsOneCopy)
 {
-    DeviceWriter writer(_backend, params(4, 4 * Buffer));
+    DeviceWriter writer(factory(), params(4, 4 * Buffer));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -158,7 +167,7 @@ TEST_F(DeviceWriterTest, OneBufferIsOneCopy)
 // A partly filled buffer - a short read - copies only what was read.
 TEST_F(DeviceWriterTest, OnlyTheBytesReadAreCopied)
 {
-    DeviceWriter writer(_backend, params(1));
+    DeviceWriter writer(factory(), params(1));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -182,7 +191,7 @@ TEST_F(DeviceWriterTest, OnlyTheBytesReadAreCopied)
 // stream and a waiter of its own but no second pool.
 TEST_F(DeviceWriterTest, ASecondDeviceSharesTheBuffers)
 {
-    DeviceWriter writer(_backend, params(4, 4 * Buffer));
+    DeviceWriter writer(factory(), params(4, 4 * Buffer));
 
     DeviceWriter::Channel first = nullptr;
     DeviceWriter::Channel second = nullptr;
@@ -212,7 +221,7 @@ TEST_F(DeviceWriterTest, ASecondDeviceSharesTheBuffers)
 // Everything in flight is not an error: the reader waits for I/O instead of submitting.
 TEST_F(DeviceWriterTest, TakeYieldsNothingWhenEveryBufferIsOut)
 {
-    DeviceWriter writer(_backend, params(1));
+    DeviceWriter writer(factory(), params(1));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -231,7 +240,7 @@ TEST_F(DeviceWriterTest, TakeYieldsNothingWhenEveryBufferIsOut)
 // hands one out.
 TEST_F(DeviceWriterTest, TakeWithoutAChannelIsReported)
 {
-    DeviceWriter writer(_backend, params(4));
+    DeviceWriter writer(factory(), params(4));
 
     StagingBuffer buffer;
     EXPECT_EQ(writer.take(nullptr, buffer), common::ResponseCode::InvalidParameterError);
@@ -242,7 +251,7 @@ TEST_F(DeviceWriterTest, AnUnopenableDeviceIsReported)
 {
     _backend->fail_open_device_at = 1;
 
-    DeviceWriter writer(_backend, params(4));
+    DeviceWriter writer(factory(), params(4));
 
     DeviceWriter::Channel channel = nullptr;
     EXPECT_EQ(writer.open(0, channel), common::ResponseCode::InvalidDevice);
@@ -250,7 +259,8 @@ TEST_F(DeviceWriterTest, AnUnopenableDeviceIsReported)
     EXPECT_EQ(writer.buffers(), 0u) << "nothing was pinned for a device that could not be opened";
 }
 
-// No backend means no device at all. Not a crash, and not silence.
+// No backend means no device at all. Not a crash, and not silence. Two ways to have none: no
+// factory, and a factory that finds no driver on this machine.
 TEST_F(DeviceWriterTest, NoBackendIsReported)
 {
     DeviceWriter writer(nullptr, params(4));
@@ -260,12 +270,37 @@ TEST_F(DeviceWriterTest, NoBackendIsReported)
     EXPECT_EQ(channel, nullptr);
 }
 
+TEST_F(DeviceWriterTest, ABackendThatCannotBeLoadedIsReported)
+{
+    DeviceWriter writer([]() { return std::shared_ptr<device::Backend>(); }, params(4));
+
+    DeviceWriter::Channel channel = nullptr;
+    EXPECT_EQ(writer.open(0, channel), common::ResponseCode::DeviceUnavailable);
+    EXPECT_EQ(channel, nullptr);
+    EXPECT_EQ(writer.buffers(), 0u);
+}
+
+// Every device after the first reuses the backend already loaded.
+TEST_F(DeviceWriterTest, TheBackendIsAskedForOnce)
+{
+    DeviceWriter writer(factory(), params(4, 4 * Buffer));
+
+    for (unsigned ordinal : { 0u, 1u, 0u, 2u })
+    {
+        DeviceWriter::Channel channel = nullptr;
+        ASSERT_EQ(writer.open(ordinal, channel), common::ResponseCode::Success);
+    }
+
+    EXPECT_EQ(_factory_calls.load(), 1u);
+    EXPECT_EQ(writer.devices(), 3u);
+}
+
 // The pool's teardown assumes every buffer is back, so the waiters must stop before it goes.
 TEST_F(DeviceWriterTest, TeardownDrainsBeforeThePoolIsDestroyed)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        DeviceWriter writer(mock, params(4, 4 * Buffer));
+        DeviceWriter writer([mock]() { return mock; }, params(4, 4 * Buffer));
 
         DeviceWriter::Channel channel = nullptr;
         ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -299,7 +334,7 @@ TEST_F(DeviceWriterTest, EveryStreamIsDestroyed)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        DeviceWriter writer(mock, params(4));
+        DeviceWriter writer([mock]() { return mock; }, params(4));
 
         DeviceWriter::Channel first = nullptr;
         DeviceWriter::Channel second = nullptr;
@@ -321,7 +356,7 @@ TEST_F(DeviceWriterTest, MovingATargetDoesNotDestroyItsStreamTwice)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        DeviceWriter writer(mock, params(4));
+        DeviceWriter writer([mock]() { return mock; }, params(4));
         for (unsigned ordinal = 0; ordinal < 4; ++ordinal)
         {
             DeviceWriter::Channel channel = nullptr;
@@ -344,7 +379,7 @@ TEST_F(DeviceWriterTest, MovingATargetDoesNotDestroyItsStreamTwice)
 // comes back: a caller cannot know to return one itself, and one lost here is a deadlock later.
 TEST_F(DeviceWriterTest, CopyingMoreThanTheBufferHoldsIsRefusedAndTheBufferReturned)
 {
-    DeviceWriter writer(_backend, params(1));
+    DeviceWriter writer(factory(), params(1));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
@@ -373,7 +408,7 @@ TEST_F(DeviceWriterTest, CopyingMoreThanTheBufferHoldsIsRefusedAndTheBufferRetur
 // caller keeps it. Saying so is the point: silence here would look like a leak.
 TEST_F(DeviceWriterTest, WriteWithoutAChannelLeavesTheBufferWithTheCaller)
 {
-    DeviceWriter writer(_backend, params(1));
+    DeviceWriter writer(factory(), params(1));
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
