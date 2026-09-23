@@ -43,7 +43,7 @@ class DeviceIssuerTest : public ::testing::Test
     }
 
     // A reading thread's own pool: small, and its own, which is the whole point of the split.
-    std::shared_ptr<SharedStagingPool> pool_for(unsigned ordinal, unsigned buffers)
+    std::shared_ptr<StagingPool> pool_for(unsigned ordinal, unsigned buffers)
     {
         DeviceWriter::Channel channel = nullptr;
         EXPECT_EQ(_writer->open(ordinal, channel), common::ResponseCode::Success);
@@ -52,7 +52,7 @@ class DeviceIssuerTest : public ::testing::Test
         params.buffer_bytesize = Buffer;
         params.slab_bytesize = buffers * Buffer;
         params.max_buffers = buffers;
-        return std::make_shared<SharedStagingPool>(_writer->device(channel), params);
+        return std::make_shared<StagingPool>(_writer->device(channel), params);
     }
 
     std::shared_ptr<device::MockBackend> _backend = std::make_shared<device::MockBackend>();
@@ -115,7 +115,7 @@ TEST_F(DeviceIssuerTest, Many_Readers_Each_With_Its_Own_Pool)
 
     DeviceIssuer issuer(_writer, 64 /* copies in flight */);
 
-    std::vector<std::shared_ptr<SharedStagingPool>> pools;
+    std::vector<std::shared_ptr<StagingPool>> pools;
     for (unsigned r = 0; r < Readers; ++r)
     {
         pools.push_back(pool_for(0, Buffers));

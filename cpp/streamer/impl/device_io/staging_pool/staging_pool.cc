@@ -4,15 +4,13 @@
 #include <utility>
 
 #include "utils/logging/logging.h"
-#include "utils/scope_guard/scope_guard.h"
 
 namespace runai::llm::streamer::impl
 {
 
 StagingPool::StagingPool(std::shared_ptr<device::Device> device, Params params) :
     _device(std::move(device)),
-    _params(params),
-    _free(params.max_buffers, 0)
+    _params(params)
 {
 }
 
@@ -21,50 +19,33 @@ StagingPool::StagingPool(std::shared_ptr<device::Device> device, Params params) 
 // this memory. The slabs are freed by their owners.
 StagingPool::~StagingPool() = default;
 
-bool StagingPool::take(unsigned & index)
+bool StagingPool::hand_out(StagingBuffer & out)
 {
-    const size_t head = _head.load(std::memory_order_relaxed);
-    if (head == _tail.load(std::memory_order_acquire))
+    if (_free.empty())
     {
         return false;
     }
 
-    index = _free[head % _free.size()];
-    _head.store(head + 1, std::memory_order_release);
+    out = _buffers[_free.front()];
+    _free.pop_front();
     return true;
-}
-
-void StagingPool::give(unsigned index)
-{
-    const size_t tail = _tail.load(std::memory_order_relaxed);
-
-    if (tail - _head.load(std::memory_order_acquire) >= _free.size())
-    {
-        // Only reachable by returning a buffer twice, or one that was never taken. Dropping it
-        // leaks a buffer; writing it would corrupt an entry another thread is reading.
-        LOG(ERROR) << "[RunAI Streamer] staging buffer " << index << " returned to a full pool";
-        return;
-    }
-
-    _free[tail % _free.size()] = index;
-    _tail.store(tail + 1, std::memory_order_release);
 }
 
 unsigned StagingPool::plan_slab(size_t & bytesize) const
 {
+    bytesize = 0;
+
     const unsigned room = _params.max_buffers - static_cast<unsigned>(_buffers.size());
     if (room == 0)
     {
-        bytesize = 0;
         return 0;
     }
 
-    // A pool of zero sized buffers divides by zero here, which is SIGFPE rather than an error the
-    // caller can see. Refused at the ceiling instead, so the pool hands out nothing.
+    // A pool of zero sized buffers would divide by zero below, which is SIGFPE rather than an error
+    // the caller can see. Refused as if it were at its ceiling, so the pool hands out nothing.
     if (_params.buffer_bytesize == 0)
     {
         LOG(ERROR) << "[RunAI Streamer] a staging pool of zero sized buffers holds nothing";
-        bytesize = 0;
         return 0;
     }
 
@@ -75,31 +56,8 @@ unsigned StagingPool::plan_slab(size_t & bytesize) const
     return per_slab;
 }
 
-void StagingPool::publish_slab(void * base, unsigned per_slab)
+common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, StagingBuffer & out)
 {
-    // Owned from here, so every path out of this function frees it - including a throw.
-    _slabs.emplace_back(base, device::PinnedDeleter{_device});
-
-    for (unsigned i = 0; i < per_slab; ++i)
-    {
-        StagingBuffer buffer;
-        buffer.data = static_cast<char *>(base) + static_cast<size_t>(i) * _params.buffer_bytesize;
-        buffer.bytesize = _params.buffer_bytesize;
-        buffer.index = static_cast<unsigned>(_buffers.size());
-
-        _buffers.push_back(buffer);
-    }
-}
-
-common::ResponseCode StagingPool::grow()
-{
-    size_t bytesize = 0;
-    const unsigned per_slab = plan_slab(bytesize);
-    if (per_slab == 0)
-    {
-        return common::ResponseCode::Success;
-    }
-
     void * base = nullptr;
     const auto code = _device->host_alloc(bytesize, &base);
     if (code != common::ResponseCode::Success)
@@ -107,52 +65,132 @@ common::ResponseCode StagingPool::grow()
         return code;
     }
 
-    publish_slab(base, per_slab);
+    // Owned from here, so every path out frees it - including the one below that decides this slab
+    // is no longer wanted, and a throw.
+    device::OwnedPinned slab(base, device::PinnedDeleter{_device});
+
+    const std::lock_guard<std::mutex> guard(_mutex);
+
+    // Another consumer may have registered a slab while this one was pinning. The window is a
+    // promise about how much memory is pinned at once, so the late slab is freed rather than
+    // published. Nothing in the streamer shares a pool between consumers, so this costs nothing.
+    if (_buffers.size() + per_slab <= _params.max_buffers)
+    {
+        _slabs.push_back(std::move(slab));
+
+        for (unsigned i = 0; i < per_slab; ++i)
+        {
+            StagingBuffer buffer;
+            buffer.data = static_cast<char *>(base) + static_cast<size_t>(i) * _params.buffer_bytesize;
+            buffer.bytesize = _params.buffer_bytesize;
+            buffer.index = static_cast<unsigned>(_buffers.size());
+
+            _buffers.push_back(buffer);
+            _free.push_back(buffer.index);
+        }
+    }
+
+    hand_out(out);
     return common::ResponseCode::Success;
-}
-
-bool StagingPool::hand_out(StagingBuffer & out)
-{
-    unsigned index = 0;
-    if (take(index))
-    {
-        out = _buffers[index];
-        return true;
-    }
-
-    if (_next_new < _buffers.size())
-    {
-        out = _buffers[_next_new++];
-        return true;
-    }
-
-    return false;
 }
 
 common::ResponseCode StagingPool::try_acquire(StagingBuffer & out)
 {
     out = StagingBuffer{};
 
-    if (hand_out(out))
+    size_t bytesize = 0;
+    unsigned per_slab = 0;
+
     {
-        return common::ResponseCode::Success;
+        const std::lock_guard<std::mutex> guard(_mutex);
+
+        if (_stopped || hand_out(out))
+        {
+            return common::ResponseCode::Success;
+        }
+
+        per_slab = plan_slab(bytesize);
+        if (per_slab == 0)
+        {
+            // At the ceiling with everything in flight. out stays invalid, which is not an error.
+            return common::ResponseCode::Success;
+        }
     }
 
-    const auto code = grow();
-    if (code != common::ResponseCode::Success)
+    return add_slab(bytesize, per_slab, out);
+}
+
+common::ResponseCode StagingPool::acquire(StagingBuffer & out)
+{
+    out = StagingBuffer{};
+
+    while (true)
     {
-        return code;
+        size_t bytesize = 0;
+        unsigned per_slab = 0;
+
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+
+            if (_stopped || hand_out(out))
+            {
+                return common::ResponseCode::Success;
+            }
+
+            per_slab = plan_slab(bytesize);
+            if (per_slab == 0)
+            {
+                // Everything is in flight and the pool is at its ceiling, so no slab is coming: the
+                // only way forward is a buffer coming back. These threads have nothing else to do,
+                // unlike an async engine's worker, so they wait rather than spin.
+                _ready.wait(lock);
+                continue;
+            }
+        }
+
+        const auto code = add_slab(bytesize, per_slab, out);
+        if (code != common::ResponseCode::Success)
+        {
+            return code;
+        }
+
+        if (out.valid())
+        {
+            return common::ResponseCode::Success;
+        }
+
+        // The slab was dropped because another consumer filled the window first. Go round: either
+        // one of its buffers is free, or this thread waits for one.
     }
-
-    hand_out(out);
-
-    // out stays invalid when the pool is at its ceiling and everything is in flight. Not an error.
-    return common::ResponseCode::Success;
 }
 
 void StagingPool::release(const StagingBuffer & buffer)
 {
-    give(buffer.index);
+    {
+        const std::lock_guard<std::mutex> guard(_mutex);
+
+        if (_free.size() >= _buffers.size())
+        {
+            // Only reachable by returning a buffer twice, or one that was never taken. Dropping it
+            // loses a buffer; handing it out twice would give two readers the same memory.
+            LOG(ERROR) << "[RunAI Streamer] staging buffer " << buffer.index << " returned to a full pool";
+            return;
+        }
+
+        _free.push_back(buffer.index);
+    }
+
+    _ready.notify_one();
+}
+
+void StagingPool::stop()
+{
+    {
+        const std::lock_guard<std::mutex> guard(_mutex);
+        _stopped = true;
+    }
+
+    _ready.notify_all();
 }
 
 size_t StagingPool::buffer_bytesize() const
@@ -162,142 +200,14 @@ size_t StagingPool::buffer_bytesize() const
 
 unsigned StagingPool::created() const
 {
+    const std::lock_guard<std::mutex> guard(_mutex);
     return static_cast<unsigned>(_buffers.size());
 }
 
 unsigned StagingPool::slabs() const
 {
+    const std::lock_guard<std::mutex> guard(_mutex);
     return static_cast<unsigned>(_slabs.size());
-}
-
-common::ResponseCode SharedStagingPool::grow_unlocked(std::unique_lock<std::mutex> & lock, bool & grew)
-{
-    grew = false;
-
-    size_t bytesize = 0;
-    const unsigned per_slab = plan_slab(bytesize);
-    if (per_slab == 0)
-    {
-        return common::ResponseCode::Success;   // at the ceiling
-    }
-
-    grew = true;
-
-    _growing = true;
-
-    // Declared first, so it runs LAST - after the lock is back and after the slab is published.
-    // Whichever way this ends, including a throw from the driver, the flag is cleared and the
-    // waiters are woken: one must not sleep through a slab that arrived, nor through one that never
-    // will. Leaving the flag set would park every later acquire on a grow nobody is doing.
-    const utils::ScopeGuard done([&]()
-        {
-            _growing = false;
-            _ready.notify_all();
-        });
-
-    void * base = nullptr;
-    auto code = common::ResponseCode::Success;
-
-    {
-        // THE POINT OF ALL THIS. Pinning a slab is a driver call of several milliseconds, and the
-        // StreamWaiter takes this same lock to hand buffers back - so holding it here would stall
-        // every copy that lands while the pool is still filling.
-        lock.unlock();
-        const utils::ScopeGuard relock([&]() { lock.lock(); });
-
-        code = _device->host_alloc(bytesize, &base);
-    }
-
-    // The lock is held again.
-    if (code == common::ResponseCode::Success)
-    {
-        publish_slab(base, per_slab);
-    }
-
-    return code;
-}
-
-common::ResponseCode SharedStagingPool::try_acquire(StagingBuffer & out)
-{
-    out = StagingBuffer{};
-
-    std::unique_lock<std::mutex> lock(_mutex);
-
-    if (hand_out(out))
-    {
-        return common::ResponseCode::Success;
-    }
-
-    // Another consumer is already pinning one. Growing again would take the pool past its ceiling, so
-    // this reports what it honestly has: nothing free just now, which is not an error.
-    if (_growing)
-    {
-        return common::ResponseCode::Success;
-    }
-
-    bool grew = false;
-    const auto code = grow_unlocked(lock, grew);
-    if (code != common::ResponseCode::Success)
-    {
-        return code;
-    }
-
-    hand_out(out);
-    return common::ResponseCode::Success;
-}
-
-common::ResponseCode SharedStagingPool::acquire(StagingBuffer & out)
-{
-    out = StagingBuffer{};
-
-    std::unique_lock<std::mutex> lock(_mutex);
-
-    while (true)
-    {
-        if (hand_out(out) || _stopped)
-        {
-            return common::ResponseCode::Success;
-        }
-
-        bool grew = false;
-        if (!_growing)
-        {
-            const auto code = grow_unlocked(lock, grew);
-            if (code != common::ResponseCode::Success)
-            {
-                return code;
-            }
-        }
-
-        if (grew)
-        {
-            // The lock was released and retaken, so the pool may have changed either way. Go round.
-            continue;
-        }
-
-        // Everything is in flight and the pool is at its ceiling - or another thread is pinning the
-        // next slab. These threads have nothing else to do, unlike an async engine's worker, so they
-        // wait for the StreamWaiter rather than spin.
-        _ready.wait(lock);
-    }
-}
-
-void SharedStagingPool::release(const StagingBuffer & buffer)
-{
-    {
-        const std::lock_guard<std::mutex> guard(_mutex);
-        StagingPool::release(buffer);
-    }
-    _ready.notify_one();
-}
-
-void SharedStagingPool::stop()
-{
-    {
-        const std::lock_guard<std::mutex> guard(_mutex);
-        _stopped = true;
-    }
-    _ready.notify_all();
 }
 
 } // namespace runai::llm::streamer::impl

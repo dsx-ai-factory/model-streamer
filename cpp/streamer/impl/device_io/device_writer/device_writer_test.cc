@@ -47,13 +47,13 @@ class DeviceWriterTest : public ::testing::Test
     }
 
     // The writer owns neither buffers nor events, so a test brings both - as a client does.
-    std::shared_ptr<SharedStagingPool> pool_for(DeviceWriter & writer, DeviceWriter::Channel channel, unsigned max_buffers)
+    std::shared_ptr<StagingPool> pool_for(DeviceWriter & writer, DeviceWriter::Channel channel, unsigned max_buffers)
     {
         StagingPool::Params params;
         params.buffer_bytesize = Buffer;
         params.slab_bytesize = max_buffers * Buffer;
         params.max_buffers = max_buffers;
-        return std::make_shared<SharedStagingPool>(writer.device(channel), params);
+        return std::make_shared<StagingPool>(writer.device(channel), params);
     }
 
     std::shared_ptr<EventPool> events_for(DeviceWriter & writer, DeviceWriter::Channel channel, unsigned max_events)
@@ -63,7 +63,7 @@ class DeviceWriterTest : public ::testing::Test
 
     // One copy's worth: a buffer from `pool` and an event from the channel's own pool.
     DeviceWriter::Copy copy_of(DeviceWriter & writer, DeviceWriter::Channel channel,
-                               const std::shared_ptr<SharedStagingPool> & pool, const StagingBuffer & buffer)
+                               const std::shared_ptr<StagingPool> & pool, const StagingBuffer & buffer)
     {
         auto & events = _events[channel];
         if (events == nullptr)
@@ -301,7 +301,7 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        std::shared_ptr<SharedStagingPool> pool;
+        std::shared_ptr<StagingPool> pool;
         {
             DeviceWriter writer([mock]() { return mock; });
 
@@ -346,7 +346,7 @@ TEST_F(DeviceWriterTest, The_Pool_Outlives_A_Reader_That_Drops_It)
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
 
-    const std::weak_ptr<SharedStagingPool> watch = pool;
+    const std::weak_ptr<StagingPool> watch = pool;
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> alive{-1};

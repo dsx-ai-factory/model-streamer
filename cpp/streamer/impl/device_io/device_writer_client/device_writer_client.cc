@@ -106,7 +106,7 @@ common::ResponseCode DeviceWriterClient::take(unsigned ordinal, StagingBuffer & 
         params.slab_bytesize = _buffers.slab_bytesize;
         params.max_buffers = _max_buffers;
 
-        _pool = std::make_shared<SharedStagingPool>(_writer->device(channel), params);
+        _pool = std::make_shared<StagingPool>(_writer->device(channel), params);
     }
 
     return _pool->try_acquire(out);

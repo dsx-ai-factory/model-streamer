@@ -213,8 +213,8 @@ TEST_F(StagingPoolTest, Teardown_Frees_Every_Slab)
     EXPECT_TRUE(_mock->live_host.empty()) << "no slab left pinned";
 }
 
-// The reaper returns buffers from its own thread while the worker takes them. Two atomics and no
-// lock, so this is the test that would catch a broken memory ordering.
+// The reaper returns buffers from its own thread while the worker takes them - the shape every user
+// has. This is the test that would catch a free list left unprotected.
 TEST_F(StagingPoolTest, Consumer_And_Producer_Run_On_Different_Threads)
 {
     StagingPool pool(_mock, params(4));
@@ -270,9 +270,9 @@ TEST_F(StagingPoolTest, Consumer_And_Producer_Run_On_Different_Threads)
 }
 
 // The synchronous threadpool's threads have nothing else to do, so they wait rather than spin.
-TEST_F(StagingPoolTest, Shared_Pool_Blocks_Until_A_Buffer_Comes_Back)
+TEST_F(StagingPoolTest, Acquire_Blocks_Until_A_Buffer_Comes_Back)
 {
-    SharedStagingPool pool(_mock, params(1, Buffer));
+    StagingPool pool(_mock, params(1, Buffer));
 
     StagingBuffer held;
     ASSERT_EQ(pool.acquire(held), common::ResponseCode::Success);
@@ -296,13 +296,12 @@ TEST_F(StagingPoolTest, Shared_Pool_Blocks_Until_A_Buffer_Comes_Back)
     EXPECT_TRUE(got.load(std::memory_order_acquire));
 }
 
-// Pinning happens with the lock released, and a flag tells the other consumers that somebody is
-// already doing it. A driver call that THROWS must still clear that flag and wake them: otherwise
-// every later acquire waits for a grow that nobody is performing any more, which is every reading
-// thread of the pool, for good.
+// Pinning happens with the lock released. A driver call that THROWS must leave the pool exactly as
+// it was, so the next consumer can register a slab itself - and must not leave the lock held, which
+// would stop every thread that touches this pool.
 TEST_F(StagingPoolTest, A_Throwing_Registration_Leaves_The_Pool_Usable)
 {
-    SharedStagingPool pool(_mock, params(4));
+    StagingPool pool(_mock, params(4));
 
     _mock->throw_host_alloc_at = 1;
 
@@ -316,14 +315,14 @@ TEST_F(StagingPoolTest, A_Throwing_Registration_Leaves_The_Pool_Usable)
 
     StagingBuffer again;
     ASSERT_EQ(pool.try_acquire(again), common::ResponseCode::Success);
-    EXPECT_TRUE(again.valid()) << "the pool still believes a registration is in flight";
+    EXPECT_TRUE(again.valid()) << "the throw left the pool unable to grow";
     EXPECT_EQ(pool.created(), 4u);
 }
 
 // Without this, a waiter sleeps for a reaper that has already stopped.
 TEST_F(StagingPoolTest, Stop_Wakes_A_Waiter)
 {
-    SharedStagingPool pool(_mock, params(1, Buffer));
+    StagingPool pool(_mock, params(1, Buffer));
 
     StagingBuffer held;
     ASSERT_EQ(pool.acquire(held), common::ResponseCode::Success);

@@ -60,7 +60,7 @@ common::ResponseCode FileSystemWorker::staging_for(const Workload & workload, De
         params.slab_bytesize = _block_bytesize;   // one call per buffer: three of them, once
         params.max_buffers = BuffersPerThread;
 
-        _pool = std::make_shared<SharedStagingPool>(device, params);
+        _pool = std::make_shared<StagingPool>(device, params);
     }
 
     out.pool = _pool;

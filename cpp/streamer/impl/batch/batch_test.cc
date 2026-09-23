@@ -278,7 +278,7 @@ TEST(Read, A_Failed_Read_Returns_Its_Staging_Buffer)
     pool_params.max_buffers = 3;
 
     DeviceStaging staging;
-    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.pool = std::make_shared<StagingPool>(writer->device(channel), pool_params);
     staging.issuer = issuer.get();
 
     Batch batch(1 /* submission */, 0, 0, file.path, params, std::move(tasks), responder, config,
@@ -346,7 +346,7 @@ TEST(Read, A_Copy_That_Fails_Part_Way_Stops_The_Answers_There)
     pool_params.max_buffers = 3;
 
     DeviceStaging staging;
-    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.pool = std::make_shared<StagingPool>(writer->device(channel), pool_params);
     staging.issuer = issuer.get();
 
     Batch batch(1 /* submission */, 0, 0, file.path, params, std::move(tasks), responder, config,
@@ -422,7 +422,7 @@ TEST(Read, A_Stopped_Pool_Is_Not_Answered_As_Read)
     pool_params.max_buffers = 3;
 
     DeviceStaging staging;
-    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.pool = std::make_shared<StagingPool>(writer->device(channel), pool_params);
     staging.issuer = issuer.get();
 
     // Stopped before the first acquire, which is the state a teardown leaves the pool in.

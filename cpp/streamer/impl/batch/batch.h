@@ -42,7 +42,7 @@ using Tasks = std::vector<Task>;
 // context and enqueues on the stream. See DeviceIssuer.
 struct DeviceStaging
 {
-    std::shared_ptr<SharedStagingPool> pool;
+    std::shared_ptr<StagingPool> pool;
     DeviceIssuer * issuer = nullptr;
 
     bool valid() const { return pool != nullptr && issuer != nullptr; }

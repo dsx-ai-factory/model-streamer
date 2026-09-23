@@ -10,7 +10,6 @@ runai_cc_auto_library(
         "//device",
         "//device/owned",
         "//utils/logging",
-        "//utils/scope_guard",
     ],
 )
 
