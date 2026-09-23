@@ -66,12 +66,40 @@ jobs:
         compression-level: 0
 
   test-sdk:
+    name: Test SDK (${{ matrix.arch }})
     needs: build
-    uses: ./.github/workflows/test-sdk.yaml
-    with:
-      artifact-pattern: sdk-*
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.release.tag_name }}
+    - uses: actions/download-artifact@v4
+      with:
+        name: sdk-${{ matrix.arch }}
+        path: sdk/dist
+    - name: Test the release archive in a clean consumer container
+      env:
+        SDK_ARCH: ${{ matrix.arch }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        docker run --rm \
+          -v "$PWD:/src:ro" -w /src \
+          -e SDK_ARCH -e RELEASE_TAG ubuntu:20.04 bash -euc '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              python3 gcc g++ cmake make pkg-config binutils ca-certificates
+            make test-sdk SDK_ARCHIVE="sdk/dist/runai-model-streamer-sdk-${RELEASE_TAG#v}-linux-${SDK_ARCH}.tar.gz"
+          '
 
   publish-github:
     name: Publish GitHub release assets

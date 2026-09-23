@@ -78,13 +78,32 @@ SDK before Bazel switches to the next architecture. Archives and GNU-compatible
 checksum files are written to `sdk/dist/`. Packaging rejects missing libraries,
 the wrong ELF architecture, and a core library without `$ORIGIN` in its runpath.
 
-PR CI retains both archives as the `sdk` Actions artifact. PR and release jobs
-run `bash sdk/verify.sh ARCHIVE` in fresh consumer containers on native x86_64 and
-aarch64 runners. That script checks checksums, builds C99 and C++17 consumers via
-pkg-config and the shipped CMake example, verifies file bytes, and checks runtime
-dependencies. Release CI builds each architecture on a separate runner, then
-waits for both consumers. GitHub asset publishing and the four PyPI package
-uploads run in parallel using the tested artifacts without rebuilding them.
+The top-level Makefile provides the same test entry points for developers and CI:
+
+```bash
+make test-python                         # Python unit tests
+PACKAGE_VERSION=0.17.0 make test-sdk     # Build and test the native SDK
+make test-sdk SDK_ARCHIVE=/path/to/runai-model-streamer-sdk-0.17.0-linux-x86_64.tar.gz
+PACKAGE_VERSION=0.17.0 make test         # Full suite, including Python and SDK tests
+```
+
+Run SDK tests on Linux with Python 3, gcc/g++, CMake, make, pkg-config, binutils,
+and the runtime dependencies installed. Building the SDK additionally requires
+the repository's Bazel toolchain; `SDK_ARCHIVE` skips that build and tests the
+supplied archive without installing any streamer Python packages.
+
+`make test-sdk` runs packaging unit tests and consumer checks: checksum
+verification, C99 and C++17 compilation via pkg-config, the shipped CMake example,
+file-byte verification, and runtime dependency checks. Consumers build against
+an unpacked temporary prefix, outside the repository.
+
+PR CI calls `make test` once with the PR version, tests the native SDK in the
+devcontainer, and retains both architectures as the `sdk` Actions artifact.
+Release CI builds each architecture on a separate runner, then calls
+`make test-sdk SDK_ARCHIVE=...` in clean Ubuntu 20.04 containers on native x86_64
+and aarch64 runners. GitHub asset publishing and the four PyPI package uploads
+run in parallel after both consumers pass, using the tested artifacts without
+rebuilding them.
 
 Object-storage end-to-end SDK tests and an exported-symbol compatibility baseline
 are follow-up work tracked by issue #179; this publishing change does not close

@@ -21,10 +21,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-
-    - name: Test SDK packaging guards
-      run: python3 -m unittest discover -s sdk -p 'test_*.py'
+      id: version
+      run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
     - name: Run tests and build
       uses: devcontainers/ci@v0.3
@@ -33,8 +31,8 @@ jobs:
         cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
-          make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 && \
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+          PACKAGE_VERSION=${{ steps.version.outputs.PACKAGE_VERSION }} \
+            make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
     - name: Upload streamer package to github action
       uses: actions/upload-artifact@v4
@@ -71,9 +69,3 @@ jobs:
         path: sdk/dist/*
         if-no-files-found: error
         compression-level: 0
-
-  test-sdk:
-    needs: lifecycle-install-tests
-    uses: ./.github/workflows/test-sdk.yaml
-    permissions:
-      contents: read
