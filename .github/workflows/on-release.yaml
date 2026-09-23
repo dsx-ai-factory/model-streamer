@@ -32,12 +32,13 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set PACKAGE_VERSION
+      id: version
       env:
         RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
         version="${RELEASE_TAG#v}"
         [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$ ]] || exit 1
-        echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+        echo "PACKAGE_VERSION=$version" >> "$GITHUB_OUTPUT"
 
     - name: Build package
       uses: devcontainers/ci@v0.3
@@ -46,7 +47,7 @@ jobs:
         cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build_${{ matrix.arch }}
+          PACKAGE_VERSION=${{ steps.version.outputs.PACKAGE_VERSION }} make build_${{ matrix.arch }}
 
     - name: Upload wheels for publishing
       uses: actions/upload-artifact@v4
