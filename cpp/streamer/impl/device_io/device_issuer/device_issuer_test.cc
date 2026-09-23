@@ -155,7 +155,10 @@ TEST_F(DeviceIssuerTest, Many_Readers_Each_With_Its_Own_Pool)
 
     ASSERT_TRUE(eventually([&]() { return done.load() == Readers * PerReader; }));
 
-    EXPECT_EQ(issuer.issued(), Readers * PerReader);
+    // AFTER the completions, not with them: the lane counts a copy as issued once its handler
+    // returns, and the completion fires from the StreamWaiter inside that handler. The last one can
+    // still be un-counted here.
+    ASSERT_TRUE(eventually([&]() { return issuer.issued() == Readers * PerReader; }));
     EXPECT_EQ(_backend->opened(0)->streams_created, 1u) << "one device, one stream, one issuer";
     EXPECT_EQ(_backend->opened(0)->copies, Readers * PerReader);
 
@@ -260,7 +263,7 @@ TEST_F(DeviceIssuerTest, One_Thread_Per_Device)
     ASSERT_TRUE(eventually([&]() { return done.load() == Devices * PerDevice; }));
 
     EXPECT_EQ(issuer.devices(), Devices) << "a lane, and a thread, for each";
-    EXPECT_EQ(issuer.issued(), Devices * PerDevice);
+    ASSERT_TRUE(eventually([&]() { return issuer.issued() == Devices * PerDevice; }));
 
     for (unsigned d = 0; d < Devices; ++d)
     {
