@@ -39,18 +39,6 @@ common::ResponseCode DeviceWriterClient::channel_for(unsigned ordinal, DeviceWri
         return code;
     }
 
-    // Built against the FIRST device this worker names, and serving every later one: pinned memory
-    // is allocated through a context and reachable from all of them.
-    if (_pool == nullptr)
-    {
-        StagingPool::Params params;
-        params.buffer_bytesize = _buffers.buffer_bytesize;
-        params.slab_bytesize = _buffers.slab_bytesize;
-        params.max_buffers = _max_buffers;
-
-        _pool = std::make_shared<SharedStagingPool>(_writer->device(channel), params);
-    }
-
     // Per device, because an event belongs to the context that created it. Created here, where the
     // device is known, and sized by the same window as the buffers - a copy needs one of each.
     _events.emplace(ordinal, std::make_shared<EventPool>(_writer->device(channel), _max_buffers));
@@ -81,6 +69,12 @@ common::ResponseCode DeviceWriterClient::bind(unsigned ordinal, const DeviceWrit
     return common::ResponseCode::Success;
 }
 
+common::ResponseCode DeviceWriterClient::open(unsigned ordinal)
+{
+    DeviceWriter::Channel channel = nullptr;
+    return channel_for(ordinal, channel);
+}
+
 common::ResponseCode DeviceWriterClient::take(unsigned ordinal, StagingBuffer & out)
 {
     out = StagingBuffer{};
@@ -99,10 +93,36 @@ common::ResponseCode DeviceWriterClient::take(unsigned ordinal, StagingBuffer & 
         return code;
     }
 
+    // Built on the FIRST TAKE, against the first device this client names, and serving every later
+    // one: pinned memory is allocated through a context and reachable from all of them.
+    //
+    // Here rather than when a channel opens, so a client that never takes owns no pool at all - which
+    // is what the synchronous reader's issuer is, since there the buffers belong to the reading
+    // threads and only the copy is shared.
+    if (_pool == nullptr)
+    {
+        StagingPool::Params params;
+        params.buffer_bytesize = _buffers.buffer_bytesize;
+        params.slab_bytesize = _buffers.slab_bytesize;
+        params.max_buffers = _max_buffers;
+
+        _pool = std::make_shared<SharedStagingPool>(_writer->device(channel), params);
+    }
+
     return _pool->try_acquire(out);
 }
 
 common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
+                                               const StagingBuffer & buffer,
+                                               size_t bytesize,
+                                               void * destination,
+                                               Completion on_done)
+{
+    return write(ordinal, _pool, buffer, bytesize, destination, std::move(on_done));
+}
+
+common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
+                                               const std::shared_ptr<StagingPool> & pool,
                                                const StagingBuffer & buffer,
                                                size_t bytesize,
                                                void * destination,
@@ -114,9 +134,9 @@ common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
         // take() opens the ordinal it is asked for, so reaching this means the bytes are going to a
         // device this worker never read for. The buffer still comes back: one pool, any ordinal.
         LOG(ERROR) << "[RunAI Streamer] write to device " << ordinal << " which was never opened";
-        if (_pool != nullptr)
+        if (pool != nullptr)
         {
-            _pool->release(buffer);
+            pool->release(buffer);
         }
         return common::ResponseCode::InvalidParameterError;
     }
@@ -125,12 +145,12 @@ common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
     auto code = bind(ordinal, existing->second);
     if (code != common::ResponseCode::Success)
     {
-        _pool->release(buffer);
+        pool->release(buffer);
         return code;
     }
 
     DeviceWriter::Copy copy;
-    copy.pool = _pool;
+    copy.pool = pool;
     copy.buffer = buffer;
     copy.events = _events.at(ordinal);
 
@@ -140,7 +160,7 @@ common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
         // The event pool has the same ceiling as the buffers and a copy takes one of each, so running
         // out is not a state the window allows.
         LOG(ERROR) << "[RunAI Streamer] no copy event for device " << ordinal << ": " << code;
-        _pool->release(buffer);
+        pool->release(buffer);
         return code != common::ResponseCode::Success ? code : common::ResponseCode::UnknownError;
     }
 

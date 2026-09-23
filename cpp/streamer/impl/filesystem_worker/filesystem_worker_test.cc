@@ -3,17 +3,61 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstring>
 #include <memory>
 #include <vector>
 
 #include "common/device/device.h"
+#include "device/mock/mock_device.h"
+#include "utils/random/random.h"
+#include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::impl
 {
 
-// An empty workload reads nothing, which is enough to check that the pool's per-worker routine drives
-// this the same way its stateless handler used to: execute once, never wait for a drain.
-TEST(FileSystemWorker, Executes_And_Is_Always_Idle)
+namespace
+{
+
+constexpr size_t Block = 4096;
+
+class FileSystemWorkerTest : public ::testing::Test
+{
+ protected:
+    // One file, one contiguous transfer, `ranges` ranges - the layout a model read produces.
+    Workload workload_of(const std::string & path, common::Device device, void * destination,
+                         unsigned ranges, size_t range_bytesize)
+    {
+        _responder->increment(ranges);
+
+        Tasks tasks;
+        for (unsigned i = 0; i < ranges; ++i)
+        {
+            auto request = std::make_shared<Request>(i * range_bytesize, 0 /* file */, i /* index */,
+                                                     1 /* tasks */, range_bytesize,
+                                                     static_cast<char *>(destination) + i * range_bytesize);
+            _requests.push_back(request);
+            tasks.emplace_back(request, i * range_bytesize, range_bytesize, 0);
+        }
+
+        common::s3::S3ClientWrapper::Params params;
+        Workload workload;
+        EXPECT_EQ(workload.add_batch(Batch(1 /* submission */, 0, 0, path, params, std::move(tasks),
+                                           _responder, _config, Block, device)),
+                  common::ResponseCode::Success);
+        return workload;
+    }
+
+    std::shared_ptr<Config> _config = std::make_shared<Config>(false /* do not force minimum */);
+    std::shared_ptr<common::Responder> _responder =
+        std::make_shared<common::Responder>(0, common::QueueMode::PERSISTENT);
+    std::vector<std::shared_ptr<Request>> _requests;
+
+    std::shared_ptr<device::MockBackend> _backend = std::make_shared<device::MockBackend>();
+};
+
+} // namespace
+
+TEST_F(FileSystemWorkerTest, Executes_And_Is_Always_Idle)
 {
     FileSystemWorker worker;
     std::atomic<bool> stopped{false};
@@ -27,34 +71,152 @@ TEST(FileSystemWorker, Executes_And_Is_Always_Idle)
     EXPECT_TRUE(worker.idle());
 }
 
-// A device destination would be written with pread - a segmentation fault, not an error - so it is
-// refused here until this reader stages through pinned memory.
-TEST(FileSystemWorker, Refuses_A_Device_Workload)
+// A device destination would be written with pread - a segmentation fault, not an error - so a
+// reader with no copy path refuses it rather than trying. The ranges are still answered.
+TEST_F(FileSystemWorkerTest, Refuses_A_Device_Workload_Without_A_Copy_Path)
 {
-    auto config = std::make_shared<Config>(false /* do not force minimum */);
-    auto responder = std::make_shared<common::Responder>(0, common::QueueMode::PERSISTENT);
-    common::s3::S3ClientWrapper::Params params;
+    std::vector<char> destination(Block);
+    auto workload = workload_of("/tmp/does-not-matter", common::Device::cuda(0), destination.data(), 1, Block);
 
-    std::vector<char> destination(64);
-    auto request = std::make_shared<Request>(0 /* file offset */, 0 /* file index */, 0 /* index */,
-                                             1 /* tasks */, destination.size(), destination.data());
-    responder->increment(1);
-
-    Tasks tasks;
-    tasks.emplace_back(request, 0, destination.size(), 0);
-
-    Workload workload;
-    ASSERT_EQ(workload.add_batch(Batch(1, 0, 0, "/tmp/file", params, std::move(tasks), responder,
-                                       config, 4096, common::Device::cuda(0))),
-              common::ResponseCode::Success);
-
-    FileSystemWorker worker;
+    FileSystemWorker worker;   // no writer, no issuer
     std::atomic<bool> stopped{false};
     worker.execute(std::move(workload), stopped);
 
-    const auto response = responder->pop(5000);
-    EXPECT_EQ(response.ret, common::ResponseCode::UnsupportedDeviceType)
+    const auto response = _responder->pop(5000);
+    EXPECT_EQ(response.ret, common::ResponseCode::DeviceUnavailable)
         << "the range must be answered, not left to hang";
+}
+
+// A buffer of no bytes reads no bytes, so the batch would never advance: it would take a buffer per
+// turn and wait for the fourth forever. Refused instead, while the ranges can still be answered.
+TEST_F(FileSystemWorkerTest, Refuses_A_Device_Workload_With_No_Block_Size)
+{
+    const auto data = utils::random::buffer(Block);
+    utils::temp::File file(data);
+
+    std::vector<char> destination(Block);
+    auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), 1, Block);
+
+    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+
+    FileSystemWorker worker(writer, issuer, 0 /* block */);
+    std::atomic<bool> stopped{false};
+    worker.execute(std::move(workload), stopped);
+
+    const auto response = _responder->pop(5000);
+    EXPECT_EQ(response.ret, common::ResponseCode::InvalidParameterError)
+        << "the reader hung instead of refusing";
+}
+
+// THE step: a device workload is read into this thread's pinned buffers, copied from there, and its
+// ranges answered only once the bytes have landed.
+TEST_F(FileSystemWorkerTest, Reads_A_Device_Workload_Through_Pinned_Buffers)
+{
+    constexpr unsigned Ranges = 8;
+
+    const auto data = utils::random::buffer(Ranges * Block);
+    utils::temp::File file(data);
+
+    // The mock's "device memory" is ordinary host memory, so the bytes are checkable.
+    std::vector<char> destination(Ranges * Block, 0);
+
+    auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
+
+    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+
+    FileSystemWorker worker(writer, issuer, Block);
+    std::atomic<bool> stopped{false};
+    worker.execute(std::move(workload), stopped);
+
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        const auto response = _responder->pop(5000);
+        EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+    }
+
+    EXPECT_EQ(std::memcmp(destination.data(), data.data(), data.size()), 0)
+        << "the bytes went through the staging buffers and arrived in order";
+
+    const auto device = _backend->opened(0);
+    ASSERT_NE(device, nullptr);
+    EXPECT_EQ(device->copies, Ranges) << "one block, one buffer, one copy";
+
+    // THREE buffers, whatever the batch size: read, copy, in flight. A pool that grew with the batch
+    // would pin the whole file.
+    EXPECT_EQ(device->host_allocs, FileSystemWorker::BuffersPerThread)
+        << "one registration per buffer, and no more than the pipeline depth";
+}
+
+// Every reading thread has its own pool, so a second worker pins its own three and shares nothing
+// but the issuer and the stream.
+TEST_F(FileSystemWorkerTest, Each_Worker_Has_Its_Own_Buffers)
+{
+    const auto data = utils::random::buffer(4 * Block);
+    utils::temp::File file(data);
+
+    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, 2 * FileSystemWorker::BuffersPerThread);
+
+    std::vector<std::vector<char>> destinations(2, std::vector<char>(4 * Block, 0));
+    std::atomic<bool> stopped{false};
+
+    for (unsigned w = 0; w < 2; ++w)
+    {
+        auto workload = workload_of(file.path, common::Device::cuda(0), destinations[w].data(), 4, Block);
+        FileSystemWorker worker(writer, issuer, Block);
+        worker.execute(std::move(workload), stopped);
+    }
+
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        EXPECT_EQ(_responder->pop(5000).ret, common::ResponseCode::Success);
+    }
+
+    const auto device = _backend->opened(0);
+    EXPECT_EQ(device->streams_created, 1u) << "one device, one stream, one issuer";
+    EXPECT_EQ(device->host_allocs, 2 * FileSystemWorker::BuffersPerThread) << "three buffers each";
+
+    for (unsigned w = 0; w < 2; ++w)
+    {
+        EXPECT_EQ(std::memcmp(destinations[w].data(), data.data(), data.size()), 0) << "worker " << w;
+    }
+}
+
+// A copy that never lands must not be reported as read. The progress counter the reader answers
+// ranges from advances per COMPLETION, so counting a failed one would answer those ranges Success
+// with nothing on the device - silent data loss, and the failure mode a byte check never sees
+// because it is the response codes that lie.
+TEST_F(FileSystemWorkerTest, A_Failed_Copy_Is_Never_Answered_As_Read)
+{
+    constexpr unsigned Ranges = 8;
+
+    const auto data = utils::random::buffer(Ranges * Block);
+    utils::temp::File file(data);
+    std::vector<char> destination(Ranges * Block, 0);
+
+    auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
+
+    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+
+    // Every copy fails at the event, which is where a real transfer error surfaces.
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    _backend->opened(0)->fail_event_synchronize = true;
+
+    FileSystemWorker worker(writer, issuer, Block);
+    std::atomic<bool> stopped{false};
+    worker.execute(std::move(workload), stopped);
+
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        const auto response = _responder->pop(5000);
+        EXPECT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        EXPECT_NE(response.ret, common::ResponseCode::Success)
+            << "range " << i << " was answered as read, but its copy never landed";
+    }
 }
 
 } // namespace runai::llm::streamer::impl

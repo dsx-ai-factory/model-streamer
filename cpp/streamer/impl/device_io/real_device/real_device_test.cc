@@ -480,4 +480,63 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
 }
 
+// tmpfs, which is the one filesystem that never reaches the asynchronous reader: it is memory
+// backed, so FsAsyncRouter leaves it ungrouped and its workloads go to the SYNCHRONOUS pool. That
+// pool reads with pread, which cannot target device memory - so these bytes have to go through
+// pinned buffers and a copy, and this is the only test that proves they do.
+//
+// A /dev/shm model cache is a common deployment, and before this path existed a device submission
+// from one failed outright.
+TEST_F(RealDevice, A_Tmpfs_Submission_Reads_Into_Device_Memory)
+{
+    // Tested rather than assumed: /dev/shm is tmpfs nearly everywhere, but a container can mount
+    // anything there, and reading from the wrong filesystem would quietly test the async path again.
+    if (::system("test \"$(stat -f -c %T /dev/shm)\" = tmpfs") != 0)
+    {
+        GTEST_SKIP() << "/dev/shm is not tmpfs here, so there is no memory-backed mount to read from";
+    }
+
+    constexpr size_t Total = 4 * Buffer;
+    constexpr unsigned Ranges = 8;
+
+    const auto data = utils::random::buffer(Total);
+    utils::temp::File file("/dev/shm", utils::random::string(), data);
+
+    void * target = nullptr;
+    ASSERT_EQ(_device->device_alloc(Total, &target), common::ResponseCode::Success);
+
+    Streamer streamer;
+
+    std::vector<FileRanges> request(1);
+    request[0].path = file.path;
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        request[0].ranges.push_back(
+            ReadRange{ i * (Total / Ranges), Total / Ranges,
+                       static_cast<char *>(target) + i * (Total / Ranges) });
+    }
+
+    SubmissionId submission_id = 0;
+    ASSERT_EQ(streamer.async_request(request, common::Device::cuda(0), &submission_id),
+              common::ResponseCode::Success);
+
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        bool done = false;
+        const auto response = streamer.response(30000, done);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "only " << i << " ranges answered";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+    }
+
+    // What makes this test about the synchronous reader rather than a second copy of the async one.
+    EXPECT_FALSE(streamer.async_pool_used())
+        << "a memory-backed mount must not reach the asynchronous reader";
+
+    const auto landed = read_back(target, Total);
+    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+        << "the bytes on the device are not the bytes in the file";
+
+    EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
+}
+
 } // namespace runai::llm::streamer::impl

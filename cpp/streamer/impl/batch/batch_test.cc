@@ -3,10 +3,12 @@
 
 #include <gtest/gtest.h>
 #include <utility>
+#include <cstring>
 #include <memory>
 #include <chrono>
 #include <set>
 
+#include "device/mock/mock_device.h"
 #include "utils/logging/logging.h"
 #include "utils/random/random.h"
 #include "utils/temp/file/file.h"
@@ -235,6 +237,207 @@ TEST(Read, Error)
 
     auto r = batch.responder->pop();
     EXPECT_EQ(r.ret, common::ResponseCode::EofError);
+}
+
+// A read that throws must give its staging buffer back. Nothing else will: the buffer was never
+// submitted, so no completion returns it, and the pool is three deep and lives as long as the
+// reading thread. Three failed batches and the fourth waits for a buffer that never comes.
+TEST(Read, A_Failed_Read_Returns_Its_Staging_Buffer)
+{
+    constexpr size_t Block = 4096;
+    constexpr unsigned Blocks = 4;
+
+    // Short of the range: the first two blocks read, the third hits the end of the file.
+    const auto data = utils::random::buffer(2 * Block + Block / 2);
+    utils::temp::File file(data);
+    common::s3::S3ClientWrapper::Params params;
+
+    auto responder = std::make_shared<common::Responder>(1);
+    const auto config = std::make_shared<Config>(false /* do not force minimum */);
+
+    std::vector<char> dst(Blocks * Block, 0);
+    auto request = std::make_shared<Request>(0 /* file offset */, 0 /* file */, 0 /* index */,
+                                             Blocks /* tasks */, dst.size(), dst.data());
+
+    Tasks tasks;
+    for (unsigned i = 0; i < Blocks; ++i)
+    {
+        tasks.emplace_back(request, i * Block, Block, i * Block);
+    }
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+
+    StagingPool::Params pool_params;
+    pool_params.buffer_bytesize = Block;
+    pool_params.slab_bytesize = Block;
+    pool_params.max_buffers = 3;
+
+    DeviceStaging staging;
+    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.issuer = issuer.get();
+
+    Batch batch(1 /* submission */, 0, 0, file.path, params, std::move(tasks), responder, config,
+                Block, common::Device::cuda(0));
+
+    std::atomic<bool> stopped(false);
+    EXPECT_NO_THROW(batch.execute(stopped, &staging));
+
+    EXPECT_EQ(responder->pop().ret, common::ResponseCode::EofError);
+
+    // Every buffer is back: the two that were copied, and the one the failed read was holding.
+    for (unsigned i = 0; i < pool_params.max_buffers; ++i)
+    {
+        StagingBuffer buffer;
+        ASSERT_EQ(staging.pool->try_acquire(buffer), common::ResponseCode::Success);
+        EXPECT_TRUE(buffer.valid()) << "buffer " << i << " of the pool was lost by the failed read";
+    }
+}
+
+// One copy failing PART WAY through is not the same case as all of them failing. The blocks that
+// landed before it really are on the device and were already answered; the failing block and
+// everything after it must not be. So the Success answers are a prefix, and it stops at the copy
+// that failed - which is what checking `failure` before advancing the progress counter buys.
+TEST(Read, A_Copy_That_Fails_Part_Way_Stops_The_Answers_There)
+{
+    constexpr size_t Block = 4096;
+    constexpr unsigned Blocks = 8;
+    constexpr unsigned FailFrom = 5;   // the fifth copy onwards, counting from 1
+
+    const auto data = utils::random::buffer(Blocks * Block);
+    utils::temp::File file(data);
+    common::s3::S3ClientWrapper::Params params;
+
+    // One response per range, all of them real: a responder that expects fewer answers the rest with
+    // its own end-of-stream marker, which reads exactly like a failed range and hides both.
+    auto responder = std::make_shared<common::Responder>(0, common::QueueMode::PERSISTENT);
+    responder->increment(Blocks);
+
+    const auto config = std::make_shared<Config>(false /* do not force minimum */);
+
+    std::vector<char> dst(Blocks * Block, 0);
+
+    // One range per block, so a response answers exactly one copy.
+    Tasks tasks;
+    std::vector<std::shared_ptr<Request>> requests;
+    for (unsigned i = 0; i < Blocks; ++i)
+    {
+        auto request = std::make_shared<Request>(i * Block, 0 /* file */, i /* index */,
+                                                 1 /* tasks */, Block, dst.data() + i * Block);
+        requests.push_back(request);
+        tasks.emplace_back(request, i * Block, Block, 0);
+    }
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    backend->opened(0)->fail_event_synchronize_from = FailFrom;
+
+    StagingPool::Params pool_params;
+    pool_params.buffer_bytesize = Block;
+    pool_params.slab_bytesize = Block;
+    pool_params.max_buffers = 3;
+
+    DeviceStaging staging;
+    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.issuer = issuer.get();
+
+    Batch batch(1 /* submission */, 0, 0, file.path, params, std::move(tasks), responder, config,
+                Block, common::Device::cuda(0));
+
+    std::atomic<bool> stopped(false);
+    EXPECT_NO_THROW(batch.execute(stopped, &staging));
+
+    std::vector<common::ResponseCode> answers;
+    for (unsigned i = 0; i < Blocks; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        answers.push_back(response.ret);
+    }
+
+    // Ranges are answered in file order, so the Success answers run from the front and stop.
+    unsigned succeeded = 0;
+    while (succeeded < Blocks && answers[succeeded] == common::ResponseCode::Success)
+    {
+        ++succeeded;
+    }
+
+    for (unsigned i = succeeded; i < Blocks; ++i)
+    {
+        EXPECT_NE(answers[i], common::ResponseCode::Success)
+            << "range " << i << " was answered as read after an earlier copy had already failed";
+    }
+
+    EXPECT_LE(succeeded, FailFrom - 1)
+        << "the copy that failed, or one after it, was answered as read";
+
+    // Whatever was answered Success really did land. The reader is free to have answered fewer,
+    // since it only answers what has already completed.
+    EXPECT_EQ(std::memcmp(dst.data(), data.data(), succeeded * Block), 0)
+        << "a range answered as read does not hold the file's bytes";
+}
+
+// A stopped pool hands out nothing, so the rest of the range is never read. Answering it Success
+// would report bytes that never left the file, let alone reached the device.
+TEST(Read, A_Stopped_Pool_Is_Not_Answered_As_Read)
+{
+    constexpr size_t Block = 4096;
+    constexpr unsigned Blocks = 4;
+
+    const auto data = utils::random::buffer(Blocks * Block);
+    utils::temp::File file(data);
+    common::s3::S3ClientWrapper::Params params;
+
+    auto responder = std::make_shared<common::Responder>(1);
+    const auto config = std::make_shared<Config>(false /* do not force minimum */);
+
+    std::vector<char> dst(Blocks * Block, 0);
+    auto request = std::make_shared<Request>(0 /* file offset */, 0 /* file */, 0 /* index */,
+                                             Blocks /* tasks */, dst.size(), dst.data());
+
+    Tasks tasks;
+    for (unsigned i = 0; i < Blocks; ++i)
+    {
+        tasks.emplace_back(request, i * Block, Block, i * Block);
+    }
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+
+    StagingPool::Params pool_params;
+    pool_params.buffer_bytesize = Block;
+    pool_params.slab_bytesize = Block;
+    pool_params.max_buffers = 3;
+
+    DeviceStaging staging;
+    staging.pool = std::make_shared<SharedStagingPool>(writer->device(channel), pool_params);
+    staging.issuer = issuer.get();
+
+    // Stopped before the first acquire, which is the state a teardown leaves the pool in.
+    staging.pool->stop();
+
+    Batch batch(1 /* submission */, 0, 0, file.path, params, std::move(tasks), responder, config,
+                Block, common::Device::cuda(0));
+
+    std::atomic<bool> stopped(false);
+    EXPECT_NO_THROW(batch.execute(stopped, &staging));
+
+    EXPECT_EQ(responder->pop().ret, common::ResponseCode::FinishedError)
+        << "the range was answered as read, but nothing was ever read into it";
+
+    EXPECT_EQ(backend->opened(0)->copies, 0u);
 }
 
 TEST(Read, Already_Stopped)

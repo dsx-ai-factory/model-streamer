@@ -79,6 +79,10 @@ class StagingPool
     // Hand a buffer back once its copy has landed. The StreamWaiter calls this.
     virtual void release(const StagingBuffer & buffer);
 
+    // What one buffer holds. A caller must never read more than this into one, so the size belongs
+    // here rather than being carried separately and kept in step by hand.
+    size_t buffer_bytesize() const;
+
     // Diagnostics. Not synchronised - call from the acquiring thread.
     unsigned created() const;
     unsigned slabs() const;

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <mutex>
 
+#include "common/exception/exception.h"
+
 namespace runai::llm::streamer::device
 {
 
@@ -44,6 +46,11 @@ common::ResponseCode MockDevice::host_alloc(size_t bytesize, void ** ptr)
     const std::lock_guard<std::mutex> guard(_mutex);
     ++host_allocs;
     host_alloc_sizes.push_back(bytesize);
+
+    if (throw_host_alloc_at != 0 && host_allocs == throw_host_alloc_at)
+    {
+        throw common::Exception(common::ResponseCode::DeviceOutOfMemory);
+    }
 
     if (fail_host_alloc_at != 0 && host_allocs == fail_host_alloc_at)
     {
@@ -176,14 +183,15 @@ common::ResponseCode MockDevice::event_query(EventHandle event, Status & status)
 
 common::ResponseCode MockDevice::event_synchronize(EventHandle event)
 {
-    ++event_syncs;
+    const unsigned nth = ++event_syncs;
 
     const std::lock_guard<std::mutex> guard(_mutex);
     _ready[event] = true;
 
-    return fail_event_synchronize.load()
-        ? common::ResponseCode::DeviceTransferError
-        : common::ResponseCode::Success;
+    const unsigned from = fail_event_synchronize_from.load();
+    const bool fails = fail_event_synchronize.load() || (from != 0 && nth >= from);
+
+    return fails ? common::ResponseCode::DeviceTransferError : common::ResponseCode::Success;
 }
 
 common::ResponseCode MockDevice::memcpy_h2d_async(void * dst, const void * src, size_t bytesize, StreamHandle)

@@ -10,6 +10,7 @@ runai_cc_auto_library(
         "//device",
         "//device/owned",
         "//utils/logging",
+        "//utils/scope_guard",
     ],
 )
 
@@ -18,6 +19,7 @@ runai_cc_test(
     srcs = ["staging_pool_test.cc"],
     deps = [
         ":staging_pool",
+        "//common/exception",
         "//device/mock",
     ],
     env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},

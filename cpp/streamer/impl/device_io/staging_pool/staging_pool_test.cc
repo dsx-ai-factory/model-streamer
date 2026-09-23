@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 
+#include "common/exception/exception.h"
 #include "device/mock/mock_device.h"
 
 namespace runai::llm::streamer::impl
@@ -104,6 +105,22 @@ TEST_F(StagingPoolTest, Grows_On_Demand_And_Stops_At_The_Ceiling)
     ASSERT_EQ(pool.try_acquire(none), common::ResponseCode::Success);
     EXPECT_FALSE(none.valid()) << "at the ceiling with everything in flight, acquire yields nothing";
     EXPECT_EQ(_mock->host_allocs, 2u) << "a refused acquire must not register another slab";
+}
+
+// Buffers of no bytes divide by zero when a slab is planned, which kills the process rather than
+// telling the caller. Nothing is handed out instead.
+TEST_F(StagingPoolTest, A_Pool_Of_Zero_Sized_Buffers_Hands_Out_Nothing)
+{
+    StagingPool::Params zero;
+    zero.max_buffers = 4;   // a ceiling, but no size to cut buffers to
+
+    StagingPool pool(_mock, zero);
+
+    StagingBuffer buffer;
+    EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+    EXPECT_FALSE(buffer.valid());
+    EXPECT_EQ(pool.created(), 0u);
+    EXPECT_EQ(_mock->host_allocs, 0u) << "nothing was registered for buffers that hold nothing";
 }
 
 // Buffers are interchangeable, so returning them in an order unrelated to how they were taken is
@@ -277,6 +294,30 @@ TEST_F(StagingPoolTest, Shared_Pool_Blocks_Until_A_Buffer_Comes_Back)
     pool.release(held);
     waiter.join();
     EXPECT_TRUE(got.load(std::memory_order_acquire));
+}
+
+// Pinning happens with the lock released, and a flag tells the other consumers that somebody is
+// already doing it. A driver call that THROWS must still clear that flag and wake them: otherwise
+// every later acquire waits for a grow that nobody is performing any more, which is every reading
+// thread of the pool, for good.
+TEST_F(StagingPoolTest, A_Throwing_Registration_Leaves_The_Pool_Usable)
+{
+    SharedStagingPool pool(_mock, params(4));
+
+    _mock->throw_host_alloc_at = 1;
+
+    StagingBuffer buffer;
+    EXPECT_THROW(pool.try_acquire(buffer), common::Exception);
+    EXPECT_FALSE(buffer.valid());
+    EXPECT_EQ(pool.created(), 0u);
+
+    // The next consumer grows the pool itself, rather than being told one is already on its way.
+    _mock->throw_host_alloc_at = 0;
+
+    StagingBuffer again;
+    ASSERT_EQ(pool.try_acquire(again), common::ResponseCode::Success);
+    EXPECT_TRUE(again.valid()) << "the pool still believes a registration is in flight";
+    EXPECT_EQ(pool.created(), 4u);
 }
 
 // Without this, a waiter sleeps for a reaper that has already stopped.

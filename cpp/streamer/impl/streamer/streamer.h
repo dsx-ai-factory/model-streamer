@@ -22,6 +22,7 @@
 #include "streamer/impl/batches/batches.h"
 #include "streamer/impl/request/request.h"
 #include "streamer/impl/submissions/submissions_mgr.h"
+#include "streamer/impl/device_io/device_issuer/device_issuer.h"
 #include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/pools/backend_pools.h"
 #include "posix_io/mount_capabilities/mount_capabilities.h"
@@ -190,6 +191,11 @@ struct Streamer
     // however many workers copy to it. Costs nothing until a submission actually names a device, so
     // it is created unconditionally. Also BEFORE _pools, for the same reason as _router.
     std::shared_ptr<DeviceWriter> _device_writer;
+
+    // One thread issuing every copy for the SYNCHRONOUS reader, shared by its threads. The async
+    // workers do not use it: each of those is a single thread and issues its own copies. Costs
+    // nothing until a device workload reaches the synchronous pool. Also BEFORE _pools.
+    std::shared_ptr<DeviceIssuer> _device_issuer;
 
     AsyncIoStats _stats;
 

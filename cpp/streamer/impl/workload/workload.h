@@ -31,7 +31,9 @@ struct Workload
 
     // Read a filesystem workload synchronously. NOT for object storage (asserts): those are dispatched to
     // the ObjectStorageWorker pool.
-    void execute(std::atomic<bool> & stopped);
+    //
+    // `staging` is required when device() is not the host - see Batch::execute.
+    void execute(std::atomic<bool> & stopped, const DeviceStaging * staging = nullptr);
 
     common::ResponseCode add_batch(Batch && batch);
 

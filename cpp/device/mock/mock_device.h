@@ -72,8 +72,18 @@ class MockDevice : public Device
     // Fail the Nth host_alloc, counting from 1. Zero means never.
     unsigned fail_host_alloc_at = 0;
 
+    // THROW from the Nth host_alloc instead of returning a code, counting from 1. Zero means never.
+    // A driver call reaches an ASSERT, which is fatal, so a caller that only handles return codes
+    // still has to survive an exception from here.
+    unsigned throw_host_alloc_at = 0;
+
     // Make every event_synchronize report a failed copy.
     std::atomic<bool> fail_event_synchronize{false};
+
+    // Fail every event_synchronize from the Nth onwards, counting from 1. Zero means never. One copy
+    // failing part way through a batch is not the same case as all of them: the reader must keep the
+    // answers it already gave for the blocks that landed before it.
+    std::atomic<unsigned> fail_event_synchronize_from{0};
 
     // Fail every event_create from the Nth onwards, counting from 1. Zero means never.
     unsigned fail_event_create_from = 0;
