@@ -65,7 +65,10 @@ TEST(Batches, Sanity)
     std::vector<std::set<int>> expected_responses(num_files);
 
     const auto chunk_size = utils::random::number<size_t>(1, 1024);
-    auto config = std::make_shared<Config>(utils::random::number(1, 20), utils::random::number<size_t>(1, 1024), chunk_size, false /* do not force minimum chunk size */);
+    auto config = std::make_shared<Config>(utils::random::number(1, 20), 1 /* s3 concurrency */,
+                                           utils::random::number<size_t>(1, 1024) /* s3 block */,
+                                           chunk_size /* fs read block */,
+                                           false /* do not force the minimum */);
     auto responder = std::make_shared<common::Responder>(0);
 
     for (unsigned i = 0; i < num_files; ++i)
@@ -401,7 +404,10 @@ TEST(Batches, Failed_Reader)
     auto chunks = utils::random::chunks(size, num_chunks);
 
     const auto chunk_size = utils::random::number<size_t>(1, 1024);
-    auto config = std::make_shared<Config>(utils::random::number(1, 20), utils::random::number<size_t>(1, 1024), chunk_size, false /* do not force minimum chunk size */);
+    auto config = std::make_shared<Config>(utils::random::number(1, 20), 1 /* s3 concurrency */,
+                                           utils::random::number<size_t>(1, 1024) /* s3 block */,
+                                           chunk_size /* fs read block */,
+                                           false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto responder = std::make_shared<common::Responder>(num_chunks);
@@ -472,7 +478,10 @@ TEST(Batches, Zero_Size_Request)
     num_chunks = chunks.size();
 
     const auto chunk_size = utils::random::number<size_t>(1, 1024);
-    auto config = std::make_shared<Config>(utils::random::number(1, 20), utils::random::number<size_t>(1, 1024), chunk_size, false /* do not force minimum chunk size */);
+    auto config = std::make_shared<Config>(utils::random::number(1, 20), 1 /* s3 concurrency */,
+                                           utils::random::number<size_t>(1, 1024) /* s3 block */,
+                                           chunk_size /* fs read block */,
+                                           false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto responder = std::make_shared<common::Responder>(num_chunks);

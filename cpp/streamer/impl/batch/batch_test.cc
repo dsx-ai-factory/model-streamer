@@ -106,7 +106,10 @@ TEST(Read, Sanity)
     auto responder = std::make_shared<common::Responder>(1);
 
     const auto chunk_bytesize = utils::random::number<size_t>(1, size);
-    const auto config = std::make_shared<Config>(utils::random::number(1, 4), chunk_bytesize, utils::random::number<size_t>(1, chunk_bytesize), false /* do not force minimum chunk size */);
+    const auto config = std::make_shared<Config>(utils::random::number(1, 4), 1 /* s3 concurrency */,
+                                                 chunk_bytesize /* s3 block */,
+                                                 utils::random::number<size_t>(1, chunk_bytesize) /* fs read block */,
+                                                 false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto dst_ptr = dst.data();
@@ -460,7 +463,10 @@ TEST(Read, Already_Stopped)
     auto responder = std::make_shared<common::Responder>(1);
 
     const auto chunk_bytesize = utils::random::number<size_t>(1, size);
-    const auto config = std::make_shared<Config>(utils::random::number(1, 4), chunk_bytesize, utils::random::number<size_t>(1, chunk_bytesize), false /* do not force minimum chunk size */);
+    const auto config = std::make_shared<Config>(utils::random::number(1, 4), 1 /* s3 concurrency */,
+                                                 chunk_bytesize /* s3 block */,
+                                                 utils::random::number<size_t>(1, chunk_bytesize) /* fs read block */,
+                                                 false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto dst_ptr = dst.data();
@@ -520,7 +526,10 @@ TEST(Read, Stopped_During_Read)
     auto responder = std::make_shared<common::Responder>(num_requests);
 
     const auto chunk_bytesize = utils::random::number<size_t>(1, size);
-    const auto config = std::make_shared<Config>(utils::random::number(1, 4), chunk_bytesize, utils::random::number<size_t>(1, chunk_bytesize), false /* do not force minimum chunk size */);
+    const auto config = std::make_shared<Config>(utils::random::number(1, 4), 1 /* s3 concurrency */,
+                                                 chunk_bytesize /* s3 block */,
+                                                 utils::random::number<size_t>(1, chunk_bytesize) /* fs read block */,
+                                                 false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto dst_ptr = dst.data();
@@ -630,7 +639,10 @@ TEST(Batch, Handle_Error_After_Completion_Is_Silent)
     auto responder = std::make_shared<common::Responder>(1, common::QueueMode::PERSISTENT);
 
     const auto chunk_bytesize = utils::random::number<size_t>(1, size);
-    const auto config = std::make_shared<Config>(utils::random::number(1, 4), chunk_bytesize, utils::random::number<size_t>(1, chunk_bytesize), false /* do not force minimum chunk size */);
+    const auto config = std::make_shared<Config>(utils::random::number(1, 4), 1 /* s3 concurrency */,
+                                                 chunk_bytesize /* s3 block */,
+                                                 utils::random::number<size_t>(1, chunk_bytesize) /* fs read block */,
+                                                 false /* do not force the minimum */);
 
     std::vector<char> dst(size);
     auto request = std::make_shared<Request>(start, utils::random::number(), utils::random::number(), 1, size, dst.data());
