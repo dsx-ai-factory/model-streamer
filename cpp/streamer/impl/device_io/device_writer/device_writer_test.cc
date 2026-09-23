@@ -9,7 +9,10 @@
 #include <thread>
 #include <vector>
 
+#include <map>
+
 #include "device/mock/mock_device.h"
+#include "streamer/impl/device_io/event_pool/event_pool.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -43,7 +46,7 @@ class DeviceWriterTest : public ::testing::Test
         return [this]() { ++_factory_calls; return _backend; };
     }
 
-    // The writer owns no buffers, so a test that needs one brings its own pool - as a reader does.
+    // The writer owns neither buffers nor events, so a test brings both - as a client does.
     std::shared_ptr<SharedStagingPool> pool_for(DeviceWriter & writer, DeviceWriter::Channel channel, unsigned max_buffers)
     {
         StagingPool::Params params;
@@ -52,6 +55,31 @@ class DeviceWriterTest : public ::testing::Test
         params.max_buffers = max_buffers;
         return std::make_shared<SharedStagingPool>(writer.device(channel), params);
     }
+
+    std::shared_ptr<EventPool> events_for(DeviceWriter & writer, DeviceWriter::Channel channel, unsigned max_events)
+    {
+        return std::make_shared<EventPool>(writer.device(channel), max_events);
+    }
+
+    // One copy's worth: a buffer from `pool` and an event from the channel's own pool.
+    DeviceWriter::Copy copy_of(DeviceWriter & writer, DeviceWriter::Channel channel,
+                               const std::shared_ptr<SharedStagingPool> & pool, const StagingBuffer & buffer)
+    {
+        auto & events = _events[channel];
+        if (events == nullptr)
+        {
+            events = events_for(writer, channel, 64);
+        }
+
+        DeviceWriter::Copy copy;
+        copy.pool = pool;
+        copy.buffer = buffer;
+        copy.events = events;
+        EXPECT_EQ(events->acquire(copy.event), common::ResponseCode::Success);
+        return copy;
+    }
+
+    std::map<DeviceWriter::Channel, std::shared_ptr<EventPool>> _events;
 
     std::shared_ptr<device::MockBackend> _backend = std::make_shared<device::MockBackend>();
     std::atomic<unsigned> _factory_calls{0};
@@ -114,7 +142,7 @@ TEST_F(DeviceWriterTest, Write_Copies_And_Returns_The_Buffer)
     std::vector<char> destination(Buffer, 0);
 
     std::atomic<int> reported{-1};
-    ASSERT_EQ(writer.write(channel, pool, buffer, Buffer, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
                            [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); }),
               common::ResponseCode::Success);
 
@@ -150,7 +178,7 @@ TEST_F(DeviceWriterTest, One_Buffer_Is_One_Copy)
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
         std::memset(buffer.data, static_cast<int>('a' + i), Buffer);
-        ASSERT_EQ(writer.write(channel, pool, buffer, Buffer, destination.data() + i * Buffer,
+        ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data() + i * Buffer,
                                [&](common::ResponseCode) { ++done; }),
                   common::ResponseCode::Success);
     }
@@ -178,7 +206,7 @@ TEST_F(DeviceWriterTest, Only_The_Bytes_Read_Are_Copied)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(writer.write(channel, pool, buffer, 16, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 16, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
@@ -207,7 +235,7 @@ TEST_F(DeviceWriterTest, A_Second_Device_Gets_Its_Own_Stream)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(writer.write(second, pool, buffer, Buffer, destination.data(),
+    ASSERT_EQ(writer.write(second, copy_of(writer, second, pool, buffer), Buffer, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
@@ -287,7 +315,7 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
                 StagingBuffer buffer;
                 ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
                 ASSERT_TRUE(buffer.valid());
-                ASSERT_EQ(writer.write(channel, pool, buffer, Buffer, destination.data() + i * Buffer, nullptr),
+                ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data() + i * Buffer, nullptr),
                           common::ResponseCode::Success);
             }
         }   // ~DeviceWriter stops the waiter, so every buffer is back before the pool can go
@@ -297,9 +325,12 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
 
     const auto device = mock->opened(0);
     ASSERT_NE(device, nullptr);
-    EXPECT_EQ(device->events_destroyed, 4u);
     EXPECT_EQ(device->host_frees, 1u) << "the slab was freed";
     EXPECT_TRUE(device->live_host.empty()) << "nothing left pinned";
+
+    // The events belong to this test's pool, not to the writer or the buffers - see EventPool. Their
+    // destruction is that pool's business, and its own test.
+    EXPECT_EQ(device->foreign_records, 0u) << "every event was recorded on its own device's stream";
 }
 
 // The waiter returns the buffer to the pool, so the pool must outlive the copy - whatever the reader
@@ -319,7 +350,7 @@ TEST_F(DeviceWriterTest, The_Pool_Outlives_A_Reader_That_Drops_It)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> alive{-1};
-    ASSERT_EQ(writer.write(channel, pool, buffer, Buffer, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
                            [&](common::ResponseCode) { alive.store(watch.lock() != nullptr ? 1 : 0); }),
               common::ResponseCode::Success);
 
@@ -397,7 +428,7 @@ TEST_F(DeviceWriterTest, Copying_More_Than_The_Buffer_Holds_Is_Refused_And_The_B
 
     std::vector<char> destination(2 * Buffer, 0);
     std::atomic<bool> told{false};
-    EXPECT_EQ(writer.write(channel, pool, buffer, Buffer + 1, destination.data(),
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer + 1, destination.data(),
                            [&](common::ResponseCode) { told.store(true); }),
               common::ResponseCode::InvalidParameterError);
 
@@ -414,7 +445,7 @@ TEST_F(DeviceWriterTest, Copying_More_Than_The_Buffer_Holds_Is_Refused_And_The_B
 // No pool means the copy cannot be accepted AT ALL - not even successfully. The waiter gives the
 // buffer back from its own thread, so enqueuing would move the fault to another thread and turn a
 // bad call into a crash.
-TEST_F(DeviceWriterTest, Write_Without_A_Pool_Is_Refused_Before_Anything_Is_Enqueued)
+TEST_F(DeviceWriterTest, Write_Without_A_Pool_Or_Event_Is_Refused_Before_Anything_Is_Enqueued)
 {
     DeviceWriter writer(factory());
 
@@ -425,8 +456,12 @@ TEST_F(DeviceWriterTest, Write_Without_A_Pool_Is_Refused_Before_Anything_Is_Enqu
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
 
+    // A copy with nowhere to put the buffer back.
+    DeviceWriter::Copy orphan;
+    orphan.buffer = buffer;
+
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(writer.write(channel, nullptr, buffer, Buffer, destination.data(), nullptr),
+    EXPECT_EQ(writer.write(channel, orphan, Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
     EXPECT_EQ(_backend->opened(0)->copies, 0u) << "nothing was enqueued, so no thread can touch it";
 
@@ -450,7 +485,7 @@ TEST_F(DeviceWriterTest, Write_Without_A_Channel_Still_Returns_The_Buffer)
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(writer.write(nullptr, pool, buffer, Buffer, destination.data(), nullptr),
+    EXPECT_EQ(writer.write(nullptr, copy_of(writer, channel, pool, buffer), Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
 
     StagingBuffer again;

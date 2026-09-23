@@ -43,7 +43,6 @@ TEST_F(StagingPoolTest, Allocates_Nothing_Until_Asked)
     StagingPool pool(_mock, params(16));
 
     EXPECT_EQ(_mock->host_allocs, 0u);
-    EXPECT_EQ(_mock->events_created, 0u);
     EXPECT_EQ(pool.created(), 0u);
 }
 
@@ -60,7 +59,6 @@ TEST_F(StagingPoolTest, One_Registration_Per_Slab)
     EXPECT_EQ(_mock->host_allocs, 1u);
     EXPECT_EQ(_mock->host_alloc_sizes.front(), Slab);
     EXPECT_EQ(pool.created(), 4u);        // the whole slab is carved at once
-    EXPECT_EQ(_mock->events_created, 4u); // one event per buffer, created with it
 }
 
 TEST_F(StagingPoolTest, Buffers_Are_Carved_From_The_Slab_In_Order)
@@ -80,7 +78,6 @@ TEST_F(StagingPoolTest, Buffers_Are_Carved_From_The_Slab_In_Order)
     for (unsigned i = 1; i < 4; ++i)
     {
         EXPECT_EQ(taken[i].data, taken[i - 1].data + Buffer);
-        EXPECT_NE(taken[i].event, taken[i - 1].event);
     }
 }
 
@@ -168,25 +165,6 @@ TEST_F(StagingPoolTest, A_Released_Buffer_Is_Handed_Out_Again)
     EXPECT_EQ(_mock->host_allocs, 1u) << "reuse, not another registration";
 }
 
-// A returned buffer must be usable immediately. A pool that handed back a buffer whose copy had
-// not landed would corrupt the next read into it.
-TEST_F(StagingPoolTest, The_Buffer_Carries_Its_Own_Event)
-{
-    StagingPool pool(_mock, params(4));
-
-    StagingBuffer buffer;
-    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
-    ASSERT_NE(buffer.event, nullptr);
-
-    device::Status status = device::Status::NotReady;
-    ASSERT_EQ(_mock->event_query(buffer.event, status), common::ResponseCode::Success);
-    EXPECT_EQ(status, device::Status::Ready) << "a never-recorded event is empty work, so a fresh buffer is free";
-
-    ASSERT_EQ(_mock->event_record(buffer.event, nullptr), common::ResponseCode::Success);
-    ASSERT_EQ(_mock->event_query(buffer.event, status), common::ResponseCode::Success);
-    EXPECT_EQ(status, device::Status::NotReady);
-}
-
 TEST_F(StagingPoolTest, A_Failed_Registration_Is_Reported)
 {
     _mock->fail_host_alloc_at = 1;
@@ -199,51 +177,9 @@ TEST_F(StagingPoolTest, A_Failed_Registration_Is_Reported)
     EXPECT_EQ(pool.created(), 0u);
 }
 
-// A slab whose first event fails yields no usable buffer. Keeping it and reporting success makes
-// acquire() ask again, and grow() allocate another slab that fails the same way - pinned memory
-// growing without bound under exactly the condition that made the event fail.
-TEST_F(StagingPoolTest, A_Slab_That_Yields_No_Buffer_Is_Freed_And_Reported)
-{
-    _mock->fail_event_create_from = 1;
-
-    StagingPool pool(_mock, params(8, 4 * Buffer));
-
-    for (unsigned attempt = 0; attempt < 5; ++attempt)
-    {
-        StagingBuffer buffer;
-        EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::DeviceOutOfMemory) << "attempt " << attempt;
-        EXPECT_FALSE(buffer.valid());
-    }
-
-    EXPECT_EQ(pool.created(), 0u);
-    EXPECT_EQ(_mock->host_allocs, 5u) << "one slab per attempt, and no more";
-    EXPECT_EQ(_mock->host_frees, 5u) << "each unusable slab was freed at once, not held to teardown";
-    EXPECT_TRUE(_mock->live_host.empty());
-}
-
-// A slab whose LATER events fail still yields the buffers it managed to build, so it is kept.
-TEST_F(StagingPoolTest, A_Slab_That_Yields_Some_Buffers_Is_Kept)
-{
-    _mock->fail_event_create_from = 3;      // two succeed, the rest fail
-
-    StagingPool pool(_mock, params(8, 4 * Buffer));
-
-    StagingBuffer first;
-    ASSERT_EQ(pool.try_acquire(first), common::ResponseCode::Success);
-    EXPECT_TRUE(first.valid());
-
-    StagingBuffer second;
-    ASSERT_EQ(pool.try_acquire(second), common::ResponseCode::Success);
-    EXPECT_TRUE(second.valid());
-
-    EXPECT_EQ(pool.created(), 2u) << "the two buffers whose events were made";
-    EXPECT_EQ(_mock->host_allocs, 1u);
-    EXPECT_EQ(_mock->host_frees, 0u) << "the slab is in use, so it stays";
-}
-
-// Events first, then the memory they refer to. The other order frees pinned pages the driver may
-// still be writing into.
-TEST_F(StagingPoolTest, Teardown_Destroys_Every_Event_And_Frees_Every_Slab)
+// Every slab is freed. The pool waits for nothing: a buffer comes back only after its copy's event
+// was synchronised, so every buffer being back already means no DMA is reading out of this memory.
+TEST_F(StagingPoolTest, Teardown_Frees_Every_Slab)
 {
     {
         StagingPool pool(_mock, params(6));
@@ -252,12 +188,10 @@ TEST_F(StagingPoolTest, Teardown_Destroys_Every_Event_And_Frees_Every_Slab)
             StagingBuffer buffer;
             ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
         }
-        EXPECT_EQ(_mock->events_created, 6u);
         EXPECT_EQ(_mock->host_allocs, 2u);
+        EXPECT_EQ(_mock->events_created, 0u) << "the pool owns no events";
     }
 
-    EXPECT_EQ(_mock->events_destroyed, 6u);
-    EXPECT_EQ(_mock->event_syncs, 6u) << "drained before anything is freed";
     EXPECT_EQ(_mock->host_frees, 2u);
     EXPECT_TRUE(_mock->live_host.empty()) << "no slab left pinned";
 }

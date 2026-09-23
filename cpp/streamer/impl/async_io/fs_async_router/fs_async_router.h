@@ -12,6 +12,7 @@
 #include "posix_io/mount_capabilities/mount_capabilities.h"
 #include "posix_io/strategy/strategy.h"
 
+#include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
 #include "streamer/impl/config/fs_queue_depth/fs_queue_depth.h"
 #include "streamer/impl/request/request.h"
@@ -69,7 +70,10 @@ class FsAsyncRouter
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
     using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned)>;
-    WorkerFactory worker_factory() const;
+
+    // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
+    // by value like everything else here, so a worker outlives this object whatever the order.
+    WorkerFactory worker_factory(std::shared_ptr<DeviceWriter> writer) const;
 
     // The largest direct-I/O block any of these mounts requires. `paths` must exclude object-storage
     // URIs, which name no mount.

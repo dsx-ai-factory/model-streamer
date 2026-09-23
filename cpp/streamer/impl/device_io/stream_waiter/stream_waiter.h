@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "device/device.h"
+#include "streamer/impl/device_io/event_pool/event_pool.h"
 #include "streamer/impl/device_io/staging_pool/staging_pool.h"
 #include "utils/draining_worker/draining_worker.h"
 
@@ -34,15 +35,25 @@ class StreamWaiter
     StreamWaiter(const StreamWaiter &) = delete;
     StreamWaiter & operator=(const StreamWaiter &) = delete;
 
-    // Hand over a buffer whose copy has been issued and whose event recorded, with the pool to
-    // return it to. Starts the thread the first time it is called.
+    // What one copy left behind: the buffer to give back, and the event that says when.
     //
-    // The pool comes per buffer because one stream serves every worker of its device, and each has
-    // its own pool.
+    // Both pools come per copy because one stream serves every worker of its device, and each worker
+    // has its own.
+    struct Copy
+    {
+        std::shared_ptr<StagingPool> pool;
+        StagingBuffer buffer;
+
+        std::shared_ptr<EventPool> events;
+        device::EventHandle event = nullptr;
+    };
+
+    // Hand over a copy that has been issued and whose event recorded. Starts the thread the first
+    // time it is called.
     //
     // Call it immediately after event_record: the gap is how long another thread can interleave on
     // the shared stream, and so how long the buffer is held.
-    void enqueue(std::shared_ptr<StagingPool> pool, const StagingBuffer & buffer, Completion on_done);
+    void enqueue(Copy copy, Completion on_done);
 
     // Waits for what is already queued, then ends the thread.
     //
@@ -56,9 +67,9 @@ class StreamWaiter
  private:
     struct Entry
     {
-        // Shared, not borrowed: the pool must outlive the copy, whatever its worker does meanwhile.
-        std::shared_ptr<StagingPool> pool;
-        StagingBuffer buffer;
+        // Shared, not borrowed: both pools must outlive the copy, whatever their worker does
+        // meanwhile.
+        Copy copy;
         Completion on_done;
     };
 

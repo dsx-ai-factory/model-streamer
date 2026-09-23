@@ -7,6 +7,7 @@ runai_cc_auto_library(
     # sub-packages.
     visibility = ["//streamer:__subpackages__"],
     deps = [
+        "//streamer/impl/device_io/event_pool",
         "//device",
         "//streamer/impl/device_io/staging_pool",
         "//utils/draining_worker",

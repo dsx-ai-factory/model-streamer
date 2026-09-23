@@ -1878,9 +1878,9 @@ TEST(Async, QueueDepthIsResolvedPerMount)
 // workload is homogeneous in its device, a SUBMISSION is - a worker is not, and must not be: the
 // same threads read for whatever is in flight.
 //
-// The device is carried but not yet acted on, so what this pins down is that nothing in the path
-// refuses the mix and every range still gets its response. Where the copies actually go is the
-// DeviceWriterClient's business, and is tested there.
+// There is no CUDA driver on the test host, so the device submissions FAIL. That is the point: each
+// one fails on its own, the host submission beside them is served normally, and every range gets
+// exactly one response. A device we cannot reach must not hang the caller or disturb its neighbours.
 TEST(Device, Concurrent_Submissions_To_Different_Devices)
 {
     const size_t range_size = 4096;
@@ -1900,7 +1900,7 @@ TEST(Device, Concurrent_Submissions_To_Different_Devices)
 
     std::vector<std::vector<char>> buffers(devices.size(), std::vector<char>(range_size * ranges));
     std::vector<std::vector<FileRanges>> requests(devices.size());
-    std::set<SubmissionId> submitted;
+    std::map<SubmissionId, size_t> submitted;   // id -> its index in `devices`
 
     for (size_t d = 0; d < devices.size(); ++d)
     {
@@ -1915,34 +1915,45 @@ TEST(Device, Concurrent_Submissions_To_Different_Devices)
         SubmissionId id = 0;
         ASSERT_EQ(streamer.async_request(requests[d], devices[d], &id), common::ResponseCode::Success)
             << "device " << devices[d];
-        submitted.insert(id);
+        submitted.emplace(id, d);
     }
 
     ASSERT_EQ(submitted.size(), devices.size()) << "every submission got its own id";
 
-    // Drain them all. Responses arrive interleaved, so they are counted per submission.
+    // Responses arrive interleaved, so they are counted per submission.
     std::map<SubmissionId, unsigned> answered;
     std::set<SubmissionId> finished;
     for (unsigned i = 0; i < ranges * devices.size(); ++i)
     {
         const auto received = recv(streamer);
-        EXPECT_EQ(received.response.ret, common::ResponseCode::Success);
-        ++answered[received.response.submission_id];
+        const auto id = received.response.submission_id;
+        ASSERT_EQ(submitted.count(id), 1u) << "response for an unknown submission";
+
+        if (devices[submitted.at(id)].is_host())
+        {
+            EXPECT_EQ(received.response.ret, common::ResponseCode::Success);
+        }
+        else
+        {
+            EXPECT_NE(received.response.ret, common::ResponseCode::Success)
+                << "there is no driver here, so a device submission cannot succeed";
+        }
+
+        ++answered[id];
         if (received.submission_done)
         {
-            finished.insert(received.response.submission_id);
+            finished.insert(id);
         }
     }
 
-    EXPECT_EQ(finished, submitted) << "every submission completed";
-    for (const auto id : submitted)
+    EXPECT_EQ(finished.size(), submitted.size()) << "every submission completed";
+    for (const auto & entry : submitted)
     {
-        EXPECT_EQ(answered[id], ranges) << "submission " << id;
+        EXPECT_EQ(answered[entry.first], ranges) << "submission " << entry.first;
     }
-    for (size_t d = 0; d < devices.size(); ++d)
-    {
-        EXPECT_EQ(std::memcmp(buffers[d].data(), data.data(), data.size()), 0) << "device " << devices[d];
-    }
+
+    // The host submission is untouched by the failures beside it.
+    EXPECT_EQ(std::memcmp(buffers[0].data(), data.data(), data.size()), 0);
 }
 
 }; // namespace runai::llm::streamer::impl

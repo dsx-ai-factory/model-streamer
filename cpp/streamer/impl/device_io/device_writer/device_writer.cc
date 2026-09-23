@@ -48,6 +48,15 @@ common::ResponseCode DeviceWriter::Channels::open(const BackendFactory & backend
         return code;
     }
 
+    // open_device RETAINS the primary context; it does not make it current on this thread. Every
+    // driver call below - and every one the caller makes afterwards - needs a current context, so the
+    // first one binds it here.
+    code = target.device->bind_thread();
+    if (code != common::ResponseCode::Success)
+    {
+        return code;
+    }
+
     device::StreamHandle stream = nullptr;
     code = target.device->stream_create(stream);
     if (code != common::ResponseCode::Success)
@@ -90,21 +99,23 @@ std::shared_ptr<device::Device> DeviceWriter::device(Channel channel) const
 }
 
 common::ResponseCode DeviceWriter::write(Channel channel,
-                                         std::shared_ptr<StagingPool> pool,
-                                         const StagingBuffer & buffer,
+                                         Copy copy,
                                          size_t bytesize,
                                          void * destination,
                                          Completion on_done)
 {
+    const auto & buffer = copy.buffer;
+    const auto & pool = copy.pool;
+
     // Checked before anything is enqueued: the waiter returns the buffer from its own thread, so a
     // missing pool would otherwise crash there rather than fail here.
     //
     // LOG rather than ASSERT, which throws: one function reporting two ways makes every call site
     // handle both.
-    if (pool == nullptr)
+    if (pool == nullptr || copy.events == nullptr || copy.event == nullptr)
     {
-        // The only path that keeps the buffer - there is nowhere to give it back to.
-        LOG(ERROR) << "[RunAI Streamer] write() called with no pool; the buffer was not returned";
+        // The only path that keeps them - there is nowhere to give them back to.
+        LOG(ERROR) << "[RunAI Streamer] write() called without a pool or an event; nothing was returned";
         return common::ResponseCode::InvalidParameterError;
     }
 
@@ -116,6 +127,7 @@ common::ResponseCode DeviceWriter::write(Channel channel,
         // A caller bug: a channel comes only from open(), which clears it on failure.
         LOG(ERROR) << "[RunAI Streamer] write() called with a null channel";
         pool->release(buffer);
+        copy.events->release(copy.event);
         return common::ResponseCode::InvalidParameterError;
     }
 
@@ -124,6 +136,7 @@ common::ResponseCode DeviceWriter::write(Channel channel,
         LOG(ERROR) << "[RunAI Streamer] asked to copy " << bytesize << " bytes from a staging buffer of "
                    << buffer.bytesize;
         pool->release(buffer);
+        copy.events->release(copy.event);
         return common::ResponseCode::InvalidParameterError;
     }
 
@@ -132,7 +145,7 @@ common::ResponseCode DeviceWriter::write(Channel channel,
     auto code = target->device->memcpy_h2d_async(destination, buffer.data, bytesize, target->stream.get());
     if (code == common::ResponseCode::Success)
     {
-        code = target->device->event_record(buffer.event, target->stream.get());
+        code = target->device->event_record(copy.event, target->stream.get());
     }
 
     if (code != common::ResponseCode::Success)
@@ -143,11 +156,12 @@ common::ResponseCode DeviceWriter::write(Channel channel,
         // on_done is NOT called: the return value is the report, and reporting both ways would tell
         // a caller twice.
         pool->release(buffer);
+        copy.events->release(copy.event);
         return code;
     }
 
-    // From here the buffer belongs to the waiter, which returns it once the copy has landed.
-    target->waiter->enqueue(std::move(pool), buffer, std::move(on_done));
+    // From here both belong to the waiter, which returns them once the copy has landed.
+    target->waiter->enqueue(std::move(copy), std::move(on_done));
     return common::ResponseCode::Success;
 }
 

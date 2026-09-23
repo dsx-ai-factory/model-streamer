@@ -15,9 +15,9 @@ StreamWaiter::StreamWaiter(std::shared_ptr<device::Device> device) :
 
 StreamWaiter::~StreamWaiter() = default;
 
-void StreamWaiter::enqueue(std::shared_ptr<StagingPool> pool, const StagingBuffer & buffer, Completion on_done)
+void StreamWaiter::enqueue(Copy copy, Completion on_done)
 {
-    _worker.push(Entry{std::move(pool), buffer, std::move(on_done)});
+    _worker.push(Entry{std::move(copy), std::move(on_done)});
 }
 
 void StreamWaiter::wait_for(Entry && entry)
@@ -34,16 +34,22 @@ void StreamWaiter::wait_for(Entry && entry)
         _thread_bound = true;
     }
 
-    const auto code = _device->event_synchronize(entry.buffer.event);
+    const auto code = _device->event_synchronize(entry.copy.event);
+
+    // RETURNED BEFORE THE COMPLETION IS REPORTED. on_done is what lets the worker free its window
+    // slot and submit the next chunk, and that chunk immediately asks for a buffer - so reporting
+    // first hands out the slot while this buffer is still ours, and the pool comes back empty with
+    // the window not full.
+    //
+    // The event before the buffer, for the same reason one step further in: a copy holds one of each
+    // and the two pools share a ceiling.
+    entry.copy.events->release(entry.copy.event);
+    entry.copy.pool->release(entry.copy.buffer);
 
     if (entry.on_done)
     {
         entry.on_done(code);
     }
-
-    // Returned even when the copy failed. A buffer lost on an error path is a deadlock that arrives
-    // later.
-    entry.pool->release(entry.buffer);
 }
 
 void StreamWaiter::stop()

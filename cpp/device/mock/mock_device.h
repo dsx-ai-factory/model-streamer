@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -77,14 +78,24 @@ class MockDevice : public Device
     // Fail every event_create from the Nth onwards, counting from 1. Zero means never.
     unsigned fail_event_create_from = 0;
 
+    // Set when event_record was given an event this device did not create, or a stream it does not
+    // own. A real driver answers CUDA_ERROR_INVALID_HANDLE: an event belongs to the context that made
+    // it, unlike the pinned memory it marks. Modelled because the mock not modelling it hid a bug
+    // that only a second GPU could show.
+    std::atomic<unsigned> foreign_records{0};
+
     // An event answers NotReady until marked ready, so a reaping order can be forced.
     void set_ready(EventHandle event, bool ready);
     void set_all_ready(bool ready);
 
  private:
     mutable std::mutex _mutex;
-    std::map<EventHandle, bool> _ready;
-    unsigned _next_token = 1;
+    std::map<EventHandle, bool> _ready;     // the events THIS device created
+    std::set<StreamHandle> _streams;        // and the streams
+
+    // PROCESS-WIDE, so no two devices ever mint the same handle. Per-device counters would collide,
+    // and the affinity check above would then accept a foreign handle that happened to match.
+    static std::atomic<uintptr_t> _next_token;
 };
 
 // A test double for Backend: hands out MockDevices by ordinal and remembers them, as the real one

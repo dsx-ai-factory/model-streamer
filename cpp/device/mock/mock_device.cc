@@ -14,9 +14,9 @@ namespace
 
 // Tokens, not addresses. Casting a counter keeps every handle distinct and obviously not a pointer
 // to anything, so a test that dereferences one fails loudly instead of corrupting memory.
-void * token(unsigned value)
+void * token(uintptr_t value)
 {
-    return reinterpret_cast<void *>(static_cast<uintptr_t>(value));
+    return reinterpret_cast<void *>(value);
 }
 
 } // namespace
@@ -88,18 +88,24 @@ common::ResponseCode MockDevice::device_free(void * ptr)
     return common::ResponseCode::Success;
 }
 
+std::atomic<uintptr_t> MockDevice::_next_token{1};
+
 common::ResponseCode MockDevice::stream_create(StreamHandle & stream)
 {
     ++streams_created;
 
     const std::lock_guard<std::mutex> guard(_mutex);
     stream = token(_next_token++);
+    _streams.insert(stream);
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode MockDevice::stream_destroy(StreamHandle)
+common::ResponseCode MockDevice::stream_destroy(StreamHandle stream)
 {
     ++streams_destroyed;
+
+    const std::lock_guard<std::mutex> guard(_mutex);
+    _streams.erase(stream);
     return common::ResponseCode::Success;
 }
 
@@ -144,9 +150,18 @@ common::ResponseCode MockDevice::event_destroy(EventHandle event)
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode MockDevice::event_record(EventHandle event, StreamHandle)
+common::ResponseCode MockDevice::event_record(EventHandle event, StreamHandle stream)
 {
     const std::lock_guard<std::mutex> guard(_mutex);
+
+    // An event and a stream belong to the context that created them. Recording one device's event on
+    // another's stream is CUDA_ERROR_INVALID_HANDLE, not a silent success.
+    if (_ready.count(event) == 0 || _streams.count(stream) == 0)
+    {
+        ++foreign_records;
+        return common::ResponseCode::InvalidParameterError;
+    }
+
     _ready[event] = false;
     return common::ResponseCode::Success;
 }

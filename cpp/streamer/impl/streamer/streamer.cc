@@ -1,3 +1,4 @@
+#include "device/cuda/cuda_device.h"
 #include "streamer/impl/streamer/streamer.h"
 
 #include <sys/sysmacros.h>   // major/minor
@@ -39,6 +40,9 @@ Streamer::Streamer() : Streamer(Config())
 Streamer::Streamer(Config config, Environment environment) :
     _config(std::make_shared<Config>(config)),
     _router(config.fs_strategy_candidates, std::move(environment)),
+    // A factory rather than a backend: obtaining one is a driver call, and a host-only load must not
+    // pay it. See DeviceWriter.
+    _device_writer(std::make_shared<DeviceWriter>(device::cuda::backend)),
     // Three worker factories, one per pool kind, in the order BackendPools takes them: the synchronous
     // filesystem reader (concurrency threads), the async one the strategy router builds per mount, and
     // object storage (s3_concurrency threads). Pools are created lazily on first use of each kind.
@@ -47,7 +51,7 @@ Streamer::Streamer(Config config, Environment environment) :
         {
             return std::make_unique<FileSystemWorker>();
         },
-        _router.worker_factory(),
+        _router.worker_factory(_device_writer),
         // each object-storage worker reads the streamer's credentials once, at client creation, via this
         // provider. It captures the shared credentials state by value, so the state outlives the worker
         // regardless of destruction order (it never captures `this`).
