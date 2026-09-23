@@ -42,10 +42,9 @@ unsigned StagingPool::plan_slab(size_t & bytesize) const
     }
 
     // A pool of zero sized buffers would divide by zero below, which is SIGFPE rather than an error
-    // the caller can see. Refused as if it were at its ceiling, so the pool hands out nothing.
+    // the caller can see. Reported as no room, which both callers turn into barren().
     if (_params.buffer_bytesize == 0)
     {
-        LOG(ERROR) << "[RunAI Streamer] a staging pool of zero sized buffers holds nothing";
         return 0;
     }
 
@@ -94,6 +93,17 @@ common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, S
     return common::ResponseCode::Success;
 }
 
+common::ResponseCode StagingPool::barren() const
+{
+    LOG(ERROR) << "[RunAI Streamer] a staging pool of " << _params.max_buffers
+               << " buffers of " << _params.buffer_bytesize << " bytes can hold nothing";
+
+    // UnknownError, because it is OUR bug and not a parameter any caller can set: the block size is
+    // clamped by the config and the window is a constant. A caller cannot act on this, and should
+    // trust nothing else it was told.
+    return common::ResponseCode::UnknownError;
+}
+
 common::ResponseCode StagingPool::try_acquire(StagingBuffer & out)
 {
     out = StagingBuffer{};
@@ -112,6 +122,11 @@ common::ResponseCode StagingPool::try_acquire(StagingBuffer & out)
         per_slab = plan_slab(bytesize);
         if (per_slab == 0)
         {
+            if (_buffers.empty())
+            {
+                return barren();
+            }
+
             // At the ceiling with everything in flight. out stays invalid, which is not an error.
             return common::ResponseCode::Success;
         }
@@ -140,6 +155,11 @@ common::ResponseCode StagingPool::acquire(StagingBuffer & out)
             per_slab = plan_slab(bytesize);
             if (per_slab == 0)
             {
+                if (_buffers.empty())
+                {
+                    return barren();
+                }
+
                 // Everything is in flight and the pool is at its ceiling, so no slab is coming: the
                 // only way forward is a buffer coming back. These threads have nothing else to do,
                 // unlike an async engine's worker, so they wait rather than spin.

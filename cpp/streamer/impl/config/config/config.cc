@@ -88,6 +88,7 @@ Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_by
     // parse() rejects a zero; a positional caller can still pass one
     ASSERT(this->fs_async_queue_depth.default_value()) << "file system queue depth must be positive";
 
+
     if (enforce_minimum)
     {
         if (s3_block_bytesize < common::s3::S3ClientWrapper::min_chunk_bytesize)
@@ -103,6 +104,11 @@ Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_by
             this->fs_sync_read_block_bytesize = min_fs_sync_read_block_bytesize;
         }
     }
+
+    // AFTER the clamp, because the clamp is what a zero usually meets first - and it is skipped when
+    // the minimum is not enforced. This value sizes the synchronous reader's staging buffers, and a
+    // buffer of no bytes reads nothing: the batch would take one per turn and never advance.
+    ASSERT(this->fs_sync_read_block_bytesize) << "file system reading block size must be positive";
 }
 
 Config::FsSettings Config::resolve_fs_settings()

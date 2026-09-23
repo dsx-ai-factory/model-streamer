@@ -108,8 +108,12 @@ TEST_F(StagingPoolTest, Grows_On_Demand_And_Stops_At_The_Ceiling)
 }
 
 // Buffers of no bytes divide by zero when a slab is planned, which kills the process rather than
-// telling the caller. Nothing is handed out instead.
-TEST_F(StagingPoolTest, A_Pool_Of_Zero_Sized_Buffers_Hands_Out_Nothing)
+// telling the caller.
+//
+// And REPORTED, not answered with an empty hand: this pool holds nothing and never will, so
+// acquire() would wait for a buffer to come back when none was ever handed out. That wait can only
+// end when the process does.
+TEST_F(StagingPoolTest, A_Pool_That_Can_Hold_Nothing_Is_Refused)
 {
     StagingPool::Params zero;
     zero.max_buffers = 4;   // a ceiling, but no size to cut buffers to
@@ -117,10 +121,28 @@ TEST_F(StagingPoolTest, A_Pool_Of_Zero_Sized_Buffers_Hands_Out_Nothing)
     StagingPool pool(_mock, zero);
 
     StagingBuffer buffer;
-    EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+    EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::UnknownError);
     EXPECT_FALSE(buffer.valid());
+    EXPECT_EQ(pool.acquire(buffer), common::ResponseCode::UnknownError) << "acquire waited";
+    EXPECT_FALSE(buffer.valid());
+
     EXPECT_EQ(pool.created(), 0u);
     EXPECT_EQ(_mock->host_allocs, 0u) << "nothing was registered for buffers that hold nothing";
+}
+
+// The same for a window of no buffers at all, which is the other way to ask for a pool that cannot
+// hand anything out.
+TEST_F(StagingPoolTest, A_Window_Of_No_Buffers_Is_Refused)
+{
+    StagingPool::Params none;
+    none.buffer_bytesize = Buffer;
+    none.slab_bytesize = Buffer;
+
+    StagingPool pool(_mock, none);
+
+    StagingBuffer buffer;
+    EXPECT_EQ(pool.try_acquire(buffer), common::ResponseCode::UnknownError);
+    EXPECT_EQ(pool.acquire(buffer), common::ResponseCode::UnknownError) << "acquire waited";
 }
 
 // Buffers are interchangeable, so returning them in an order unrelated to how they were taken is
