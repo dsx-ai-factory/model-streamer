@@ -14,6 +14,31 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aarch64-linux-gnu-ld.gold /usr/bin/ld.gold
 
+# ThreadSanitizer (`bazel test --config=tsan`).
+#
+# Ubuntu 20.04 ships libtsan.so for gcc-9 but NOT libtsan_preinit.o, so -fsanitize=thread fails to
+# link. This is that file, which is all of GCC's own libsanitizer/tsan/tsan_preinit.c: it registers
+# __tsan_init in .preinit_array so the runtime starts before any constructor runs.
+#
+# Built with the CROSS compiler that will consume it, so the object matches its target whatever the
+# host architecture is. x86_64 only - there is no libtsan for the aarch64 cross toolchain.
+#
+# The `test -f libtsan.so` is not a formality: -print-file-name echoes its argument back when the
+# file is not there, so without it the object would land in the build directory and --config=tsan
+# would keep failing with the same confusing error. The second test never shadows a real
+# libtsan_preinit.o, in case a later base image ships one.
+RUN printf '%s\n' \
+        'extern void __tsan_init(void);' \
+        'static void __local_tsan_preinit(void) { __tsan_init(); }' \
+        '__attribute__((section(".preinit_array"), used))' \
+        'static void (*tsan_preinit)(void) = __local_tsan_preinit;' \
+        > /tmp/tsan_preinit.c \
+    && TSAN_DIR="$(dirname "$(x86_64-linux-gnu-gcc -print-file-name=libtsan.so)")" \
+    && test -f "$TSAN_DIR/libtsan.so" \
+    && { test -f "$TSAN_DIR/libtsan_preinit.o" \
+         || x86_64-linux-gnu-gcc -c -fPIC /tmp/tsan_preinit.c -o "$TSAN_DIR/libtsan_preinit.o"; } \
+    && rm /tmp/tsan_preinit.c
+
 RUN pip install \
     boto3 \
     cpplint==1.5.4 \
