@@ -1,0 +1,54 @@
+name: Test SDK archives
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  consumer:
+    name: SDK consumer (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk
+          path: sdk/dist
+      - name: Verify both checksums and the expected asset set
+        working-directory: sdk/dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for arch in x86_64 aarch64; do
+            archives=(runai-model-streamer-sdk-*-linux-${arch}.tar.gz)
+            test "${#archives[@]}" -eq 1
+            test -f "${archives[0]}.sha256"
+          done
+          files=(*)
+          test "${#files[@]}" -eq 4
+          sha256sum -c *.sha256
+      - name: Test in a clean consumer container
+        # Only artifacts and the test script enter this container. It has no
+        # Bazel, devcontainer libraries, or streamer Python packages.
+        env:
+          SDK_ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            -v "$PWD/sdk/dist:/artifacts:ro" \
+            -v "$PWD/sdk/verify.sh:/verify.sh:ro" \
+            -e SDK_ARCH ubuntu:20.04 bash -euc '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                gcc g++ cmake make pkg-config binutils ca-certificates
+              bash /verify.sh /artifacts/runai-model-streamer-sdk-*-linux-${SDK_ARCH}.tar.gz
+            '

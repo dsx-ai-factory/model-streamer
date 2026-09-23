@@ -1,15 +1,18 @@
 X86_64_ARCH := x86_64
 AARCH64_ARCH := aarch64
+PACKAGE_VERSION ?= 0.0.0
 
 .PHONY: build build_aarch64 build_x86_64 test test_strategies install
 
 build_x86_64:
 	make -C cpp build ARCH=${X86_64_ARCH} && \
-	make -C py build ARCH=${X86_64_ARCH}
+	make -C py build ARCH=${X86_64_ARCH} && \
+	python3 sdk/package.py --version "$(PACKAGE_VERSION)" --arch $(X86_64_ARCH)
 
 build_aarch64:
 	make -C cpp build ARCH=${AARCH64_ARCH} && \
-	make -C py build ARCH=${AARCH64_ARCH}
+	make -C py build ARCH=${AARCH64_ARCH} && \
+	python3 sdk/package.py --version "$(PACKAGE_VERSION)" --arch $(AARCH64_ARCH)
 
 build: 
 	make -C py clean && \

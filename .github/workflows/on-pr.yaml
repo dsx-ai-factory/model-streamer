@@ -23,6 +23,9 @@ jobs:
     - name: Set PACKAGE_VERSION
       run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
+    - name: Test SDK packaging guards
+      run: python3 -m unittest discover -s sdk -p 'test_*.py'
+
     - name: Run tests and build
       uses: devcontainers/ci@v0.3
       with:
@@ -60,3 +63,17 @@ jobs:
         name: runai_model_streamer_azure
         path: py/runai_model_streamer_azure/dist/*
         if-no-files-found: error
+
+    - name: Upload SDK archives
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdk
+        path: sdk/dist/*
+        if-no-files-found: error
+        compression-level: 0
+
+  test-sdk:
+    needs: lifecycle-install-tests
+    uses: ./.github/workflows/test-sdk.yaml
+    permissions:
+      contents: read

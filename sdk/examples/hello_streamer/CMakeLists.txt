@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(hello_streamer LANGUAGES C CXX)
+find_package(runai-streamer CONFIG REQUIRED)
+add_executable(hello_streamer hello_streamer.c)
+target_compile_features(hello_streamer PRIVATE c_std_99)
+target_compile_options(hello_streamer PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(hello_streamer PRIVATE runai::streamer)

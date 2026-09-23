@@ -1,0 +1,9 @@
+prefix=${pcfiledir}/../..
+includedir=${prefix}/include
+libdir=${prefix}/lib
+
+Name: runai-streamer
+Description: Run:ai Model Streamer C API
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lstreamer
