@@ -51,8 +51,33 @@ common::ResponseCode DeviceWriterClient::channel_for(unsigned ordinal, DeviceWri
         _pool = std::make_shared<SharedStagingPool>(_writer->device(channel), params);
     }
 
+    // Per device, because an event belongs to the context that created it. Created here, where the
+    // device is known, and sized by the same window as the buffers - a copy needs one of each.
+    _events.emplace(ordinal, std::make_shared<EventPool>(_writer->device(channel), _max_buffers));
+
     _channels.emplace(ordinal, channel);
     out = channel;
+    return common::ResponseCode::Success;
+}
+
+common::ResponseCode DeviceWriterClient::bind(unsigned ordinal, const DeviceWriter::Channel & channel)
+{
+    if (_bound && _bound_ordinal == ordinal)
+    {
+        return common::ResponseCode::Success;
+    }
+
+    const auto device = _writer->device(channel);
+    ASSERT(device != nullptr) << "binding a channel that names no device";
+
+    const auto code = device->bind_thread();
+    if (code != common::ResponseCode::Success)
+    {
+        return code;
+    }
+
+    _bound = true;
+    _bound_ordinal = ordinal;
     return common::ResponseCode::Success;
 }
 
@@ -61,7 +86,14 @@ common::ResponseCode DeviceWriterClient::take(unsigned ordinal, StagingBuffer & 
     out = StagingBuffer{};
 
     DeviceWriter::Channel channel = nullptr;
-    const auto code = channel_for(ordinal, channel);
+    auto code = channel_for(ordinal, channel);
+    if (code != common::ResponseCode::Success)
+    {
+        return code;
+    }
+
+    // Pinning and creating an event are driver calls like any other.
+    code = bind(ordinal, channel);
     if (code != common::ResponseCode::Success)
     {
         return code;
@@ -89,12 +121,47 @@ common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
         return common::ResponseCode::InvalidParameterError;
     }
 
-    return _writer->write(existing->second, _pool, buffer, bytesize, destination, std::move(on_done));
+    // The copy, the event record and creating an event all run in this device's context.
+    auto code = bind(ordinal, existing->second);
+    if (code != common::ResponseCode::Success)
+    {
+        _pool->release(buffer);
+        return code;
+    }
+
+    DeviceWriter::Copy copy;
+    copy.pool = _pool;
+    copy.buffer = buffer;
+    copy.events = _events.at(ordinal);
+
+    code = copy.events->acquire(copy.event);
+    if (code != common::ResponseCode::Success || copy.event == nullptr)
+    {
+        // The event pool has the same ceiling as the buffers and a copy takes one of each, so running
+        // out is not a state the window allows.
+        LOG(ERROR) << "[RunAI Streamer] no copy event for device " << ordinal << ": " << code;
+        _pool->release(buffer);
+        return code != common::ResponseCode::Success ? code : common::ResponseCode::UnknownError;
+    }
+
+    return _writer->write(existing->second, std::move(copy), bytesize, destination, std::move(on_done));
+}
+
+void DeviceWriterClient::release(const StagingBuffer & buffer)
+{
+    ASSERT(_pool != nullptr) << "releasing a buffer to a client that never took one";
+    _pool->release(buffer);
 }
 
 unsigned DeviceWriterClient::devices() const
 {
     return static_cast<unsigned>(_channels.size());
+}
+
+unsigned DeviceWriterClient::events(unsigned ordinal) const
+{
+    const auto it = _events.find(ordinal);
+    return it != _events.end() ? it->second->created() : 0;
 }
 
 unsigned DeviceWriterClient::buffers() const

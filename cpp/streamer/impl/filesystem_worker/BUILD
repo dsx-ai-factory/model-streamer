@@ -4,6 +4,7 @@ runai_cc_auto_library(
     name = "filesystem_worker",
     deps = [
         "//streamer/impl/workload",
+        "//utils/logging",
         "//utils/threadpool",
     ],
     visibility = ["//streamer:__subpackages__"],
@@ -14,5 +15,6 @@ runai_cc_test(
     srcs = ["filesystem_worker_test.cc"],
     deps = [
         ":filesystem_worker",
+        "//streamer/impl/batches",
     ],
 )

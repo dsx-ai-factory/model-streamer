@@ -1,5 +1,6 @@
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
 #include "common/device/device.h"
+#include "device/mock/mock_device.h"
 
 #include <gtest/gtest.h>
 
@@ -78,7 +79,8 @@ struct Fixture
     //
     // `path_override` gives the batches a path that is not the temp file. The worker opens
     // batch.path, so this is how a test makes the open fail while the ranges stay valid.
-    Workload workload(const std::string & path_override = "")
+    Workload workload(const std::string & path_override = "",
+                      common::Device device = common::Device::host())
     {
         const std::string & batch_path = path_override.empty() ? file.path : path_override;
 
@@ -87,7 +89,7 @@ struct Fixture
         for (const auto & transfer : assigner.transfers())
         {
             Batches batches(1 /* submission */, transfer.file_index, transfer.tasks, config, responder,
-                            batch_path, params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
+                            batch_path, params, transfer.range_sizes, transfer.first_range_index, device);
             for (size_t i = 0; i < batches.size(); ++i)
             {
                 out.add_batch(std::move(batches[i]));
@@ -143,7 +145,8 @@ struct Driver
     // directly, so setting RUNAI_STREAMER_FS_QUEUE_DEPTH in the fixture no longer changes it.
     explicit Driver(Strategy strategy = Strategy::IoUringBuffered, size_t block = 4096,
                     std::optional<size_t> mount_block = std::nullopt,
-                    unsigned depth = Config::default_fs_async_queue_depth) :
+                    unsigned depth = Config::default_fs_async_queue_depth,
+                    std::shared_ptr<DeviceWriter> writer = nullptr) :
         worker(strategy,
                mount_block.value_or(block),
                depth,
@@ -157,7 +160,9 @@ struct Driver
                    auto owned = std::make_unique<MockIoEngine>(config.depth, limits);
                    engine = owned.get();
                    return owned;
-               })
+               },
+               {} /* on_engine_dead */,
+               std::move(writer))
     {}
 
     // execute() stages everything, since the window is larger than the chunk count. Staged is not
@@ -1362,6 +1367,144 @@ TEST(AsyncIoWorker, An_Engine_That_Cannot_Be_Built_Is_Not_An_Internal_Error)
     EXPECT_EQ(responses[0].ret, common::ResponseCode::FsAsyncEngineError);
 
     EXPECT_TRUE(told) << "the streamer must learn the mount is dead, or it keeps routing here";
+}
+
+// --- device destinations -------------------------------------------------------------------------
+
+namespace
+{
+
+// A worker with a real DeviceWriter over a MockDevice, so the copy path runs without a driver.
+struct DeviceDriver : Driver
+{
+    explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock) :
+        Driver(Strategy::IoUringBuffered, 4096, std::nullopt, Config::default_fs_async_queue_depth,
+               std::make_shared<DeviceWriter>([mock]() { return mock; })),
+        backend(std::move(mock))
+    {}
+
+    // A copy lands on the StreamWaiter's thread, so the worker needs another turn to account it. The
+    // pool gives it one because idle() is false while a copy is outstanding; here that loop is
+    // explicit, and bounded so a missing completion fails rather than hangs.
+    void settle()
+    {
+        for (unsigned i = 0; i < 500 && !worker.idle(); ++i)
+        {
+            worker.drain(stopped);
+        }
+        EXPECT_TRUE(worker.idle()) << "a copy was never accounted";
+    }
+
+    std::shared_ptr<device::MockBackend> backend;
+};
+
+} // namespace
+
+// The whole point of the step: a device range is read into pinned host memory and copied from there,
+// and the caller is answered only once the copy has landed.
+TEST(AsyncIoWorkerDevice, Reads_Into_A_Staging_Buffer_And_Copies)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    ASSERT_EQ(driver.engine->staged_count(), 1u) << "three small ranges pack into one chunk";
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    for (const auto & r : responses)
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success);
+    }
+
+    const auto device = mock->opened(0);
+    ASSERT_NE(device, nullptr);
+    EXPECT_EQ(device->copies, 1u) << "one chunk, one copy";
+    EXPECT_EQ(device->host_allocs, 1u) << "one slab, pinned on the first take";
+
+    // The bytes went through the staging buffer and arrived, in the right order.
+    EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(0, 600));
+}
+
+// A read that never lands must still answer its ranges, and must give its staging buffer back -
+// one lost would shrink the pool for the life of the worker.
+TEST(AsyncIoWorkerDevice, A_Failed_Read_Returns_Its_Staging_Buffer)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ ChunkSize, ChunkSize });
+    DeviceDriver driver(mock);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto ids = driver.in_flight();
+    ASSERT_EQ(ids.size(), 2u);
+    driver.engine->fail(ids[0], EIO);
+    driver.engine->complete(ids[1]);
+    driver.route();
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 2);
+    unsigned failed = 0;
+    for (const auto & r : responses)
+    {
+        failed += (r.ret != common::ResponseCode::Success) ? 1 : 0;
+    }
+    EXPECT_GT(failed, 0u) << "the failed read was reported";
+
+    const auto device = mock->opened(0);
+    EXPECT_EQ(device->copies, 1u) << "only the chunk that landed was copied";
+
+    // Both buffers are back: the pool never grew past the one slab it started with.
+    EXPECT_EQ(device->host_allocs, 1u);
+}
+
+// A device this host cannot open fails every range of the workload, and nothing is left pinned.
+TEST(AsyncIoWorkerDevice, An_Unreachable_Device_Fails_Every_Range)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    mock->fail_open_device_at = 1;
+
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    for (const auto & r : responses)
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::InvalidDevice);
+    }
+}
+
+// A host workload must not touch the device path at all - no driver, no pinned memory, no stream.
+TEST(AsyncIoWorkerDevice, A_Host_Workload_Touches_No_Device)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock);
+
+    driver.execute(fixture.workload());
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    for (const auto & r : responses)
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success);
+    }
+
+    EXPECT_EQ(mock->opens, 0u) << "no device was opened for a host read";
+    EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(0, 600));
 }
 
 }; // namespace runai::llm::streamer::impl

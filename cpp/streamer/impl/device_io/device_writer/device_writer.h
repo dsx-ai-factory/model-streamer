@@ -59,17 +59,22 @@ class DeviceWriter
     // So a client can allocate pinned memory, which needs a context. Null for a null channel.
     std::shared_ptr<device::Device> device(Channel channel) const;
 
-    // Copies `bytesize` bytes from the front of `buffer` to `destination`, then returns the buffer to
-    // `pool` once that copy has landed. Returns as soon as the copy is ENQUEUED.
+    // What one copy needs, and what has to come back when it lands. The EVENT comes from the caller
+    // because it belongs to the context that made it - a buffer serves any device, an event does not.
+    using Copy = StreamWaiter::Copy;
+
+    // Copies `bytesize` bytes from the front of `copy.buffer` to `destination`, then returns the
+    // buffer and the event to their pools once that copy has landed. Returns as soon as the copy is
+    // ENQUEUED.
     //
     // `on_done` is called exactly when this returns Success, from the waiter's thread. On any error
     // the return value is the only report, so a caller is never told twice.
     //
-    // The buffer is ours from here and comes back whatever happens - one lost on an error path is a
-    // deadlock that arrives later. The one exception is a null pool: nowhere to give it back to.
+    // The buffer and the event are ours from here and come back whatever happens - one lost on an
+    // error path is a deadlock that arrives later. The one exception is a missing pool: nowhere to
+    // give them back to.
     common::ResponseCode write(Channel channel,
-                               std::shared_ptr<StagingPool> pool,
-                               const StagingBuffer & buffer,
+                               Copy copy,
                                size_t bytesize,
                                void * destination,
                                Completion on_done);

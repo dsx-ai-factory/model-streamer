@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "device/mock/mock_device.h"
+#include "streamer/impl/device_io/event_pool/event_pool.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -29,7 +30,25 @@ StagingPool::Params params(unsigned max_buffers)
 class StreamWaiterTest : public ::testing::Test
 {
  protected:
+    // One copy's worth: a buffer from `pool` and an event from this device's own pool. The waiter
+    // gives both back, so both have to be real.
+    StreamWaiter::Copy copy_of(const std::shared_ptr<StagingPool> & pool, const StagingBuffer & buffer)
+    {
+        if (_events == nullptr)
+        {
+            _events = std::make_shared<EventPool>(_mock, 64);
+        }
+
+        StreamWaiter::Copy copy;
+        copy.pool = pool;
+        copy.buffer = buffer;
+        copy.events = _events;
+        EXPECT_EQ(_events->acquire(copy.event), common::ResponseCode::Success);
+        return copy;
+    }
+
     std::shared_ptr<device::MockDevice> _mock = std::make_shared<device::MockDevice>();
+    std::shared_ptr<EventPool> _events;
 };
 
 // Waits until a condition holds, so a test never depends on a thread being scheduled within some
@@ -70,7 +89,7 @@ TEST_F(StreamWaiterTest, The_Thread_Starts_On_The_First_Enqueue)
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
     ASSERT_TRUE(buffer.valid());
 
-    waiter.enqueue(pool, buffer, nullptr);
+    waiter.enqueue(copy_of(pool, buffer), nullptr);
 
     EXPECT_TRUE(eventually([&]() { return waiter.completed() == 1u; }));
     EXPECT_TRUE(waiter.running());
@@ -93,7 +112,7 @@ TEST_F(StreamWaiterTest, A_Buffer_Comes_Back_After_Its_Copy)
     ASSERT_FALSE(none.valid()) << "the only buffer is out";
 
     std::atomic<int> reported{-1};
-    waiter.enqueue(pool, buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+    waiter.enqueue(copy_of(pool, buffer), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
     EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::Success);
@@ -113,7 +132,7 @@ TEST_F(StreamWaiterTest, It_Waits_On_The_Event_Not_The_Stream)
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
-    waiter.enqueue(pool, buffer, nullptr);
+    waiter.enqueue(copy_of(pool, buffer), nullptr);
 
     ASSERT_TRUE(eventually([&]() { return waiter.completed() == 1u; }));
     EXPECT_EQ(_mock->event_syncs, 1u);
@@ -134,7 +153,7 @@ TEST_F(StreamWaiterTest, Completions_Are_Reported_In_Issue_Order)
         StagingBuffer buffer;
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
-        waiter.enqueue(pool, buffer, [&, i](common::ResponseCode)
+        waiter.enqueue(copy_of(pool, buffer), [&, i](common::ResponseCode)
             {
                 const std::lock_guard<std::mutex> guard(order_lock);
                 order.push_back(i);
@@ -163,7 +182,7 @@ TEST_F(StreamWaiterTest, A_Failed_Copy_Still_Returns_Its_Buffer)
     _mock->fail_event_synchronize = true;
 
     std::atomic<int> reported{-1};
-    waiter.enqueue(pool, buffer, [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+    waiter.enqueue(copy_of(pool, buffer), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
     EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceTransferError);
@@ -185,7 +204,7 @@ TEST_F(StreamWaiterTest, Stop_Waits_For_What_Is_Already_Queued)
             StagingBuffer buffer;
             ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid());
-            waiter.enqueue(pool, buffer, nullptr);
+            waiter.enqueue(copy_of(pool, buffer), nullptr);
         }
         waiter.stop();
         EXPECT_EQ(waiter.completed(), 4u) << "drained, not abandoned";
@@ -214,7 +233,7 @@ TEST_F(StreamWaiterTest, Every_Enqueued_Buffer_Is_Returned_By_The_Time_Stop_Retu
         StagingBuffer buffer;
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
-        waiter.enqueue(pool, buffer, [&](common::ResponseCode) { ++reported; });
+        waiter.enqueue(copy_of(pool, buffer), [&](common::ResponseCode) { ++reported; });
     }
 
     waiter.stop();

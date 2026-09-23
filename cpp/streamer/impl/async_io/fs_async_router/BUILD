@@ -3,6 +3,7 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "fs_async_router",
     deps = [
+        "//streamer/impl/device_io/device_writer",
         "//common/exception",
         "//posix_io/alignment",
         "//posix_io/engine_factory",

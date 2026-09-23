@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "streamer/impl/device_io/device_writer/device_writer.h"
+#include "streamer/impl/device_io/event_pool/event_pool.h"
 #include "streamer/impl/device_io/staging_pool/staging_pool.h"
 
 namespace runai::llm::streamer::impl
@@ -21,8 +22,12 @@ namespace runai::llm::streamer::impl
 // cost no more pinned memory than one shared one: a pool grows on demand, and the windows already
 // sum to the bound the streamer intends.
 //
-// ONE POOL whatever devices this worker names, because its window does not grow with them and
+// ONE BUFFER POOL whatever devices this worker names, because its window does not grow with them and
 // pinned memory reaches every context.
+//
+// ONE EVENT POOL PER DEVICE, because an event does NOT reach every context: recording one device's
+// event on another's stream is CUDA_ERROR_INVALID_HANDLE. Measured on 4x B200. Splitting the events -
+// a few hundred bytes each - is what lets the buffers, at 16 MiB each, stay shared.
 //
 // NOTHING EXISTS until the first take(): no pinned memory, no stream, no thread, no driver. So a
 // worker can own one unconditionally instead of deciding whether it might ever see a device.
@@ -78,13 +83,25 @@ class DeviceWriterClient
                                void * destination,
                                Completion on_done);
 
+    // Give back a buffer that was taken but never written - a read that failed, or a workload that
+    // went away. A buffer lost here shrinks the pool for the life of the worker.
+    void release(const StagingBuffer & buffer);
+
     // Diagnostics.
     unsigned devices() const;
     unsigned buffers() const;
+    unsigned events(unsigned device_ordinal) const;
 
  private:
     // The channel for an ordinal, opening it on first use. The first call also builds the pool.
     common::ResponseCode channel_for(unsigned ordinal, DeviceWriter::Channel & out);
+
+    // Make `ordinal`'s context current on this thread. A driver call without one fails with
+    // CUDA_ERROR_INVALID_CONTEXT, and a context is per THREAD - which is why this belongs here, in
+    // the per-thread object, rather than in the shared writer.
+    //
+    // Only on a change, which is almost never: a submission names one device.
+    common::ResponseCode bind(unsigned ordinal, const DeviceWriter::Channel & channel);
 
     const std::shared_ptr<DeviceWriter> _writer;
     const Buffers _buffers;
@@ -94,6 +111,11 @@ class DeviceWriterClient
     // open() - once per device, never per buffer.
     std::shared_ptr<SharedStagingPool> _pool;
     std::map<unsigned, DeviceWriter::Channel> _channels;
+    std::map<unsigned, std::shared_ptr<EventPool>> _events;
+
+    // Which device's context this thread currently holds. Unset until the first bind.
+    bool _bound = false;
+    unsigned _bound_ordinal = 0;
 };
 
 } // namespace runai::llm::streamer::impl

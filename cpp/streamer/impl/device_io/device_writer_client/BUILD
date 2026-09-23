@@ -3,6 +3,7 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "device_writer_client",
     deps = [
+        "//streamer/impl/device_io/event_pool",
         "//streamer/impl/device_io/device_writer",
         "//streamer/impl/device_io/staging_pool",
         "//utils/logging",

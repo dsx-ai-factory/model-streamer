@@ -5,6 +5,7 @@ runai_cc_auto_library(
     deps = [
         "//posix_io/io_engine",
         "//streamer/impl/chunk_splitter",
+        "//streamer/impl/device_io/staging_pool",
         "//utils/logging",
     ],
 )
@@ -15,5 +16,6 @@ runai_cc_test(
     deps = [
         ":inflight_chunks",
         "//common/exception",
+        "//device/mock",
     ],
 )

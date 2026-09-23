@@ -15,22 +15,22 @@ namespace runai::llm::streamer::impl
 
 // A pinned host buffer on loan from a pool.
 //
-// `event` marks the end of the copy OUT of this buffer, and nothing else. Whoever issues the copy
-// records it; whoever reaps queries it. It is never re-recorded to mark later work - doing that
-// holds the buffer until the later work finishes, which halves the depth the same memory supports.
+// It carries NO event. An event belongs to the context that created it, but this memory is reachable
+// from every context - so a buffer can serve any device while an event cannot. The event that marks
+// a copy comes from an EventPool for the device being copied to.
 //
 // A COPY, never a reference into the pool. The pool's buffer vector grows, and growth reallocates.
 struct StagingBuffer
 {
-    char *      data = nullptr;
-    size_t      bytesize = 0;
-    device::EventHandle event = nullptr;
-    unsigned    index = 0;      // position in the pool, so release() needs no search
+    char *   data = nullptr;
+    size_t   bytesize = 0;
+    unsigned index = 0;      // position in the pool, so release() needs no search
 
     bool valid() const { return data != nullptr; }
 };
 
-// Pinned host buffers for one worker, created on demand and reused for the streamer's lifetime.
+// Pinned host buffers for one worker, created on demand and reused for the streamer's lifetime. ONE
+// pool serves every device the worker names: this memory is reachable from every context.
 //
 // Buffers are not created one at a time. The pool registers a SLAB and cuts buffers out of it,
 // because creation carries a fixed per-call cost: on a B200, 16 MiB registers at 3.43 GB/s against
@@ -60,13 +60,10 @@ class StagingPool
 
     StagingPool(std::shared_ptr<device::Device> device, Params params);
 
-    // Waits for every event, then lets the owners below free the events and the slabs. Pinned
-    // memory must not be freed while the driver may still be writing into it, which is what the
-    // wait is for.
-    //
-    // Every buffer must already be back: the streamer drains its in-flight requests before teardown
-    // anyway, and the waiter must be stopped. It synchronises every event rather than tracking which
-    // are outstanding, because that bookkeeping is exactly what would be racy.
+    // PRECONDITION: every buffer is already back. A buffer returns only after its copy's event was
+    // synchronised, so this is also what guarantees no DMA is still reading out of this memory when
+    // it is freed. The streamer drains its in-flight requests before teardown anyway, and every
+    // StreamWaiter is stopped first.
     virtual ~StagingPool();
 
     StagingPool(const StagingPool &) = delete;
@@ -97,19 +94,31 @@ class StagingPool
     bool take(unsigned & index);
     void give(unsigned index);
 
+    // Hand out a buffer that already exists - returned, or created and never used. False when there
+    // is none, which is when the pool has to grow.
+    bool hand_out(StagingBuffer & out);
+
+    // The next slab to register: how many buffers it yields, and how many bytes that is. Zero when
+    // the pool is at its ceiling.
+    //
+    // Split from the registration itself so that SharedStagingPool can PIN OUTSIDE ITS LOCK. Pinning
+    // a 16 MiB slab takes about 4 ms, and holding the lock across it blocks the StreamWaiter's
+    // release() for that whole time - stalling the buffer returns of every copy that lands while the
+    // pool is still growing.
+    unsigned plan_slab(size_t & bytesize) const;
+
+    // Adopt a slab that has been pinned, and cut buffers out of it.
+    void publish_slab(void * base, unsigned per_slab);
+
     std::vector<StagingBuffer> _buffers;   // never shrinks, so indices stay valid
 
  private:
+    // Plan, pin and publish in one step, with no lock to release: this class has a single consumer.
     common::ResponseCode grow();
 
-    // The handles this pool owns. Held as owners rather than freed by hand in the destructor, so a
-    // throw part-way through grow() cannot leak an event or a slab, and so the rule that they are
-    // released is a property of the type rather than of one function being written correctly.
-    //
-    // A StagingBuffer carries a BORROWED copy of its event handle: it is a value handed to callers,
-    // so it cannot own anything.
+    // Held as owners rather than freed by hand in the destructor, so a throw part-way through grow()
+    // cannot leak a slab, and so the rule that they are released is a property of the type.
     std::vector<device::OwnedPinned> _slabs;
-    std::vector<device::OwnedEvent> _events;
 
     // Buffers that exist but have never been handed out. Consumer only, so growth - which happens
     // inside try_acquire() - never writes to the ring below and never becomes a second producer.
@@ -137,6 +146,13 @@ class SharedStagingPool : public StagingPool
     using StagingPool::StagingPool;
 
     // Locks, never waits. For a caller with something else to do.
+    //
+    // An INVALID buffer has a second meaning here that the base class does not have: another consumer
+    // is registering a slab, so this one is not allowed to register a second. With ONE consumer - a
+    // per-worker client - that cannot happen, and an invalid buffer means only "everything is in
+    // flight". A caller that treats invalid as impossible is therefore relying on being alone; the
+    // synchronous reader, where several threads share a pool, must use acquire() instead, which waits
+    // for the slab rather than reporting nothing.
     common::ResponseCode try_acquire(StagingBuffer & out) override;
 
     // Waits until a buffer is free or the pool can grow. An invalid buffer means stopped.
@@ -149,9 +165,20 @@ class SharedStagingPool : public StagingPool
     void stop();
 
  private:
-    std::mutex _mutex;
+    // Pin a slab with the lock RELEASED, then take it again to publish. Returns the driver's code.
+    //
+    // `grew` says whether there was any room to grow into. Without it a caller cannot tell "a slab
+    // arrived, look again" from "the pool is at its ceiling, wait" - and a waiter that cannot tell
+    // spins instead of sleeping.
+    common::ResponseCode grow_unlocked(std::unique_lock<std::mutex> & lock, bool & grew);
+
+    mutable std::mutex _mutex;
     std::condition_variable _ready;
     bool _stopped = false;
+
+    // Set while a thread is pinning outside the lock, so a second consumer does not register a slab
+    // the first one is already registering - which would take the pool past its ceiling.
+    bool _growing = false;
 };
 
 } // namespace runai::llm::streamer::impl

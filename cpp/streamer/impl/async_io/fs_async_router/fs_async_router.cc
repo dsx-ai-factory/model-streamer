@@ -54,17 +54,18 @@ AsyncIoCounters FsAsyncRouter::counters() const
     return _workers->total();
 }
 
-FsAsyncRouter::WorkerFactory FsAsyncRouter::worker_factory() const
+FsAsyncRouter::WorkerFactory FsAsyncRouter::worker_factory(std::shared_ptr<DeviceWriter> writer) const
 {
     // Reading the strategy inside is safe: the factory runs when the pool is created, which is the
     // first push, which is after resolution.
     return [resolver = _strategy_resolver, workers = _workers, dead = _dead_mounts,
-            engine = _environment.engine]
+            engine = _environment.engine, writer = std::move(writer)]
            (dev_t device, size_t block, unsigned depth) -> std::unique_ptr<utils::Worker<Workload>>
     {
         auto worker = std::make_unique<AsyncIoWorker>(resolver->resolved(), block, depth,
                                                       engine ? engine : posix_io::make_io_engine,
-                                                      [dead, device]() { dead->add(device); });
+                                                      [dead, device]() { dead->add(device); },
+                                                      writer);
 
         // Registered here, the last point at which the concrete type is still known: the pool stores
         // it as a Worker<Workload>, which knows nothing of counters.

@@ -22,6 +22,7 @@
 #include "streamer/impl/batches/batches.h"
 #include "streamer/impl/request/request.h"
 #include "streamer/impl/submissions/submissions_mgr.h"
+#include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/pools/backend_pools.h"
 #include "posix_io/mount_capabilities/mount_capabilities.h"
 #include "streamer/impl/async_io/async_io_stats/async_io_stats.h"
@@ -184,6 +185,11 @@ struct Streamer
     // Declared BEFORE _pools, and that order is load-bearing: the async pool's factory is built from
     // worker_factory() while _pools is constructed.
     FsAsyncRouter _router;
+
+    // The copy path onto a device, shared by every worker of this streamer - one stream per device
+    // however many workers copy to it. Costs nothing until a submission actually names a device, so
+    // it is created unconditionally. Also BEFORE _pools, for the same reason as _router.
+    std::shared_ptr<DeviceWriter> _device_writer;
 
     AsyncIoStats _stats;
 
