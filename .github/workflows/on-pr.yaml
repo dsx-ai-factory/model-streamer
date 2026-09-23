@@ -61,11 +61,3 @@ jobs:
         name: runai_model_streamer_azure
         path: py/runai_model_streamer_azure/dist/*
         if-no-files-found: error
-
-    - name: Upload C/C++ SDK archives
-      uses: actions/upload-artifact@v4
-      with:
-        name: cpp-sdk
-        path: sdk/dist/*
-        if-no-files-found: error
-        compression-level: 0

@@ -97,8 +97,8 @@ verification, C99 and C++17 compilation via pkg-config, the shipped CMake exampl
 file-byte verification, and runtime dependency checks. Consumers build against
 an unpacked temporary prefix, outside the repository.
 
-PR CI calls `make test` once with the PR version, tests the C/C++ SDK in the
-devcontainer, and retains both architectures as the `cpp-sdk` Actions artifact.
+PR CI calls `make test` once with the PR version and tests the C/C++ SDK in the
+devcontainer.
 Release CI builds each architecture on a separate runner, then calls
 `make test-cpp CPP_SDK_ARCHIVE=...` in clean Ubuntu 20.04 containers on native x86_64
 and aarch64 runners. GitHub asset publishing and the four PyPI package uploads
