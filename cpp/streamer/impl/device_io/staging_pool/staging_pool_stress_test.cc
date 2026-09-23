@@ -22,15 +22,15 @@ namespace
 
 // One scenario: random pool shape, random traffic, run on real threads.
 //
-// The free list is two atomics with no lock, and a broken memory ordering there fails only
-// sometimes. One run proves nothing, so the shape is randomised and the whole thing is repeated -
-// the point is many different interleavings, not one long one.
+// A buffer handed out twice, or lost, needs an interleaving to show itself, and one run proves
+// nothing. So the shape is randomised and the whole thing is repeated - the point is many different
+// interleavings, not one long one.
 struct Scenario
 {
     size_t   buffer_bytesize;
     size_t   slab_bytesize;
     unsigned max_buffers;
-    unsigned consumers;     // more than one exercises SharedStagingPool
+    unsigned consumers;     // more than one makes two threads register a slab at once
     unsigned rounds;        // total acquires across all consumers
 };
 
@@ -62,16 +62,10 @@ std::string run_scenario(const Scenario & scenario, unsigned seed)
     params.slab_bytesize = scenario.slab_bytesize;
     params.max_buffers = scenario.max_buffers;
 
+    // Both entry points are exercised: the blocking one when there are several consumers, the
+    // non-blocking one when there is a single consumer, which is every user in the streamer.
     const bool shared = scenario.consumers > 1;
-    std::unique_ptr<StagingPool> pool;
-    if (shared)
-    {
-        pool = std::make_unique<SharedStagingPool>(mock, params);
-    }
-    else
-    {
-        pool = std::make_unique<StagingPool>(mock, params);
-    }
+    auto pool = std::make_unique<StagingPool>(mock, params);
 
     // Held per buffer index. A buffer handed out while already out is the corruption this is
     // looking for: two readers would write the same bytes.
@@ -110,12 +104,8 @@ std::string run_scenario(const Scenario & scenario, unsigned seed)
                     return;
                 }
 
-                // The shared pool waits; the lock-free one returns and lets the caller retry.
-                // Both are exercised, since the scenario picks the pool by consumer count.
                 StagingBuffer buffer;
-                const auto code = shared
-                    ? static_cast<SharedStagingPool *>(pool.get())->acquire(buffer)
-                    : pool->try_acquire(buffer);
+                const auto code = shared ? pool->acquire(buffer) : pool->try_acquire(buffer);
                 if (code != common::ResponseCode::Success)
                 {
                     fail("acquire failed");
@@ -202,7 +192,7 @@ std::string run_scenario(const Scenario & scenario, unsigned seed)
     {
         // A consumer that gave its round back may still be waiting; without this it waits for a
         // reaper that is about to stop.
-        static_cast<SharedStagingPool *>(pool.get())->stop();
+        pool->stop();
     }
     reaper.join();
 

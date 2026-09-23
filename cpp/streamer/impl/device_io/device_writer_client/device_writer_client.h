@@ -129,7 +129,7 @@ class DeviceWriterClient
 
     // Touched only by this worker's thread. The writer behind them is shared, and locks only inside
     // open() - once per device, never per buffer.
-    std::shared_ptr<SharedStagingPool> _pool;
+    std::shared_ptr<StagingPool> _pool;
     std::map<unsigned, DeviceWriter::Channel> _channels;
     std::map<unsigned, std::shared_ptr<EventPool>> _events;
 

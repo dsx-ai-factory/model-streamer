@@ -53,7 +53,7 @@ class FileSystemWorker : public utils::Worker<Workload>
     const std::shared_ptr<DeviceIssuer> _issuer;
     const size_t _block_bytesize;
 
-    std::shared_ptr<SharedStagingPool> _pool;
+    std::shared_ptr<StagingPool> _pool;
 };
 
 }; // namespace runai::llm::streamer::impl
