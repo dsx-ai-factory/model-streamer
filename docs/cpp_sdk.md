@@ -1,6 +1,6 @@
 # Model Streamer C/C++ SDK
 
-The SDK is published alongside the Python wheels on GitHub Releases, with the
+The C/C++ SDK is published alongside the Python SDK wheels on GitHub Releases, with the
 same version and source tag. It exposes the C API from `streamer/streamer.h`,
 which can also be used from C++17. No Python package or Bazel installation is
 needed to consume it.
@@ -81,30 +81,30 @@ the wrong ELF architecture, and a core library without `$ORIGIN` in its runpath.
 The top-level Makefile provides the same test entry points for developers and CI:
 
 ```bash
-make test-python                         # Python unit tests
-PACKAGE_VERSION=0.17.0 make test-sdk     # Build and test the native SDK
-make test-sdk SDK_ARCHIVE=/path/to/runai-model-streamer-sdk-0.17.0-linux-x86_64.tar.gz
-PACKAGE_VERSION=0.17.0 make test         # Full suite, including Python and SDK tests
+make test-python                         # Python SDK unit tests
+PACKAGE_VERSION=0.17.0 make test-cpp     # Build and test the C/C++ SDK
+make test-cpp CPP_SDK_ARCHIVE=/path/to/runai-model-streamer-sdk-0.17.0-linux-x86_64.tar.gz
+PACKAGE_VERSION=0.17.0 make test         # Full suite, including both SDKs
 ```
 
-Run SDK tests on Linux with Python 3, gcc/g++, CMake, make, pkg-config, binutils,
+Run C/C++ SDK tests on Linux with Python 3, gcc/g++, CMake, make, pkg-config, binutils,
 and the runtime dependencies installed. Building the SDK additionally requires
-the repository's Bazel toolchain; `SDK_ARCHIVE` skips that build and tests the
+the repository's Bazel toolchain; `CPP_SDK_ARCHIVE` skips that build and tests the
 supplied archive without installing any streamer Python packages.
 
-`make test-sdk` runs packaging unit tests and consumer checks: checksum
+`make test-cpp` runs packaging unit tests and consumer checks: checksum
 verification, C99 and C++17 compilation via pkg-config, the shipped CMake example,
 file-byte verification, and runtime dependency checks. Consumers build against
 an unpacked temporary prefix, outside the repository.
 
-PR CI calls `make test` once with the PR version, tests the native SDK in the
-devcontainer, and retains both architectures as the `sdk` Actions artifact.
+PR CI calls `make test` once with the PR version, tests the C/C++ SDK in the
+devcontainer, and retains both architectures as the `cpp-sdk` Actions artifact.
 Release CI builds each architecture on a separate runner, then calls
-`make test-sdk SDK_ARCHIVE=...` in clean Ubuntu 20.04 containers on native x86_64
+`make test-cpp CPP_SDK_ARCHIVE=...` in clean Ubuntu 20.04 containers on native x86_64
 and aarch64 runners. GitHub asset publishing and the four PyPI package uploads
 run in parallel after both consumers pass, using the tested artifacts without
 rebuilding them.
 
-Object-storage end-to-end SDK tests and an exported-symbol compatibility baseline
+Object-storage end-to-end C/C++ SDK tests and an exported-symbol compatibility baseline
 are follow-up work tracked by issue #179; this publishing change does not close
 all of that issue's acceptance criteria.

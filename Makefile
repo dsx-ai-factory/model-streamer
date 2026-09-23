@@ -1,10 +1,10 @@
 X86_64_ARCH := x86_64
 AARCH64_ARCH := aarch64
 PACKAGE_VERSION ?= 0.0.0
-SDK_ARCHIVE ?=
-SDK_NATIVE_ARCHIVE = sdk/dist/runai-model-streamer-sdk-$(patsubst v%,%,$(PACKAGE_VERSION))-linux-$(shell uname -m).tar.gz
+CPP_SDK_ARCHIVE ?=
+CPP_SDK_NATIVE_ARCHIVE = sdk/dist/runai-model-streamer-sdk-$(patsubst v%,%,$(PACKAGE_VERSION))-linux-$(shell uname -m).tar.gz
 
-.PHONY: build build_aarch64 build_x86_64 test test-python test-sdk test_strategies install
+.PHONY: build build_aarch64 build_x86_64 test test-python test-cpp test_strategies install
 
 build_x86_64:
 	make -C cpp build ARCH=${X86_64_ARCH} && \
@@ -28,24 +28,24 @@ test: install
 	make -C cpp test && \
 	$(MAKE) test-python && \
 	$(MAKE) -C py/runai_model_streamer test-dist && \
-	$(MAKE) test-sdk SDK_ARCHIVE="$(SDK_NATIVE_ARCHIVE)" && \
+	$(MAKE) test-cpp CPP_SDK_ARCHIVE="$(CPP_SDK_NATIVE_ARCHIVE)" && \
 	make -C tests all && \
 	make test_strategies
 
 test-python:
 	$(MAKE) -C py/runai_model_streamer test-unit
 
-# Standalone SDK testing builds the native libraries without installing Python
+# Standalone C/C++ SDK testing builds the native libraries without installing Python
 # packages. CI can supply an already packaged archive to test the exact release
 # artifact without rebuilding it.
-test-sdk:
+test-cpp:
 	python3 -m unittest discover -s sdk -p 'test_*.py'
-ifneq ($(SDK_ARCHIVE),)
-	bash sdk/verify.sh "$(SDK_ARCHIVE)"
+ifneq ($(CPP_SDK_ARCHIVE),)
+	bash sdk/verify.sh "$(CPP_SDK_ARCHIVE)"
 else
 	$(MAKE) -C cpp build ARCH=$(shell uname -m)
 	python3 sdk/package.py --version "$(PACKAGE_VERSION)" --arch $(shell uname -m)
-	bash sdk/verify.sh "$(SDK_NATIVE_ARCHIVE)"
+	bash sdk/verify.sh "$(CPP_SDK_NATIVE_ARCHIVE)"
 endif
 
 # Filesystem read strategies, every one we support. Each list keeps sync_buffered last as the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the current architecture's Bazel outputs without rebuilding them."""
+"""Package the C/C++ SDK from the current architecture's existing Bazel outputs."""
 
 import argparse
 import hashlib

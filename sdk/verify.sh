@@ -39,4 +39,4 @@ for library in "$prefix"/lib/*.so; do
     if [[ "$dependencies" == *'not found'* ]]; then exit 1; fi
 done
 readelf -dW "$prefix/lib/libstreamer.so" | grep -E '\((RUNPATH|RPATH)\).*\[\$ORIGIN\]'
-echo "SDK consumer checks passed for $arch"
+echo "C/C++ SDK consumer checks passed for $arch"
