@@ -111,6 +111,11 @@ class StagingPool
     // A buffer that is free right now, or false. CALLER HOLDS THE LOCK.
     bool hand_out(StagingBuffer & out);
 
+    // A pool that has no buffer and can never make one - no size, or a window of none. Told apart
+    // from "at the ceiling" by the pool being EMPTY: nothing was ever handed out, so no release can
+    // ever come, and acquire() would wait for something that cannot happen.
+    common::ResponseCode barren() const;
+
     // Holding the device keeps its primary context alive for longer than every buffer allocated
     // through it. Releasing that context underneath pinned memory is undefined, and nothing else
     // here would prevent it.
