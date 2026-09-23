@@ -143,10 +143,12 @@ TEST_F(FileSystemWorkerTest, Reads_A_Device_Workload_Through_Pinned_Buffers)
     ASSERT_NE(device, nullptr);
     EXPECT_EQ(device->copies, Ranges) << "one block, one buffer, one copy";
 
-    // THREE buffers, whatever the batch size: read, copy, in flight. A pool that grew with the batch
-    // would pin the whole file.
-    EXPECT_EQ(device->host_allocs, FileSystemWorker::BuffersPerThread)
-        << "one registration per buffer, and no more than the pipeline depth";
+    // AT MOST three buffers, whatever the batch size. A pool that grew with the batch would pin the
+    // whole file. Not exactly three: the pool grows only when no buffer is free, so a copy that
+    // lands before the next block is read means the third is never needed.
+    EXPECT_LE(device->host_allocs, FileSystemWorker::BuffersPerThread)
+        << "the pool grew past the pipeline depth";
+    EXPECT_GE(device->host_allocs, 1u);
 }
 
 // Every reading thread has its own pool, so a second worker pins its own three and shares nothing
@@ -162,21 +164,31 @@ TEST_F(FileSystemWorkerTest, Each_Worker_Has_Its_Own_Buffers)
     std::vector<std::vector<char>> destinations(2, std::vector<char>(4 * Block, 0));
     std::atomic<bool> stopped{false};
 
+    // Counted per worker, because how MANY buffers a worker pins depends on how fast the copies come
+    // back. What must be true is that the second worker pins its OWN: sharing the first one's pool
+    // would let it reuse buffers that are all free by now, and register nothing at all.
+    std::vector<unsigned> pinned_after(2, 0);
+
     for (unsigned w = 0; w < 2; ++w)
     {
         auto workload = workload_of(file.path, common::Device::cuda(0), destinations[w].data(), 4, Block);
         FileSystemWorker worker(writer, issuer, Block);
         worker.execute(std::move(workload), stopped);
-    }
 
-    for (unsigned i = 0; i < 8; ++i)
-    {
-        EXPECT_EQ(_responder->pop(5000).ret, common::ResponseCode::Success);
+        for (unsigned i = 0; i < 4; ++i)
+        {
+            EXPECT_EQ(_responder->pop(5000).ret, common::ResponseCode::Success) << "worker " << w;
+        }
+
+        pinned_after[w] = _backend->opened(0)->host_allocs;
     }
 
     const auto device = _backend->opened(0);
     EXPECT_EQ(device->streams_created, 1u) << "one device, one stream, one issuer";
-    EXPECT_EQ(device->host_allocs, 2 * FileSystemWorker::BuffersPerThread) << "three buffers each";
+
+    EXPECT_GT(pinned_after[1], pinned_after[0]) << "the second worker read out of the first one's pool";
+    EXPECT_LE(pinned_after[0], FileSystemWorker::BuffersPerThread);
+    EXPECT_LE(pinned_after[1] - pinned_after[0], FileSystemWorker::BuffersPerThread);
 
     for (unsigned w = 0; w < 2; ++w)
     {
