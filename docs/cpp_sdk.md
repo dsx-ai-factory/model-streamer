@@ -82,8 +82,9 @@ PR CI retains both archives as the `sdk` Actions artifact. PR and release jobs
 run `bash sdk/verify.sh ARCHIVE` in fresh consumer containers on native x86_64 and
 aarch64 runners. That script checks checksums, builds C99 and C++17 consumers via
 pkg-config and the shipped CMake example, verifies file bytes, and checks runtime
-dependencies. Release publishing waits for both consumers and uploads the tested
-archives without rebuilding them.
+dependencies. Release CI builds each architecture on a separate runner, then
+waits for both consumers. GitHub asset publishing and the four PyPI package
+uploads run in parallel using the tested artifacts without rebuilding them.
 
 Object-storage end-to-end SDK tests and an exported-symbol compatibility baseline
 are follow-up work tracked by issue #179; this publishing change does not close

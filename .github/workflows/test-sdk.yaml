@@ -2,6 +2,11 @@ name: Test SDK archives
 
 on:
   workflow_call:
+    inputs:
+      artifact-pattern:
+        description: SDK artifact name or pattern; architecture artifacts are merged before testing
+        type: string
+        default: sdk
 
 permissions:
   contents: read
@@ -22,7 +27,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: sdk
+          pattern: ${{ inputs.artifact-pattern }}
+          merge-multiple: true
           path: sdk/dist
       - name: Verify both checksums and the expected asset set
         working-directory: sdk/dist

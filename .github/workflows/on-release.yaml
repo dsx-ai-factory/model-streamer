@@ -7,7 +7,13 @@ on:
 
 jobs:
   build:
-    name: Build wheels and SDK
+    name: Build wheels and SDK (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    # Both targets use the existing x86_64 devcontainer and cross-toolchain,
+    # with independent Bazel output trees on separate runners.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -40,12 +46,12 @@ jobs:
         cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build_${{ matrix.arch }}
 
     - name: Upload wheels for publishing
       uses: actions/upload-artifact@v4
       with:
-        name: wheels
+        name: wheels-${{ matrix.arch }}
         path: py/*/dist/*.whl
         if-no-files-found: error
         compression-level: 0
@@ -53,7 +59,7 @@ jobs:
     - name: Upload SDK for validation
       uses: actions/upload-artifact@v4
       with:
-        name: sdk
+        name: sdk-${{ matrix.arch }}
         path: sdk/dist/*
         if-no-files-found: error
         compression-level: 0
@@ -61,11 +67,13 @@ jobs:
   test-sdk:
     needs: build
     uses: ./.github/workflows/test-sdk.yaml
+    with:
+      artifact-pattern: sdk-*
     permissions:
       contents: read
 
-  publish:
-    name: Publish validated release artifacts
+  publish-github:
+    name: Publish GitHub release assets
     needs: [build, test-sdk]
     runs-on: ubuntu-latest
     permissions:
@@ -73,11 +81,13 @@ jobs:
     steps:
     - uses: actions/download-artifact@v4
       with:
-        name: wheels
+        pattern: wheels-*
+        merge-multiple: true
         path: py
     - uses: actions/download-artifact@v4
       with:
-        name: sdk
+        pattern: sdk-*
+        merge-multiple: true
         path: sdk/dist
     - name: Upload release assets
       uses: softprops/action-gh-release@v2
@@ -89,30 +99,28 @@ jobs:
           sdk/dist/*.tar.gz
           sdk/dist/*.tar.gz.sha256
 
-    - name: Publish streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+  publish-pypi:
+    name: Publish ${{ matrix.package }} to PyPI
+    needs: [build, test-sdk]
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - runai_model_streamer
+          - runai_model_streamer_s3
+          - runai_model_streamer_gcs
+          - runai_model_streamer_azure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: wheels-*
+        merge-multiple: true
+        path: py
+    - uses: pypa/gh-action-pypi-publish@release/v1
       with:
         password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer/dist/
-        print-hash: true
-
-    - name: Publish s3 streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_s3/dist/
-        print-hash: true
-
-    - name: Publish GCS streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_gcs/dist/
-        print-hash: true
-
-    - name: Publish Azure streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_azure/dist/
+        packages-dir: py/${{ matrix.package }}/dist/
         print-hash: true
