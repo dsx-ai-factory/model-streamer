@@ -85,7 +85,7 @@ common::ResponseCode Workload::verify_batch(const Batch & batch)
     return common::ResponseCode::Success;
 }
 
-void Workload::execute(std::atomic<bool> & stopped)
+void Workload::execute(std::atomic<bool> & stopped, const DeviceStaging * staging)
 {
     if (size() == 0)
     {
@@ -97,7 +97,7 @@ void Workload::execute(std::atomic<bool> & stopped)
 
     for (auto & batch : _batches)
     {
-        batch.execute(stopped);
+        batch.execute(stopped, staging);
         LOG(DEBUG) << "Finished batch " << batch;
     }
 }

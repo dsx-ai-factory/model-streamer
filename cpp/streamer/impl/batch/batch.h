@@ -19,6 +19,8 @@
 #include "streamer/impl/task/task.h"
 #include "streamer/impl/reader/reader.h"
 #include "streamer/impl/chunk_splitter/chunk_splitter.h"
+#include "streamer/impl/device_io/device_issuer/device_issuer.h"
+#include "streamer/impl/device_io/staging_pool/staging_pool.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -32,6 +34,19 @@ namespace runai::llm::streamer::impl
 //         [task 1    ][  task 2 ][    task 3     ][ task 4 ]
 
 using Tasks = std::vector<Task>;
+
+// What a batch needs to reach a DEVICE from the synchronous reader: the reading thread's own pinned
+// buffers, and the issuer shared by every reading thread.
+//
+// The pool is per thread so nothing contends for buffers; the issuer is shared so one thread binds a
+// context and enqueues on the stream. See DeviceIssuer.
+struct DeviceStaging
+{
+    std::shared_ptr<SharedStagingPool> pool;
+    DeviceIssuer * issuer = nullptr;
+
+    bool valid() const { return pool != nullptr && issuer != nullptr; }
+};
 
 
 struct Batch
@@ -79,8 +94,11 @@ struct Batch
   // end offset of the batch
   size_t end_offset() const;
 
-  // read the batch synchronously
-  void execute(std::atomic<bool> & stopped);
+  // Read the batch synchronously.
+  //
+  // `staging` is required for a DEVICE batch and unused for a host one: this reader writes with
+  // pread, which cannot target device memory, so those bytes go through pinned buffers and a copy.
+  void execute(std::atomic<bool> & stopped, const DeviceStaging * staging = nullptr);
 
   // handle response from the reader
   void handle_response(const common::backend_api::Response & response, const Task * task_ptr);
@@ -132,6 +150,10 @@ struct Batch
 
  private:
   void read(const Config & config, std::atomic<bool> & stopped);
+
+  // The same range, but landing in pinned buffers and copied on from there. One block is one buffer
+  // and one copy, and a range is answered only once its bytes are on the device.
+  void read_to_device(const DeviceStaging & staging, std::atomic<bool> & stopped);
 
   // handle response from a single task
   void handle_task_response(const common::ResponseCode response_code, const Task * task_ptr);

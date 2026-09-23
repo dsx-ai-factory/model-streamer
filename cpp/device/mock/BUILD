@@ -6,6 +6,7 @@ runai_cc_auto_library(
     name = "mock",
     deps = [
         "//device",
+        "//common/exception",
     ],
     testonly = True,
     visibility = ["//visibility:public"],

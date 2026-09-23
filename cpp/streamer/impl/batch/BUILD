@@ -3,6 +3,8 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "batch",
     deps = [
+        "//streamer/impl/device_io/device_issuer",
+        "//utils/semaphore",
         "//common/device",
         "//streamer/impl/chunk_splitter",
         "//common/responder",
@@ -18,6 +20,7 @@ runai_cc_test(
     name = "batch_test",
     srcs = ["batch_test.cc"],
     deps = [":batch",
+            "//device/mock",
             "//streamer/impl/file",
             "//streamer/impl/workload",
             "//utils/random",

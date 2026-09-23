@@ -4,6 +4,7 @@ runai_cc_auto_library(
     name = "streamer",
     deps = [
         "//device/cuda",
+        "//streamer/impl/device_io/device_issuer",
         "//common/device",
         "//streamer/impl/assigner",
         "//streamer/impl/config/config",

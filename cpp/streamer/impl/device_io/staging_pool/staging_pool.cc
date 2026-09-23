@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "utils/logging/logging.h"
+#include "utils/scope_guard/scope_guard.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -54,6 +55,15 @@ unsigned StagingPool::plan_slab(size_t & bytesize) const
     const unsigned room = _params.max_buffers - static_cast<unsigned>(_buffers.size());
     if (room == 0)
     {
+        bytesize = 0;
+        return 0;
+    }
+
+    // A pool of zero sized buffers divides by zero here, which is SIGFPE rather than an error the
+    // caller can see. Refused at the ceiling instead, so the pool hands out nothing.
+    if (_params.buffer_bytesize == 0)
+    {
+        LOG(ERROR) << "[RunAI Streamer] a staging pool of zero sized buffers holds nothing";
         bytesize = 0;
         return 0;
     }
@@ -145,6 +155,11 @@ void StagingPool::release(const StagingBuffer & buffer)
     give(buffer.index);
 }
 
+size_t StagingPool::buffer_bytesize() const
+{
+    return _params.buffer_bytesize;
+}
+
 unsigned StagingPool::created() const
 {
     return static_cast<unsigned>(_buffers.size());
@@ -169,24 +184,36 @@ common::ResponseCode SharedStagingPool::grow_unlocked(std::unique_lock<std::mute
     grew = true;
 
     _growing = true;
-    lock.unlock();
 
-    // THE POINT OF ALL THIS. Pinning a slab is a driver call of several milliseconds, and the
-    // StreamWaiter takes this same lock to hand buffers back - so holding it here would stall every
-    // copy that lands while the pool is still filling.
+    // Declared first, so it runs LAST - after the lock is back and after the slab is published.
+    // Whichever way this ends, including a throw from the driver, the flag is cleared and the
+    // waiters are woken: one must not sleep through a slab that arrived, nor through one that never
+    // will. Leaving the flag set would park every later acquire on a grow nobody is doing.
+    const utils::ScopeGuard done([&]()
+        {
+            _growing = false;
+            _ready.notify_all();
+        });
+
     void * base = nullptr;
-    const auto code = _device->host_alloc(bytesize, &base);
+    auto code = common::ResponseCode::Success;
 
-    lock.lock();
-    _growing = false;
+    {
+        // THE POINT OF ALL THIS. Pinning a slab is a driver call of several milliseconds, and the
+        // StreamWaiter takes this same lock to hand buffers back - so holding it here would stall
+        // every copy that lands while the pool is still filling.
+        lock.unlock();
+        const utils::ScopeGuard relock([&]() { lock.lock(); });
 
+        code = _device->host_alloc(bytesize, &base);
+    }
+
+    // The lock is held again.
     if (code == common::ResponseCode::Success)
     {
         publish_slab(base, per_slab);
     }
 
-    // Both paths: a waiter must not sleep through a slab that arrived, nor through one that failed.
-    _ready.notify_all();
     return code;
 }
 

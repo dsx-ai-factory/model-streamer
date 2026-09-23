@@ -55,12 +55,22 @@ class DeviceWriterClient
     // cannot ask for an (N+1)th buffer its own window has not already paid for.
     //
     // Build this in capacity(), which is where the window is decided.
+    //
+    // A client that never calls take() owns NO pool - which is what the synchronous reader's issuer
+    // is, since there the buffers belong to the reading threads and only the copy is shared.
     DeviceWriterClient(std::shared_ptr<DeviceWriter> writer, Buffers buffers, unsigned max_buffers);
 
     ~DeviceWriterClient();
 
     DeviceWriterClient(const DeviceWriterClient &) = delete;
     DeviceWriterClient & operator=(const DeviceWriterClient &) = delete;
+
+    // Open a device without taking a buffer from it.
+    //
+    // take() does this implicitly, so a client that reads never calls it. One that does NOT read -
+    // the synchronous reader's issuer, whose buffers come from elsewhere - has no other first touch,
+    // and write() deliberately refuses an ordinal it has not seen.
+    common::ResponseCode open(unsigned device_ordinal);
 
     // A buffer to read into, for bytes bound for `device_ordinal`. Opens the device on first use,
     // which also builds the pool - pinned memory needs a context, and this is the first call with one.
@@ -78,6 +88,16 @@ class DeviceWriterClient
     // An ordinal that take() never opened is reported rather than opened: opening here would hide a
     // worker writing to a device it never read for.
     common::ResponseCode write(unsigned device_ordinal,
+                               const StagingBuffer & buffer,
+                               size_t bytesize,
+                               void * destination,
+                               Completion on_done);
+
+    // The same, for a buffer from someone else's pool. The synchronous reader keeps a pool per
+    // reading thread and shares one issuer, so the buffer arrives from a pool this object does not
+    // own - and must go back to that one.
+    common::ResponseCode write(unsigned device_ordinal,
+                               const std::shared_ptr<StagingPool> & pool,
                                const StagingBuffer & buffer,
                                size_t bytesize,
                                void * destination,
