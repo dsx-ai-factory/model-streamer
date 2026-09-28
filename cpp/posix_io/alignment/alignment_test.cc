@@ -207,7 +207,7 @@ TEST(DirectBlock, Unusable_Values_Are_REJECTED)
     // Rejected, not replaced. An earlier version fell back to DirectBlockSize with a warning, which
     // hides the very typo this validation exists to catch: an operator who asks for 3000 gets 65536,
     // and nothing they would read says so. Every other malformed numeric variable already fails
-    // runai_start with InvalidParameterError, and this now matches.
+    // runai_file_streamer_start with InvalidParameterError, and this now matches.
     //
     // Below 512: no device reports a smaller logical block, and 1, 2 and 4 are also below
     // sizeof(void *), which posix_memalign refuses outright.

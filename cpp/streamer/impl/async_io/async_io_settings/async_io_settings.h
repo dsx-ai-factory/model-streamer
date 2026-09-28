@@ -12,7 +12,7 @@ namespace runai::llm::streamer::impl
 //
 // CONSTRUCT ON THE FIRST WORKLOAD, never at streamer construction. Depth is divided by
 // RUNAI_STREAMER_PROCESS_GROUP_SIZE, which the Python layer does not write until stream_files() -
-// long after runai_start() has returned. Building this early reads the unset default of 1, skips the
+// long after runai_file_streamer_start() has returned. Building this early reads the unset default of 1, skips the
 // division, and says nothing: the device then sees eight times the intended depth at TP=8.
 //
 // Every value is clamped against its real ceiling here and logged when clamped. A configured number

@@ -15,7 +15,7 @@ namespace runai::llm::streamer::impl
 //
 // Assigns submission ids and tracks, per submission, how many responses remain to be consumed,
 // so the single consumer can decide when a submission is complete (submission_done) and report
-// its throughput. One submission == one runai_request call.
+// its throughput. One submission == one runai_file_streamer_request call.
 //
 // Self-contained and thread-safe: its mutex is a STRICT LEAF - it is never held while touching
 // the responder or the thread pool (and this class never calls into them), so it cannot be

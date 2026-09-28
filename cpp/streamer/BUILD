@@ -2,18 +2,19 @@ load("//:rules.bzl", "runai_portable_so", "runai_cc_test", "runai_cc_auto_librar
 
 runai_portable_so(
     name = "libstreamer.so",
-    srcs = ["streamer.h",
-            "streamer.cc",
-    ],
-    deps = ["//streamer/impl", "//common/device", "//common/submission", "//posix_io/alignment"],
+    srcs = ["streamer.cc"],
+    deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
     ldscript = ":streamer.ldscript",
-    defines = ["_RUNAI_STREAMER_SO"],
-    linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"]
+    linkopts = ["-lpthread", "-Wl,-rpath,$$ORIGIN"],
+    # So //streamer/api:c_api_so_test can link the shipped artifact - the only way to exercise
+    # streamer.ldscript, which applies to this target alone. Granted to that package only: linking
+    # the streamer anywhere else would put a second copy of it in the same process.
+    visibility = ["//streamer/api:__pkg__"],
 )
 
 runai_cc_auto_library(
     name = "streamer",
-    deps = ["//streamer/impl", "//common/device", "//common/submission", "//posix_io/alignment"],
+    deps = ["//streamer/impl", "//streamer/api", "//common/submission", "//posix_io/alignment"],
 )
 
 runai_cc_test(

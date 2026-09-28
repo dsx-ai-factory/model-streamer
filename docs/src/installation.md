@@ -1,6 +1,6 @@
 ## Installation
 
-Run:ai Model Streamer is a Python package available for installation in PyPi. Installing the streamer is done in your Python project using `pip` or by adding `runai-model-streamer` to your `requirements.txt` file.
+Model Streamer is a Python package available for installation in PyPi. Installing the streamer is done in your Python project using `pip` or by adding `runai-model-streamer` to your `requirements.txt` file.
 
 ### Setup
 

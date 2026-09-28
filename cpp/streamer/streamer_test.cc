@@ -10,6 +10,7 @@
 #include <set>
 
 #include "common/response_code/response_code.h"
+#include "common/submission/submission_id.h"
 
 #include "utils/logging/logging.h"
 #include "utils/random/random.h"
@@ -60,8 +61,8 @@ inline int submit(void * streamer, unsigned num_files, const char ** paths, size
     }
 
     SubmissionId submission_id = 0;
-    return runai_request(streamer, &submission_id, num_files, paths, num_ranges.data(),
-                         range_offsets.data(), range_sizes.data(), range_dsts.data(), NvFileStreamerDevice{});
+    return runai_file_streamer_request(streamer, &submission_id, num_files, paths, num_ranges.data(),
+                         range_offsets.data(), range_sizes.data(), range_dsts.data(), RunaiFileStreamerDevice{});
 }
 
 // Single-file variant that reports the submission id, for the concurrent-submission tests. The sub ranges
@@ -83,15 +84,15 @@ inline int submit_one(void * streamer, SubmissionId * id, const char * path, siz
         d += size;
     }
 
-    return runai_request(streamer, id, 1, &path, &num_ranges,
-                         range_offsets.data(), sizes.data(), range_dsts.data(), NvFileStreamerDevice{});
+    return runai_file_streamer_request(streamer, id, 1, &path, &num_ranges,
+                         range_offsets.data(), sizes.data(), range_dsts.data(), RunaiFileStreamerDevice{});
 }
 
 inline int next_response(void * streamer, unsigned * file_index, unsigned * index)
 {
     SubmissionId submission_id = 0;
     int submission_done = 0;
-    return runai_response(streamer, &submission_id, file_index, index, &submission_done, 0);
+    return runai_file_streamer_response(streamer, &submission_id, file_index, index, &submission_done, 0);
 }
 
 struct StreamerTest : ::testing::Test
@@ -142,11 +143,11 @@ struct StreamerTest : ::testing::Test
 TEST_F(StreamerTest, Creation)
 {
     void * streamer = nullptr;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
     EXPECT_NE(streamer, nullptr);
 
-    EXPECT_NO_THROW(runai_end(streamer));
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
 // Replaces AssignerTest.Mismatched_Input_Sizes, which asserted the old per-file vector length check.
@@ -155,7 +156,7 @@ TEST_F(StreamerTest, Creation)
 TEST(Request, Null_Parameters)
 {
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     SubmissionId id = 0;
     // a real file, so the one submission that IS accepted below reads successfully and the test is about
@@ -171,27 +172,27 @@ TEST(Request, Null_Parameters)
 
     const auto invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
 
-    EXPECT_EQ(runai_request(streamer, &id, 1, nullptr, &num_ranges, &offset, &size, &dst, NvFileStreamerDevice{}), invalid);
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, nullptr, &offset, &size, &dst, NvFileStreamerDevice{}), invalid);
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, &num_ranges, nullptr, &size, &dst, NvFileStreamerDevice{}), invalid);
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, &num_ranges, &offset, nullptr, &dst, NvFileStreamerDevice{}), invalid);
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, &num_ranges, &offset, &size, nullptr, NvFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, nullptr, &num_ranges, &offset, &size, &dst, RunaiFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, nullptr, &offset, &size, &dst, RunaiFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, &num_ranges, nullptr, &size, &dst, RunaiFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, &num_ranges, &offset, nullptr, &dst, RunaiFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, &num_ranges, &offset, &size, nullptr, RunaiFileStreamerDevice{}), invalid);
 
     // a null path entry is caught before it is used to construct a std::string - the previous code built
     // the vector straight from the array, which was undefined behaviour on a null element
     const char * null_path = nullptr;
-    EXPECT_EQ(runai_request(streamer, &id, 1, &null_path, &num_ranges, &offset, &size, &dst, NvFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &null_path, &num_ranges, &offset, &size, &dst, RunaiFileStreamerDevice{}), invalid);
 
     // A null destination ELEMENT (the array itself is fine) is caught deeper, by verify_requests, which
     // throws rather than returning. The specific code has to survive the C boundary: UnknownError is what
     // tells a caller to abort everything, while an argument error is attributable and recoverable, so
     // collapsing this to UnknownError would turn a bad argument into a dead stream.
     void * null_dst = nullptr;
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, &num_ranges, &offset, &size, &null_dst, NvFileStreamerDevice{}), invalid);
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, &num_ranges, &offset, &size, &null_dst, RunaiFileStreamerDevice{}), invalid);
 
     // a zero-sized range writes nothing, so a null destination there is accepted
     size_t zero = 0;
-    EXPECT_EQ(runai_request(streamer, &id, 1, &path, &num_ranges, &offset, &zero, &null_dst, NvFileStreamerDevice{}),
+    EXPECT_EQ(runai_file_streamer_request(streamer, &id, 1, &path, &num_ranges, &offset, &zero, &null_dst, RunaiFileStreamerDevice{}),
               static_cast<int>(common::ResponseCode::Success));
 
     // The only submission accepted above, so it owes one response and must be drained before the test
@@ -200,14 +201,14 @@ TEST(Request, Null_Parameters)
     unsigned range_index = 0;
     int submission_done = 0;
     SubmissionId response_id = 0;
-    EXPECT_EQ(runai_response(streamer, &response_id, &file_index, &range_index, &submission_done, 0),
+    EXPECT_EQ(runai_file_streamer_response(streamer, &response_id, &file_index, &range_index, &submission_done, 0),
               static_cast<int>(common::ResponseCode::Success));
     EXPECT_EQ(response_id, id);
     EXPECT_EQ(file_index, 0u);
     EXPECT_EQ(range_index, 0u);
     EXPECT_EQ(submission_done, 1);
 
-    EXPECT_NO_THROW(runai_end(streamer));
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
 TEST(Creation, Invalid_Parameter)
@@ -217,7 +218,7 @@ TEST(Creation, Invalid_Parameter)
     {
         utils::temp::Env size("RUNAI_STREAMER_CONCURRENCY", 0);
         utils::temp::Env chunk_bytesize("RUNAI_STREAMER_CHUNK_BYTESIZE", utils::random::number<int>(1, 2000));
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::InvalidParameterError));
         EXPECT_EQ(streamer, nullptr);
     }
@@ -225,7 +226,7 @@ TEST(Creation, Invalid_Parameter)
     {
         utils::temp::Env size("RUNAI_STREAMER_CONCURRENCY", utils::random::number<int>(1, 10));
         utils::temp::Env chunk_bytesize("RUNAI_STREAMER_CHUNK_BYTESIZE", 0);
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::InvalidParameterError));
         EXPECT_EQ(streamer, nullptr);
     }
@@ -233,7 +234,7 @@ TEST(Creation, Invalid_Parameter)
     {
         utils::temp::Env size("RUNAI_STREAMER_CONCURRENCY", utils::random::number<int>(1, 10));
         utils::temp::Env chunk_bytesize("RUNAI_STREAMER_CHUNK_BYTESIZE", 0);
-        auto res = runai_start(&streamer);
+        auto res = runai_file_streamer_start(&streamer);
         EXPECT_EQ(res, static_cast<int>(common::ResponseCode::InvalidParameterError));
         EXPECT_EQ(streamer, nullptr);
     }
@@ -249,7 +250,7 @@ TEST_F(StreamerTest, Read)
     EXPECT_EQ(expected.size(), size);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     std::vector<unsigned char> v(size);
@@ -265,7 +266,7 @@ TEST_F(StreamerTest, Read)
         }
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST_F(StreamerTest, Async)
@@ -278,7 +279,7 @@ TEST_F(StreamerTest, Async)
     EXPECT_EQ(expected.size(), size);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     std::vector<unsigned char> dst(size);
@@ -300,7 +301,7 @@ TEST_F(StreamerTest, Async)
         }
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST_F(StreamerTest, Error)
@@ -310,7 +311,7 @@ TEST_F(StreamerTest, Error)
     utils::temp::File file(data);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     std::vector<char> dst(size);
@@ -331,7 +332,7 @@ TEST_F(StreamerTest, Error)
     EXPECT_EQ(r, 0);
     EXPECT_EQ(file_index, 0);
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST(Response, Description)
@@ -352,7 +353,7 @@ TEST(Response, Description)
 
     for (auto response_code : {common::ResponseCode::FileAccessError, common::ResponseCode::EofError, common::ResponseCode::InvalidParameterError, common::ResponseCode::EmptyRequestError, common::ResponseCode::BusyError, common::ResponseCode::UnknownError, common::ResponseCode::FinishedError} )
     {
-        std::string str = runai_response_str(static_cast<int>(response_code));
+        std::string str = runai_file_streamer_response_str(static_cast<int>(response_code));
 
         const auto it = __strings.find(static_cast<int>(response_code));
         EXPECT_NE(it, __strings.end());
@@ -366,7 +367,7 @@ TEST_F(StreamerTest, S3_Library_Not_Found)
     auto size = utils::random::number(100, 1000);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     const auto s3_path = "s3://" + utils::random::string() + "/" + utils::random::string();
@@ -378,7 +379,7 @@ TEST_F(StreamerTest, S3_Library_Not_Found)
     unsigned r = utils::random::number();
     EXPECT_EQ(next_response(streamer, &r, &r), static_cast<int>(common::ResponseCode::S3NotSupported));
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST_F(StreamerTest, GCS_Library_Not_Found)
@@ -386,7 +387,7 @@ TEST_F(StreamerTest, GCS_Library_Not_Found)
     auto size = utils::random::number(100, 1000);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     const auto s3_path = "gs://" + utils::random::string() + "/" + utils::random::string();
@@ -398,7 +399,7 @@ TEST_F(StreamerTest, GCS_Library_Not_Found)
     unsigned r = utils::random::number();
     EXPECT_EQ(next_response(streamer, &r, &r), static_cast<int>(common::ResponseCode::GCSNotSupported));
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST_F(StreamerTest, End_Before_Read)
@@ -408,7 +409,7 @@ TEST_F(StreamerTest, End_Before_Read)
     utils::temp::File file(data);
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     std::vector<unsigned char> dst(size);
@@ -420,7 +421,7 @@ TEST_F(StreamerTest, End_Before_Read)
     ::usleep(utils::random::number(400));
 
     const auto start_time = std::chrono::steady_clock::now();
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
     const auto time_ = std::chrono::steady_clock::now();
     const auto duration  = std::chrono::duration_cast<std::chrono::milliseconds>(time_ - start_time);
     EXPECT_LT(duration.count(), 1000);
@@ -495,7 +496,7 @@ TEST_F(StreamerTest, Multiple_Files)
     dsts[0] = static_cast<void *>(dst.data());
 
     void * streamer;
-    auto res = runai_start(&streamer);
+    auto res = runai_file_streamer_start(&streamer);
     EXPECT_EQ(res, static_cast<int>(common::ResponseCode::Success));
 
     EXPECT_EQ(submit(streamer, num_files, file_paths.data(), file_offsets.data(), sizes.data(), dsts.data(), num_ranges.data(), internal_sizes.data()), static_cast<int>(common::ResponseCode::Success));
@@ -532,7 +533,7 @@ TEST_F(StreamerTest, Multiple_Files)
         offset += sizes[file_index];
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST(AsyncEx, ConcurrentSubmissionsDemux)
@@ -548,7 +549,7 @@ TEST(AsyncEx, ConcurrentSubmissionsDemux)
     ASSERT_EQ(expected.size(), size);
 
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     const char * path = file.path.c_str();
     size_t offset = 0;
@@ -582,7 +583,7 @@ TEST(AsyncEx, ConcurrentSubmissionsDemux)
         SubmissionId sid = 0;
         unsigned fi = 0, idx = 0;
         int done = 0;
-        int ret = runai_response(streamer, &sid, &fi, &idx, &done, 5000);
+        int ret = runai_file_streamer_response(streamer, &sid, &fi, &idx, &done, 5000);
         ASSERT_EQ(ret, static_cast<int>(common::ResponseCode::Success));
         got[sid]++;
         if (done) done_count[sid]++;
@@ -597,7 +598,7 @@ TEST(AsyncEx, ConcurrentSubmissionsDemux)
     SubmissionId sid = 0;
     unsigned fi = 0, idx = 0;
     int done = 0;
-    EXPECT_EQ(runai_response(streamer, &sid, &fi, &idx, &done, 50),
+    EXPECT_EQ(runai_file_streamer_response(streamer, &sid, &fi, &idx, &done, 50),
               static_cast<int>(common::ResponseCode::TimedOut));
 
     for (size_t i = 0; i < size; ++i)
@@ -606,7 +607,7 @@ TEST(AsyncEx, ConcurrentSubmissionsDemux)
         EXPECT_EQ(dstB[i], expected[i]);
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST(AsyncEx, PerSubmissionErrorIsolation)
@@ -620,7 +621,7 @@ TEST(AsyncEx, PerSubmissionErrorIsolation)
     ASSERT_EQ(expected.size(), data_size);
 
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     const char * path = file.path.c_str();
     size_t offset = 0;
@@ -652,7 +653,7 @@ TEST(AsyncEx, PerSubmissionErrorIsolation)
         SubmissionId sid = 0;
         unsigned fi = 0, idx = 0;
         int done = 0;
-        int ret = runai_response(streamer, &sid, &fi, &idx, &done, 5000);
+        int ret = runai_file_streamer_response(streamer, &sid, &fi, &idx, &done, 5000);
         ret_by_sub[sid] = ret;
         done_by_sub[sid] += done;
     }
@@ -668,7 +669,7 @@ TEST(AsyncEx, PerSubmissionErrorIsolation)
         EXPECT_EQ(dstA[i], expected[i]);
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 TEST(AsyncEx, MultipleSubmitterThreads)
@@ -682,7 +683,7 @@ TEST(AsyncEx, MultipleSubmitterThreads)
     ASSERT_EQ(expected.size(), size);
 
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     const unsigned N = utils::random::number(4, 12);
     std::vector<std::vector<unsigned char>> dsts(N, std::vector<unsigned char>(size));
@@ -722,7 +723,7 @@ TEST(AsyncEx, MultipleSubmitterThreads)
         SubmissionId sid = 0;
         unsigned fi = 0, idx = 0;
         int done = 0;
-        int ret = runai_response(streamer, &sid, &fi, &idx, &done, 5000);
+        int ret = runai_file_streamer_response(streamer, &sid, &fi, &idx, &done, 5000);
         EXPECT_EQ(ret, static_cast<int>(common::ResponseCode::Success));
         done_by_sub[sid] += done;
     }
@@ -740,7 +741,7 @@ TEST(AsyncEx, MultipleSubmitterThreads)
         }
     }
 
-    runai_end(streamer);
+    runai_file_streamer_end(streamer);
 }
 
 // Every exit of the probe must leave a USABLE block behind, including the ones that report an error.
@@ -755,7 +756,7 @@ TEST(AsyncEx, MultipleSubmitterThreads)
 TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
 {
     void * streamer = nullptr;
-    ASSERT_EQ(runai_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     const auto invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
 
@@ -765,31 +766,31 @@ TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
 
     // The success case first, so the failures below are compared against something real.
     size_t block = 0;
-    EXPECT_EQ(runai_probe_direct_block_size(streamer, &path, 1, &block),
+    EXPECT_EQ(runai_file_streamer_probe_direct_block_size(streamer, &path, 1, &block),
               static_cast<int>(common::ResponseCode::Success));
     EXPECT_GT(block, 0u);
 
     // A null streamer. Rejected, but the block must still be usable.
     block = 0;
-    EXPECT_EQ(runai_probe_direct_block_size(nullptr, &path, 1, &block), invalid);
+    EXPECT_EQ(runai_file_streamer_probe_direct_block_size(nullptr, &path, 1, &block), invalid);
     EXPECT_GT(block, 0u) << "an error exit left the out-parameter untouched, so the caller reads 0";
 
     // A null path array with a non-zero count. Same requirement.
     block = 0;
-    EXPECT_EQ(runai_probe_direct_block_size(streamer, nullptr, 1, &block), invalid);
+    EXPECT_EQ(runai_file_streamer_probe_direct_block_size(streamer, nullptr, 1, &block), invalid);
     EXPECT_GT(block, 0u) << "an error exit left the out-parameter untouched, so the caller reads 0";
 
     // No paths at all. Nothing can be measured, so this reports UnknownError - and still answers with
     // a layout value, which is the whole contract.
     block = 0;
-    EXPECT_EQ(runai_probe_direct_block_size(streamer, nullptr, 0, &block),
+    EXPECT_EQ(runai_file_streamer_probe_direct_block_size(streamer, nullptr, 0, &block),
               static_cast<int>(common::ResponseCode::UnknownError));
     EXPECT_GT(block, 0u);
 
     // A null out-parameter is the one case with nowhere to write, so it only reports.
-    EXPECT_EQ(runai_probe_direct_block_size(streamer, &path, 1, nullptr), invalid);
+    EXPECT_EQ(runai_file_streamer_probe_direct_block_size(streamer, &path, 1, nullptr), invalid);
 
-    EXPECT_NO_THROW(runai_end(streamer));
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
 }; // namespace runai::llm::streamer

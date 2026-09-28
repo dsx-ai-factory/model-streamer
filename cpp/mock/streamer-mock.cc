@@ -10,7 +10,7 @@
 #include <vector>
 #include "utils/fd/fd.h"
 #include "utils/logging/logging.h"
-#include "common/device/device.h"
+#include "streamer/device.h"
 #include "common/response_code/response_code.h"
 #include "common/submission/submission_id.h"
 
@@ -34,7 +34,7 @@ struct State {
 
     // Set when the file could not be opened. Every range still gets a response, carrying this code -
     // the real streamer fails a file's ranges individually rather than dropping them, and a dropped
-    // response would hang the caller (runai_response blocks).
+    // response would hang the caller (runai_file_streamer_response blocks).
     int error = 0;
 };
 
@@ -50,9 +50,9 @@ struct Submission {
     bool drained() const { return response_given >= response_total; }
 };
 
-// ONE STREAMER's state, owned by the handle. The real library makes runai_start `new impl::Streamer`
-// and runai_end `delete` it (streamer/streamer.cc:22-56), so submissions and ids belong to a handle,
-// not to the process. Holding them in globals instead let a second runai_start wipe the submissions a
+// ONE STREAMER's state, owned by the handle. The real library makes runai_file_streamer_start `new impl::Streamer`
+// and runai_file_streamer_end `delete` it (streamer/streamer.cc:22-56), so submissions and ids belong to a handle,
+// not to the process. Holding them in globals instead let a second runai_file_streamer_start wipe the submissions a
 // live streamer was still draining - and that is reachable, not hypothetical: FileStreamer.list_files
 // starts a temporary streamer when used outside its context manager, so listing during a stream would
 // corrupt it here while working in production. A mock that disagrees with the product about this
@@ -78,9 +78,9 @@ StreamerState & state_of(void * streamer)
 int request(void * streamer, const char * path, unsigned num_ranges, const size_t * range_offsets, const size_t * range_sizes, void ** range_dsts, State * state)
 {
     // Record the ranges BEFORE touching the file. The submission owes exactly one response per range
-    // whatever happens below, and runai_request does not consult this function's result - so returning
+    // whatever happens below, and runai_file_streamer_request does not consult this function's result - so returning
     // early would leave total_items at 0 while the response counter had already been raised by num_ranges,
-    // and those responses would never be produced. The caller would then block forever in runai_response.
+    // and those responses would never be produced. The caller would then block forever in runai_file_streamer_response.
     state->ranges.reserve(num_ranges);
     for (unsigned j = 0; j < num_ranges; ++j) {
         state->ranges.push_back(MockRange{ range_offsets[j], range_sizes[j], reinterpret_cast<char*>(range_dsts[j]) });
@@ -106,7 +106,7 @@ int request(void * streamer, const char * path, unsigned num_ranges, const size_
 
 // Read one sub-range. Returns 0 on success or a per-sub-range error code (matching common::ResponseCode:
 // FileAccessError=2 on a read failure, EofError=3 on a short read). Even on an error this is a COMPLETED
-// sub-range response: *index is set and the item is consumed, so runai_response still reports the owning
+// sub-range response: *index is set and the item is consumed, so runai_file_streamer_response still reports the owning
 // submission id and submission_done - matching the real C API (which sets all out-params on an error response).
 int response(void * streamer, unsigned * index, State * state)
 {
@@ -152,7 +152,7 @@ int response(void * streamer, unsigned * index, State * state)
     return ret;
 }
 
-extern "C" int runai_start(void ** streamer)
+extern "C" int runai_file_streamer_start(void ** streamer)
 {
     // A fresh state per streamer, so a new one cannot disturb another that is still draining. No reset of
     // anything shared is needed (or possible) any more - there is nothing shared.
@@ -167,10 +167,10 @@ extern "C" int runai_start(void ** streamer)
     return 0;
 }
 
-extern "C" void runai_end(void * streamer)
+extern "C" void runai_file_streamer_end(void * streamer)
 {
-    // Really free it, like the real runai_end. A leaked state would be harmless in a test process, but
-    // then a handle used after runai_end would keep working here and fault in production - which is the
+    // Really free it, like the real runai_file_streamer_end. A leaked state would be harmless in a test process, but
+    // then a handle used after runai_file_streamer_end would keep working here and fault in production - which is the
     // bug FileStreamer.__exit__ clears self.streamer to avoid.
     delete static_cast<StreamerState *>(streamer);
 }
@@ -192,7 +192,7 @@ static int submission_next_response(void * streamer, Submission & submission, un
     return -1;
 }
 
-extern "C" int runai_set_credentials(
+extern "C" int runai_file_streamer_set_credentials(
     void * streamer,
     const char ** param_keys,
     const char ** param_values,
@@ -205,26 +205,26 @@ extern "C" int runai_set_credentials(
 // point must appear here as well as in streamer.ldscript or the whole suite fails to import.
 //
 // Accepts anything: the mock reads no files, so it has no strategy to choose between.
-extern "C" int runai_set_fs_strategy(
+extern "C" int runai_file_streamer_set_fs_strategy(
     void * streamer,
     const char * candidates)
 {
     return 0;
 }
 
-extern "C" int runai_request(
+extern "C" int runai_file_streamer_request(
     void * streamer,
-    SubmissionId * out_submission_id,
+    RunaiFileStreamerSubmissionId * out_submission_id,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
     size_t * range_offsets,
     size_t * range_sizes,
     void ** range_dsts,
-    NvFileStreamerDevice device
+    RunaiFileStreamerDevice device
 )
 {
-    // Zeroed here, before anything that can fail, exactly as the real runai_request does: the contract
+    // Zeroed here, before anything that can fail, exactly as the real runai_file_streamer_request does: the contract
     // says the id is left 0 when the call fails before one is assigned, and a caller reusing the
     // variable would otherwise read the previous submission's id as if this one were live.
     if (out_submission_id != nullptr) {
@@ -232,7 +232,7 @@ extern "C" int runai_request(
     }
 
     // Refused like the real C API, so a Python test that asks for a device gets the same answer here.
-    if (device.type != NV_FILE_STREAMER_DEVICE_CPU) {
+    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU) {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
     }
 
@@ -274,9 +274,9 @@ extern "C" int runai_request(
     return 0;
 }
 
-extern "C" int runai_response(
+extern "C" int runai_file_streamer_response(
     void * streamer,
-    SubmissionId * out_submission_id,
+    RunaiFileStreamerSubmissionId * out_submission_id,
     unsigned * file_index,
     unsigned * index,
     int * submission_done,
@@ -330,7 +330,7 @@ extern "C" int runai_response(
 
 // The mock reads nothing, so it probes nothing. It reports the process-wide default, which is what
 // the Python ring pads with in tests - a measured answer would need a real mount and a real read.
-extern "C" int runai_probe_direct_block_size(void * streamer, const char ** paths, unsigned num_paths,
+extern "C" int runai_file_streamer_probe_direct_block_size(void * streamer, const char ** paths, unsigned num_paths,
                                              size_t * out_block)
 {
     (void)streamer; (void)paths; (void)num_paths;
@@ -344,12 +344,12 @@ extern "C" int runai_probe_direct_block_size(void * streamer, const char ** path
     return static_cast<int>(runai::llm::streamer::common::ResponseCode::Success);
 }
 
-extern "C" const char * runai_response_str(int response_code)
+extern "C" const char * runai_file_streamer_response_str(int response_code)
 {
     return 0;
 }
 
-extern "C" int runai_list_files(
+extern "C" int runai_file_streamer_list_files(
     void *        streamer,
     const char *  prefix,
     int           is_recursive,

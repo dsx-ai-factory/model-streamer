@@ -1,3 +1,5 @@
+FROM quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e AS minio-src
+
 FROM ubuntu:20.04
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -26,9 +28,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget https://dl.min.io/server/minio/release/linux-$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64")/minio \
-    && chmod +x minio \
-    && mv minio /usr/local/bin/minio
+COPY --from=minio-src /usr/bin/minio /usr/local/bin/minio
 
 RUN curl -fsSL -o fake-gcs-server_1.52.2.tar.gz https://github.com/fsouza/fake-gcs-server/releases/download/v1.52.2/fake-gcs-server_1.52.2_Linux_$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64").tar.gz \
     && mkdir -p fake-gcs-server \

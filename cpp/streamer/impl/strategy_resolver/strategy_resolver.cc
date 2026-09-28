@@ -82,7 +82,7 @@ common::ResponseCode StrategyResolver::set_candidates(const std::string & candid
         // _resolved is checked separately from _resolved_from - they are NOT set together. A failed
         // resolve() records the list it walked and leaves _resolved empty, so reading it here threw
         // std::bad_optional_access on exactly that path. The throw then met the catch(...) in
-        // runai_set_fs_strategy and turned this specific, recoverable code into UnknownError, which
+        // runai_file_streamer_set_fs_strategy and turned this specific, recoverable code into UnknownError, which
         // tells the caller to abort everything.
         //
         // It only ever fired with a log sink enabled: should_process_log() requires __print or

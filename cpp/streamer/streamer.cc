@@ -12,76 +12,29 @@
 #include "streamer/impl/streamer/streamer.h"
 #include "posix_io/alignment/alignment.h"
 
+// The C API is defined at file scope, where streamer.h declares it. The helper below is the only part
+// that is ours to name, so it keeps the namespace.
 namespace runai::llm::streamer
 {
-
-// Library for reading files concurrently into host memory buffers
-// A single submission (runai_request) may cover many files, and many submissions may be in flight at
-// once - each response carries the id of the submission it belongs to
-// NOT THREAD SAFE - caller must not send requests and responses in parallel
-
-// Creates a streamer object; see streamer.h for the configuration environment variables.
-
-_RUNAI_EXTERN_C int runai_start(void ** streamer)
-{
-    // verify configuration
-    std::unique_ptr<impl::Config> config;
-    try
-    {
-        config = std::make_unique<impl::Config>();
-    }
-    catch(...)
-    {
-        return static_cast<int>(common::ResponseCode::InvalidParameterError);
-    }
-
-    try
-    {
-        *streamer = new impl::Streamer(*config);
-    }
-    catch(...)
-    {
-        return static_cast<int>(common::ResponseCode::UnknownError);
-    }
-    return static_cast<int>(common::ResponseCode::Success);
-}
-
-// destroys streamer object
-
-_RUNAI_EXTERN_C void runai_end(void * streamer)
-{
-    try
-    {
-        auto s = static_cast<impl::Streamer *>(streamer);
-        if (s != nullptr)
-        {
-            delete s;
-        }
-    }
-    catch(...)
-    {
-    }
-}
-
 namespace
 {
 
 // Marshal the C request arrays and submit, forwarding out_submission_id. Credentials are NOT passed here:
-// they are streamer-scoped, set once via runai_set_credentials.
+// they are streamer-scoped, set once via runai_file_streamer_set_credentials.
 //
 // The C arrays are flat and grouped by file in the order of paths; they are transposed here into one
 // FileRanges per file, each holding its ranges as (offset, size, dst) triples. Validation is ordered so
 // that no array is dereferenced before it has been checked - in particular paths[i] is checked before
 // being used to construct a std::string.
 int submit_request(impl::Streamer * s,
-                   SubmissionId * out_submission_id,
+                   RunaiFileStreamerSubmissionId * out_submission_id,
                    unsigned num_files,
                    const char ** paths, unsigned * num_ranges,
                    size_t * range_offsets, size_t * range_sizes, void ** range_dsts,
-                   NvFileStreamerDevice device)
+                   RunaiFileStreamerDevice device)
 {
     // Rejected before anything is committed, so a submission this build cannot serve owes no responses.
-    if (device.type != NV_FILE_STREAMER_DEVICE_CPU)
+    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU)
     {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
     }
@@ -127,12 +80,64 @@ int submit_request(impl::Streamer * s,
 }
 
 } // namespace
+}  // namespace runai::llm::streamer
+
+using namespace runai::llm::streamer;
+
+// Library for reading files concurrently into host memory buffers
+// A single submission (runai_file_streamer_request) may cover many files, and many submissions may be in flight at
+// once - each response carries the id of the submission it belongs to
+// NOT THREAD SAFE - caller must not send requests and responses in parallel
+
+// Creates a streamer object; see streamer.h for the configuration environment variables.
+
+int runai_file_streamer_start(void ** streamer)
+{
+    // verify configuration
+    std::unique_ptr<impl::Config> config;
+    try
+    {
+        config = std::make_unique<impl::Config>();
+    }
+    catch(...)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+
+    try
+    {
+        *streamer = new impl::Streamer(*config);
+    }
+    catch(...)
+    {
+        return static_cast<int>(common::ResponseCode::UnknownError);
+    }
+    return static_cast<int>(common::ResponseCode::Success);
+}
+
+// destroys streamer object
+
+void runai_file_streamer_end(void * streamer)
+{
+    try
+    {
+        auto s = static_cast<impl::Streamer *>(streamer);
+        if (s != nullptr)
+        {
+            delete s;
+        }
+    }
+    catch(...)
+    {
+    }
+}
+
 
 // Set the streamer's object-storage credentials as a general key/value dictionary (canonical config-param
 // keys; see common::s3::Credentials). Set-once and thread-safe: the same credentials may be set repeatedly
 // (Success); a different set after the first returns CredentialsAlreadySet. Credentials are streamer-scoped -
 // the read/list entry points use whatever was set here.
-_RUNAI_EXTERN_C int runai_set_credentials(
+int runai_file_streamer_set_credentials(
     void * streamer,
     const char ** param_keys,
     const char ** param_values,
@@ -150,7 +155,7 @@ _RUNAI_EXTERN_C int runai_set_credentials(
     }
     catch (const common::Exception & e)
     {
-        // report the specific code (see runai_request for why this matters)
+        // report the specific code (see runai_file_streamer_request for why this matters)
         return static_cast<int>(e.error());
     }
     catch(...)
@@ -159,7 +164,7 @@ _RUNAI_EXTERN_C int runai_set_credentials(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_set_fs_strategy(
+int runai_file_streamer_set_fs_strategy(
     void * streamer,
     const char * candidates)
 {
@@ -175,7 +180,7 @@ _RUNAI_EXTERN_C int runai_set_fs_strategy(
     }
     catch (const common::Exception & e)
     {
-        // report the specific code (see runai_request for why this matters)
+        // report the specific code (see runai_file_streamer_request for why this matters)
         return static_cast<int>(e.error());
     }
     catch(...)
@@ -184,16 +189,16 @@ _RUNAI_EXTERN_C int runai_set_fs_strategy(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_request(
+int runai_file_streamer_request(
     void * streamer,
-    SubmissionId * out_submission_id,
+    RunaiFileStreamerSubmissionId * out_submission_id,
     unsigned num_files,
     const char ** paths,
     unsigned * num_ranges,
     size_t * range_offsets,
     size_t * range_sizes,
     void ** range_dsts,
-    NvFileStreamerDevice device
+    RunaiFileStreamerDevice device
 )
 {
     // default the id to 0 ("none") so every return path - including early failures and a throw
@@ -211,7 +216,7 @@ _RUNAI_EXTERN_C int runai_request(
             return static_cast<int>(common::ResponseCode::InvalidParameterError);
         }
 
-        // credentials are streamer-scoped (runai_set_credentials), not per request
+        // credentials are streamer-scoped (runai_file_streamer_set_credentials), not per request
         return submit_request(s, out_submission_id, num_files, paths, num_ranges, range_offsets, range_sizes, range_dsts, device);
     }
     catch (const common::Exception & e)
@@ -229,9 +234,9 @@ _RUNAI_EXTERN_C int runai_request(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C int runai_response(
+int runai_file_streamer_response(
     void * streamer,
-    SubmissionId * out_submission_id,
+    RunaiFileStreamerSubmissionId * out_submission_id,
     unsigned * file_index,
     unsigned * index,
     int * submission_done,
@@ -256,7 +261,7 @@ _RUNAI_EXTERN_C int runai_response(
     }
     catch (const common::Exception & e)
     {
-        // report the specific code (see runai_request for why this matters)
+        // report the specific code (see runai_file_streamer_request for why this matters)
         return static_cast<int>(e.error());
     }
     catch(...)
@@ -267,7 +272,7 @@ _RUNAI_EXTERN_C int runai_response(
 
 const char * unexpected_error = "Unexpected error occured";
 
-_RUNAI_EXTERN_C int runai_probe_direct_block_size(
+int runai_file_streamer_probe_direct_block_size(
     void *        streamer,
     const char ** paths,
     unsigned      num_paths,
@@ -322,7 +327,7 @@ _RUNAI_EXTERN_C int runai_probe_direct_block_size(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-_RUNAI_EXTERN_C const char * runai_response_str(int response_code)
+const char * runai_file_streamer_response_str(int response_code)
 {
     try
     {
@@ -335,7 +340,7 @@ _RUNAI_EXTERN_C const char * runai_response_str(int response_code)
     return unexpected_error;
 }
 
-_RUNAI_EXTERN_C int runai_list_files(
+int runai_file_streamer_list_files(
     void *                streamer,
     const char *          prefix,
     int                   is_recursive,
@@ -343,7 +348,7 @@ _RUNAI_EXTERN_C int runai_list_files(
     unsigned              num_allow_patterns,
     const char **         ignore_patterns,
     unsigned              num_ignore_patterns,
-    RunaiFileListCallback callback,
+    RunaiFileStreamerFileListCallback callback,
     void *                user_data)
 {
     try
@@ -356,7 +361,7 @@ _RUNAI_EXTERN_C int runai_list_files(
         for (unsigned i = 0; ignore_patterns && i < num_ignore_patterns; ++i) ignore.emplace_back(ignore_patterns[i]);
 
         auto * s = static_cast<impl::Streamer *>(streamer);
-        // credentials are streamer-scoped (runai_set_credentials), applied when the listing client is built
+        // credentials are streamer-scoped (runai_file_streamer_set_credentials), applied when the listing client is built
         const auto files = s->list_files(prefix, is_recursive != 0, allow, ignore);
         for (const auto & entry : files)
         {
@@ -374,5 +379,3 @@ _RUNAI_EXTERN_C int runai_list_files(
     }
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
-
-} // namespace runai::llm::streamer

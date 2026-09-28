@@ -26,8 +26,8 @@ jobs:
     - name: Run tests and build
       uses: devcontainers/ci@v0.3
       with:
-        imageName: ghcr.io/run-ai/runai-model-streamer/devcontainer
-        cacheFrom: ghcr.io/run-ai/runai-model-streamer/devcontainer
+        imageName: ghcr.io/${{ github.repository }}/devcontainer
+        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
           make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 && \

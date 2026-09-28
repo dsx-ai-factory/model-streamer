@@ -126,7 +126,7 @@ TEST_F(Creation, Queue_Depth_Is_Parsed)
 }
 
 // A malformed value fails where every other malformed variable fails - building the Config, which
-// runai_start turns into InvalidParameterError. Silently falling back would leave the typo undetected.
+// runai_file_streamer_start turns into InvalidParameterError. Silently falling back would leave the typo undetected.
 TEST_F(Creation, Malformed_Queue_Depth_Is_Rejected)
 {
     for (const auto * bad : { "nfs=64", "abc", "0", "512,nfs=0", "512,nfs=64,nfs=32", "-1" })

@@ -17,7 +17,7 @@ namespace runai::llm::streamer::posix_io
 //
 // Called on the FIRST WORKLOAD, not at streamer construction: depth depends on
 // RUNAI_STREAMER_PROCESS_GROUP_SIZE, which Python does not set until stream_files(), long after
-// runai_start() returned. Building earlier would read the default of 1 and skip the division.
+// runai_file_streamer_start() returned. Building earlier would read the default of 1 and skip the division.
 //
 // A failure to build a real engine DEMOTES the strategy for the rest of the process
 // (IoUringProbe::mark_unavailable), so resolution stops offering something that has already failed.

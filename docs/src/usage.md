@@ -1,4 +1,4 @@
-## Using Run:ai Model Streamer
+## Using Model Streamer
 
 ### Streaming
 

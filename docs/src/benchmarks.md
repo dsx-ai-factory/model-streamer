@@ -1,5 +1,5 @@
-# Run:ai Model Streamer Benchmarks
-The purpose of these benchmarks is to present an empirical performance analysis of the Run:ai Model Streamer, highlighting its effectiveness across different storage types (local SSDs and cloud-based S3) and in combination with the vLLM inference engine. We compare the Run:ai Model Streamer’s performance against other tools, such as the Hugging Face safetensors loader and Tensorizer.
+# Model Streamer Benchmarks
+The purpose of these benchmarks is to present an empirical performance analysis of the Model Streamer, highlighting its effectiveness across different storage types (local SSDs and cloud-based S3) and in combination with the vLLM inference engine. We compare the Model Streamer’s performance against other tools, such as the Hugging Face safetensors loader and Tensorizer.
 
 ## Technical Configuration
 
@@ -14,7 +14,7 @@ The experiments were conducted using the following setup:
 ### Software Stack
 - **CUDA 12.4**
 - **vLLM 0.5.5** (Transformers 4.44.2)
-- **Run:ai Model Streamer 0.6.0**
+- **Model Streamer 0.6.0**
 - **Tensorizer 2.9.0**
 - **Transformers 4.45.0.dev0**
 - **Accelerate 0.34.2**
@@ -42,7 +42,7 @@ A cloud-based storage option where the latency and bandwidth constraints of the 
 
 ## Experiment Results
 
-The experiments were structured to compare the performance of different model loaders (Run:ai Model Streamer, Tensorizer, and HuggingFace Safetensors Loader) across the three storage types:
+The experiments were structured to compare the performance of different model loaders (Model Streamer, Tensorizer, and HuggingFace Safetensors Loader) across the three storage types:
 
 #### GP3 SSD
 We measured model loading times using different loaders on the GP3 SSD configuration.  
@@ -52,11 +52,11 @@ We measured model loading times using different loaders on the GP3 SSD configura
 
 
 
-**Figure 1:** The Effect of Concurrency on Model Loading Performance with Run:ai Model Streamer on GP3 SSD. This figure shows the impact of different concurrency levels (1, 4, 8, and 16) on model loading time using the Run:ai Model Streamer. As concurrency increases, load times decrease significantly, dropping from 47.56 seconds (at concurrency 1) to 14.34 seconds (at concurrency 16). At this point, the streamer achieves the maximum possible throughput of 1 GiB/s, which is the limit of the GP3 SSD.
+**Figure 1:** The Effect of Concurrency on Model Loading Performance with Model Streamer on GP3 SSD. This figure shows the impact of different concurrency levels (1, 4, 8, and 16) on model loading time using the Model Streamer. As concurrency increases, load times decrease significantly, dropping from 47.56 seconds (at concurrency 1) to 14.34 seconds (at concurrency 16). At this point, the streamer achieves the maximum possible throughput of 1 GiB/s, which is the limit of the GP3 SSD.
 
 <img src="Figure2.png" alt="Figure 2" width="600">
 
-**Figure 2:** Model Loading Performance on AWS GP3 SSD with Safetensors Loader, Run:ai Model Streamer, and Tensorizer. This figure compares the model loading times of Safetensors Loader, Run:ai Model Streamer, and Tensorizer on AWS GP3 SSD. The best observed performance for each loader is shown. For the Run:ai Model Streamer, the optimal result was achieved with a concurrency level of 16. For Tensorizer, the best performance was recorded using 16 workers as well.
+**Figure 2:** Model Loading Performance on AWS GP3 SSD with Safetensors Loader, Model Streamer, and Tensorizer. This figure compares the model loading times of Safetensors Loader, Model Streamer, and Tensorizer on AWS GP3 SSD. The best observed performance for each loader is shown. For the Model Streamer, the optimal result was achieved with a concurrency level of 16. For Tensorizer, the best performance was recorded using 16 workers as well.
 
 #### IO2 SSD
 The same loaders were tested on IO2 SSD to evaluate the impact of higher IOPS and throughput.  
@@ -64,11 +64,11 @@ The same loaders were tested on IO2 SSD to evaluate the impact of higher IOPS an
 
 <img src="Figure3.png" alt="Figure 3" width="600">
 
-**Figure 3:** The Effect of Concurrency on Model Loading Performance with Run:ai Model Streamer on IO2 SSD. This figure shows the impact of different concurrency levels (1, 4, 8, and 16) on model loading time using the Run:ai Model Streamer. As concurrency increases, load times decrease significantly, dropping from 43.71 seconds (at concurrency 1) to 7.53 seconds (at concurrency 8).
+**Figure 3:** The Effect of Concurrency on Model Loading Performance with Model Streamer on IO2 SSD. This figure shows the impact of different concurrency levels (1, 4, 8, and 16) on model loading time using the Model Streamer. As concurrency increases, load times decrease significantly, dropping from 43.71 seconds (at concurrency 1) to 7.53 seconds (at concurrency 8).
 
 <img src="Figure4.png" alt="Figure 4" width="600">
 
-**Figure 4:** Model Loading Performance on AWS IO2 SSD with Safetensors Loader, Run:ai Model Streamer, and Tensorizer. This figure compares the model loading times of Safetensors Loader, Run:ai Model Streamer, and Tensorizer on AWS IO2 SSD. The best observed performance for each loader is shown. For the Run:ai Model Streamer, the optimal result was achFigieved with a concurrency level of 8. For Tensorizer, the best performance is recorded using 8 workers as well (see Appendix B). 
+**Figure 4:** Model Loading Performance on AWS IO2 SSD with Safetensors Loader, Model Streamer, and Tensorizer. This figure compares the model loading times of Safetensors Loader, Model Streamer, and Tensorizer on AWS IO2 SSD. The best observed performance for each loader is shown. For the Model Streamer, the optimal result was achFigieved with a concurrency level of 8. For Tensorizer, the best performance is recorded using 8 workers as well (see Appendix B). 
 
 #### Amazon S3
 This experiment focused on comparing loaders in a cloud storage scenario. Safetensors Loader was excluded as it does not support S3.  
@@ -76,14 +76,14 @@ This experiment focused on comparing loaders in a cloud storage scenario. Safete
 
 <img src="Figure5.png" alt="Figure 5" width="600">
 
-**Figure 5:** The Effect of Concurrency on Model Loading Performance with Run:ai Model Streamer on S3 Bucket. This figure shows the impact of different concurrency levels (4, 16, 32 and 64) on model loading time using the Run:ai Model Streamer. As concurrency increases, load times decrease significantly, dropping from 28.24 seconds (at concurrency 4) to 4.88 seconds (at concurrency 32). 
+**Figure 5:** The Effect of Concurrency on Model Loading Performance with Model Streamer on S3 Bucket. This figure shows the impact of different concurrency levels (4, 16, 32 and 64) on model loading time using the Model Streamer. As concurrency increases, load times decrease significantly, dropping from 28.24 seconds (at concurrency 4) to 4.88 seconds (at concurrency 32). 
 
 <img src="Figure6.png" alt="Figure 6" width="600">
 
-**Figure 6:** Model Loading Performance from AWS S3 with Run:ai Model Streamer, and Tensorizer. This figure compares the model loading times of Run:ai Model Streamer and Tensorizer from S3 bucket. The best observed performance for each loader is shown. For the Run:ai Model Streamer, the optimal result was achieved with a concurrency level of 32 (4.88 seconds), while for Tensorizer, the best performance was recorded using 16 workers (37.36 seconds). 
+**Figure 6:** Model Loading Performance from AWS S3 with Model Streamer, and Tensorizer. This figure compares the model loading times of Model Streamer and Tensorizer from S3 bucket. The best observed performance for each loader is shown. For the Model Streamer, the optimal result was achieved with a concurrency level of 32 (4.88 seconds), while for Tensorizer, the best performance was recorded using 16 workers (37.36 seconds). 
 
 #### vLLM with Different Loaders
-We integrated Run:ai Model Streamer into vLLM to measure the complete time required to load the model for all the storage types above and make it ready for inference.
+We integrated Model Streamer into vLLM to measure the complete time required to load the model for all the storage types above and make it ready for inference.
 *(Results as Tables in Appendix D)*
 
 
@@ -95,14 +95,14 @@ We performed these experiments without the optional hashing.
 
 <img src="Figure7.png" alt="Figure 7" width="600">
 
-**Figure 7:** This figure presents the total time required for the vLLM engine to be ready for inference across different storage types (GP3 SSD, IO2 SSD, and S3) when using Run:ai Model Streamer, HuggingFace Safetensors Loader, and Tensorizer. The dark-colored bars show the time it takes to load the model from storage to GPU while the light-colored bars show the total time for the vLLM engine to load and get ready to serve requests (time to load the model plus the time to warm the inference engine up). For local storage options (GP3 and IO2 SSD), the Run:ai Model Streamer and Tensorizer consistently outperformed the Safetensors Loader, cutting readiness times nearly in half. On S3, both Run:ai Model Streamer and Tensorizer were tested, with Run:ai Model Streamer delivering significantly faster readiness times. 
+**Figure 7:** This figure presents the total time required for the vLLM engine to be ready for inference across different storage types (GP3 SSD, IO2 SSD, and S3) when using Model Streamer, HuggingFace Safetensors Loader, and Tensorizer. The dark-colored bars show the time it takes to load the model from storage to GPU while the light-colored bars show the total time for the vLLM engine to load and get ready to serve requests (time to load the model plus the time to warm the inference engine up). For local storage options (GP3 and IO2 SSD), the Model Streamer and Tensorizer consistently outperformed the Safetensors Loader, cutting readiness times nearly in half. On S3, both Model Streamer and Tensorizer were tested, with Model Streamer delivering significantly faster readiness times. 
 
 ## Appendix A
 **GP3 SSD Results**
 
 <table>
   <tr>
-    <td colspan="2" align="center" valign="middle"><b>Run:ai Model Streamer</b></td>
+    <td colspan="2" align="center" valign="middle"><b>Model Streamer</b></td>
     <td><b>HuggingFace Safetensors Loader</b></td>
   </tr>
   <tr>
@@ -173,7 +173,7 @@ We performed these experiments without the optional hashing.
 **IO2 SSD Results**
 <table>
   <tr>
-    <td colspan="2" align="center" valign="middle"><b>Run:ai Model Streamer</b></td>
+    <td colspan="2" align="center" valign="middle"><b>Model Streamer</b></td>
     <td><b>HuggingFace Safetensors Loader</b></td>
   </tr>
   <tr>
@@ -241,7 +241,7 @@ We performed these experiments without the optional hashing.
 
 <table>
   <tr>
-    <th colspan="2"><b>Run:ai Model Streamer</b></th>
+    <th colspan="2"><b>Model Streamer</b></th>
   </tr>
   <tr>
     <th><b>Concurrency</b></th>
@@ -312,7 +312,7 @@ For GP3 SSD Storage
     <td>66.13</td>
   </tr>
   <tr>
-    <td>Run:ai Model Streamer</td>
+    <td>Model Streamer</td>
     <td>35.08</td>
   </tr>
   <tr>
@@ -335,7 +335,7 @@ For IO2 SSD Storage
     <td>62.69</td>
   </tr>
   <tr>
-    <td>Run:ai Model Streamer</td>
+    <td>Model Streamer</td>
     <td>28.28</td>
   </tr>
   <tr>
@@ -354,7 +354,7 @@ For S3 Storage
     <th><b>Loader</b></th>
     <th><b>Total time until vLLM engine is ready for request(s)</b></th>
   </tr>
-    <td>Run:ai Model Streamer</td>
+    <td>Model Streamer</td>
     <td>23.18</td>
   </tr>
   <tr>
