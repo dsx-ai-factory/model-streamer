@@ -22,14 +22,14 @@ from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
 RUNAI_STREAMER_S3_UNSIGNED_ENV_VAR = "RUNAI_STREAMER_S3_UNSIGNED"
 
 
-class MinioServer(ObjectStoreBackend):
+class SeaweedFSServer(ObjectStoreBackend):
     def __init__(self):
         self.url = os.getenv("AWS_ENDPOINT_URL")
         self.key = os.getenv("AWS_ACCESS_KEY_ID")
         self.password = os.getenv("AWS_SECRET_ACCESS_KEY")
 
     def wait_for_startup(self, timeout=30):
-        print("Waiting for MinIO server to be up and running.")
+        print("Waiting for SeaweedFS server to be up and running.")
         start_time = time.time()
         s3_client = boto3.client(
             "s3",
@@ -40,11 +40,11 @@ class MinioServer(ObjectStoreBackend):
         while time.time() - start_time < timeout:
             try:
                 s3_client.list_buckets()
-                print("MinIO server is up and running.")
+                print("SeaweedFS server is up and running.")
                 return
             except (ClientError, NoCredentialsError):
                 time.sleep(0.5)
-        raise TimeoutError(f"MinIO server failed to start within {timeout} seconds.")
+        raise TimeoutError(f"SeaweedFS server failed to start within {timeout} seconds.")
 
     def upload_file(self, bucket, directory, file):
         s3_client = boto3.client(
@@ -56,13 +56,13 @@ class MinioServer(ObjectStoreBackend):
         s3_client.upload_file(file, bucket, os.path.join(directory, os.path.basename(file)))
 
 TestS3ompatibility = compatibility_test_cases(
-    backend_class = MinioServer,
+    backend_class = SeaweedFSServer,
     scheme = "s3",
     bucket_name = os.getenv("AWS_BUCKET")
 )
 
 TestS3ListFiles = list_files_test_cases(
-    backend_class = MinioServer,
+    backend_class = SeaweedFSServer,
     scheme = "s3",
     bucket_name = os.getenv("AWS_BUCKET")
 )
@@ -73,7 +73,7 @@ class TestS3UnsignedPublicBucket(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = MinioServer()
+        cls.server = SeaweedFSServer()
         cls.server.wait_for_startup()
         cls.temp_dir = tempfile.mkdtemp()
 
