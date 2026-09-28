@@ -341,7 +341,9 @@ TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
     // execute() submits; the plugin completes asynchronously and the worker harvests on its own turns.
     // Give it those turns, until the first reads have landed and their copies are stuck holding the
     // buffers.
-    for (unsigned i = 0; i < 500 && backend->opened(0)->copies.load() == 0; ++i)
+    // Generous: this runs alongside the rest of the suite, and a loaded machine can take a while to
+    // complete a read and give the worker a turn to harvest it.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
     {
         worker.drain(stopped);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -356,7 +358,7 @@ TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
     // The link catches up: every buffer comes back, and the waiting chunks read.
     backend->opened(0)->release_copies();
 
-    for (unsigned i = 0; i < 2000 && !worker.idle(); ++i)
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
     {
         worker.drain(stopped);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));

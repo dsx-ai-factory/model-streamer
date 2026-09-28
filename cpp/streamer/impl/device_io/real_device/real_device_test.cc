@@ -32,6 +32,7 @@
 #include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/device_io/device_writer_client/device_writer_client.h"
 #include "streamer/impl/streamer/streamer.h"
+#include "streamer/streamer.h"
 #include "utils/random/random.h"
 #include "utils/temp/env/env.h"
 #include "common/s3_wrapper/s3_wrapper.h"
@@ -391,6 +392,69 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
     }
 
     ASSERT_EQ(worst, common::ResponseCode::Success) << "strategy " << streamer.fs_strategy();
+
+    const auto landed = read_back(target, Total);
+    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+        << "the bytes on the device are not the bytes in the file";
+
+    EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
+}
+
+// THE PUBLIC API, to a real device. Every other test here drives impl::Streamer, which never sees the
+// boundary check - so this is the only one that shows a caller of the shipped C API reaching device
+// memory at all.
+//
+// The API ADMITS a device submission and lets the readers answer per range: whether there is a driver,
+// a device, or memory to pin is not known at admission, and by then every range owes a response.
+TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
+{
+    constexpr size_t Total = 4 * Buffer;
+    constexpr unsigned Ranges = 4;
+
+    const auto data = utils::random::buffer(Total);
+    utils::temp::File file(data);
+
+    void * target = nullptr;
+    ASSERT_EQ(_device->device_alloc(Total, &target), common::ResponseCode::Success);
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    const char * path = file.path.c_str();
+    unsigned num_ranges = Ranges;
+
+    std::vector<size_t> offsets(Ranges);
+    std::vector<size_t> sizes(Ranges, Total / Ranges);
+    std::vector<void *> dsts(Ranges);
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        offsets[i] = i * (Total / Ranges);
+        dsts[i] = static_cast<char *>(target) + offsets[i];
+    }
+
+    RunaiFileStreamerDevice device;
+    device.type = RUNAI_FILE_STREAMER_DEVICE_CUDA;
+    device.id = 0;
+
+    RunaiFileStreamerSubmissionId submission_id = 0;
+    ASSERT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
+                                          offsets.data(), sizes.data(), dsts.data(), device),
+              static_cast<int>(common::ResponseCode::Success))
+        << "the public API refused a device submission";
+
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        RunaiFileStreamerSubmissionId answered = 0;
+        unsigned file_index = 0;
+        unsigned index = 0;
+        int submission_done = 0;
+        EXPECT_EQ(runai_file_streamer_response(streamer, &answered, &file_index, &index,
+                                               &submission_done, 30000 /* ms */),
+                  static_cast<int>(common::ResponseCode::Success)) << "range " << i;
+        EXPECT_EQ(answered, submission_id);
+    }
+
+    runai_file_streamer_end(streamer);
 
     const auto landed = read_back(target, Total);
     EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)

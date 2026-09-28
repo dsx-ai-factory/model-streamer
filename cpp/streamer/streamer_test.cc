@@ -815,8 +815,34 @@ TEST(Device, Is_Validated_At_The_Boundary)
     device.id = 0;
 
     SubmissionId submission_id = 0;
+
+    // ACCEPTED, whether or not this host has a driver. Admission only decides that the submission can
+    // be routed; whether the bytes can reach the device is answered per range, because by then every
+    // range owes a response. So the code here is Success, and a host with no CUDA reports
+    // DeviceUnavailable through the responses below.
     EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
                                           &offset, &size, &dst, device),
+              static_cast<int>(common::ResponseCode::Success));
+
+    // BOUNDED, not next_response(): that one waits forever, so a range that is never answered would
+    // hang this test instead of failing it - and "every range is answered" is what is being checked.
+    SubmissionId cuda_answered = 0;
+    unsigned cuda_file = 0;
+    unsigned cuda_index = 0;
+    int cuda_done = 0;
+    const auto cuda_response = runai_file_streamer_response(streamer, &cuda_answered, &cuda_file,
+                                                            &cuda_index, &cuda_done, 30000 /* ms */);
+    EXPECT_NE(cuda_response, static_cast<int>(common::ResponseCode::TimedOut))
+        << "an accepted device submission owes a response for every range";
+    EXPECT_NE(cuda_response, static_cast<int>(common::ResponseCode::UnsupportedDeviceType))
+        << "the device type was refused after the submission was accepted";
+
+    // A TYPE THIS BUILD DOES NOT KNOW is still refused at the boundary - nothing below could route it.
+    RunaiFileStreamerDevice unknown;
+    unknown.type = static_cast<RunaiFileStreamerDeviceType>(RUNAI_FILE_STREAMER_DEVICE_CUDA + 1);
+    unknown.id = 0;
+    EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &num_ranges,
+                                          &offset, &size, &dst, unknown),
               static_cast<int>(common::ResponseCode::UnsupportedDeviceType));
 
     // A negative ordinal is the caller's mistake whatever this build supports, and is reported as
