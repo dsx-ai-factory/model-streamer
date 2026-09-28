@@ -249,9 +249,16 @@ class SafetensorsStreamer:
             is_distributed: bool = False,
             tensor_names: Optional[Collection[str]] = None,
         ) -> None:
-        # None = no filter (today's behavior). Empty = certainly a caller bug, reject it up front.
+        # None = no filter (today's behavior). str satisfies Collection[str] structurally, so
+        # reject it - otherwise `in` below silently becomes substring matching.
+        if isinstance(tensor_names, str):
+            raise ValueError("tensor_names must be a collection of names, not a single str")
+        # Empty = certainly a caller bug, reject it up front.
         if tensor_names is not None and len(tensor_names) == 0:
             raise ValueError("tensor_names must not be empty - pass None to load every tensor")
+        # Normalize once for O(1) membership below.
+        if tensor_names is not None:
+            tensor_names = frozenset(tensor_names)
 
         self.files_to_tensors_metadata = {}
         self.total_size = 0
@@ -266,9 +273,6 @@ class SafetensorsStreamer:
         # metadata is created on cpu and each process reads it individually
         safetensors_metadatas = safetensors_pytorch.prepare_request(self.file_streamer, paths, s3_credentials)
 
-        # Accumulates across every file - a name only counts as "unknown" if it matched in NONE
-        # of them, not just the one being processed right now.
-        found_names = set() if tensor_names is not None else None
         # Every kept name, WITH duplicates - only tensor_names carries the expectation of one
         # tensor per requested name, so this is never tracked for the unfiltered load.
         all_kept_names: List[str] = [] if tensor_names is not None else None
@@ -286,7 +290,6 @@ class SafetensorsStreamer:
             # Filtered tensors may have gaps between them, so compute each one's absolute file
             # offset directly instead of the cumulative walk FileChunks.contiguous() does.
             kept_metadata = [tm for tm in tensors_metadata if tm.name in tensor_names]
-            found_names.update(tm.name for tm in kept_metadata)
             all_kept_names.extend(tm.name for tm in kept_metadata)
             kept_offsets = [file_offset + tm.offsets.start for tm in kept_metadata]
             kept_sizes = [tm.get_bytesize() for tm in kept_metadata]
@@ -296,13 +299,17 @@ class SafetensorsStreamer:
             file_stream_requests.append(FileChunks(i, path, kept_offsets, kept_sizes))
 
         if tensor_names is not None:
-            missing = set(tensor_names) - found_names
+            # A name only counts as "unknown" if it matched in NONE of the files, not just the
+            # one being processed at the time - so dedupe across all of them first.
+            kept_set = set(all_kept_names)
+
+            missing = tensor_names - kept_set
             if missing:
                 raise ValueError(f"tensor_names not found in checkpoint: {sorted(missing)}")
 
             # Cheap common-case gate (set() is a single C-level pass, faster than a manual loop -
             # measured). Only pay for finding WHICH names collided when the gate actually trips.
-            if len(set(all_kept_names)) != len(all_kept_names):
+            if len(kept_set) != len(all_kept_names):
                 counts = Counter(all_kept_names)
                 duplicates = sorted(name for name, count in counts.items() if count > 1)
                 raise ValueError(

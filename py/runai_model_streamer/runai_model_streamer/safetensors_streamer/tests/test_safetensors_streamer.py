@@ -552,6 +552,19 @@ class TestSafetensorsStreamer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 streamer.stream_file(file_path, None, "cpu", tensor_names=set())
 
+    def test_tensor_names_str_raises(self):
+        """A bare str satisfies Collection[str] structurally, so a caller who forgets the braces
+        (tensor_names="A" instead of tensor_names={"A"}) must get a clear error, not silent
+        substring matching against every tensor name."""
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_dir, "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+
+        with SafetensorsStreamer() as streamer:
+            with self.assertRaisesRegex(ValueError, "str"):
+                streamer.stream_file(file_path, None, "cpu", tensor_names="A")
+
     def test_tensor_names_unknown_name_raises(self):
         """A name not present in the checkpoint must raise, naming the problem, not silently
         return fewer tensors than requested."""
