@@ -16,6 +16,7 @@ runai_cc_test(
         "//streamer/impl/device_io/device_writer",
         "//streamer/impl/device_io/device_writer_client",
         "//streamer/impl/streamer",
+        "//streamer",   # the public C API: the only test here that goes through it
         "//utils/temp/file",
         "//utils/random",
         "//utils/temp/env",

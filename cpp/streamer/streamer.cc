@@ -42,7 +42,14 @@ int submit_request(impl::Streamer * s,
         return static_cast<int>(common::ResponseCode::InvalidDevice);
     }
 
-    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU)
+    // A type this build has never heard of. CUDA is served now, so this is no longer "anything that is
+    // not the host" - it is a value outside the enum, which nothing below could route.
+    //
+    // Whether a CUDA destination can actually be READ is decided later, per range: there may be no
+    // driver, no such device, or no memory to pin. Those are reported through the responses, because
+    // by then the submission has been accepted and every range owes an answer.
+    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU &&
+        device.type != RUNAI_FILE_STREAMER_DEVICE_CUDA)
     {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
     }
