@@ -1,5 +1,6 @@
 #include "streamer/impl/object_storage_worker/object_storage_worker.h"
 #include "common/device/device.h"
+#include "device/mock/mock_device.h"
 
 #include <gtest/gtest.h>
 
@@ -89,7 +90,7 @@ struct Submission
 
     // build the workloads (one Assigner over the request, Batches per contiguous transfer) ready to push
     // to the pool
-    std::vector<Workload> build()
+    std::vector<Workload> build(common::Device device = common::Device::host())
     {
         Assigner assigner(request, config);
         std::vector<Workload> workloads(assigner.num_workloads());
@@ -103,7 +104,7 @@ struct Submission
             common::s3::S3ClientWrapper::Params params(uri, credentials, config->s3_block_bytesize, config->s3_concurrency);
 
             Batches batches(submission_id, file_idx, transfer.tasks, config, responder, paths[file_idx], params,
-                            transfer.range_sizes, transfer.first_range_index, common::Device::host());
+                            transfer.range_sizes, transfer.first_range_index, device);
             for (size_t j = 0; j < batches.size(); ++j)
             {
                 workloads[batches[j].workload_index].add_batch(std::move(batches[j]));
@@ -159,7 +160,7 @@ class ObjectStorageWorkerTest : public ::testing::Test
     // create a Config/Responder and a (num_files) submission; returns the workloads ready to dispatch. Stores
     // the config/responder/submission as members so the test can build a pool and wait on the responder.
     std::vector<Workload> build(unsigned num_files, unsigned s3_concurrency, unsigned ranges_per_file = 0,
-                                size_t s3_block_bytesize = 0)
+                                size_t s3_block_bytesize = 0, common::Device device = common::Device::host())
     {
         make_context(s3_concurrency);
         // Applied here, between the config and the cut: Batches divides the ranges using this value, so
@@ -169,7 +170,7 @@ class ObjectStorageWorkerTest : public ::testing::Test
             config->s3_block_bytesize = s3_block_bytesize;
         }
         submission = std::make_unique<Submission>(utils::random::number(), num_files, config, responder, ranges_per_file);
-        return submission->build();
+        return submission->build(device);
     }
 
     // Bigger than any file Submission generates (it tops out at 100000 bytes), so one range is one
@@ -184,13 +185,16 @@ class ObjectStorageWorkerTest : public ::testing::Test
         responder = std::make_shared<common::Responder>(0);
     }
 
-    static utils::ThreadPool<Workload> make_pool(unsigned size)
+    static utils::ThreadPool<Workload> make_pool(unsigned size,
+                                                std::shared_ptr<DeviceWriter> writer = nullptr,
+                                                std::shared_ptr<DeviceIssuer> issuer = nullptr)
     {
         return utils::ThreadPool<Workload>(
-            []() -> std::unique_ptr<utils::Worker<Workload>>
+            [writer, issuer]() -> std::unique_ptr<utils::Worker<Workload>>
             {
                 // the s3 mock client ignores credentials, so the provider returns an empty set
-                return std::make_unique<ObjectStorageWorker>([]() { return common::s3::Credentials{}; });
+                return std::make_unique<ObjectStorageWorker>([]() { return common::s3::Credentials{}; },
+                                                             writer, issuer);
             },
             size);
     }
@@ -247,6 +251,185 @@ class ObjectStorageWorkerTest : public ::testing::Test
 
 // All requests of a multi-file submission complete successfully through a pool of ObjectStorageWorkers,
 // with the drained-responder sentinel randomly enabled to prove the worker tolerates it.
+// THE step: an object storage read whose destination is a device lands in pinned host memory and is
+// copied from there, and its ranges are answered only once the copy has retired.
+TEST_F(ObjectStorageWorkerTest, Reads_A_Device_Submission_Through_Pinned_Buffers)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 4;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // One range is one chunk, because the block size is larger than any file the fixture generates.
+    auto workloads = build(Files, 2 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+
+    {
+        auto pool = make_pool(config->s3_concurrency, writer, issuer);
+        push_all(pool, workloads);
+
+        // Let the reads land and their copies pile up, holding every buffer. The chunks behind them
+        // have nowhere to read into and must be waiting, not failing.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        backend->opened(0)->release_copies();
+
+        // INSIDE the pool's scope: its destructor stops the workers rather than waiting for what is
+        // queued, so a response popped after it would be a response the workers never sent.
+        for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+        {
+            const auto response = responder->pop(5000);
+            ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+            EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+        }
+    }
+
+    const auto device = backend->opened(0);
+    ASSERT_NE(device, nullptr) << "no device was ever opened, so nothing was staged";
+
+    // ONE COPY PER CHUNK, and a chunk is a span of whole ranges: every file here is smaller than the
+    // block size, so its four ranges pack into one read and therefore one copy. A range answered
+    // without a copy behind it would mean the plugin had written to the caller's device pointer -
+    // the segmentation fault this whole path exists to avoid.
+    EXPECT_EQ(device->copies.load(), Files) << "a chunk reached the device without a copy";
+    EXPECT_GT(device->host_allocs.load(), 0u) << "nothing was pinned, so nothing was staged";
+
+    // NOT a byte check: the s3 mock records reads and never writes into the destination, so no test
+    // here can tell correct bytes from zeroed ones - a gap this path inherits rather than adds.
+}
+
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - which is a slow link, not a failed read. Failing
+// the chunk there would turn a slow device into lost ranges.
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - a slow device, not a failed read. Failing the chunk
+// there would turn slowness into lost ranges.
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - a slow device, not a failed read. Failing the chunk
+// there would turn slowness into lost ranges.
+//
+// The worker is driven DIRECTLY rather than through a ThreadPool: the pool's destructor decides when
+// its workers stop, and a teardown that lands mid-flight answers the ranges FinishedError - true, but
+// it says nothing about whether a chunk waited.
+TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
+{
+    // The pool is the plugin's window plus CopyDepth, and this mock advertises no window - so the pool
+    // is CopyDepth buffers and every file past that has to wait for one.
+    constexpr unsigned Files = 6;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // Opened here so the mock device exists before the worker starts: holding its copies is what keeps
+    // the staging buffers out and drives the pool dry.
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // execute() submits; the plugin completes asynchronously and the worker harvests on its own turns.
+    // Give it those turns, until the first reads have landed and their copies are stuck holding the
+    // buffers.
+    for (unsigned i = 0; i < 500 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Copies are held, so the buffers never came back and the chunks behind them are waiting. Nothing
+    // is answered yet, and nothing has been failed.
+    EXPECT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so no buffer is held";
+    EXPECT_EQ(responder->pop(50).ret, common::ResponseCode::TimedOut)
+        << "a waiting chunk was answered - it was failed rather than parked";
+
+    // The link catches up: every buffer comes back, and the waiting chunks read.
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 2000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "a chunk waited for good";
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success)
+            << "range " << i << " was failed for want of a buffer rather than waiting for one";
+    }
+
+    const auto device = backend->opened(0);
+    EXPECT_EQ(device->copies.load(), Files) << "one chunk per file, one copy each";
+
+    // The whole point: six files went through a pool of two buffers.
+    EXPECT_LE(device->host_allocs.load(), ObjectStorageWorker::CopyDepth) << "the pool grew past its ceiling";
+}
+
+// A RETRIED chunk gives its staging buffer back before the backoff. That path does not go through the
+// completion accounting, so a buffer held there is lost for the life of the worker - and the pool is
+// small, so a couple of retries would leave every later chunk waiting for a buffer that no longer
+// exists. Holding it would also pin memory through a backoff that another chunk could be reading into.
+TEST_F(ObjectStorageWorkerTest, A_Retried_Chunk_Gives_Its_Buffer_Back)
+{
+    constexpr unsigned Files = 4;
+    constexpr unsigned RangesPerFile = 1;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    // Retries on, and the first reads fail retryably - so several chunks take a buffer, fail, and are
+    // scheduled again.
+    config->object_storage_retry_timeout = std::chrono::seconds(5);
+    set_read_failures(Files, common::ResponseCode::RetryableFileAccessError);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    for (unsigned i = 0; i < 4000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "a retried chunk never came back - its buffer was lost";
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut)
+            << "range " << i << " was never answered after its retry";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+    }
+
+    // Every failed attempt returned its buffer, so the pool never had to grow past its ceiling even
+    // though twice as many attempts were made as there are chunks.
+    const auto device = backend->opened(0);
+    ASSERT_NE(device, nullptr);
+    EXPECT_LE(device->host_allocs.load(), ObjectStorageWorker::CopyDepth)
+        << "a retry took a second buffer without giving the first one back";
+}
+
 TEST_F(ObjectStorageWorkerTest, Happy_Path)
 {
     set_sentinel(utils::random::boolean());

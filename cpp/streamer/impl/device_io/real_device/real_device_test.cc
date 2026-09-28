@@ -34,6 +34,8 @@
 #include "streamer/impl/streamer/streamer.h"
 #include "utils/random/random.h"
 #include "utils/temp/env/env.h"
+#include "common/s3_wrapper/s3_wrapper.h"
+#include "utils/dylib/dylib.h"
 #include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::impl
@@ -395,6 +397,64 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
         << "the bytes on the device are not the bytes in the file";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
+}
+
+// OBJECT STORAGE to a real device, through the s3 MOCK plugin: a real driver, real pinned buffers and
+// a real copy, without a bucket.
+//
+// This is the arrangement that has hidden bugs twice before. The mock device did not model that an
+// event belongs to the context that made it, nor that a thread needs one bound - both only showed on
+// hardware. The object path pins buffers sized by a PLUGIN's window, which no other test does, and
+// hands that pinned memory to a plugin to write into.
+//
+// NOT a byte check: the s3 mock records reads and never writes into the destination, so nothing here
+// can tell correct bytes from zeroed ones. What it proves is that the pinning, the context, the events
+// and the copy all work against the driver for object storage as they do for files.
+TEST_F(RealDevice, An_Object_Storage_Submission_Reads_Into_Device_Memory)
+{
+    constexpr size_t Total = 4 * Buffer;
+    constexpr unsigned Ranges = 8;
+
+    utils::Dylib dylib("libstreamers3.so");
+    dylib.dlsym<void(*)(unsigned)>("runai_mock_s3_set_response_time_ms")(0);
+
+    void * target = nullptr;
+    ASSERT_EQ(_device->device_alloc(Total, &target), common::ResponseCode::Success);
+
+    Streamer streamer;
+
+    std::vector<FileRanges> request(1);
+    request[0].path = "s3://a-bucket/an-object";
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        request[0].ranges.push_back(
+            ReadRange{ i * (Total / Ranges), Total / Ranges,
+                       static_cast<char *>(target) + i * (Total / Ranges) });
+    }
+
+    SubmissionId submission_id = 0;
+    ASSERT_EQ(streamer.async_request(request, common::Device::cuda(0), &submission_id),
+              common::ResponseCode::Success);
+
+    auto worst = common::ResponseCode::Success;
+    for (unsigned i = 0; i < Ranges; ++i)
+    {
+        bool done = false;
+        const auto response = streamer.response(30000, done);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "only " << i << " ranges answered";
+        if (response.ret != common::ResponseCode::Success)
+        {
+            worst = response.ret;
+        }
+    }
+
+    EXPECT_EQ(worst, common::ResponseCode::Success)
+        << "an object storage range bound for a device was not read";
+
+    EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
+
+    dylib.dlsym<void(*)()>("runai_mock_s3_cleanup")();
+    common::s3::S3ClientWrapper::shutdown();
 }
 
 // A FULL WINDOW against a real device, which is the state every invariant here is written for and

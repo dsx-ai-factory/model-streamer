@@ -43,10 +43,7 @@ Streamer::Streamer(Config config, Environment environment) :
     // A factory rather than a backend: obtaining one is a driver call, and a host-only load must not
     // pay it. See DeviceWriter.
     _device_writer(std::make_shared<DeviceWriter>(device::cuda::backend)),
-    // The event ceiling is every buffer every reading thread could hand over at once, which is the
-    // most copies that can be outstanding: one per buffer, and BuffersPerThread each.
-    _device_issuer(std::make_shared<DeviceIssuer>(
-        _device_writer, config.concurrency * FileSystemWorker::BuffersPerThread)),
+    _device_issuer(std::make_shared<DeviceIssuer>(_device_writer)),
     // Three worker factories, one per pool kind, in the order BackendPools takes them: the synchronous
     // filesystem reader (concurrency threads), the async one the strategy router builds per mount, and
     // object storage (s3_concurrency threads). Pools are created lazily on first use of each kind.
@@ -60,9 +57,10 @@ Streamer::Streamer(Config config, Environment environment) :
         // each object-storage worker reads the streamer's credentials once, at client creation, via this
         // provider. It captures the shared credentials state by value, so the state outlives the worker
         // regardless of destruction order (it never captures `this`).
-        [state = _credentials_state]() -> std::unique_ptr<utils::Worker<Workload>>
+        [state = _credentials_state, writer = _device_writer, issuer = _device_issuer]()
+            -> std::unique_ptr<utils::Worker<Workload>>
         {
-            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); });
+            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); }, writer, issuer);
         },
         _config->concurrency, _config->s3_concurrency),
     // One PERSISTENT responder for the streamer's lifetime, shared by all submissions and

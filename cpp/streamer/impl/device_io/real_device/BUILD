@@ -7,6 +7,9 @@ load("//:rules.bzl", "runai_cc_binary", "runai_cc_test")
 # no device-to-host copy.
 runai_cc_test(
     name = "real_device_test",
+    # Excluded from --config=tsan for the same reason as streamer_s3_test: it dlopens
+    # libstreamers3.so, and the sanitized binary does not resolve $ORIGIN in its RUNPATH.
+    tags = ["no_tsan"],
     srcs = ["real_device_test.cc"],
     deps = [
         "//device/cuda",
@@ -16,7 +19,16 @@ runai_cc_test(
         "//utils/temp/file",
         "//utils/random",
         "//utils/temp/env",
+        "//utils/dylib",
         "@cuda//:cuda_headers",
+        # The object storage path, driven through the s3 MOCK plugin: a real driver and a real staging
+        # pool, without a real bucket.
+        "//s3/s3_mock:libstreamers3.so",
+    ],
+    linkstatic = False,
+    data = ["//s3/s3_mock:libstreamers3.so"],
+    linkopts = [
+        "-Wl,-rpath,$$ORIGIN/../../../../s3/s3_mock",
     ],
     env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
 )

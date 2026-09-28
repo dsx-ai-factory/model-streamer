@@ -24,6 +24,10 @@ runai_cc_auto_library(
         "//common/exception",
         "//common/response_code",
         "//common/backend_api/response",
+        "//streamer/impl/device_io/device_issuer",
+        "//streamer/impl/device_io/device_writer",
+        "//streamer/impl/device_io/staging_pool",
+        "//common/device",
         "//streamer/impl/workload",
         "//streamer/impl/batch",
         "//streamer/impl/task",
@@ -46,6 +50,7 @@ runai_cc_test(
     tags = ["no_tsan"],
     srcs = ["object_storage_worker_test.cc"],
     deps = [
+        "//device/mock",
         ":object_storage_worker",
         "//streamer/impl/assigner",
         "//streamer/impl/batches",
