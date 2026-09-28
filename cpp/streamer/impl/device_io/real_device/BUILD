@@ -48,3 +48,20 @@ runai_cc_binary(
     ],
     linkopts = ["-lpthread", "-lm", "-ldl"],
 )
+
+# Real object storage to a real device, through the public C API. Skips unless BOTH a usable GPU and an
+# object to read are present, so it is inert under `bazel test //...`.
+#
+# The REAL plugin, not the mock: this is the only test that can say the right bytes arrived, and it can
+# only say it against a server that actually stores them. tests/Makefile starts one.
+runai_cc_test(
+    name = "object_device_test",
+    srcs = ["object_device_test.cc"],
+    deps = [
+        "//device/cuda",
+        "//streamer",
+        "@cuda//:cuda_headers",
+    ],
+    linkopts = ["-ldl"],
+    env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
+)
