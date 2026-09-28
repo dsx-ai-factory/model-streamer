@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -108,6 +109,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // mark - and a lock would put contention on the read path for no gain.
     AsyncIoCounters counters() const;
 
+    // Pinned buffers this worker's pool has registered. Zero until a device workload arrives, and
+    // never more than the window plus the copy depth. Diagnostics.
+    unsigned staging_buffers() const;
+
+    // Reads that landed no buffer and are waiting for one. Diagnostics.
+    unsigned waiting_for_a_buffer() const;
+
  protected:
     // Builds the engine and returns the window size, on the FIRST workload.
     //
@@ -152,6 +160,9 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // A copy still in flight is work this worker owes, even with an empty window and an idle engine.
     // Without this the pool would park on its queue and the workload would never finalize.
     bool has_deferred_work() const override;
+
+    // Buffers beyond the window, by default. RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH overrides it.
+    static constexpr unsigned DefaultCopyDepth = 2;
 
  private:
     // Per workload, kept until its last task is accounted.
@@ -201,15 +212,28 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         common::ResponseCode ret = common::ResponseCode::Success;
     };
 
-    // Give this chunk somewhere to land when its destination is a device. Returns false with `error`
-    // set when no buffer could be had, which is a driver failure rather than a full window - the pool
-    // is sized to the window, so it cannot refuse.
-    bool stage_into_device_buffer(posix_io::RequestId id, const Batch & batch, common::ResponseCode & error);
+    // What staging a device chunk did. NoBuffer is not a failure: the pool holds the window plus a
+    // little, so it runs dry exactly when the link has fallen behind storage. The read then waits
+    // rather than failing.
+    enum class Staged
+    {
+        Yes,
+        NoBuffer,
+        Failed,
+    };
+
+    // Give this chunk somewhere to land when its destination is a device. `error` is set only on
+    // Failed.
+    Staged stage_into_device_buffer(posix_io::RequestId id, const Batch & batch, common::ResponseCode & error);
 
     // Issue the copy for a landed chunk. Its tasks are answered from complete_copy() instead, once the
     // bytes are actually on the device. False when the copy could not be enqueued at all, and the
     // caller then accounts the chunk itself.
     bool issue_copy(posix_io::RequestId id, const InflightChunk & entry, const Batch & batch);
+
+    // Give every parked read another chance at a buffer. One pass: a read the pool still cannot serve
+    // goes back to the end of the queue.
+    void resume_waiting();
 
     // Take whatever copies have landed and account their chunks. `wait` blocks for one, which is safe
     // only while a copy is outstanding - one is then guaranteed to arrive.
@@ -227,8 +251,11 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     void complete_chunk(posix_io::RequestId id, common::ResponseCode ret);
 
     // Account every task a chunk covered - one read carried them all, so they share its outcome -
-    // free its window slot, and finalize the workload once its last chunk is accounted.
-    void account_chunk(posix_io::RequestId id, common::ResponseCode ret);
+    // and finalize the workload once its last chunk is accounted.
+    //
+    // `free_slot` is false for a chunk whose copy has just retired: its window slot went back when the
+    // READ landed, which is what keeps copies from narrowing the read window.
+    void account_chunk(posix_io::RequestId id, common::ResponseCode ret, bool free_slot = true);
 
     // The batch's descriptor, opening it on first use. Returns -1 and sets out_error if it cannot be
     // opened - that is this file's failure, not the storage's.
@@ -392,6 +419,19 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // Copies issued and not yet accounted. Written only by this worker's thread: the waiter thread
     // pushes to _copies and touches nothing else.
     size_t _copies_issued = 0;
+
+    // Buffers the pool may hold beyond the read window, so a read never waits for a copy. Small: the
+    // copy stage holds well under one buffer at the rates we have measured, and the pool never
+    // shrinks, so headroom bought here is pinned for the life of the worker.
+    unsigned _copy_depth = DefaultCopyDepth;
+
+    // Reads that landed no buffer and have not been issued. They hold their window slot, so the base
+    // admits no more work for them, and resume_waiting() retries them on every turn.
+    //
+    // EVERY TURN rather than on a copy completion: a buffer also comes back from a copy that could
+    // not be issued and from a failed read, and neither of those reports anything. Cleared by
+    // abort_all(), which drops the records these name.
+    std::deque<posix_io::RequestId> _waiting;
 
     // Filled by the StreamWaiter's thread, drained by this one. A completion cannot be accounted where
     // it is reported: answering a task and freeing a window slot are this thread's business.

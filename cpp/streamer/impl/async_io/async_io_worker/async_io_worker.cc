@@ -148,7 +148,17 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     buffers.buffer_bytesize = _settings->chunk_bytesize();
     buffers.slab_bytesize = std::max(_settings->chunk_bytesize(), device_slab_bytesize());
 
-    _device_out = std::make_unique<DeviceWriterClient>(_writer, buffers, _engine->depth());
+    // NOT the window. The window says how many reads may be in flight; the pool must also cover the
+    // chunks whose read has landed and whose copy has not, or a copy would cost a read its slot. The
+    // two were one number, which meant the only way to give the copy stage room was to read harder -
+    // and reading harder is measurably worse past a shallow depth.
+    //
+    // Zero is a meaningful setting here - the pool is then exactly the window, which is what this
+    // worker did before - so the floor is 0 rather than getenv_positive's usual 1.
+    _copy_depth = utils::getenv_positive<unsigned>("RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH",
+                                                   DefaultCopyDepth, 0u);
+
+    _device_out = std::make_unique<DeviceWriterClient>(_writer, buffers, _engine->depth() + _copy_depth);
 
     LOG(INFO) << "Async io worker ready: " << _strategy << ", " << *_settings;
 
@@ -700,8 +710,18 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
         if (!batch.device.is_host())
         {
             auto error = common::ResponseCode::Success;
-            if (!stage_into_device_buffer(id, batch, error))
+            switch (stage_into_device_buffer(id, batch, error))
             {
+            case Staged::Yes:
+                break;
+
+            case Staged::NoBuffer:
+                // Keeps its window slot, so the base admits nothing in its place. resume_waiting()
+                // gives it another chance on every turn the worker takes.
+                _waiting.push_back(id);
+                return;
+
+            case Staged::Failed:
                 complete_chunk(id, error);
                 return;
             }
@@ -799,6 +819,11 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     // Copies that landed while this thread was elsewhere. Blocking only when no read is outstanding:
     // there is then nothing else to wait for, and without it the pool would spin on has_deferred_work.
     drain_copies(_issued == 0);
+
+    // EVERY TURN, not only after a copy reports. A buffer also comes back when a copy could not be
+    // issued at all and when a read failed - neither queues a completion - so tying this to
+    // drain_copies would leave a read parked with a free buffer in the pool and nothing to wake it.
+    resume_waiting();
 
     // Flush first: the previous pump may have left a backlog, and issuing it before waiting is what
     // stops it sitting a whole loop iteration longer than it must.
@@ -958,30 +983,26 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     }
 }
 
-bool AsyncIoWorker::stage_into_device_buffer(posix_io::RequestId id, const Batch & batch,
-                                             common::ResponseCode & error)
+AsyncIoWorker::Staged AsyncIoWorker::stage_into_device_buffer(posix_io::RequestId id, const Batch & batch,
+                                                              common::ResponseCode & error)
 {
     StagingBuffer buffer;
     error = _device_out->take(batch.device.id, buffer);
     if (error != common::ResponseCode::Success)
     {
         LOG(ERROR) << "No staging buffer for " << batch.device << ": " << error;
-        return false;
+        return Staged::Failed;
     }
 
-    // The pool's ceiling is this worker's window, so every chunk in flight has already been paid for
-    // and there is always one free. An invalid buffer means that rule is broken, not that the caller
-    // should wait.
+    // Every buffer is out: the window's reads hold theirs, and the copy headroom is spent on chunks
+    // waiting for the link. Not an error - the read waits for a copy to retire.
     if (!buffer.valid())
     {
-        LOG(ERROR) << "The staging pool is at its ceiling with the window not full - the pool is"
-                   << " sized to the window, so this should not happen";
-        error = common::ResponseCode::UnknownError;
-        return false;
+        return Staged::NoBuffer;
     }
 
     _chunks.set_staging(id, buffer);
-    return true;
+    return Staged::Yes;
 }
 
 bool AsyncIoWorker::issue_copy(posix_io::RequestId id, const InflightChunk & entry, const Batch & batch)
@@ -1000,6 +1021,19 @@ bool AsyncIoWorker::issue_copy(posix_io::RequestId id, const InflightChunk & ent
 
     ++_copies_issued;
     return true;
+}
+
+void AsyncIoWorker::resume_waiting()
+{
+    // At most one pass over what is waiting now. stage_pending() parks a read again when the pool is
+    // still dry, pushing it to the BACK, so a count taken up front is what stops this looping on the
+    // same read forever.
+    for (size_t remaining = _waiting.size(); remaining > 0; --remaining)
+    {
+        const auto id = _waiting.front();
+        _waiting.pop_front();
+        stage_pending(id);
+    }
 }
 
 bool AsyncIoWorker::drain_copies(bool wait)
@@ -1036,13 +1070,24 @@ void AsyncIoWorker::complete_copy(posix_io::RequestId id, common::ResponseCode r
     }
 
     // Straight to the accounting: the copy is the last step, and the buffer is already back in the
-    // pool - the waiter returns it before this is even queued.
-    account_chunk(id, ret);
+    // pool - the waiter returns it before this is even queued. The window slot went back when the
+    // read landed.
+    account_chunk(id, ret, false /* slot already freed */);
+}
+
+unsigned AsyncIoWorker::staging_buffers() const
+{
+    return _device_out != nullptr ? _device_out->buffers() : 0;
+}
+
+unsigned AsyncIoWorker::waiting_for_a_buffer() const
+{
+    return static_cast<unsigned>(_waiting.size());
 }
 
 bool AsyncIoWorker::has_deferred_work() const
 {
-    return _copies_issued > 0;
+    return _copies_issued > 0 || !_waiting.empty();
 }
 
 void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode ret)
@@ -1066,6 +1111,10 @@ void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode 
 
             if (issued)
             {
+                // The read is done with its slot: the bytes are in pinned host memory and the window
+                // means reads in flight. Holding it until the copy retired cost a read its place,
+                // which is the whole reason the pool is no longer sized by the window.
+                _queue->complete(1);
                 return;
             }
 
@@ -1076,7 +1125,7 @@ void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode 
     account_chunk(id, ret);
 }
 
-void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode ret)
+void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode ret, bool free_slot)
 {
     const auto * entry = _chunks.find(id);
     ASSERT(entry != nullptr) << "accounting request " << id << " twice";
@@ -1092,13 +1141,12 @@ void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode r
     const auto batch_index = entry->batch_index;
     const auto chunk = _chunks.release(id);
 
-    // Free the window slot - once per chunk, never on a re-stage.
-    //
-    // For a DEVICE chunk this is reached only once the copy has retired, which is what makes the
-    // staging pool's ceiling and this window the same number: a worker cannot ask for an (N+1)th
-    // buffer its window has not already paid for. Freeing the slot when the read landed would hand
-    // the buffer to the next chunk while the DMA was still reading out of it.
-    _queue->complete(1);
+    // Free the window slot - once per chunk, never on a re-stage, and never twice: a chunk whose copy
+    // was issued gave its slot back when the read landed.
+    if (free_slot)
+    {
+        _queue->complete(1);
+    }
 
     const auto wlit = _inflight.find(workload_id);
     if (wlit == _inflight.end())
@@ -1305,6 +1353,11 @@ void AsyncIoWorker::abort_all(common::ResponseCode code)
     }
 
     _chunks.clear();
+
+    // With them, or a parked read would name a record that no longer exists and resume_waiting()
+    // would assert on it. They are already answered: their chunks were finalized above.
+    _waiting.clear();
+
     account_inflight();
     _issued = 0;
 }

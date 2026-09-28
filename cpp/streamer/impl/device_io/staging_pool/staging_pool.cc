@@ -87,6 +87,13 @@ common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, S
             _buffers.push_back(buffer);
             _free.push_back(buffer.index);
         }
+
+        // Once per slab, so bounded by the ceiling and not by traffic. Pinned memory is never given
+        // back, so this line is the record of what a run settled on - and the only way to see that a
+        // pool grew past what its window needed.
+        LOG(DEBUG) << "[RunAI Streamer] staging pool grew to " << _buffers.size() << " buffers ("
+                  << utils::logging::human_readable_size(_buffers.size() * _params.buffer_bytesize)
+                  << " pinned, " << _slabs.size() << " registrations)";
     }
 
     hand_out(out);
