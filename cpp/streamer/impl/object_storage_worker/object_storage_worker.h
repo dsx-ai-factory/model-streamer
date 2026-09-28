@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <utility>
@@ -12,12 +13,18 @@
 #include "common/response_code/response_code.h"
 #include "common/s3_credentials/s3_credentials.h"
 
+#include "common/device/device.h"
+
 #include "streamer/impl/config/config/config.h"
+#include "streamer/impl/device_io/device_issuer/device_issuer.h"
+#include "streamer/impl/device_io/device_writer/device_writer.h"
+#include "streamer/impl/device_io/staging_pool/staging_pool.h"
 #include "streamer/impl/object_storage_worker/object_storage_retry.h"
 #include "streamer/impl/reader/reader.h"
 #include "streamer/impl/workload/workload.h"
 
 #include "utils/capacity_worker/capacity_worker.h"
+#include "utils/deque/deque.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -50,7 +57,21 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // credentials_provider supplies the streamer's object-storage credentials. It is invoked ONCE, when this
     // worker builds its client (see capacity), so credentials are read only at client creation - never on the
     // per-request path.
-    explicit ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider);
+    // `writer` and `issuer` are the streamer's copy path, shared by every worker. Null in tests that
+    // read to host memory only: a device workload is then refused rather than read, because writing a
+    // device pointer through the plugin is a segmentation fault and not an error.
+    explicit ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider,
+                                 std::shared_ptr<DeviceWriter> writer = nullptr,
+                                 std::shared_ptr<DeviceIssuer> issuer = nullptr);
+
+    // Staging buffers this worker may hold BEYOND its in-flight window, so a chunk whose read has
+    // landed can wait for its copy without costing another chunk its buffer.
+    //
+    // Two, measured: on a B200 over NFS the copy stage holds about 0.3 of a buffer at the rate the
+    // storage sustains, and sweeping this from 0 to 64 put the peak at 1-2 and cost 16% at 64, where
+    // the pinned memory starts to hurt. See AsyncIoWorker::DefaultCopyDepth, which is the same number
+    // for the same reason.
+    static constexpr unsigned CopyDepth = 2;
 
  protected:
     // First workload sizes the window: build the persistent reader/client from its params and return the
@@ -108,6 +129,12 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
         size_t   first = 0;                 // first task of the span
         unsigned count = 0;                 // tasks in the span
         ObjectStorageRetry::State retry;
+
+        // Where a DEVICE chunk's bytes land before they are copied. Here rather than on ObjectChunk,
+        // which is a value the capacity queue copies in and out. Taken fresh in submit() and given
+        // back by whoever ends the attempt - including a retry, which should not hold pinned memory
+        // through its backoff when another chunk could be using it.
+        StagingBuffer staging;
     };
 
     // Per-in-flight-workload state, owned here and kept alive until the workload's last task finalizes.
@@ -134,7 +161,34 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
 
     // Account one completed chunk: free the window slot and report EVERY task it covered - one read
     // carries them all, so they succeed or fail together. Finalizes the workload once its last task lands.
-    void complete_chunk(InflightMap::iterator wlit, size_t chunk_idx, common::ResponseCode ret);
+    // `free_slot` is false for a chunk whose COPY has just retired: its window slot went back when the
+    // read landed, because the window counts reads in flight and a copy must not cost a read its
+    // place.
+    void complete_chunk(InflightMap::iterator wlit, size_t chunk_idx, common::ResponseCode ret,
+                        bool free_slot = true);
+
+    // Hand a landed device chunk to the issuer. The window slot goes back here - the read is done -
+    // and the tasks are answered later, from copy_done(), once the bytes are on the device.
+    //
+    // Cannot fail: the issuer answers through the completion below whatever happens, including when
+    // it could not open the device at all.
+    void issue_copy(InflightMap::iterator wlit, size_t chunk_idx);
+
+    // A copy that has retired, routed back to THIS thread. Answering a task and freeing a window slot
+    // are this worker's business, and the completion arrives on the StreamWaiter's.
+    struct CopyDone
+    {
+        common::backend_api::ObjectRequestId_t handle = 0;
+        common::ResponseCode ret = common::ResponseCode::Success;
+    };
+
+    // Account every copy that has landed since the last turn.
+    void drain_copies();
+
+    // Give every parked chunk another chance at a staging buffer. One pass per queue: a chunk the pool
+    // still cannot serve goes back to the end of its own queue.
+    void resume_waiting();
+    void resume_from(std::deque<common::backend_api::ObjectRequestId_t> & waiting);
 
     // Move retry entries whose jitter delay elapsed to the FRONT of the capacity queue, so a retry is
     // preferred over a new submission.
@@ -151,7 +205,42 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // pool can join. Used on teardown (stopped) and when the responder drains early.
     void abort_all(common::ResponseCode code);
 
+    // This worker's own pinned buffers, built on the first DEVICE chunk and sized to its window plus
+    // CopyDepth. One consumer - this thread - so nothing contends for them.
+    common::ResponseCode staging_pool_for(const common::Device & device);
+
     std::function<common::s3::Credentials()> _credentials_provider;   // streamer credentials, read once at client build
+
+    // The copy path. The WRITER opens devices and owns a stream per device; the ISSUER is shared by
+    // every reading thread in the streamer and enqueues the copies, so this worker never touches the
+    // driver itself. Borrowed, not owned: the streamer outlives its pools.
+    const std::shared_ptr<DeviceWriter> _writer;
+    const std::shared_ptr<DeviceIssuer> _issuer;
+
+    std::shared_ptr<StagingPool> _pool;
+
+    // Filled by the StreamWaiter's thread, drained by this one.
+    utils::Deque<CopyDone> _copies;
+
+    // Chunks with no staging buffer, holding their window slots until one comes back.
+    //
+    // TWO QUEUES, each in arrival order. A chunk that has already attempted is running against a
+    // wall-clock deadline that keeps ticking while it waits, so it goes before chunks that have
+    // attempted nothing - which is what promote_due_retries() already gives it in the capacity queue,
+    // through enqueue_front, and what parking would otherwise throw away.
+    //
+    // Not one queue with retries pushed to the front: that would order the retries among themselves
+    // backwards, putting the newest - the one with the most deadline left - first.
+    std::deque<common::backend_api::ObjectRequestId_t> _waiting_retries;
+    std::deque<common::backend_api::ObjectRequestId_t> _waiting;
+
+    // Copies handed over and not yet accounted. Keeps this worker busy while they are outstanding, so
+    // the pool gives it the turns it needs to drain them.
+    size_t _copies_issued = 0;
+
+    // What capacity() answered: this worker's in-flight window, in chunks. Kept because the staging
+    // pool is sized from it and is built later, on the first device chunk.
+    size_t _window_chunks = 0;
     std::shared_ptr<const Config> _config;   // keeps the Config alive for the persistent reader's reference
     std::shared_ptr<Reader> _reader;         // persistent, built by capacity() on the first non-empty workload
     common::ResponseCode _reader_error = common::ResponseCode::Success;   // last client-build failure code (for discard)

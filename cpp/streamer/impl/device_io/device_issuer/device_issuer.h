@@ -50,10 +50,23 @@ class DeviceIssuer
     // arrives from the reader that read into it - but it DOES own an event pool per device, because
     // a copy needs an event from the context it runs in.
     //
-    // `max_in_flight` is that event ceiling: the most copies that can be outstanding at once, which
-    // is every buffer every reader could hand over - `concurrency x buffers per reader`. Too low and
-    // a copy is refused for want of an event, which is not a state any caller can do anything about.
-    DeviceIssuer(std::shared_ptr<DeviceWriter> writer, unsigned max_in_flight);
+    // The event ceiling is NOT a parameter, and not a policy. Events cost a driver object each and are
+    // created on demand, so the number below bounds a LEAK rather than reserving anything - and it
+    // cannot be derived here anyway: this issuer is shared by readers whose windows are their own, and
+    // an object storage worker learns its window from its plugin long after this exists.
+    //
+    // Too low is the only harmful direction: a copy refused for want of an event is a failure no
+    // caller can act on, and the honest worst case is large - object storage sizes its window from a
+    // bandwidth-delay product, so `s3_concurrency x window` reaches six figures at the configuration's
+    // limits.
+    //
+    // So this is set where only a LEAK can reach it. A copy in flight holds a staging buffer, so
+    // hitting this needs 65536 buffers live on one device at once: 128 GiB of pinned memory at the
+    // 2 MiB minimum block, 512 GiB at the 8 MiB object chunk. No pool can get there. The events
+    // themselves are created on demand, so a ceiling nobody reaches costs nothing.
+    static constexpr unsigned MaxCopiesInFlight = 65536;
+
+    explicit DeviceIssuer(std::shared_ptr<DeviceWriter> writer);
 
     // Waits for what is queued, so every copy has been issued before this returns. The StreamWaiter
     // then drains its own queue, which is what puts the buffers back.
@@ -123,7 +136,6 @@ class DeviceIssuer
     void issue(unsigned ordinal, DeviceWriterClient & client, Request && request);
 
     const std::shared_ptr<DeviceWriter> _writer;
-    const unsigned _max_in_flight;
 
     // Guards the map only. Taken once per device, never per copy: submit() finds the lane, releases
     // this, and pushes to the lane's own queue. A std::map keeps references stable, and lanes are

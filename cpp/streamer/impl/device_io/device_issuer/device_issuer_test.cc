@@ -65,7 +65,7 @@ class DeviceIssuerTest : public ::testing::Test
 // the driver is never reached.
 TEST_F(DeviceIssuerTest, Starts_Nothing_Until_The_First_Submit)
 {
-    DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+    DeviceIssuer issuer(_writer);
 
     EXPECT_FALSE(issuer.running());
     EXPECT_EQ(issuer.issued(), 0u);
@@ -78,7 +78,7 @@ TEST_F(DeviceIssuerTest, Starts_Nothing_Until_The_First_Submit)
 TEST_F(DeviceIssuerTest, Copies_And_Returns_The_Buffer_To_Its_Own_Pool)
 {
     auto pool = pool_for(0, 1);
-    DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+    DeviceIssuer issuer(_writer);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
@@ -113,7 +113,7 @@ TEST_F(DeviceIssuerTest, Many_Readers_Each_With_Its_Own_Pool)
     constexpr unsigned PerReader = 50;
     constexpr unsigned Buffers = 3;   // the sync reader's pipeline: fill, copy, in flight
 
-    DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+    DeviceIssuer issuer(_writer);
 
     std::vector<std::shared_ptr<StagingPool>> pools;
     for (unsigned r = 0; r < Readers; ++r)
@@ -174,7 +174,7 @@ TEST_F(DeviceIssuerTest, Many_Readers_Each_With_Its_Own_Pool)
 TEST_F(DeviceIssuerTest, A_Copy_That_Cannot_Be_Issued_Still_Reports)
 {
     auto pool = pool_for(0, 1);
-    DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+    DeviceIssuer issuer(_writer);
 
     StagingBuffer buffer;
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
@@ -209,7 +209,7 @@ TEST_F(DeviceIssuerTest, Teardown_Issues_What_Is_Already_Queued)
     std::vector<char> destination(4 * Buffer, 0);
 
     {
-        DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+        DeviceIssuer issuer(_writer);
 
         for (unsigned i = 0; i < 4; ++i)
         {
@@ -233,7 +233,7 @@ TEST_F(DeviceIssuerTest, One_Thread_Per_Device)
     constexpr unsigned Devices = 4;
     constexpr unsigned PerDevice = 25;
 
-    DeviceIssuer issuer(_writer, 64 /* copies in flight */);
+    DeviceIssuer issuer(_writer);
 
     // One reader with one pool, submitting to every device in turn - the interleaving that would
     // make a single shared thread switch context on every copy.

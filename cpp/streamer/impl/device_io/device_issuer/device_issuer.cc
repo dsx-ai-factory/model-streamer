@@ -20,9 +20,8 @@ DeviceWriterClient::Buffers no_buffers()
 
 } // namespace
 
-DeviceIssuer::DeviceIssuer(std::shared_ptr<DeviceWriter> writer, unsigned max_in_flight) :
-    _writer(std::move(writer)),
-    _max_in_flight(max_in_flight)
+DeviceIssuer::DeviceIssuer(std::shared_ptr<DeviceWriter> writer) :
+    _writer(std::move(writer))
 {
 }
 
@@ -40,7 +39,7 @@ DeviceIssuer::Lane * DeviceIssuer::lane_for(unsigned ordinal, common::ResponseCo
         return &existing->second;
     }
 
-    auto client = std::make_shared<DeviceWriterClient>(_writer, no_buffers(), _max_in_flight);
+    auto client = std::make_shared<DeviceWriterClient>(_writer, no_buffers(), MaxCopiesInFlight);
 
     // Opened HERE rather than on the lane's thread so a device that cannot be reached is reported to
     // the reader while it is still listening, instead of through a completion.

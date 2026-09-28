@@ -18,9 +18,69 @@
 namespace runai::llm::streamer::impl
 {
 
-ObjectStorageWorker::ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider) :
-    _credentials_provider(std::move(credentials_provider))
+ObjectStorageWorker::ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider,
+                                         std::shared_ptr<DeviceWriter> writer,
+                                         std::shared_ptr<DeviceIssuer> issuer) :
+    _credentials_provider(std::move(credentials_provider)),
+    _writer(std::move(writer)),
+    _issuer(std::move(issuer))
 {}
+
+common::ResponseCode ObjectStorageWorker::staging_pool_for(const common::Device & target)
+{
+    if (_pool != nullptr)
+    {
+        return common::ResponseCode::Success;
+    }
+
+    if (_writer == nullptr || _issuer == nullptr)
+    {
+        LOG(ERROR) << "This reader has no copy path, so it cannot serve " << target;
+        return common::ResponseCode::DeviceUnavailable;
+    }
+
+    // Through the device this chunk names. Pinned memory is reachable from every context, so the pool
+    // built here serves any later device this worker reads for.
+    DeviceWriter::Channel channel = nullptr;
+    const auto code = _writer->open(target.id, channel);
+    if (code != common::ResponseCode::Success)
+    {
+        return code;
+    }
+
+    // AND BIND IT. Pinning is a driver call and a new thread inherits no context: open_device only
+    // retains the primary context, it does not make it current here. Without this cuMemHostAlloc
+    // answers CUDA_ERROR_INVALID_CONTEXT - which no mock can show, because a mock has no contexts.
+    const auto device = _writer->device(channel);
+    const auto bound = device->bind_thread();
+    if (bound != common::ResponseCode::Success)
+    {
+        LOG(ERROR) << "Could not bind a context for " << target << ": " << bound;
+        return bound;
+    }
+
+    StagingPool::Params params;
+    params.buffer_bytesize = _chunk_bytesize;
+    params.slab_bytesize = _chunk_bytesize;   // one registration per buffer, and only as they are needed
+    // A pool cannot be sized from the unset sentinel. Falling back to the copy depth alone reads
+    // slowly rather than pinning without limit, and says so.
+    if (_window_chunks == static_cast<size_t>(-1))
+    {
+        LOG(WARNING) << "This object storage plugin advertises no in-flight window; staging "
+                     << CopyDepth << " buffers for the device copy and no more";
+    }
+
+    // The clamp is not a memory policy, it is a guard: the window is a size_t from a plugin, and
+    // max_buffers is an unsigned that is multiplied by the chunk size. A window this large is already
+    // 32 GiB of staging at the default chunk, so anything past it is a plugin reporting nonsense.
+    static constexpr size_t SaneWindowChunks = 4096;
+
+    const size_t window = _window_chunks == static_cast<size_t>(-1) ? 0 : _window_chunks;
+    params.max_buffers = static_cast<unsigned>(std::min(window, SaneWindowChunks)) + CopyDepth;
+
+    _pool = std::make_shared<StagingPool>(device, params);
+    return common::ResponseCode::Success;
+}
 
 std::size_t ObjectStorageWorker::capacity(const Workload & first)
 {
@@ -71,13 +131,20 @@ std::size_t ObjectStorageWorker::capacity(const Workload & first)
         }
     }
 
-    // The window is a max in-flight chunk count: the plugin's byte window / chunk size (unbounded for
-    // gcs/azure, which advertise SIZE_MAX). Each in-flight chunk costs 1.
+    // The window is a max in-flight chunk count: the plugin's byte window / chunk size. Each in-flight
+    // chunk costs 1.
+    //
+    // SIZE_MAX is the UNSET sentinel, not "unbounded": every plugin advertises a real window, and gcs
+    // and azure size theirs to their own threadpool (margin x readers x chunk). The value is filled in
+    // when a client is created, and this runs after that - so it is not reached in practice.
     const size_t unbounded = static_cast<size_t>(-1);
     const size_t window_bytes = _reader->max_inflight_bytes();
-    return (window_bytes == unbounded)
+
+    _window_chunks = (window_bytes == unbounded)
         ? unbounded
         : std::max(static_cast<size_t>(1), window_bytes / _chunk_bytesize);
+
+    return _window_chunks;
 }
 
 void ObjectStorageWorker::discard(Workload && workload)
@@ -244,6 +311,56 @@ void ObjectStorageWorker::submit(const ObjectChunk & chunk)
     ASSERT(first.error == common::ResponseCode::Success)
         << "task already failed before its only chunk was submitted";
 
+    // A DEVICE chunk cannot be read where it is going: the plugin writes with the CPU, and a device
+    // pointer would be a segmentation fault. It lands in pinned host memory and is copied afterwards.
+    //
+    // A FRESH buffer every attempt, retries included. Holding one through a backoff pins memory that
+    // another chunk could be reading into, and the buffer is given back by whoever ends the attempt.
+    char * destination = chunk.buffer;
+
+    if (!first.batch->device.is_host())
+    {
+        const auto ready = staging_pool_for(first.batch->device);
+        if (ready != common::ResponseCode::Success)
+        {
+            complete_chunk(wlit, chunk_idx, ready);
+            return;
+        }
+
+        StagingBuffer buffer;
+        const auto code = _pool->try_acquire(buffer);
+        if (code != common::ResponseCode::Success)
+        {
+            complete_chunk(wlit, chunk_idx, code);
+            return;
+        }
+
+        if (!buffer.valid())
+        {
+            // Every buffer is out: the window's reads hold theirs, and the copy headroom is spent on
+            // chunks waiting for the link. Not an error - the chunk waits for a buffer, keeping its
+            // window slot so the base admits nothing in its place.
+            //
+            // BEFORE the retry accounting below, so waiting costs no part of this chunk's retry
+            // budget: it has not attempted anything yet.
+            //
+            // A chunk that HAS attempted waits in the other queue, which is drained first: its
+            // deadline is already running, and a chunk that has attempted nothing has none.
+            if (_retry.retry_count(cs.retry) > 0)
+            {
+                _waiting_retries.push_back(chunk.handle);
+            }
+            else
+            {
+                _waiting.push_back(chunk.handle);
+            }
+            return;
+        }
+
+        cs.staging = buffer;
+        destination = buffer.data;
+    }
+
     // ObjectStorageRetry starts the deadline here, so queueing before the first backend attempt does not
     // consume the chunk's retry budget. A delayed retry promoted after its deadline is rejected here.
     if (_retry.enabled() && !_retry.begin_attempt(cs.retry))
@@ -257,7 +374,7 @@ void ObjectStorageWorker::submit(const ObjectChunk & chunk)
     try
     {
         const common::Range range(chunk.offset, chunk.bytesize);
-        _reader->async_read(first.batch->object_storage_params, chunk.handle, range, chunk.buffer);
+        _reader->async_read(first.batch->object_storage_params, chunk.handle, range, destination);
     }
     catch (const common::Exception & e)
     {
@@ -270,11 +387,81 @@ void ObjectStorageWorker::submit(const ObjectChunk & chunk)
     }
 }
 
-void ObjectStorageWorker::complete_chunk(InflightMap::iterator wlit, size_t chunk_idx, common::ResponseCode ret)
+void ObjectStorageWorker::issue_copy(InflightMap::iterator wlit, size_t chunk_idx)
 {
-    _queue->complete(1);   // free the window slot so the next chunk can be submitted
-
     Inflight & wl = wlit->second;
+    ChunkState & cs = wl.chunks[chunk_idx];
+    const auto & batch = *wl.tasks[cs.first].batch;
+
+    const auto handle = cs.chunk.handle;
+
+    // The window slot goes back HERE, not when the copy retires: the window counts reads in flight,
+    // and a copy holding a slot would cost a read its place for as long as the link takes.
+    _queue->complete(1);
+
+    // Ours no longer, on either path: the issuer returns the buffer to the pool whatever happens.
+    const StagingBuffer buffer = cs.staging;
+    cs.staging = StagingBuffer{};
+
+    _issuer->submit(batch.device.id, _pool, buffer, cs.chunk.bytesize, cs.chunk.buffer,
+                    [this, handle](common::ResponseCode ret) { _copies.push(CopyDone{ handle, ret }); });
+
+    ++_copies_issued;
+}
+
+void ObjectStorageWorker::drain_copies()
+{
+    CopyDone done;
+
+    while (_copies_issued > 0 && _copies.try_pop(done))
+    {
+        --_copies_issued;
+
+        auto [wlit, chunk_idx] = locate(done.handle);
+        if (wlit == _inflight.end())
+        {
+            continue;   // its workload was aborted while the copy was in flight
+        }
+
+        if (done.ret != common::ResponseCode::Success)
+        {
+            LOG(ERROR) << "[RunAI Streamer] copy to device failed for chunk " << done.handle
+                       << ": " << done.ret;
+        }
+
+        // The slot went back when the read landed, so this must not free it again.
+        complete_chunk(wlit, chunk_idx, done.ret, false /* slot already freed */);
+    }
+}
+
+void ObjectStorageWorker::complete_chunk(InflightMap::iterator wlit, size_t chunk_idx,
+                                        common::ResponseCode ret, bool free_slot)
+{
+    Inflight & wl = wlit->second;
+    ChunkState & cs = wl.chunks[chunk_idx];
+
+    // A DEVICE chunk is not done when its read lands: the bytes are in pinned host memory. Hand the
+    // copy over and answer the tasks from drain_copies(), so a range is answered only once its bytes
+    // are on the device. issue_copy() frees the window slot itself.
+    if (ret == common::ResponseCode::Success && cs.staging.valid() && free_slot)
+    {
+        issue_copy(wlit, chunk_idx);
+        return;
+    }
+
+    // Still ours only when no copy was handed over - a failed read, or an attempt that is about to be
+    // retried. A buffer lost here would shrink the pool for the life of the worker.
+    if (cs.staging.valid())
+    {
+        _pool->release(cs.staging);
+        cs.staging = StagingBuffer{};
+    }
+
+    if (free_slot)
+    {
+        _queue->complete(1);   // free the window slot so the next chunk can be submitted
+    }
+
     const auto & span = wl.chunks[chunk_idx];
 
     // One read carried all of these, so they share its outcome.
@@ -323,6 +510,33 @@ void ObjectStorageWorker::promote_due_retries()
     }
 }
 
+void ObjectStorageWorker::resume_waiting()
+{
+    // Retries first, then the rest, each in arrival order.
+    //
+    // One pass over each queue. submit() parks a chunk again when the pool is still dry, pushing it to
+    // the BACK of its queue, so a count taken up front is what stops this looping on the same chunk.
+    resume_from(_waiting_retries);
+    resume_from(_waiting);
+}
+
+void ObjectStorageWorker::resume_from(std::deque<common::backend_api::ObjectRequestId_t> & waiting)
+{
+    for (size_t remaining = waiting.size(); remaining > 0; --remaining)
+    {
+        const auto handle = waiting.front();
+        waiting.pop_front();
+
+        auto [wlit, chunk_idx] = locate(handle);
+        if (wlit == _inflight.end())
+        {
+            continue;   // its workload was aborted while it waited
+        }
+
+        submit(wlit->second.chunks[chunk_idx].chunk);
+    }
+}
+
 void ObjectStorageWorker::pre_pump()
 {
     if (_retry.enabled())
@@ -333,7 +547,7 @@ void ObjectStorageWorker::pre_pump()
 
 bool ObjectStorageWorker::has_deferred_work() const
 {
-    return _retry.has_pending();
+    return _retry.has_pending() || _copies_issued > 0 || !_waiting.empty() || !_waiting_retries.empty();
 }
 
 void ObjectStorageWorker::report_workload(Inflight & wl, common::ResponseCode code)
@@ -379,12 +593,41 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
     // OOM caller is expected to abort on UnknownError and tear the streamer down.
     _retry.clear();
 
+    // Every staging buffer still held by a chunk that will never complete. Before the workloads are
+    // erased, because the chunks go with them - and a buffer lost here would shrink the pool for the
+    // life of the worker. A buffer already handed to the issuer is NOT here: that one comes back on
+    // its own, and its completion locates to end() and is dropped.
+    if (_pool != nullptr)
+    {
+        for (auto & [base, wl] : _inflight)
+        {
+            (void)base;
+            for (auto & cs : wl.chunks)
+            {
+                if (cs.staging.valid())
+                {
+                    _pool->release(cs.staging);
+                    cs.staging = StagingBuffer{};
+                }
+            }
+        }
+    }
+
     for (auto it = _inflight.begin(); it != _inflight.end(); )
     {
         auto next = std::next(it);
         finalize(it, code);   // fails every batch and erases `it`
         it = next;
     }
+
+    // Copies handed over are no longer anyone's business here: their workloads are gone, so their
+    // completions locate to end() and are dropped. Forgetting them is what lets idle() become true.
+    _copies_issued = 0;
+
+    // With them, or a waiting chunk would name a workload that no longer exists - and it would keep
+    // this worker busy for good, because a parked chunk is deferred work.
+    _waiting.clear();
+    _waiting_retries.clear();
 
     // Zero the window so idle() becomes true and the pool can join. clear() drops every pending chunk and
     // releases all in-flight credit in one step - the workloads those chunks belonged to were already failed
@@ -409,6 +652,14 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
         abort_all(common::ResponseCode::FinishedError);   // teardown: fail all in flight, empty the window
         return;
     }
+
+    // Copies that landed while this thread was elsewhere. Before the window is examined below, so a
+    // chunk whose copy has retired is off the books by then.
+    drain_copies();
+
+    // EVERY TURN, not only after a copy retires: a buffer also comes back from a read that failed and
+    // from an attempt about to be retried, and neither of those reports a copy.
+    resume_waiting();
 
     // With no backend attempt in flight, sleep in short slices while a retry is deferred so the thread does
     // not busy-wait. CapacityWorker calls pump() immediately after this returns; pre_pump() then promotes a
@@ -481,6 +732,15 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
             const auto retry = _retry.schedule(cs.retry, cs.chunk.handle);
             if (retry.has_value())
             {
+                // GIVEN BACK BEFORE THE BACKOFF. This path does not go through complete_chunk, and the
+                // next attempt takes a fresh buffer - so holding this one would lose it for the life of
+                // the worker, and would pin memory another chunk could be reading into meanwhile.
+                if (cs.staging.valid())
+                {
+                    _pool->release(cs.staging);
+                    cs.staging = StagingBuffer{};
+                }
+
                 // The failed attempt is no longer in flight; the logical chunk remains pending in _retry.
                 _queue->complete(1);
                 LOG(DEBUG) << "Retrying object chunk " << cs.chunk.handle << " (offset " << cs.chunk.offset
@@ -501,7 +761,14 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
     // flight: it was stopped or drained early. Abort rather than spin re-reading the same sentinel. Gated
     // on responder_drained, not merely !progressed, so a round that only dropped a late completion (the
     // client is alive) never aborts an unrelated in-flight submission.
-    if (!progressed && responder_drained && _queue != nullptr && !_queue->idle())
+    //
+    // AND NOT WHILE THIS WORKER IS THE ONE HOLDING THINGS UP. A chunk parked for a staging buffer, or a
+    // copy still in flight, keeps its window slot - so the queue is not idle and the plugin has nothing
+    // left to report, which looks exactly like a client that went away. Aborting there fails a whole
+    // submission because the device link was slower than the storage.
+    const bool ours_to_finish = !_waiting.empty() || !_waiting_retries.empty() || _copies_issued > 0;
+
+    if (!progressed && responder_drained && !ours_to_finish && _queue != nullptr && !_queue->idle())
     {
         abort_all(common::ResponseCode::FinishedError);
     }

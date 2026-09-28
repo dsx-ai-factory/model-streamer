@@ -270,7 +270,7 @@ TEST(Read, A_Failed_Read_Returns_Its_Staging_Buffer)
 
     auto backend = std::make_shared<device::MockBackend>();
     auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
@@ -337,7 +337,7 @@ TEST(Read, A_Copy_That_Fails_Part_Way_Stops_The_Answers_There)
 
     auto backend = std::make_shared<device::MockBackend>();
     auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
@@ -414,7 +414,7 @@ TEST(Read, A_Stopped_Pool_Is_Not_Answered_As_Read)
 
     auto backend = std::make_shared<device::MockBackend>();
     auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, 3 /* copies in flight */);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
     ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);

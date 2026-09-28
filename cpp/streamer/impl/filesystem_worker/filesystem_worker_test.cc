@@ -98,7 +98,7 @@ TEST_F(FileSystemWorkerTest, Refuses_A_Device_Workload_With_No_Block_Size)
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), 1, Block);
 
     auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     FileSystemWorker worker(writer, issuer, 0 /* block */);
     std::atomic<bool> stopped{false};
@@ -124,7 +124,7 @@ TEST_F(FileSystemWorkerTest, Reads_A_Device_Workload_Through_Pinned_Buffers)
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
 
     auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     FileSystemWorker worker(writer, issuer, Block);
     std::atomic<bool> stopped{false};
@@ -159,7 +159,7 @@ TEST_F(FileSystemWorkerTest, Each_Worker_Has_Its_Own_Buffers)
     utils::temp::File file(data);
 
     auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, 2 * FileSystemWorker::BuffersPerThread);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     std::vector<std::vector<char>> destinations(2, std::vector<char>(4 * Block, 0));
     std::atomic<bool> stopped{false};
@@ -211,7 +211,7 @@ TEST_F(FileSystemWorkerTest, A_Failed_Copy_Is_Never_Answered_As_Read)
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
 
     auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
-    auto issuer = std::make_shared<DeviceIssuer>(writer, FileSystemWorker::BuffersPerThread);
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     // Every copy fails at the event, which is where a real transfer error surfaces.
     DeviceWriter::Channel channel = nullptr;
