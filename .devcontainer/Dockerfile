@@ -1,5 +1,3 @@
-FROM quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e AS minio-src
-
 FROM ubuntu:20.04
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -28,7 +26,20 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=minio-src /usr/bin/minio /usr/local/bin/minio
+# weed (SeaweedFS), the S3-compatible object store used for local S3 tests. MinIO killed every
+# free distribution channel in 2026 (dl.min.io binaries pulled April, Docker Hub delisted
+# Sept 11, quay.io anonymous pulls cut Sept 24), and its last free release carries an unpatched
+# CVSS 8.8 auth-bypass CVE. SeaweedFS ships plain GitHub Release tarballs on its own repo, not a
+# third-party registry a vendor can lock down. Checksummed like liburing/libaio below.
+RUN WEED_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64") \
+    && if [ "$WEED_ARCH" = "amd64" ]; then WEED_SHA256=31fb804858885f9e7f18b6d3b1da09e824baac3e6a55b5a62c3c4c77e6ed6d7d; \
+       else WEED_SHA256=ba5c9def9ff98f78becdf309a50a9f906922f6383a7c4c772d01ede3cc012e16; fi \
+    && curl -fsSL -o weed.tar.gz https://github.com/seaweedfs/seaweedfs/releases/download/4.47/linux_${WEED_ARCH}.tar.gz \
+    && echo "${WEED_SHA256}  weed.tar.gz" | sha256sum -c - \
+    && tar zxf weed.tar.gz \
+    && chmod +x weed \
+    && mv weed /usr/local/bin/weed \
+    && rm -f weed.tar.gz
 
 RUN curl -fsSL -o fake-gcs-server_1.52.2.tar.gz https://github.com/fsouza/fake-gcs-server/releases/download/v1.52.2/fake-gcs-server_1.52.2_Linux_$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64").tar.gz \
     && mkdir -p fake-gcs-server \
