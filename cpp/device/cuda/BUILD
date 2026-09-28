@@ -32,3 +32,21 @@ runai_cc_test(
     env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
 )
 
+# The loader, driven against the fake driver in cuda_mock. Its DT_RPATH puts that library ahead of any
+# real one, so this behaves the same on a GPU machine and on CPU-only CI - and FAILS if the mock is not
+# found, rather than skipping.
+runai_cc_test(
+    name = "cuda_loader_test",
+    srcs = ["cuda_loader_test.cc"],
+    deps = [
+        ":cuda",
+        "//device/cuda/cuda_mock:libcuda.so.1",
+    ],
+    data = ["//device/cuda/cuda_mock:libcuda.so.1"],
+    linkstatic = False,
+    linkopts = [
+        "-Wl,-rpath,$$ORIGIN/cuda_mock",
+        "-ldl",
+    ],
+    env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
+)
