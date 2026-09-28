@@ -7,7 +7,7 @@ import time
 import boto3
 from unittest.mock import patch
 
-from botocore.exceptions import NoCredentialsError, ClientError
+from botocore.exceptions import NoCredentialsError, ClientError, EndpointConnectionError
 from safetensors.torch import safe_open
 
 from tests.cases.interface import ObjectStoreBackend
@@ -42,7 +42,7 @@ class SeaweedFSServer(ObjectStoreBackend):
                 s3_client.list_buckets()
                 print("SeaweedFS server is up and running.")
                 return
-            except (ClientError, NoCredentialsError):
+            except (ClientError, NoCredentialsError, EndpointConnectionError):
                 time.sleep(0.5)
         raise TimeoutError(f"SeaweedFS server failed to start within {timeout} seconds.")
 
