@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <map>
 #include <set>
@@ -85,6 +86,12 @@ class MockDevice : public Device
     // answers it already gave for the blocks that landed before it.
     std::atomic<unsigned> fail_event_synchronize_from{0};
 
+    // HOLD every event_synchronize until release_copies(). A copy that never retires keeps its
+    // staging buffer, which is the only way a test can make a pool run dry - the mock otherwise
+    // returns a buffer before the next read asks for one, so a reader never waits for the link.
+    void hold_copies();
+    void release_copies();
+
     // Fail every event_create from the Nth onwards, counting from 1. Zero means never.
     unsigned fail_event_create_from = 0;
 
@@ -99,6 +106,12 @@ class MockDevice : public Device
     void set_all_ready(bool ready);
 
  private:
+    // Guards the hold below. Its own condition, not _mutex's: event_synchronize runs on the waiter's
+    // thread and must not hold the state lock while it sleeps.
+    std::mutex _hold_mutex;
+    std::condition_variable _hold;
+    bool _copies_held = false;
+
     mutable std::mutex _mutex;
     std::map<EventHandle, bool> _ready;     // the events THIS device created
     std::set<StreamHandle> _streams;        // and the streams

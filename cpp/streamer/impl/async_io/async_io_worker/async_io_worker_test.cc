@@ -3,6 +3,7 @@
 #include "device/mock/mock_device.h"
 
 #include <gtest/gtest.h>
+#include <thread>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -1377,8 +1378,9 @@ namespace
 // A worker with a real DeviceWriter over a MockDevice, so the copy path runs without a driver.
 struct DeviceDriver : Driver
 {
-    explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock) :
-        Driver(Strategy::IoUringBuffered, 4096, std::nullopt, Config::default_fs_async_queue_depth,
+    explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock,
+                          unsigned depth = Config::default_fs_async_queue_depth) :
+        Driver(Strategy::IoUringBuffered, 4096, std::nullopt, depth,
                std::make_shared<DeviceWriter>([mock]() { return mock; })),
         backend(std::move(mock))
     {}
@@ -1430,6 +1432,220 @@ TEST(AsyncIoWorkerDevice, Reads_Into_A_Staging_Buffer_And_Copies)
 
     // The bytes went through the staging buffer and arrived, in the right order.
     EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(0, 600));
+}
+
+
+// A read that cannot have a buffer WAITS. It used to fail the chunk with UnknownError, because the
+// pool was the window and a free window slot therefore promised a free buffer. It no longer does:
+// the slot goes back when the read lands, while the buffer stays out until the copy retires. So the
+// pool runs dry exactly when the link falls behind storage, and the read must wait for it - not lose
+// its ranges over it.
+TEST(AsyncIoWorkerDevice, A_Read_Waits_For_A_Buffer_Rather_Than_Failing)
+{
+    constexpr unsigned Window = 4;
+    constexpr unsigned Copies = 1;   // ceiling five, so held copies can starve the reads
+
+    const utils::temp::Env copy_depth("RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH", static_cast<int>(Copies));
+
+    auto mock = std::make_shared<device::MockBackend>();
+    DeviceDriver driver(mock, Window);
+
+    Fixture first({ ChunkSize, ChunkSize, ChunkSize, ChunkSize });
+    driver.execute(first.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto ids = driver.in_flight();
+    ASSERT_EQ(ids.size(), Window);
+
+    // From here every copy stays in flight, holding its staging buffer.
+    mock->opened(0)->hold_copies();
+
+    // All but one read lands. ONE IS LEFT IN FLIGHT ON PURPOSE: with nothing outstanding the worker
+    // blocks waiting for a copy to report, which is right against a driver and a deadlock against a
+    // mock that is holding them.
+    for (unsigned i = 0; i + 1 < ids.size(); ++i)
+    {
+        driver.engine->complete(ids[i]);
+    }
+    driver.route();
+
+    // Three buffers are inside copies, one is inside the read still in flight. The pool carves whole
+    // slabs, so it may hold up to its ceiling.
+    ASSERT_LE(driver.worker.staging_buffers(), Window + Copies);
+
+    // A second submission arrives with almost every buffer held. Three chunks, and at most one buffer
+    // to be had.
+    Fixture second({ ChunkSize, ChunkSize, ChunkSize });
+    driver.execute(second.workload("", common::Device::cuda(0)));
+
+    EXPECT_LE(driver.worker.staging_buffers(), Window + Copies) << "the pool grew past its ceiling";
+    EXPECT_GT(driver.worker.waiting_for_a_buffer(), 0u) << "a read with no buffer was not parked";
+    EXPECT_FALSE(driver.worker.idle()) << "a parked read must keep the worker busy";
+
+    // And they are parked, not failed: nothing has been answered for them.
+    EXPECT_EQ(second.responder->pop(50 /* ms */).ret, common::ResponseCode::TimedOut);
+
+    // The link catches up. Each retiring copy returns a buffer, and each returned buffer takes one
+    // parked read off the list.
+    mock->opened(0)->release_copies();
+
+    // Bounded, not one turn: a copy reports from the StreamWaiter's thread, so the worker needs as
+    // many turns as it takes for those to arrive. drain_copies() then takes one parked read off the
+    // list for each buffer that comes back.
+    for (unsigned i = 0; i < 500 && driver.worker.waiting_for_a_buffer() > 0; ++i)
+    {
+        driver.route();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_EQ(driver.worker.waiting_for_a_buffer(), 0u) << "a parked read was never resumed";
+
+    // The resumed reads are staged, not issued - the worker flushes on its next turn. Only now can
+    // the worker be expected to settle: until the test completes them, it rightly has work.
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+
+    for (const auto & r : drain_responses(*first.responder, 4))
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success) << "first submission";
+    }
+    for (const auto & r : drain_responses(*second.responder, 3))
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success) << "second submission, the one that waited";
+    }
+
+    EXPECT_EQ(second.got_at(0, 3 * ChunkSize), second.expected_at(0, 3 * ChunkSize))
+        << "a read that waited for a buffer landed the wrong bytes";
+}
+
+
+// A parked read must be woken by a buffer coming back, HOWEVER it comes back.
+//
+// A copy that fails still reports, so it wakes one. A copy that cannot be ISSUED does not: write()
+// gives the buffer straight back and no completion is ever queued. Waking only on a completion left
+// the read parked with a free buffer in the pool and nothing to wake it - and a parked read keeps
+// the worker busy, so the pool calls it forever. Not a slow load: a live-lock.
+TEST(AsyncIoWorkerDevice, A_Copy_That_Cannot_Be_Issued_Still_Wakes_A_Parked_Read)
+{
+    constexpr unsigned Window = 4;
+    constexpr unsigned Copies = 1;
+
+    const utils::temp::Env copy_depth("RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH", static_cast<int>(Copies));
+
+    auto mock = std::make_shared<device::MockBackend>();
+    DeviceDriver driver(mock, Window);
+
+    Fixture first({ ChunkSize, ChunkSize, ChunkSize, ChunkSize });
+    driver.execute(first.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto ids = driver.in_flight();
+    ASSERT_EQ(ids.size(), Window);
+
+    // Held copies keep their buffers, which is what empties the pool.
+    mock->opened(0)->hold_copies();
+
+    driver.engine->complete(ids[0]);
+    driver.engine->complete(ids[1]);
+    driver.route();
+
+    // A second submission with the pool nearly empty: some of it has to wait.
+    //
+    // TWO chunks, because two window slots are free - the two reads that landed. A third would leave
+    // execute() looping for a completion that only the test can produce.
+    Fixture second({ ChunkSize, ChunkSize });
+    driver.execute(second.workload("", common::Device::cuda(0)));
+
+    const auto parked = driver.worker.waiting_for_a_buffer();
+    ASSERT_GT(parked, 0u) << "no read was parked, so there is nothing to wake";
+
+    // From here no copy can be issued: it needs an event, and the held copies hold theirs. The next
+    // read to land therefore returns its buffer WITHOUT ever queuing a completion.
+    mock->opened(0)->fail_event_create_from = 1;
+
+    driver.engine->complete(ids[2]);   // ids[3] stays in flight, so the worker never blocks on a copy
+
+    // Bounded: if nothing wakes the parked reads this ends and FAILS rather than hanging.
+    for (unsigned i = 0; i < 200 && driver.worker.waiting_for_a_buffer() >= parked; ++i)
+    {
+        driver.route();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_LT(driver.worker.waiting_for_a_buffer(), parked)
+        << "a buffer came back with no completion behind it, and woke nobody";
+
+    // Let go of everything before the worker is destroyed: a held copy would leave the StreamWaiter
+    // asleep inside event_synchronize, and its thread is joined in the destructor.
+    mock->opened(0)->fail_event_create_from = 0;
+    mock->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 200; ++i)
+    {
+        driver.route();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+
+// An abort drops every in-flight record, so nothing may be left naming one. A parked read does: it
+// holds a request id whose record abort_all() is about to forget, and the worker stays busy while it
+// is parked - so the pool calls it again and the retry asserts on a record that is gone.
+TEST(AsyncIoWorkerDevice, An_Abort_Leaves_No_Parked_Read_Behind)
+{
+    constexpr unsigned Window = 4;
+    constexpr unsigned Copies = 1;
+
+    const utils::temp::Env copy_depth("RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH", static_cast<int>(Copies));
+
+    auto mock = std::make_shared<device::MockBackend>();
+    DeviceDriver driver(mock, Window);
+
+    Fixture first({ ChunkSize, ChunkSize, ChunkSize, ChunkSize });
+    driver.execute(first.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto ids = driver.in_flight();
+    ASSERT_EQ(ids.size(), Window);
+
+    mock->opened(0)->hold_copies();
+
+    driver.engine->complete(ids[0]);
+    driver.engine->complete(ids[1]);
+    driver.route();
+
+    Fixture second({ ChunkSize, ChunkSize });
+    driver.execute(second.workload("", common::Device::cuda(0)));
+
+    ASSERT_GT(driver.worker.waiting_for_a_buffer(), 0u) << "no read was parked, so there is nothing to abort";
+
+    // Teardown with a read still parked. The reads in flight are completed first and the copies let
+    // go, because abort_all() waits for the kernel to be done with every destination before it
+    // reports - unbounded, by design.
+    mock->opened(0)->release_copies();
+    driver.engine->complete_all();
+
+    // stopped BEFORE the next turn, so the parked reads are still parked when the abort runs: that
+    // is the state this is about.
+    driver.stopped = true;
+    driver.route();
+
+    EXPECT_EQ(driver.worker.waiting_for_a_buffer(), 0u)
+        << "a parked read outlived the record it names, and the next turn would assert on it";
+
+    // The next turn is the one that used to die. It must be ordinary.
+    EXPECT_NO_THROW(driver.route());
+
+    for (const auto & r : drain_responses(*first.responder, 4))
+    {
+        EXPECT_NE(r.ret, common::ResponseCode::TimedOut) << "a range was never answered";
+    }
+    for (const auto & r : drain_responses(*second.responder, 2))
+    {
+        EXPECT_NE(r.ret, common::ResponseCode::TimedOut) << "a parked range was never answered";
+    }
 }
 
 // A read that never lands must still answer its ranges, and must give its staging buffer back -

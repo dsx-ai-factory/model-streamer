@@ -181,9 +181,32 @@ common::ResponseCode MockDevice::event_query(EventHandle event, Status & status)
     return common::ResponseCode::Success;
 }
 
+void MockDevice::hold_copies()
+{
+    const std::lock_guard<std::mutex> guard(_hold_mutex);
+    _copies_held = true;
+}
+
+void MockDevice::release_copies()
+{
+    {
+        const std::lock_guard<std::mutex> guard(_hold_mutex);
+        _copies_held = false;
+    }
+
+    _hold.notify_all();
+}
+
 common::ResponseCode MockDevice::event_synchronize(EventHandle event)
 {
     const unsigned nth = ++event_syncs;
+
+    {
+        // BEFORE the state lock. A held copy sleeps here, and sleeping under _mutex would stop the
+        // test thread reading a counter or the pool handing a buffer back.
+        std::unique_lock<std::mutex> hold(_hold_mutex);
+        _hold.wait(hold, [this]() { return !_copies_held; });
+    }
 
     const std::lock_guard<std::mutex> guard(_mutex);
     _ready[event] = true;
