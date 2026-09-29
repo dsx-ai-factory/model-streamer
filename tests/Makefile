@@ -18,11 +18,17 @@ AZURITE_CONTAINER := test-bucket
 
 # The C++ device test: real object storage into GPU memory, through the public C API. Built by bazel,
 # so it is a path rather than a pytest target, and it SKIPS unless it finds both a GPU and an object.
-DEVICE_TEST := ../cpp/bazel-bin/streamer/impl/device_io/real_device/object_device_test
+#
+# OVERRIDABLE, because the default rarely works as-is: bazel-bin is a symlink into the build
+# container's cache, and that container usually has no GPU, while the host with the GPU has no
+# bazel-bin. Build there, copy the binary here, and point at it:
+#
+#   make gcs_device DEVICE_TEST=/path/to/object_device_test
+DEVICE_TEST ?= ../cpp/bazel-bin/streamer/impl/device_io/real_device/object_device_test
 DEVICE_FIXTURE := /tmp/runai-object-fixture.bin
 DEVICE_OBJECT := device-fixture.bin
 
-.PHONY: gcs s3 azure fuzzing all gcs_device azure_device
+.PHONY: gcs s3 azure fuzzing all gcs_device azure_device require_device
 
 s3:
 	@set -e; \
@@ -116,12 +122,25 @@ all: fuzzing s3 gcs azure
 # The fixture is written here and uploaded by the same tool the suite already needs, so the expected
 # bytes have exactly one definition: the file on disk.
 #
-# Needs a GPU. Without one the binary skips, which is why these are separate targets rather than part
-# of `make all`.
+# Needs a GPU, which is why these are separate targets rather than part of `make all`.
+#
+# CHECKED BEFORE ANYTHING STARTS. The test SKIPS when there is no usable device, and a skipped gtest
+# exits 0 - so without this a machine with no GPU would start an emulator, upload a fixture, run
+# nothing and report success. A target that exists to exercise the device path must not pass when the
+# device path never ran.
+require_device:
+	@test -x "$(DEVICE_TEST)" || { \
+		echo "$(DEVICE_TEST) is missing - build it first: (cd ../cpp && bazel build //streamer/impl/device_io/real_device:object_device_test)"; \
+		exit 1; }
+	@nvidia-smi -L 2>/dev/null | grep -q GPU || { \
+		echo "no usable GPU here. These targets read object storage into DEVICE memory; without one the"; \
+		echo "test skips and gtest still exits 0, so this would look like a pass."; \
+		exit 1; }
+
 $(DEVICE_FIXTURE):
 	head -c 33554432 /dev/urandom > $(DEVICE_FIXTURE)
 
-gcs_device: $(DEVICE_FIXTURE)
+gcs_device: require_device $(DEVICE_FIXTURE)
 	@echo "Starting Fake GCS Server on port ${FAKE_GCS_SERVER_API_PORT}"; \
 	mkdir -p ${FAKE_GCS_SERVER_DATA_DIR}/${FAKE_GCS_SERVER_BUCKET}; \
 	cp $(DEVICE_FIXTURE) ${FAKE_GCS_SERVER_DATA_DIR}/${FAKE_GCS_SERVER_BUCKET}/$(DEVICE_OBJECT); \
@@ -137,7 +156,7 @@ gcs_device: $(DEVICE_FIXTURE)
 	rm -rf ${FAKE_GCS_SERVER_ROOT}; \
 	exit $$STATUS
 
-azure_device: $(DEVICE_FIXTURE)
+azure_device: require_device $(DEVICE_FIXTURE)
 	@make -C ../cpp build_azure_test; \
 	echo "Starting Azurite server on port ${AZURITE_API_PORT}"; \
 	azurite --silent --skipApiVersionCheck --location ${AZURITE_SERVER_WORKSPACE} --blobPort ${AZURITE_API_PORT} & \
