@@ -324,8 +324,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
         truncated_data = b"\x00" * 10
         path = self.create_corrupted_safetensors("truncated_body.st", len(json_str), json_str, truncated_data)
 
-        # 1. Validate our Streamer - stream_file() itself must now reject this, before any
-        # tensor is actually read.
+        # 1. Validate our Streamer rejects this before any tensor is actually read.
         with SafetensorsStreamer() as streamer:
             with self.assertRaisesRegex(ValueError, "truncated"):
                 streamer.stream_file(path, None, "cpu")
@@ -373,11 +372,8 @@ class TestSafetensorsStreamer(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "start"):
                 streamer.stream_file(path, None, "cpu")
 
-    # -------------------------------------------------------------------------
-    # LENGTH CHECK, SPLIT: pure comparison vs. information gathering.
-    # _validate_physical_length is pure. _get_actual_file_size does the I/O - local filesystem
-    # only (object storage removed, see the linked issue).
-    # -------------------------------------------------------------------------
+    # _validate_physical_length is a pure comparison. _get_actual_file_size does the I/O -
+    # local filesystem only, see issue #197 for object storage.
 
     def test_validate_physical_length_matches_succeeds(self):
         safetensors_pytorch._validate_physical_length("any/path", 100, 100)
@@ -404,9 +400,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
         self.assertEqual(size, os.path.getsize(file_path))
 
     def test_get_actual_file_size_object_storage_is_not_checked(self):
-        # Deliberately not implemented (removed after review - see the linked issue for the
-        # planned zero-extra-request fix): every object-storage scheme must return None, not
-        # attempt a listing call.
+        # See issue #197 - every object-storage scheme must return None, not attempt a listing call.
         self.assertIsNone(safetensors_pytorch._get_actual_file_size("s3://bucket/model.safetensors"))
         self.assertIsNone(safetensors_pytorch._get_actual_file_size("gs://bucket/model.safetensors"))
         self.assertIsNone(safetensors_pytorch._get_actual_file_size("az://container/model.safetensors"))

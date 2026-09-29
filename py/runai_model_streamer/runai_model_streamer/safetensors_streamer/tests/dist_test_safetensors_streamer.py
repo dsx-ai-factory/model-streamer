@@ -94,11 +94,8 @@ class TestTensorNamesDistributedFiltering(unittest.TestCase):
     bounded by RUNAI_STREAMER_DIST_TIMEOUT). This class only covers same-selection behavior.
     """
 
-    # The real names baked into test_files/test.safetensors.
-    ALL_NAMES = [
-        "tensor1.bfloat16", "tensor1.bool", "tensor1.float16", "tensor1.float32", "tensor1.float64",
-        "tensor1.int16", "tensor1.int32", "tensor1.int64", "tensor1.int8", "tensor1.uint8",
-    ]
+    # A subset of the real names baked into test_files/test.safetensors.
+    NAMES = ["tensor1.float16", "tensor1.bfloat16", "tensor1.bool"]
 
     ENV_VARS = {
         "RUNAI_STREAMER_DIST": "1",
@@ -108,7 +105,6 @@ class TestTensorNamesDistributedFiltering(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.rank = dist.get_rank()
-        cls.world_size = dist.get_world_size()
 
     def setUp(self):
         dist.barrier()
@@ -123,7 +119,7 @@ class TestTensorNamesDistributedFiltering(unittest.TestCase):
         # Same 3 names on both ranks, but as different collection types in different orders - the
         # doc is explicit that tensor_names is "treated as a set", so this must succeed identically
         # to the same-order case, not be flagged as a mismatch.
-        names = [self.ALL_NAMES[2], self.ALL_NAMES[0], self.ALL_NAMES[1]]
+        names = self.NAMES
         my_names = names if self.rank == 0 else set(reversed(names))
 
         with unittest.mock.patch.dict(os.environ, self.ENV_VARS):
