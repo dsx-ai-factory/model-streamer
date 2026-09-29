@@ -57,6 +57,38 @@ bool raw_has_ext_arg()
     return (params.features & IORING_FEAT_EXT_ARG) != 0;
 }
 
+#ifndef __NR_io_uring_register
+#define __NR_io_uring_register 427
+#endif
+
+// Whether this kernel will register a buffer, asked with the raw syscall for the same reason as the
+// two above. Registering through liburing would share the code path being checked.
+//
+// The answer is not a kernel version: io_uring_register charges RLIMIT_MEMLOCK, so the same kernel
+// answers differently under a different limit. That is exactly why the probe registers rather than
+// tests a version, and why this test must register too.
+bool raw_can_register_buffer()
+{
+    struct io_uring_params params;
+    std::memset(&params, 0, sizeof(params));
+
+    const int fd = ::syscall(__NR_io_uring_setup, 8, &params);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    alignas(4096) static unsigned char buffer[4096];
+    struct iovec iov;
+    iov.iov_base = buffer;
+    iov.iov_len = sizeof(buffer);
+
+    const long ret = ::syscall(__NR_io_uring_register, fd, IORING_REGISTER_BUFFERS, &iov, 1u);
+    ::close(fd);
+
+    return ret == 0;
+}
+
 } // namespace
 
 // The probe must agree with the kernel - in both directions. In a container under Docker's default
@@ -89,6 +121,58 @@ TEST(IoUringProbe, Agrees_With_The_Kernel)
                                                               : common::ResponseCode::UnknownError;
         EXPECT_EQ(capability.error, expected);
     }
+}
+
+// Fixed buffers are reported from a REAL registration, so the expectation is a real registration too.
+//
+// Asked of the kernel with the raw syscall, as above. A version test would answer this wrongly on any
+// host with a small RLIMIT_MEMLOCK, which is the case the probe exists to catch.
+TEST(IoUringProbe, Reports_Fixed_Buffers_As_The_Kernel_Does)
+{
+    if (raw_io_uring_setup_errno() != 0)
+    {
+        GTEST_SKIP() << "no io_uring here, so there is nothing to register against";
+    }
+
+    EXPECT_EQ(probe_io_uring().fixed_buffers, raw_can_register_buffer());
+}
+
+// Fixed buffers describe a ring, so they cannot outlive one. An unavailable probe claiming them would
+// invite a caller that checks only this field to register against an engine that was never built.
+//
+// Both directions of unavailable are covered: declined at probe time (the host), and demoted later
+// (mark_unavailable, when a ring of the configured depth could not be built).
+TEST(IoUringProbe, Unavailable_Never_Claims_Fixed_Buffers)
+{
+    const auto probed = probe_io_uring();
+    if (!probed.available)
+    {
+        EXPECT_FALSE(probed.fixed_buffers) << "declined io_uring still reported fixed buffers";
+    }
+
+    IoUringProbe probe;
+    ASSERT_TRUE(probe.capability().available || !probe.capability().fixed_buffers);
+
+    probe.mark_unavailable(common::ResponseCode::FileAccessError);
+
+    EXPECT_FALSE(probe.capability().available);
+    EXPECT_FALSE(probe.capability().fixed_buffers) << "a demoted probe still reported fixed buffers";
+}
+
+// Fixed buffers must NOT gate availability: a ring that cannot register still reads with
+// IORING_OP_READ. Getting this wrong would silently drop io_uring on every host with a small
+// RLIMIT_MEMLOCK - a large regression bought by an optimisation.
+TEST(IoUringProbe, Fixed_Buffers_Do_Not_Gate_Availability)
+{
+    if (raw_io_uring_setup_errno() != 0 || !raw_has_ext_arg())
+    {
+        GTEST_SKIP() << "io_uring is unavailable here for reasons that have nothing to do with buffers";
+    }
+
+    const auto capability = probe_io_uring();
+
+    EXPECT_TRUE(capability.available)
+        << "available must not depend on fixed_buffers, which is " << capability.fixed_buffers;
 }
 
 // The reason survives to the caller: mark_unavailable is what strategy resolution reports when it
