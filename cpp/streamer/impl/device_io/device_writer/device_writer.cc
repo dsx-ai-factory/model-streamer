@@ -140,8 +140,9 @@ common::ResponseCode DeviceWriter::write(Channel channel,
         return common::ResponseCode::InvalidParameterError;
     }
 
-    // Nothing between the copy and the record, so the event marks this copy and not what another
-    // thread enqueued on the same stream.
+    // These two are NOT atomic. Two workers can share a device, so another thread may enqueue between
+    // them and this event then marks a later point on the stream. A stream is FIFO, so the event fires
+    // late and never early: the buffer is held longer, the bytes are still right.
     auto code = target->device->memcpy_h2d_async(destination, buffer.data, bytesize, target->stream.get());
     if (code == common::ResponseCode::Success)
     {
