@@ -363,9 +363,9 @@ class TestSafetensorsStreamer(unittest.TestCase):
             "test_tensor": {"dtype": "U8", "shape": [10], "data_offsets": [5, 15]},
         }
         json_str = json.dumps(header_dict)
-        # Only the tensor's own 10 bytes - no padding, so sum(sizes) == physical byte count
-        # despite the offset being wrong.
-        data = b"\x00" * 10
+        # 15 bytes total, matching the declared end - the length check alone would pass, so
+        # only the offset check can catch this.
+        data = b"\x00" * 15
         path = self.create_corrupted_safetensors("leading_gap.st", len(json_str), json_str, data)
 
         with SafetensorsStreamer() as streamer:
@@ -503,13 +503,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
         self.assertEqual(set(our.keys()), their_names)
 
     def test_tensor_names_filters_to_requested_subset(self):
-        """A, B, C - 10 bytes each, values 1/2/3:
-
-            byte offset:   0        10       20       30
-                           |--A: 1s--|--B: 2s--|--C: 3s--|
-
-        Request A and C, skipping B in the MIDDLE - breaks a naive cumulative offset walk.
-        Wrong math would read C starting 10 bytes early, returning B's 2s instead of C's 3s."""
+        """Request A and C, skipping B in the middle - proves gaps don't break offset math."""
         header_dict = {
             "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
             "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
