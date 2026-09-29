@@ -307,8 +307,7 @@ class SafetensorsStreamer:
             if missing:
                 raise ValueError(f"tensor_names not found in checkpoint: {sorted(missing)}")
 
-            # Cheap common-case gate (set() is a single C-level pass, faster than a manual loop -
-            # measured). Only pay for finding WHICH names collided when the gate actually trips.
+            # Only pay for finding WHICH names collided when the gate actually trips.
             if len(kept_set) != len(all_kept_names):
                 counts = Counter(all_kept_names)
                 duplicates = sorted(name for name, count in counts.items() if count > 1)

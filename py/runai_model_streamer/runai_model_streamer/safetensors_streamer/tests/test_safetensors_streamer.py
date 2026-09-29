@@ -528,6 +528,24 @@ class TestSafetensorsStreamer(unittest.TestCase):
         self.assertTrue(torch.all(tensors["A"].eq(1)))
         self.assertTrue(torch.all(tensors["C"].eq(3)))
 
+    def test_tensor_names_accepts_a_list(self):
+        """A list must filter correctly, same as a set - Collection[str] allows it, and nothing
+        about the filter loop should depend on which container type the caller used."""
+        header_dict = {
+            "A": {"dtype": "U8", "shape": [10], "data_offsets": [0, 10]},
+            "B": {"dtype": "U8", "shape": [10], "data_offsets": [10, 20]},
+            "C": {"dtype": "U8", "shape": [10], "data_offsets": [20, 30]},
+        }
+        json_str = json.dumps(header_dict)
+        tensor_data = (b"\x01" * 10) + (b"\x02" * 10) + (b"\x03" * 10)
+        path = self.create_corrupted_safetensors("list_input.st", len(json_str), json_str, tensor_data)
+
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_file(path, None, "cpu", tensor_names=["A", "C"])
+            kept = {name for name, _ in streamer.get_tensors()}
+
+        self.assertEqual(kept, {"A", "C"})
+
     def test_tensor_names_empty_set_raises(self):
         """An explicitly empty tensor_names must raise - None means 'no filter', set() means
         'load nothing', which is never useful and almost certainly a caller bug."""
