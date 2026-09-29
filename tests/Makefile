@@ -28,8 +28,14 @@ s3:
 	cleanup() { \
 		rc=$$?; \
 		echo "Stopping weed..."; \
-		[ -n "$$WEED_PID" ] && kill $$WEED_PID 2>/dev/null; \
-		[ -n "$$WEED_PID" ] && wait $$WEED_PID 2>/dev/null; \
+		[ -n "$$PYTEST_PID" ] && kill $$PYTEST_PID 2>/dev/null; \
+		[ -n "$$PYTEST_PID" ] && wait $$PYTEST_PID 2>/dev/null; \
+		if [ -n "$$WEED_PID" ]; then \
+			kill -INT $$WEED_PID 2>/dev/null; \
+			i=0; while kill -0 $$WEED_PID 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done; \
+			kill -9 $$WEED_PID 2>/dev/null; \
+			wait $$WEED_PID 2>/dev/null; \
+		fi; \
 		rm -f $$S3_CONFIG; \
 		rm -rf $$S3_TEST_DATA_DIR; \
 		exit $$rc; \
@@ -38,7 +44,9 @@ s3:
 	weed mini -dir=$$S3_TEST_DATA_DIR -bucket=${S3_TEST_BUCKET} -s3.port=${S3_TEST_API_PORT} -s3.config=$$S3_CONFIG & \
 	WEED_PID=$$!; \
 	echo "weed PID is $$WEED_PID"; \
-	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_BUCKET=${S3_TEST_BUCKET} AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} WEED_PID=$$WEED_PID pytest s3/
+	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_BUCKET=${S3_TEST_BUCKET} AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} WEED_PID=$$WEED_PID pytest s3/ & \
+	PYTEST_PID=$$!; \
+	wait $$PYTEST_PID
 
 gcs:
 	@echo "Starting Fake GCS Server on port ${FAKE_GCS_SERVER_API_PORT} with root directory ${FAKE_GCS_SERVER_ROOT}"; \
