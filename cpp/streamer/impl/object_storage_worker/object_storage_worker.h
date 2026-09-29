@@ -205,6 +205,13 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // pool can join. Used on teardown (stopped) and when the responder drains early.
     void abort_all(common::ResponseCode code);
 
+    // This worker, not the backend, is what the submission is waiting for: a chunk parked for a staging
+    // buffer was never submitted, and a copy still in flight will return the buffer that releases one.
+    //
+    // A drained backend responder then means "nothing in flight right now", not "nothing more is
+    // coming" - the two are indistinguishable from the plugin and only this tells them apart.
+    bool holding_work() const;
+
     // This worker's own pinned buffers, built on the first DEVICE chunk and sized to its window plus
     // CopyDepth. One consumer - this thread - so nothing contends for them.
     common::ResponseCode staging_pool_for(const common::Device & device);

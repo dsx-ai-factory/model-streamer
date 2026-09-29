@@ -312,6 +312,76 @@ TEST_F(ObjectStorageWorkerTest, Reads_A_Device_Submission_Through_Pinned_Buffers
 // The worker is driven DIRECTLY rather than through a ThreadPool: the pool's destructor decides when
 // its workers stop, and a teardown that lands mid-flight answers the ranges FinishedError - true, but
 // it says nothing about whether a chunk waited.
+// A backend with nothing in flight is not a backend that has finished.
+//
+// The plugin reports FinishedError whenever it has no ready event, and that is exactly what it reports
+// while THIS worker is the one holding things up: chunks parked for a staging buffer were never
+// submitted, so the plugin has nothing to say about them. Aborting there failed a whole submission for
+// being slower at copying than at reading.
+//
+// Deterministic where A_Chunk_Waits_For_A_Staging_Buffer caught it only 3 times in 40: waiting until
+// every buffer is out guarantees the plugin has nothing left, so the next turn takes the path.
+TEST_F(ObjectStorageWorkerTest, A_Drained_Backend_Does_Not_Abort_Parked_Chunks)
+{
+    constexpr unsigned Files = 6;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // Every buffer out and its copy held means every read the plugin was given has completed, so it has
+    // nothing ready and answers FinishedError from here on.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() < ObjectStorageWorker::CopyDepth; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    ASSERT_EQ(backend->opened(0)->copies.load(), ObjectStorageWorker::CopyDepth)
+        << "the pool never ran dry, so the plugin still has reads and this test proves nothing";
+
+    // Turns taken against a plugin that reports FinishedError every time. Chunks are parked behind the
+    // held copies, so none of them may be answered.
+    for (unsigned i = 0; i < 20; ++i)
+    {
+        worker.drain(stopped);
+    }
+
+    EXPECT_EQ(responder->pop(50).ret, common::ResponseCode::TimedOut)
+        << "a parked chunk was answered while the plugin was merely idle";
+
+    // And the work still completes once the link catches up.
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success)
+            << "range " << i << " was aborted by an idle plugin";
+    }
+}
+
 TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
 {
     // The pool is the plugin's window plus CopyDepth, and this mock advertises no window - so the pool

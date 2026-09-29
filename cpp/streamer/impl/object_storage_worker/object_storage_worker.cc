@@ -577,6 +577,11 @@ void ObjectStorageWorker::finalize(InflightMap::iterator wlit, common::ResponseC
     _inflight.erase(wlit);
 }
 
+bool ObjectStorageWorker::holding_work() const
+{
+    return !_waiting.empty() || !_waiting_retries.empty() || _copies_issued > 0;
+}
+
 void ObjectStorageWorker::abort_all(common::ResponseCode code)
 {
     // Fail and drop every in-flight workload - including any whose reads are still outstanding at the
@@ -682,12 +687,23 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
     const auto r = _reader->async_response(responses, _max_responses);
     if (r != common::ResponseCode::Success)
     {
-        // FinishedError = responder stopped/drained; any other code is a backend failure. Either way, no
-        // more completions are coming for this worker's in-flight chunks - fail them all.
+        // Any code but FinishedError is a backend failure: no more completions are coming for this
+        // worker's in-flight chunks whatever else it is holding, so fail them all.
         if (r != common::ResponseCode::FinishedError)
         {
             LOG(ERROR) << "Object storage responder returned " << r;
+            abort_all(r);
+            return;
         }
+
+        // FinishedError says the backend has nothing in flight - which is ALSO what it says while this
+        // worker is the one holding things up, because a parked chunk was never submitted. Aborting
+        // there fails a whole submission for being slower at copying than at reading.
+        if (holding_work())
+        {
+            return;   // the next turn retires a copy, frees a buffer and submits a parked chunk
+        }
+
         abort_all(r);
         return;
     }
@@ -766,9 +782,7 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
     // copy still in flight, keeps its window slot - so the queue is not idle and the plugin has nothing
     // left to report, which looks exactly like a client that went away. Aborting there fails a whole
     // submission because the device link was slower than the storage.
-    const bool ours_to_finish = !_waiting.empty() || !_waiting_retries.empty() || _copies_issued > 0;
-
-    if (!progressed && responder_drained && !ours_to_finish && _queue != nullptr && !_queue->idle())
+    if (!progressed && responder_drained && !holding_work() && _queue != nullptr && !_queue->idle())
     {
         abort_all(common::ResponseCode::FinishedError);
     }
