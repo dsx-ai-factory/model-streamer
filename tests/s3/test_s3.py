@@ -22,6 +22,17 @@ from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
 RUNAI_STREAMER_S3_UNSIGNED_ENV_VAR = "RUNAI_STREAMER_S3_UNSIGNED"
 
 
+def _pid_alive(pid):
+    # Signal 0: existence check only, POSIX guarantees no signal is actually sent.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class SeaweedFSServer(ObjectStoreBackend):
     def __init__(self):
         self.url = os.getenv("AWS_ENDPOINT_URL")
@@ -31,6 +42,8 @@ class SeaweedFSServer(ObjectStoreBackend):
     def wait_for_startup(self, timeout=30):
         print("Waiting for SeaweedFS server to be up and running.")
         start_time = time.time()
+        weed_pid = os.getenv("WEED_PID")
+        weed_pid = int(weed_pid) if weed_pid else None
         s3_client = boto3.client(
             "s3",
             endpoint_url=self.url,
@@ -38,6 +51,10 @@ class SeaweedFSServer(ObjectStoreBackend):
             aws_secret_access_key=self.password
         )
         while time.time() - start_time < timeout:
+            if weed_pid is not None and not _pid_alive(weed_pid):
+                raise RuntimeError(
+                    f"weed process (pid {weed_pid}) exited before the S3 endpoint became ready."
+                )
             try:
                 s3_client.list_buckets()
                 print("SeaweedFS server is up and running.")

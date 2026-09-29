@@ -26,11 +26,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libxml2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# weed (SeaweedFS), the S3-compatible object store used for local S3 tests. MinIO killed every
-# free distribution channel in 2026 (dl.min.io binaries pulled April, Docker Hub delisted
-# Sept 11, quay.io anonymous pulls cut Sept 24), and its last free release carries an unpatched
-# CVSS 8.8 auth-bypass CVE. SeaweedFS ships plain GitHub Release tarballs on its own repo, not a
-# third-party registry a vendor can lock down. Checksummed like liburing/libaio below.
+# weed (SeaweedFS), the S3-compatible object store used for local S3 tests. Checksummed like
+# liburing/libaio below.
 RUN WEED_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64") \
     && if [ "$WEED_ARCH" = "amd64" ]; then WEED_SHA256=31fb804858885f9e7f18b6d3b1da09e824baac3e6a55b5a62c3c4c77e6ed6d7d; \
        else WEED_SHA256=ba5c9def9ff98f78becdf309a50a9f906922f6383a7c4c772d01ede3cc012e16; fi \
