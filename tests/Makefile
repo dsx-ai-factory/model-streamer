@@ -28,13 +28,15 @@ s3:
 	cleanup() { \
 		rc=$$?; \
 		echo "Stopping weed..."; \
-		[ -n "$$PYTEST_PID" ] && kill $$PYTEST_PID 2>/dev/null; \
-		[ -n "$$PYTEST_PID" ] && wait $$PYTEST_PID 2>/dev/null; \
+		if [ -n "$$PYTEST_PID" ]; then \
+			kill $$PYTEST_PID 2>/dev/null || true; \
+			wait $$PYTEST_PID 2>/dev/null || true; \
+		fi; \
 		if [ -n "$$WEED_PID" ]; then \
-			kill -INT $$WEED_PID 2>/dev/null; \
+			kill -INT $$WEED_PID 2>/dev/null || true; \
 			i=0; while kill -0 $$WEED_PID 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done; \
-			kill -9 $$WEED_PID 2>/dev/null; \
-			wait $$WEED_PID 2>/dev/null; \
+			kill -9 $$WEED_PID 2>/dev/null || true; \
+			wait $$WEED_PID 2>/dev/null || true; \
 		fi; \
 		rm -f $$S3_CONFIG; \
 		rm -rf $$S3_TEST_DATA_DIR; \
