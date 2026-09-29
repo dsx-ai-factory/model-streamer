@@ -7,7 +7,7 @@ import time
 import boto3
 from unittest.mock import patch
 
-from botocore.exceptions import NoCredentialsError, ClientError
+from botocore.exceptions import NoCredentialsError, ClientError, EndpointConnectionError
 from safetensors.torch import safe_open
 
 from tests.cases.interface import ObjectStoreBackend
@@ -22,15 +22,28 @@ from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
 RUNAI_STREAMER_S3_UNSIGNED_ENV_VAR = "RUNAI_STREAMER_S3_UNSIGNED"
 
 
-class MinioServer(ObjectStoreBackend):
+def _pid_alive(pid):
+    # Signal 0: existence check only, POSIX guarantees no signal is actually sent.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+class SeaweedFSServer(ObjectStoreBackend):
     def __init__(self):
         self.url = os.getenv("AWS_ENDPOINT_URL")
         self.key = os.getenv("AWS_ACCESS_KEY_ID")
         self.password = os.getenv("AWS_SECRET_ACCESS_KEY")
 
     def wait_for_startup(self, timeout=30):
-        print("Waiting for MinIO server to be up and running.")
+        print("Waiting for SeaweedFS server to be up and running.")
         start_time = time.time()
+        weed_pid = os.getenv("WEED_PID")
+        weed_pid = int(weed_pid) if weed_pid else None
         s3_client = boto3.client(
             "s3",
             endpoint_url=self.url,
@@ -38,13 +51,17 @@ class MinioServer(ObjectStoreBackend):
             aws_secret_access_key=self.password
         )
         while time.time() - start_time < timeout:
+            if weed_pid is not None and not _pid_alive(weed_pid):
+                raise RuntimeError(
+                    f"weed process (pid {weed_pid}) exited before the S3 endpoint became ready."
+                )
             try:
                 s3_client.list_buckets()
-                print("MinIO server is up and running.")
+                print("SeaweedFS server is up and running.")
                 return
-            except (ClientError, NoCredentialsError):
+            except (ClientError, NoCredentialsError, EndpointConnectionError):
                 time.sleep(0.5)
-        raise TimeoutError(f"MinIO server failed to start within {timeout} seconds.")
+        raise TimeoutError(f"SeaweedFS server failed to start within {timeout} seconds.")
 
     def upload_file(self, bucket, directory, file):
         s3_client = boto3.client(
@@ -56,13 +73,13 @@ class MinioServer(ObjectStoreBackend):
         s3_client.upload_file(file, bucket, os.path.join(directory, os.path.basename(file)))
 
 TestS3ompatibility = compatibility_test_cases(
-    backend_class = MinioServer,
+    backend_class = SeaweedFSServer,
     scheme = "s3",
     bucket_name = os.getenv("AWS_BUCKET")
 )
 
 TestS3ListFiles = list_files_test_cases(
-    backend_class = MinioServer,
+    backend_class = SeaweedFSServer,
     scheme = "s3",
     bucket_name = os.getenv("AWS_BUCKET")
 )
@@ -73,7 +90,7 @@ class TestS3UnsignedPublicBucket(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.server = MinioServer()
+        cls.server = SeaweedFSServer()
         cls.server.wait_for_startup()
         cls.temp_dir = tempfile.mkdtemp()
 
