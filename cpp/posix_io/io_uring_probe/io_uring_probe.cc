@@ -24,6 +24,32 @@ common::ResponseCode reason_for(int error)
     return (error == EPERM || error == EACCES) ? common::ResponseCode::FileAccessError : common::ResponseCode::UnknownError;
 }
 
+// Register one small buffer and give it straight back.
+//
+// The opcode being supported is not enough: registration also charges RLIMIT_MEMLOCK, which a kernel
+// version cannot tell us about. One page is small enough to pass under any limit that permits
+// registration at all, which is the question here - a pool sized against the limit is the caller's
+// problem, not the probe's.
+bool trial_registration(struct io_uring * ring)
+{
+    alignas(4096) static unsigned char buffer[4096];
+
+    struct iovec iov;
+    iov.iov_base = buffer;
+    iov.iov_len = sizeof(buffer);
+
+    const int ret = io_uring_register_buffers(ring, &iov, 1);
+    if (ret < 0)
+    {
+        LOG(INFO) << "io_uring fixed buffers are not available: io_uring_register_buffers failed: "
+                  << std::strerror(-ret) << ". Reads will use IORING_OP_READ";
+        return false;
+    }
+
+    io_uring_unregister_buffers(ring);
+    return true;
+}
+
 } // namespace
 
 IoUringCapability probe_io_uring()
@@ -49,9 +75,26 @@ IoUringCapability probe_io_uring()
     // SECOND ring to answer the same question.
     struct io_uring_probe * probe = io_uring_get_probe_ring(&ring);
     const bool op_read = (probe != nullptr) && io_uring_opcode_supported(probe, IORING_OP_READ);
+    const bool op_read_fixed = (probe != nullptr) && io_uring_opcode_supported(probe, IORING_OP_READ_FIXED);
     if (probe != nullptr)
     {
         io_uring_free_probe(probe);
+    }
+
+    // Only for a ring we are going to keep. The two gates below decline io_uring outright, and a
+    // capability reported for a ring nobody will build is a state the struct should not be able to
+    // describe - besides costing a syscall on every host we reject.
+    if (op_read && capability.timed_wait_is_free)
+    {
+        if (!op_read_fixed)
+        {
+            LOG(INFO) << "io_uring fixed buffers are not available: this kernel has no"
+                      << " IORING_OP_READ_FIXED. Reads will use IORING_OP_READ";
+        }
+        else
+        {
+            capability.fixed_buffers = trial_registration(&ring);
+        }
     }
 
     io_uring_queue_exit(&ring);
@@ -89,7 +132,7 @@ IoUringCapability probe_io_uring()
 
     capability.available = true;
 
-    LOG(INFO) << "io_uring is available";
+    LOG(INFO) << "io_uring is available, fixed buffers " << (capability.fixed_buffers ? "yes" : "no");
     return capability;
 }
 
@@ -127,6 +170,10 @@ void IoUringProbe::mark_unavailable(common::ResponseCode reason)
     _probed = true;
     _capability.available = false;
     _capability.error = reason;
+
+    // Cleared with it: fixed buffers describe a ring, and there is no ring any more. Leaving it set
+    // would let a caller that checks only this field register against an engine that was never built.
+    _capability.fixed_buffers = false;
 
     // Reports WHAT was disabled and why, and says nothing about the host.
     //
