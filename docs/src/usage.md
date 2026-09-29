@@ -10,13 +10,18 @@ If your SafeTensors file resides on a file system, run the following code to loa
 
 ```python
 from runai_model_streamer import SafetensorsStreamer
+import torch
 
 file_path = "/path/to/file.safetensors"
+
+device = "cuda"
+if torch.xpu.is_available():
+    device = "xpu"
 
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to(f'{device}:0')
 ```
 
 > **Note:** To make the tensors available on the CPU memory, clone the yielded tensors before calling `streamer.get_tensors()`. Note that otherwise, tensors may be overwritten when using `RUNAI_STREAMER_MEMORY_LIMIT` or completely destroyed when closing the `SafetensorsStreamer` object.
@@ -27,13 +32,18 @@ To stream tensors from multiple files in parallel use the `streamer.stream_files
 
 ```python
 from runai_model_streamer import SafetensorsStreamer
+import torch
 
 file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
+
+device = "cuda"
+if torch.xpu.is_available():
+    device = "xpu"
 
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to(f'{device}:0')
 ```
 
 > **Note:** You can not mix S3 path and file system paths on same `streamer.stream_files()` call.
@@ -52,15 +62,19 @@ Distributed streaming is designed to solve this problem by dividing the reading 
 
 ```python
 from runai_model_streamer import SafetensorsStreamer
+import torch
 
 file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
 
 tensors = {}
-device = 'CUDA:0'
+device = "cuda:0"
+if torch.xpu.is_available():
+    device = "xpu:0"
+
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths, s3_credentials=None, device=device, is_distributed=True)
     for name, tensor in streamer.get_tensors():       
-       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is CUDA:0
+       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is {device}:0
 ```
 
 ##### Requirements
@@ -78,7 +92,7 @@ The nccl backend with nvlink between devices is most suitable for distributed st
 
 ##### Control
 
-Distributed streaming is enabled by default when streaming from object storage to CUDA devices.
+Distributed streaming is enabled by default when streaming from object storage to CUDA and XPU devices.
 It is possible to disable distributed streaming by setting `RUNAI_STREAMER_DIST=0`
 
 It is possible to force distributed streaming for other cases by setting `RUNAI_STREAMER_DIST=1`
