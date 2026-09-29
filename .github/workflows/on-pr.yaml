@@ -1,8 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: RunAI Model Streamer Library - Pull Request
 on:
   pull_request:
 
 jobs:
+  license-compliance:
+    name: Check licenses and source attribution
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - run: python3 tools/check_licenses.py
+
   lifecycle-install-tests:
     name: Test, Build & Push
     runs-on: ubuntu-latest
@@ -31,7 +43,8 @@ jobs:
         push: never
         runCmd: |
           make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 && \
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build && \
+          python3 tools/check_licenses.py --wheels py/*/dist/*.whl
 
     - name: Upload streamer package to github action
       uses: actions/upload-artifact@v4

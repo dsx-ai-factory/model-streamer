@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 load("//:rules.bzl", "runai_cc_auto_library")
 
 # The headers that ship in the SDK tarball, laid out exactly as they are installed: this directory is

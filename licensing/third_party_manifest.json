@@ -1,0 +1,948 @@
+{
+  "description": "Source revisions and SHA-256 hashes of upstream license and attribution files. Python runtime entries are reference notices, not resolved dependency versions.",
+  "components": [
+    {
+      "name": "AWS SDK for C++",
+      "repository": "https://github.com/aws/aws-sdk-cpp",
+      "revision": "1.11.584",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/LICENSE",
+          "path": "LICENSE",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/NOTICE.txt",
+          "path": "NOTICE.txt",
+          "sha256": "8f43c4888a1e14f48c102b3f5556d581d02ea3afc9cbe31a2b714dae9383ef36"
+        },
+        {
+          "path": "LICENSE.txt",
+          "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/LICENSE.txt",
+          "sha256": "d721f7df04e3f82ff104de91a734c4e2ea40e8e4bb2f89dc4d4c7dd6ebbecb40"
+        }
+      ]
+    },
+    {
+      "name": "AWS CRT C++",
+      "repository": "https://github.com/awslabs/aws-crt-cpp",
+      "revision": "05edb40f592813fab2b6f7ba141554fdcf86a7c9",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/05edb40f592813fab2b6f7ba141554fdcf86a7c9/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/05edb40f592813fab2b6f7ba141554fdcf86a7c9/NOTICE",
+          "path": "NOTICE",
+          "sha256": "90f9b4a63a71d4a70420242c414b2fe24ee809c094c2dbac3b8871a646469293"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-auth",
+      "repository": "https://github.com/awslabs/aws-c-auth",
+      "revision": "cd9d6afcd42035d49bb2d0d3bef24b9faed57773",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/cd9d6afcd42035d49bb2d0d3bef24b9faed57773/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/cd9d6afcd42035d49bb2d0d3bef24b9faed57773/NOTICE",
+          "path": "NOTICE",
+          "sha256": "f228f9b9f0405035d8bc2dbd9f018533b641136c7110f9e6a34edec7dd52e310"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-cal",
+      "repository": "https://github.com/awslabs/aws-c-cal",
+      "revision": "938d0fea30d8476a7cf260278d636404682a28d4",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/938d0fea30d8476a7cf260278d636404682a28d4/LICENSE",
+          "path": "LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/938d0fea30d8476a7cf260278d636404682a28d4/NOTICE",
+          "path": "NOTICE",
+          "sha256": "06da05ec640017cc2bc80e4856cf14a9002efdd57b1ed4655714bfe5e777d216"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-common",
+      "repository": "https://github.com/awslabs/aws-c-common",
+      "revision": "aaa2f11ed609e3f888efd9bf745e810b45b13a38",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/aaa2f11ed609e3f888efd9bf745e810b45b13a38/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/aaa2f11ed609e3f888efd9bf745e810b45b13a38/NOTICE",
+          "path": "NOTICE",
+          "sha256": "f43576ad8c3330cd2647c8e8dc3572d8bf7dfc47a13d56dbdb8c1abbef900367"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-compression",
+      "repository": "https://github.com/awslabs/aws-c-compression",
+      "revision": "f951ab2b819fc6993b6e5e6cfef64b1a1554bfc8",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/f951ab2b819fc6993b6e5e6cfef64b1a1554bfc8/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/f951ab2b819fc6993b6e5e6cfef64b1a1554bfc8/NOTICE",
+          "path": "NOTICE",
+          "sha256": "758db6c88293e55e9790adc73e9e58066405c408797afa9d48bef18d308eb49e"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-event-stream",
+      "repository": "https://github.com/awslabs/aws-c-event-stream",
+      "revision": "9312b052583183b98526aaeb91e5c72ec3db9627",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/9312b052583183b98526aaeb91e5c72ec3db9627/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/9312b052583183b98526aaeb91e5c72ec3db9627/NOTICE",
+          "path": "NOTICE",
+          "sha256": "ca6098641e6982418933b0eb3973e56f544e94932f1244cb9352db60321a040f"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-http",
+      "repository": "https://github.com/awslabs/aws-c-http",
+      "revision": "3eedf1ef8c6874cd941dbde794a6ab3bd979e181",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/3eedf1ef8c6874cd941dbde794a6ab3bd979e181/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/3eedf1ef8c6874cd941dbde794a6ab3bd979e181/NOTICE",
+          "path": "NOTICE",
+          "sha256": "2d1f498ef5ec8f71a7590ad3447688de6f0276434c619b5c4ce6e53c068ea33e"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-io",
+      "repository": "https://github.com/awslabs/aws-c-io",
+      "revision": "689dee3cb8dbd8a6906431d154a3695f7688c056",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/689dee3cb8dbd8a6906431d154a3695f7688c056/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/689dee3cb8dbd8a6906431d154a3695f7688c056/NOTICE",
+          "path": "NOTICE",
+          "sha256": "f0604df9ed45fb474874f8b363700aa2e493705799ffd6e1362b899aa70653e4"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-mqtt",
+      "repository": "https://github.com/awslabs/aws-c-mqtt",
+      "revision": "3ac506507679a86677f8875dcc07589b63907863",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/3ac506507679a86677f8875dcc07589b63907863/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/3ac506507679a86677f8875dcc07589b63907863/NOTICE",
+          "path": "NOTICE",
+          "sha256": "09211ec471e551c78cd57aba8344847091f297a6ae389288beb5d55076ab2c76"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-s3",
+      "repository": "https://github.com/awslabs/aws-c-s3",
+      "revision": "52c90d39dab19a36e06d746a8c795060632619e2",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/52c90d39dab19a36e06d746a8c795060632619e2/LICENSE",
+          "path": "LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/52c90d39dab19a36e06d746a8c795060632619e2/NOTICE",
+          "path": "NOTICE",
+          "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+        }
+      ]
+    },
+    {
+      "name": "aws-c-sdkutils",
+      "repository": "https://github.com/awslabs/aws-c-sdkutils",
+      "revision": "f678bda9e21f7217e4bbf35e0d1ea59540687933",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/f678bda9e21f7217e4bbf35e0d1ea59540687933/LICENSE",
+          "path": "LICENSE",
+          "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/f678bda9e21f7217e4bbf35e0d1ea59540687933/NOTICE",
+          "path": "NOTICE",
+          "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+        }
+      ]
+    },
+    {
+      "name": "aws-checksums",
+      "repository": "https://github.com/awslabs/aws-checksums",
+      "revision": "9978ba2c33a7a259c1a6bd0f62abe26827d03b85",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/awslabs/aws-checksums/9978ba2c33a7a259c1a6bd0f62abe26827d03b85/LICENSE",
+          "path": "LICENSE",
+          "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+        }
+      ]
+    },
+    {
+      "name": "s2n",
+      "repository": "https://github.com/aws/s2n-tls",
+      "revision": "92f7827c8487eb2a99b443aec6ee7d1df031b1bf",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/aws/s2n-tls/92f7827c8487eb2a99b443aec6ee7d1df031b1bf/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/aws/s2n-tls/92f7827c8487eb2a99b443aec6ee7d1df031b1bf/NOTICE",
+          "path": "NOTICE",
+          "sha256": "b009d59fea9a0d7fed87b24f6b174a6ac41e1cf94ce77a8160e29997a4c7883c"
+        }
+      ]
+    },
+    {
+      "name": "Azure SDK for C++",
+      "repository": "https://github.com/Azure/azure-sdk-for-cpp",
+      "revision": "azure-storage-blobs_12.15.0",
+      "scope": "native",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Azure/azure-sdk-for-cpp/azure-storage-blobs_12.15.0/LICENSE.txt",
+          "path": "LICENSE.txt",
+          "sha256": "9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b"
+        }
+      ]
+    },
+    {
+      "name": "OpenSSL",
+      "repository": "https://github.com/openssl/openssl",
+      "revision": "openssl-3.5.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.0/LICENSE.txt",
+          "path": "LICENSE.txt",
+          "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+        },
+        {
+          "path": "crypto/cryptlib.c",
+          "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.0/crypto/cryptlib.c",
+          "sha256": "da562f92e70ffca530c79a0296e7068f85002187eaf8b64e75c67f59cdbf28f8",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "curl (AWS / Azure)",
+      "repository": "https://github.com/curl/curl",
+      "revision": "curl-8_13_0",
+      "scope": "native",
+      "license": "curl",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/curl/curl/curl-8_13_0/COPYING",
+          "path": "COPYING",
+          "sha256": "e18f1989333b70044b2adfb7dc2f905d0119dbdcac3bc9f4bc9d540e3a29de5b"
+        }
+      ]
+    },
+    {
+      "name": "zlib (AWS / Azure)",
+      "repository": "https://github.com/madler/zlib",
+      "revision": "v1.3.1",
+      "scope": "native",
+      "license": "Zlib",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE",
+          "path": "LICENSE",
+          "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+        }
+      ]
+    },
+    {
+      "name": "libxml2",
+      "repository": "https://github.com/GNOME/libxml2",
+      "revision": "v2.13.5",
+      "scope": "native",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/GNOME/libxml2/v2.13.5/Copyright",
+          "path": "Copyright",
+          "sha256": "c99aae1afe013e50b8b3701e089222b351258043c3025b64053a233fd25b4be7"
+        }
+      ]
+    },
+    {
+      "name": "liburing",
+      "repository": "https://github.com/axboe/liburing",
+      "revision": "liburing-2.14",
+      "scope": "native",
+      "license": "MIT (including the MIT option for dual-licensed Linux UAPI headers)",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/axboe/liburing/liburing-2.14/LICENSE",
+          "path": "LICENSE",
+          "sha256": "2ec12f7934cdfce25ff72b0557738989d79fc7a496d1cf9b2d3f9464fd61edbe"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/axboe/liburing/liburing-2.14/src/include/liburing/io_uring.h",
+          "path": "src/include/liburing/io_uring.h",
+          "sha256": "50bdc8ed67464033cf88377747719fe746255fcae986eb3738e7987b592f452e",
+          "opening_comment_only": true
+        },
+        {
+          "path": "src/setup.c",
+          "url": "https://raw.githubusercontent.com/axboe/liburing/liburing-2.14/src/setup.c",
+          "sha256": "8db10c6aecb6027eae72a1db1e86b3854019af0281f0e06b7dff93528c10073e",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "glibc fdelt_chk derived code",
+      "repository": "https://github.com/lattera/glibc",
+      "revision": "895ef79e04a953cac1493863bcae29ad85657ee1",
+      "scope": "vendored",
+      "license": "LGPL-2.1-or-later",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/lattera/glibc/895ef79e04a953cac1493863bcae29ad85657ee1/COPYING.LIB",
+          "path": "COPYING.LIB",
+          "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/lattera/glibc/895ef79e04a953cac1493863bcae29ad85657ee1/debug/fdelt_chk.c",
+          "path": "debug/fdelt_chk.c",
+          "sha256": "91df1fd5db3a97bc4cb5afbf9fb2b382e11bb81158a70a7d7141d9adbe723504",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "GCC runtime (toolchain reference)",
+      "repository": "https://github.com/gcc-mirror/gcc",
+      "revision": "releases/gcc-9.4.0",
+      "scope": "toolchain",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-9.4.0/COPYING3",
+          "path": "COPYING3",
+          "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-9.4.0/COPYING.RUNTIME",
+          "path": "COPYING.RUNTIME",
+          "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+        }
+      ]
+    },
+    {
+      "name": "Google Cloud C++",
+      "repository": "https://github.com/googleapis/google-cloud-cpp",
+      "revision": "v2.37.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/google-cloud-cpp/v2.37.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/google-cloud-cpp/v2.37.0/google/cloud/storage/client.h",
+          "path": "google/cloud/storage/client.h",
+          "sha256": "043c5be1c6c5e6d4c043230a0fa50a5fd1f441c3addd663222847665a0f281f3",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "Abseil",
+      "repository": "https://github.com/abseil/abseil-cpp",
+      "revision": "20250127.1",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/abseil/abseil-cpp/20250127.1/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/abseil/abseil-cpp/20250127.1/absl/base/config.h",
+          "path": "absl/base/config.h",
+          "sha256": "ea08ddd5ada17b5840841f63db7e53c76285d5ebbf69670cbf77803f47c4278b",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "Google APIs",
+      "repository": "https://github.com/googleapis/googleapis",
+      "revision": "079e5305050859d0e3a8c0768611283ee4863c07",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/googleapis/079e5305050859d0e3a8c0768611283ee4863c07/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/googleapis/079e5305050859d0e3a8c0768611283ee4863c07/google/storage/v2/storage.proto",
+          "path": "google/storage/v2/storage.proto",
+          "sha256": "82fe062bdf8ec90c709120072ab7ec45552c834331fdc3a93a0e7ac308819f6b",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "Protocol Buffers",
+      "repository": "https://github.com/protocolbuffers/protobuf",
+      "revision": "v27.0",
+      "scope": "native",
+      "license": "BSD-3-Clause; MIT (utf8_range)",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v27.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v27.0/third_party/utf8_range/LICENSE",
+          "path": "third_party/utf8_range/LICENSE",
+          "sha256": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074"
+        }
+      ]
+    },
+    {
+      "name": "BoringSSL",
+      "repository": "https://github.com/google/boringssl",
+      "revision": "82a53d8c902f940eb1310f76a0b96c40c67f632f",
+      "scope": "native",
+      "license": "See upstream multi-license text",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/google/boringssl/82a53d8c902f940eb1310f76a0b96c40c67f632f/LICENSE",
+          "path": "LICENSE",
+          "sha256": "a78d37138db9a43843736b2973284b61af19cd5384cf3c752e922171b0d4fc56"
+        }
+      ]
+    },
+    {
+      "name": "gRPC",
+      "repository": "https://github.com/grpc/grpc",
+      "revision": "v1.69.0",
+      "scope": "native",
+      "license": "Apache-2.0; bundled third-party terms",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "590198e3f305f2c347fde64d637c65492bbef554db6c8364e149cd375e3797ee"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/NOTICE.txt",
+          "path": "NOTICE.txt",
+          "sha256": "693ff28ec216d5112ac1bbfe64ef539005867d1c7bd427b57d579683293b947f"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/third_party/address_sorting/LICENSE",
+          "path": "third_party/address_sorting/LICENSE",
+          "sha256": "be1227afc73a4d58af895a0f95eb21f67697e0a6a0c5b1a3e17436280e9158a6"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/third_party/utf8_range/LICENSE",
+          "path": "third_party/utf8_range/LICENSE",
+          "sha256": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/third_party/xxhash/LICENSE",
+          "path": "third_party/xxhash/LICENSE",
+          "sha256": "553d0035773ddd1590045f8fdc3a4c6ead31e36336721aeca8421e88ed1c9f80"
+        }
+      ]
+    },
+    {
+      "name": "curl (GCS)",
+      "repository": "https://github.com/curl/curl",
+      "revision": "curl-7_69_1",
+      "scope": "native",
+      "license": "curl",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/curl/curl/curl-7_69_1/COPYING",
+          "path": "COPYING",
+          "sha256": "db3c4a3b3695a0f317a0c5176acd2f656d18abc45b3ee78e50935a78eb1e132e"
+        }
+      ]
+    },
+    {
+      "name": "nlohmann JSON",
+      "repository": "https://github.com/nlohmann/json",
+      "revision": "v3.11.3",
+      "scope": "native",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT",
+          "path": "LICENSE.MIT",
+          "sha256": "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
+        }
+      ]
+    },
+    {
+      "name": "CRC32C",
+      "repository": "https://github.com/google/crc32c",
+      "revision": "1.1.2",
+      "scope": "native",
+      "license": "BSD-3-Clause",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/google/crc32c/1.1.2/LICENSE",
+          "path": "LICENSE",
+          "sha256": "a1f30b77c01e0995fa32a00119e00749e8731ee8a3c4c3549bce74083c72b0b6"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/google/crc32c/1.1.2/AUTHORS",
+          "path": "AUTHORS",
+          "sha256": "6c96b5e2a101ab9a629d8623be73f69e2346ef02e8ddd7096abe030c452252d2"
+        }
+      ]
+    },
+    {
+      "name": "OpenTelemetry C++",
+      "repository": "https://github.com/open-telemetry/opentelemetry-cpp",
+      "revision": "v1.20.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-cpp/v1.20.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "path": "api/include/opentelemetry/version.h",
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-cpp/v1.20.0/api/include/opentelemetry/version.h",
+          "sha256": "399f7aff9e8140ba757babd817ae0be6b59bdbebfd3ebf62f74e7759b691ac59",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "zlib (gRPC)",
+      "repository": "https://github.com/madler/zlib",
+      "revision": "09155eaa2f9270dc4ed1fa13e2b4b2613e6e4851",
+      "scope": "native",
+      "license": "Zlib",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/madler/zlib/09155eaa2f9270dc4ed1fa13e2b4b2613e6e4851/LICENSE",
+          "path": "LICENSE",
+          "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+        }
+      ]
+    },
+    {
+      "name": "RE2",
+      "repository": "https://github.com/google/re2",
+      "revision": "2022-04-01",
+      "scope": "native",
+      "license": "BSD-3-Clause",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/google/re2/2022-04-01/LICENSE",
+          "path": "LICENSE",
+          "sha256": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449"
+        }
+      ]
+    },
+    {
+      "name": "c-ares",
+      "repository": "https://github.com/c-ares/c-ares",
+      "revision": "6360e96b5cf8e5980c887ce58ef727e53d77243a",
+      "scope": "native",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/c-ares/c-ares/6360e96b5cf8e5980c887ce58ef727e53d77243a/LICENSE.md",
+          "path": "LICENSE.md",
+          "sha256": "db4eb63fe09daebdf57d3f79b091bb5ee5070c0d761040e83264e648d307af4c"
+        }
+      ]
+    },
+    {
+      "name": "OpenCensus C++",
+      "repository": "https://github.com/census-instrumentation/opencensus-cpp",
+      "revision": "5501a1a255805e0be83a41348bb5f2630d5ed6b3",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/census-instrumentation/opencensus-cpp/5501a1a255805e0be83a41348bb5f2630d5ed6b3/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "opencensus/trace/span.h",
+          "url": "https://raw.githubusercontent.com/census-instrumentation/opencensus-cpp/5501a1a255805e0be83a41348bb5f2630d5ed6b3/opencensus/trace/span.h",
+          "sha256": "9d418181803284b84c3aaea6174f9d475e123676c79d437646a576c627d03998",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "Envoy data-plane API",
+      "repository": "https://github.com/envoyproxy/data-plane-api",
+      "revision": "f8b75d1efa92bbf534596a013d9ca5873f79dd30",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/envoyproxy/data-plane-api/f8b75d1efa92bbf534596a013d9ca5873f79dd30/LICENSE",
+          "path": "LICENSE",
+          "sha256": "58a365fe99e6a28ca903dad980080f109a18ccad888db1a010ce0ada20f90042"
+        }
+      ]
+    },
+    {
+      "name": "OpenCensus proto",
+      "repository": "https://github.com/census-instrumentation/opencensus-proto",
+      "revision": "v0.3.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/census-instrumentation/opencensus-proto/v0.3.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "src/opencensus/proto/trace/v1/trace.proto",
+          "url": "https://raw.githubusercontent.com/census-instrumentation/opencensus-proto/v0.3.0/src/opencensus/proto/trace/v1/trace.proto",
+          "sha256": "6eea0cf44b6d383fa50e05d24e91c5dbe12a1574453754e9d60bf0a6ed5344f8",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "protoc-gen-validate",
+      "repository": "https://github.com/bufbuild/protoc-gen-validate",
+      "revision": "v1.0.4",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/bufbuild/protoc-gen-validate/v1.0.4/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        }
+      ]
+    },
+    {
+      "name": "xDS",
+      "repository": "https://github.com/cncf/xds",
+      "revision": "3a472e524827f72d1ad621c4983dd5af54c46776",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/cncf/xds/3a472e524827f72d1ad621c4983dd5af54c46776/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
+      "name": "OpenTelemetry proto",
+      "repository": "https://github.com/open-telemetry/opentelemetry-proto",
+      "revision": "v1.5.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/v1.5.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "path": "opentelemetry/proto/common/v1/common.proto",
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-proto/v1.5.0/opentelemetry/proto/common/v1/common.proto",
+          "sha256": "6a75b9ff79bb37e502a16fd739294a29a4a6608eb07416f2187d05d7f3745e8e",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "Prometheus C++",
+      "repository": "https://github.com/jupp0r/prometheus-cpp",
+      "revision": "b1234816facfdda29845c46696a02998a4af115a",
+      "scope": "native",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/jupp0r/prometheus-cpp/b1234816facfdda29845c46696a02998a4af115a/LICENSE",
+          "path": "LICENSE",
+          "sha256": "631da2561d776749086945e1f5adf2e5f4fcde920ddaacda018d505787de1882"
+        }
+      ]
+    },
+    {
+      "name": "OpenTracing C++",
+      "repository": "https://github.com/opentracing/opentracing-cpp",
+      "revision": "v1.6.0",
+      "scope": "native",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/opentracing/opentracing-cpp/v1.6.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "076d03156735d5ff2df2ea0f8b12351ef65e5e9222b5c8c6a35101dadb41e717"
+        }
+      ]
+    },
+    {
+      "name": "torch",
+      "repository": "https://github.com/pytorch/pytorch",
+      "revision": "v2.6.0",
+      "scope": "python-runtime-reference",
+      "license": "BSD-3-Clause and bundled terms",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/pytorch/pytorch/v2.6.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "47a26beb94e3f6b333a3677fc85d546f1fdfd2f0b3686c26d2fb5b10e0134165"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/pytorch/pytorch/v2.6.0/NOTICE",
+          "path": "NOTICE",
+          "sha256": "c2cc7bf0caec7652c2b460a8a470bea1677f241e4ab8e431df34cf17f5a9fec0"
+        }
+      ]
+    },
+    {
+      "name": "numpy",
+      "repository": "https://github.com/numpy/numpy",
+      "revision": "v2.2.0",
+      "scope": "python-runtime-reference",
+      "license": "BSD-3-Clause",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/numpy/numpy/v2.2.0/LICENSE.txt",
+          "path": "LICENSE.txt",
+          "sha256": "01fb016849aa427edb1bbbbd55f91c26ca6cadb32a5b20e7f000655dd05b0760"
+        }
+      ]
+    },
+    {
+      "name": "humanize",
+      "repository": "https://github.com/python-humanize/humanize",
+      "revision": "4.12.0",
+      "scope": "python-runtime-reference",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/python-humanize/humanize/4.12.0/LICENCE",
+          "path": "LICENCE",
+          "sha256": "8ba6c18112a431400ad3c743f70670079b302545d98884fc2f28a91c383a0380"
+        }
+      ]
+    },
+    {
+      "name": "boto3",
+      "repository": "https://github.com/boto/boto3",
+      "revision": "1.37.0",
+      "scope": "python-runtime-reference",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/boto/boto3/1.37.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/boto/boto3/1.37.0/NOTICE",
+          "path": "NOTICE",
+          "sha256": "04fb1e61484a7810f1ba09bb42bc01ca58c9af33927d7c5a21556e4c4d1c7fa4"
+        }
+      ]
+    },
+    {
+      "name": "google-cloud-storage",
+      "repository": "https://github.com/googleapis/python-storage",
+      "revision": "v3.1.0",
+      "scope": "python-runtime-reference",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/python-storage/v3.1.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "google/cloud/storage/__init__.py",
+          "url": "https://raw.githubusercontent.com/googleapis/python-storage/v3.1.0/google/cloud/storage/__init__.py",
+          "sha256": "d7a4dc639f7c84d485d419652e2e2f9fc8184cd77c4e751bb0aff47019e29772",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "google-auth",
+      "repository": "https://github.com/googleapis/google-auth-library-python",
+      "revision": "v2.38.0",
+      "scope": "python-runtime-reference",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/googleapis/google-auth-library-python/v2.38.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "path": "google/auth/__init__.py",
+          "url": "https://raw.githubusercontent.com/googleapis/google-auth-library-python/v2.38.0/google/auth/__init__.py",
+          "sha256": "c20e4c5b0464f277c914c994314da02e2aeb3dd19ef4d330a8b91d4b0745c04f",
+          "opening_comment_only": true
+        }
+      ]
+    },
+    {
+      "name": "azure-storage-blob",
+      "repository": "https://github.com/Azure/azure-sdk-for-python",
+      "revision": "azure-storage-blob_12.25.0",
+      "scope": "python-runtime-reference",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Azure/azure-sdk-for-python/azure-storage-blob_12.25.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "name": "azure-identity",
+      "repository": "https://github.com/Azure/azure-sdk-for-python",
+      "revision": "azure-identity_1.21.0",
+      "scope": "python-runtime-reference",
+      "license": "MIT",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Azure/azure-sdk-for-python/azure-identity_1.21.0/LICENSE",
+          "path": "LICENSE",
+          "sha256": "7c77a44a8acd9b41fdc209864a8016b3d430b5d0e09309818d5b7444336df744"
+        }
+      ]
+    },
+    {
+      "name": "GoogleTest",
+      "repository": "https://github.com/google/googletest",
+      "revision": "9816b96a6ddc0430671693df90192bbee57108b6",
+      "scope": "test-only",
+      "license": "BSD-3-Clause",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/google/googletest/9816b96a6ddc0430671693df90192bbee57108b6/googletest/LICENSE",
+          "path": "googletest/LICENSE",
+          "sha256": "9702de7e4117a8e2b20dafab11ffda58c198aede066406496bef670d40a22138"
+        }
+      ]
+    },
+    {
+      "name": "libaio",
+      "repository": "https://pagure.io/libaio",
+      "revision": "0.3.113",
+      "scope": "native",
+      "license": "LGPL-2.1-or-later",
+      "files": [
+        {
+          "url": "https://releases.pagure.org/libaio/libaio-0.3.113.tar.gz",
+          "path": "COPYING",
+          "archive_member": "libaio-0.3.113/COPYING",
+          "sha256": "5bbcbb737e60fe9deba08ecbd00920cfcc3403ba2e534c64fdeea49d6bb87509"
+        },
+        {
+          "url": "https://releases.pagure.org/libaio/libaio-0.3.113.tar.gz",
+          "path": "src/libaio.h",
+          "archive_member": "libaio-0.3.113/src/libaio.h",
+          "sha256": "442dabe8ff9c7441e57e8776a75bf16d946539d656e06c99a5b772929de19c23",
+          "opening_comment_only": true
+        }
+      ]
+    }
+  ]
+}

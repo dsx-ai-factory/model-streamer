@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // O_DIRECT is a GNU extension, so this must come before any libc header.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE

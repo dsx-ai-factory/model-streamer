@@ -36,6 +36,28 @@ with SafetensorsStreamer() as streamer:
         gpu_tensor = tensor.to('CUDA:0')
 ```
 
+## Licensing and Contributions
+
+NVIDIA-authored code is released under the [Apache License 2.0](LICENSE).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and the
+required Developer Certificate of Origin sign-off.
+
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) contains third-party
+attributions and license texts. Third-party code retains its upstream terms;
+in particular, the glibc-derived function in
+[portability.c](cpp/cc/portability/portability.c) retains its LGPL notice.
+
+The Apache 2.0 license links in
+[py/runai_model_streamer](py/runai_model_streamer/LICENSE),
+[py/runai_model_streamer_s3](py/runai_model_streamer_s3/LICENSE),
+[py/runai_model_streamer_gcs](py/runai_model_streamer_gcs/LICENSE), and
+[py/runai_model_streamer_azure](py/runai_model_streamer_azure/LICENSE)
+point to the root license so each independently distributed package includes
+the same license text. Each package also includes the third-party notices.
+
+Maintainers should follow the [release compliance checklist](docs/release-compliance.md)
+when updating dependencies or preparing a distribution.
+
 ## Development
 
 Our repository is built using devcontainer ([Further reading](https://containers.dev/))
@@ -69,4 +91,3 @@ pip3 install py/runai_model_streamer py/runai_model_streamer_s3
 
 > [!IMPORTANT]
 > In order to the CPP to run, you need to install libcurl4 and libssl1.1_1
-

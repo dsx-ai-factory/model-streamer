@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: RunAI Model Streamer Library - Resease
 
 on:
@@ -33,7 +36,8 @@ jobs:
         cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build && \
+          python3 tools/check_licenses.py --wheels py/*/dist/*.whl
 
     - name: Upload As Release Asset
       uses: softprops/action-gh-release@v1

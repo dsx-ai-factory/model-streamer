@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Loads dependencies for the C++ toolchain."""
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")

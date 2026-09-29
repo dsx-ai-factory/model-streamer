@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 from setuptools import setup, find_packages
 
@@ -22,7 +25,7 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-azure",
     version=VERSION,
-    license_files=("LICENSE",),
+    license_files=("LICENSE", "THIRD_PARTY_NOTICES.txt"),
     packages=find_packages(),
     install_requires=["azure-storage-blob", "azure-identity"],
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],

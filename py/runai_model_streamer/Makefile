@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 ARCH := $(shell uname -m)
 PLATFORM := manylinux2014_${ARCH}
 PACKAGE_VERSION ?= 0.0.0

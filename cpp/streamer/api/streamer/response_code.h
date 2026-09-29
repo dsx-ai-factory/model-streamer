@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef RUNAI_FILE_STREAMER_RESPONSE_CODE_H
 #define RUNAI_FILE_STREAMER_RESPONSE_CODE_H
 

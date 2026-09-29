@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 load("@//third_party:uring.bzl", "uring_library")
 
 package(default_visibility = ["//visibility:public"])

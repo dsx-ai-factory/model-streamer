@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 # The symbols this library exports. Used by libstreamer.so and by libstreamer-mock.so.
 #
 # The two names below are ELF version nodes, not product versions. A version node is a label on an

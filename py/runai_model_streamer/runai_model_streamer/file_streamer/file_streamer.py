@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Dict, List, Iterator, Optional, Tuple
 from runai_model_streamer.libstreamer.libstreamer import (
     runai_probe_direct_block_size,
