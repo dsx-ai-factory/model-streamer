@@ -56,9 +56,10 @@ bool offers_this_buffer(const Registration & registration, const char * buffer, 
 
 IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytesize)
 {
-    // Asked once. The host's answer cannot change while we run, and a refused registration costs a
-    // syscall every time it is retried.
-    _fixed_buffers = IoUringProbe::instance().capability().fixed_buffers;
+    // Both gates, asked once. The host's answer cannot change while we run, and the mount's cannot
+    // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
+    // keyed by it, so an engine never serves two mounts that answered differently.
+    _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));

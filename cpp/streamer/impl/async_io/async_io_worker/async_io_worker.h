@@ -79,7 +79,8 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
                            unsigned node_wide_depth = Config::default_fs_async_queue_depth,
                            EngineFactory factory = posix_io::make_io_engine,
                            std::function<void()> on_engine_dead = {},
-                           std::shared_ptr<DeviceWriter> writer = nullptr);
+                           std::shared_ptr<DeviceWriter> writer = nullptr,
+                           bool register_buffers = false);
     ~AsyncIoWorker() override;
 
     // Bytes copied out of a scratch buffer, over this worker's life.
@@ -317,6 +318,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         size_t wanted = 0;          // how many of them this pass yields
     };
 
+    // The staging buffer this pass reads into, described for the engine, or nothing.
+    //
+    // NOTHING for a bounced direct pass: that reads into a scratch buffer, which is not the staging
+    // pool's memory and is not registered. Offering the staging slab for it would name a region the
+    // read does not land in, and the engine would decline anyway.
+    posix_io::Registration registration_for(const StagingBuffer & staging, const DirectPass & pass) const;
+
     bool plan_direct_pass(const Chunk & pending, size_t block, DirectPass & out);
 
     // Copy a bounced pass out of its scratch buffer, give the buffer back, and return how many WANTED
@@ -374,6 +382,10 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     bool _block_measured = false;
 
     const unsigned _node_wide_depth;
+
+    // Whether this mount's reads may use registered buffers. Decided by the router from the file
+    // system type, and handed to the engine, which also has the host's answer.
+    const bool _register_buffers;
 
     // Set once a measurement was refused for being larger than the scratch buffers. It only silences
     // the warning: _block_measured stays false, so a later submission reporting a block this engine

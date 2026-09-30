@@ -59,17 +59,30 @@ class FsAsyncRouter
         std::vector<dev_t> devices;
         std::vector<size_t> blocks;
         std::vector<unsigned> depths;
+
+        // Whether each group's reads may use registered buffers. Per mount, because registration is
+        // worth 1.45x on virtiofs with O_DIRECT and -8% on NFS.
+        std::vector<bool> registers;
     };
 
-    // One group per MOUNT: an engine serves one mount, and a workload goes to one engine.
+    // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
+    // rather than the list, so the matching rule lives in Config with its tests.
+    using RegisterPolicy = std::function<bool(const std::string & fs_type)>;
+
+    // One group per MOUNT, and a workload goes to one group. Groups are not engines: several mounts
+    // can share an engine once the engine cap is reached (BackendPools), which is why every per-mount
+    // answer is carried here rather than assumed to be the engine's.
     //
     // Stats once per directory, not once per file. Never fails a submission - an unreadable directory
     // sends its file to the synchronous reader.
-    Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth);
+    //
+    // A null `registers` means every mount registers, which is what a caller that does not care wants.
+    Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
+                  const RegisterPolicy & registers = nullptr);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
-    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned)>;
+    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool)>;
 
     // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
     // by value like everything else here, so a worker outlives this object whatever the order.

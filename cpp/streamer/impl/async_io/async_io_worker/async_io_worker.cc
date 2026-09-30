@@ -54,12 +54,13 @@ size_t device_slab_bytesize()
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
                              EngineFactory factory, std::function<void()> on_engine_dead,
-                             std::shared_ptr<DeviceWriter> writer) :
+                             std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
     _writer(std::move(writer)),
     _strategy(strategy),
     _block(block != 0 ? block : posix_io::MaxProbeBlock),
     _block_measured(block != 0),
     _node_wide_depth(node_wide_depth),
+    _register_buffers(register_buffers),
     _factory(std::move(factory)),
     _on_engine_dead(std::move(on_engine_dead))
 {
@@ -107,6 +108,7 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     config.chunk_bytesize = _settings->chunk_bytesize();
 
     config.direct_block = _block;
+    config.register_buffers = _register_buffers;
 
     _engine = _factory(_strategy, config);
     if (_engine == nullptr)
@@ -767,7 +769,8 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
         _chunks.set_bounce(id, pass.scratch, pass.skip, pass.wanted);
     }
 
-    const auto ret = _engine->stage(id, file, pass.offset, pass.bytesize, pass.buffer);
+    const auto ret = _engine->stage(id, file, pass.offset, pass.bytesize, pass.buffer,
+                                    registration_for(entry->staging, pass));
     if (ret != common::ResponseCode::Success)
     {
         // Not staged, so no completion will arrive for it - this worker has to resolve it. Give the
@@ -981,6 +984,31 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
             break;
         }
     }
+}
+
+posix_io::Registration AsyncIoWorker::registration_for(const StagingBuffer & staging,
+                                                      const DirectPass & pass) const
+{
+    // Asked here and not left to the engine, so a mount that does not register pays nothing: slab_at()
+    // takes the pool's lock, and producing a description only to have it discarded is a lock per read.
+    //
+    // A bounced pass reads into scratch, not into this buffer, so it has no region to name either.
+    if (!_register_buffers || !staging.valid() || pass.scratch != nullptr || _device_out == nullptr)
+    {
+        return posix_io::Registration();
+    }
+
+    const auto slab = _device_out->slab_at(staging.slab);
+    if (!slab.valid())
+    {
+        return posix_io::Registration();
+    }
+
+    posix_io::Registration registration;
+    registration.base = slab.base;
+    registration.bytesize = slab.bytesize;
+    registration.id = staging.slab;
+    return registration;
 }
 
 AsyncIoWorker::Staged AsyncIoWorker::stage_into_device_buffer(posix_io::RequestId id, const Batch & batch,
