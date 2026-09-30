@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <string>
 
 #include "utils/logging/logging.h"
 
@@ -30,7 +31,7 @@ common::ResponseCode reason_for(int error)
 // version cannot tell us about. One page is small enough to pass under any limit that permits
 // registration at all, which is the question here - a pool sized against the limit is the caller's
 // problem, not the probe's.
-bool trial_registration(struct io_uring * ring)
+bool trial_registration(struct io_uring * ring, std::string & why_not)
 {
     alignas(4096) static unsigned char buffer[4096];
 
@@ -41,8 +42,7 @@ bool trial_registration(struct io_uring * ring)
     const int ret = io_uring_register_buffers(ring, &iov, 1);
     if (ret < 0)
     {
-        LOG(INFO) << "io_uring fixed buffers are not available: io_uring_register_buffers failed: "
-                  << std::strerror(-ret) << ". Reads will use IORING_OP_READ";
+        why_not = std::string("io_uring_register_buffers failed: ") + std::strerror(-ret);
         return false;
     }
 
@@ -84,16 +84,19 @@ IoUringCapability probe_io_uring()
     // Only for a ring we are going to keep. The two gates below decline io_uring outright, and a
     // capability reported for a ring nobody will build is a state the struct should not be able to
     // describe - besides costing a syscall on every host we reject.
+    // Why fixed buffers are off, for the one line at the end. Carried rather than logged here: three
+    // lines to say one thing is what turns a log nobody reads into the normal state.
+    std::string no_fixed_buffers;
+
     if (op_read && capability.timed_wait_is_free)
     {
         if (!op_read_fixed)
         {
-            LOG(INFO) << "io_uring fixed buffers are not available: this kernel has no"
-                      << " IORING_OP_READ_FIXED. Reads will use IORING_OP_READ";
+            no_fixed_buffers = "this kernel has no IORING_OP_READ_FIXED";
         }
         else
         {
-            capability.fixed_buffers = trial_registration(&ring);
+            capability.fixed_buffers = trial_registration(&ring, no_fixed_buffers);
         }
     }
 
@@ -132,7 +135,8 @@ IoUringCapability probe_io_uring()
 
     capability.available = true;
 
-    LOG(INFO) << "io_uring is available, fixed buffers " << (capability.fixed_buffers ? "yes" : "no");
+    LOG(INFO) << "io_uring is available; fixed buffers "
+              << (capability.fixed_buffers ? "yes" : "no (" + no_fixed_buffers + "), so reads use IORING_OP_READ");
     return capability;
 }
 

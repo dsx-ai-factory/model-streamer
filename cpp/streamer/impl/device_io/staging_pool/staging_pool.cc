@@ -75,7 +75,11 @@ common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, S
     // published. Nothing in the streamer shares a pool between consumers, so this costs nothing.
     if (_buffers.size() + per_slab <= _params.max_buffers)
     {
-        _slabs.push_back(std::move(slab));
+        _slabs.push_back(SlabRecord{ std::move(slab), bytesize });
+
+        // Taken after the push, so it names the slab these buffers are cut from. Slabs are never
+        // removed, so it stays this slab's index for the life of the pool.
+        const auto slab_index = static_cast<unsigned>(_slabs.size() - 1);
 
         for (unsigned i = 0; i < per_slab; ++i)
         {
@@ -83,6 +87,7 @@ common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, S
             buffer.data = static_cast<char *>(base) + static_cast<size_t>(i) * _params.buffer_bytesize;
             buffer.bytesize = _params.buffer_bytesize;
             buffer.index = static_cast<unsigned>(_buffers.size());
+            buffer.slab = slab_index;
 
             _buffers.push_back(buffer);
             _free.push_back(buffer.index);
@@ -223,6 +228,18 @@ void StagingPool::stop()
 size_t StagingPool::buffer_bytesize() const
 {
     return _params.buffer_bytesize;
+}
+
+StagingPool::Slab StagingPool::slab_at(unsigned index) const
+{
+    const std::lock_guard<std::mutex> guard(_mutex);
+
+    if (index >= _slabs.size())
+    {
+        return Slab{};
+    }
+
+    return Slab{ _slabs[index].memory.get(), _slabs[index].bytesize };
 }
 
 unsigned StagingPool::created() const

@@ -82,6 +82,59 @@ TEST_F(StagingPoolTest, Buffers_Are_Carved_From_The_Slab_In_Order)
     }
 }
 
+// A buffer names the slab it was cut from, and that slab's memory contains it.
+//
+// This is what lets a reader register a slab once with the kernel and then name it by index per read.
+// An index that pointed at the wrong slab would read into memory the kernel never registered - which
+// the kernel rejects, but only at run time and only on the hosts that use fixed reads.
+TEST_F(StagingPoolTest, A_Buffer_Names_The_Slab_It_Came_From)
+{
+    StagingPool pool(_mock, params(8));   // two slabs of four
+
+    std::vector<StagingBuffer> taken;
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        StagingBuffer buffer;
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+        ASSERT_TRUE(buffer.valid());
+        taken.push_back(buffer);
+    }
+
+    ASSERT_EQ(pool.slabs(), 2u) << "this test wants two slabs, or it proves nothing about the index";
+
+    for (const auto & buffer : taken)
+    {
+        const auto slab = pool.slab_at(buffer.slab);
+        ASSERT_TRUE(slab.valid()) << "buffer " << buffer.index << " names slab " << buffer.slab
+                                  << ", which the pool does not have";
+
+        const auto * const base = static_cast<const char *>(slab.base);
+        EXPECT_GE(buffer.data, base);
+        EXPECT_LE(buffer.data + buffer.bytesize, base + slab.bytesize)
+            << "buffer " << buffer.index << " is not inside the slab it names";
+    }
+
+    // The two slabs are told apart, rather than every buffer claiming slab 0.
+    EXPECT_EQ(taken.front().slab, 0u);
+    EXPECT_EQ(taken.back().slab, 1u);
+}
+
+// Out of range rather than undefined: a caller that has not seen a slab grow asks for one that is not
+// there, and must be told so instead of reading past the vector.
+TEST_F(StagingPoolTest, An_Unknown_Slab_Is_Invalid)
+{
+    StagingPool pool(_mock, params(4));
+
+    EXPECT_FALSE(pool.slab_at(0).valid()) << "nothing is allocated until a buffer is asked for";
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+
+    EXPECT_TRUE(pool.slab_at(0).valid());
+    EXPECT_FALSE(pool.slab_at(1).valid());
+    EXPECT_FALSE(pool.slab_at(4096).valid());
+}
+
 // The pool grows only when a buffer is actually needed, so a small load never reaches the ceiling.
 TEST_F(StagingPoolTest, Grows_On_Demand_And_Stops_At_The_Ceiling)
 {
