@@ -167,6 +167,11 @@ common::ResponseCode DeviceWriterClient::write(unsigned ordinal,
     return _writer->write(existing->second, std::move(copy), bytesize, destination, std::move(on_done));
 }
 
+StagingPool::Slab DeviceWriterClient::slab_at(unsigned index) const
+{
+    return _pool == nullptr ? StagingPool::Slab{} : _pool->slab_at(index);
+}
+
 void DeviceWriterClient::release(const StagingBuffer & buffer)
 {
     ASSERT(_pool != nullptr) << "releasing a buffer to a client that never took one";

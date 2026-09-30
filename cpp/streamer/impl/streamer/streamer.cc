@@ -326,7 +326,9 @@ common::ResponseCode Streamer::async_request(
 
     // Object storage has no mount to probe and no strategy to consult, so it is not asked.
     const auto groups = object_storage ? FsAsyncRouter::Groups{}
-                                       : _router.groups(request, _config->fs_async_queue_depth);
+                                       : _router.groups(request, _config->fs_async_queue_depth,
+                                                        [this](const std::string & fs_type)
+                                                        { return _config->registers_buffers(fs_type); });
     Assigner assigner(request, _config, groups.by_file);
 
     std::vector<Workload> workloads(assigner.num_workloads());
@@ -435,6 +437,7 @@ common::ResponseCode Streamer::async_request(
 
                     workloads[next].direct_block = groups.blocks[group];
                     _pools.push_async(groups.devices[group], groups.blocks[group], groups.depths[group],
+                                      groups.registers[group],
                                       std::move(workloads[next]));
                 }
             }

@@ -104,6 +104,10 @@ AsyncIoConfig config_with(unsigned depth)
     AsyncIoConfig config;
     config.depth = depth;
     config.chunk_bytesize = 1 << 20;
+
+    // On, because the registration tests below are the reason this file exists in its current form.
+    // The mount policy is tested where it is decided, in the router - not here.
+    config.register_buffers = true;
     return config;
 }
 

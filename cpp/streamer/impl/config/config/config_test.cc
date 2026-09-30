@@ -275,4 +275,49 @@ TEST_F(Creation, A_Plain_Number_Applies_Everywhere)
     EXPECT_EQ(config.fs_async_queue_depth.for_type("nfs"), 64u);
 }
 
+
+// NFS is denied by default because registration measured 0.92x there - a loss - while virtiofs with
+// O_DIRECT gained 1.45x. Prefix matched, so nfs4 is covered without naming it.
+TEST_F(Creation, Register_Buffers_Denies_Nfs_By_Default)
+{
+    const Config config;
+
+    EXPECT_TRUE(config.registers_buffers("ext4"));
+    EXPECT_TRUE(config.registers_buffers("virtiofs"));
+    EXPECT_TRUE(config.registers_buffers("xfs"));
+
+    EXPECT_FALSE(config.registers_buffers("nfs"));
+    EXPECT_FALSE(config.registers_buffers("nfs4")) << "a prefix must cover the versioned name";
+}
+
+// We have measured three file systems and a site may have a fourth, so the list is not a constant.
+TEST_F(Creation, Register_Buffers_Deny_List_Is_Configurable)
+{
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "nfs,virtiofs");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("virtiofs"));
+        EXPECT_FALSE(config.registers_buffers("nfs4"));
+        EXPECT_TRUE(config.registers_buffers("ext4"));
+    }
+
+    {
+        // Empty means register everywhere - the way to turn the denial off without naming a type.
+        const utils::temp::Env env("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "");
+        const Config config;
+
+        EXPECT_TRUE(config.registers_buffers("nfs4"));
+    }
+}
+
+// An unknown type registers. We deny what we have measured to be worse, not what we have not seen.
+TEST_F(Creation, An_Unknown_File_System_Registers)
+{
+    const Config config;
+
+    EXPECT_TRUE(config.registers_buffers("lustre"));
+    EXPECT_TRUE(config.registers_buffers(""));
+}
+
 }; // namespace runai::llm::streamer::impl

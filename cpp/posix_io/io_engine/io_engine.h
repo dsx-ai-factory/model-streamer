@@ -150,6 +150,15 @@ struct AsyncIoConfig
     // and bounces more of every chunk's head and tail; on NFS under the chunks policy a 64 KiB block
     // against a 4 KiB mount cost 2.4x the load time.
     size_t direct_block = 0;
+
+    // Whether reads on this MOUNT should use registered buffers when the caller offers them.
+    //
+    // Per mount, because it is worth different amounts on different filesystems: measured 1.45x less
+    // read CPU on virtiofs with O_DIRECT, and 0.92x - a LOSS - on NFS, where the data arrives over the
+    // network and there is no device DMA into our pages for registration to streamline.
+    //
+    // Defaults to false so a caller that says nothing gets the behaviour it had before.
+    bool register_buffers = false;
 };
 
 // The asynchronous I/O engine: io_uring or libaio, direct or buffered.

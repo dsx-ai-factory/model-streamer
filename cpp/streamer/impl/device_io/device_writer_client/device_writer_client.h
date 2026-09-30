@@ -107,6 +107,13 @@ class DeviceWriterClient
     // went away. A buffer lost here shrinks the pool for the life of the worker.
     void release(const StagingBuffer & buffer);
 
+    // The memory a StagingBuffer::slab index names, for a reader that offers it to the kernel.
+    //
+    // ASKED WHEN NEEDED rather than carried on the buffer: a slab's geometry is used once per slab, so
+    // copying it into every buffer and every in-flight chunk would carry it through millions of reads
+    // to spend it a handful of times. Invalid before the pool exists.
+    StagingPool::Slab slab_at(unsigned index) const;
+
     // Diagnostics.
     unsigned devices() const;
     unsigned buffers() const;
