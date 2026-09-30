@@ -1,4 +1,4 @@
-name: RunAI Model Streamer Library - Resease
+name: RunAI Model Streamer Library - Release
 
 on:
   release:
@@ -6,15 +6,23 @@ on:
       - created
 
 jobs:
-  build-and-push:
-    name: Build & Push
+  build:
+    name: Build Python wheels and C/C++ SDK (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    # Both targets use the existing x86_64 devcontainer and cross-toolchain,
+    # with independent Bazel output trees on separate runners.
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: read
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.release.tag_name }}
 
     - name: Log in to GitHub Container Registry
       uses: docker/login-action@v3
@@ -24,7 +32,13 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+      id: version
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        version="${RELEASE_TAG#v}"
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*$ ]] || exit 1
+        echo "PACKAGE_VERSION=$version" >> "$GITHUB_OUTPUT"
 
     - name: Build package
       uses: devcontainers/ci@v0.3
@@ -33,39 +47,109 @@ jobs:
         cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
         push: never
         runCmd: |
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+          PACKAGE_VERSION=${{ steps.version.outputs.PACKAGE_VERSION }} make build_${{ matrix.arch }}
 
-    - name: Upload As Release Asset
-      uses: softprops/action-gh-release@v1
+    - name: Upload wheels for publishing
+      uses: actions/upload-artifact@v4
       with:
-        files: py/*/dist/*.whl
+        name: wheels-${{ matrix.arch }}
+        path: py/*/dist/*.whl
+        if-no-files-found: error
+        compression-level: 0
+
+    - name: Upload C/C++ SDK for validation
+      uses: actions/upload-artifact@v4
+      with:
+        name: cpp-sdk-${{ matrix.arch }}
+        path: sdk/dist/*
+        if-no-files-found: error
+        compression-level: 0
+
+  test-cpp:
+    name: Test C/C++ SDK (${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.release.tag_name }}
+    - uses: actions/download-artifact@v4
+      with:
+        name: cpp-sdk-${{ matrix.arch }}
+        path: sdk/dist
+    - name: Test the release archive in a clean consumer container
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        CPP_SDK_ARCH: ${{ matrix.arch }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: |
+        docker run --rm \
+          -v "$PWD:/src:ro" -w /src \
+          -e CPP_SDK_ARCH -e RELEASE_TAG ubuntu:20.04 bash -euc '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              python3 gcc g++ cmake make pkg-config binutils ca-certificates
+            make test-cpp CPP_SDK_ARCHIVE="sdk/dist/runai-model-streamer-sdk-${RELEASE_TAG#v}-linux-${CPP_SDK_ARCH}.tar.gz"
+          '
 
-    - name: Publish streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+  publish-github:
+    name: Publish GitHub release assets
+    needs: [build, test-cpp]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: wheels-*
+        merge-multiple: true
+        path: py
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: cpp-sdk-*
+        merge-multiple: true
+        path: sdk/dist
+    - name: Upload release assets
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.release.tag_name }}
+        fail_on_unmatched_files: true
+        files: |
+          py/*/dist/*.whl
+          sdk/dist/*.tar.gz
+          sdk/dist/*.tar.gz.sha256
+
+  publish-pypi:
+    name: Publish ${{ matrix.package }} to PyPI
+    needs: [build, test-cpp]
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - runai_model_streamer
+          - runai_model_streamer_s3
+          - runai_model_streamer_gcs
+          - runai_model_streamer_azure
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        pattern: wheels-*
+        merge-multiple: true
+        path: py
+    - uses: pypa/gh-action-pypi-publish@release/v1
       with:
         password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer/dist/
-        print-hash: true
-
-    - name: Publish s3 streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_s3/dist/
-        print-hash: true
-
-    - name: Publish GCS streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_gcs/dist/
-        print-hash: true
-
-    - name: Publish Azure streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_azure/dist/
+        packages-dir: py/${{ matrix.package }}/dist/
         print-hash: true
