@@ -166,9 +166,10 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
     keeps failing if a future change stops wiring _safe_destination_path
     into the download loop.
 
-    Not run against a real backend: MinIO itself rejects ".." in object
-    keys at PutObject time (XMinioInvalidResourceName), so a real MinIO
-    upload can never carry a traversal key to reproduce this with.
+    Not run against a real backend: S3-compatible servers commonly reject ".."
+    in object keys at PutObject time, so a real upload can rarely carry a
+    traversal key to reproduce this with. This test stays mock-only
+    regardless of which backend the other S3 integration tests use.
     """
     def setUp(self):
         self.dst = tempfile.mkdtemp()

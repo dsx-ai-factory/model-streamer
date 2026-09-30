@@ -1,9 +1,8 @@
 RUN_TIMES := 10
-MINIO_API_PORT := 9000
-MINIO_DATA_DIR := /tmp/minio
-MINIO_BUCKET := test-bucket
-MINIO_ROOT_USER := minioadmin
-MINIO_ROOT_PASSWORD := minioadmin
+S3_TEST_API_PORT := 9000
+S3_TEST_BUCKET := test-bucket
+S3_TEST_ACCESS_KEY := testkey
+S3_TEST_SECRET_KEY := testsecret
 
 FAKE_GCS_SERVER_API_PORT := 8000
 FAKE_GCS_SERVER_ROOT := /tmp/fake-gcs-server
@@ -20,16 +19,36 @@ AZURITE_CONTAINER := test-bucket
 .PHONY: gcs s3 azure fuzzing all
 
 s3:
-	@echo "Starting MinIO server on port ${MINIO_API_PORT} with data directory ${MINIO_DATA_DIR}"; \
-	mkdir -p ${MINIO_DATA_DIR}/${MINIO_BUCKET}; \
-	MINIO_ROOT_USER=${MINIO_ROOT_USER} MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD} minio server ${MINIO_DATA_DIR} --address ":${MINIO_API_PORT}" & \
-	MINIO_PID=$$!; \
-	echo "MinIO PID is $$MINIO_PID"; \
-	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_BUCKET=${MINIO_BUCKET} AWS_ENDPOINT_URL=http://127.0.0.2:${MINIO_API_PORT} AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER} AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD} pytest s3/; \
-	echo "Stopping MinIO..."; \
-	kill $$MINIO_PID; \
-	wait $$MINIO_PID 2>/dev/null || true; \
-	rm -rf ${MINIO_DATA_DIR}
+	@set -e; \
+	S3_TEST_DATA_DIR=$$(mktemp -d); \
+	echo "Starting SeaweedFS (weed mini) on port ${S3_TEST_API_PORT} with data directory $$S3_TEST_DATA_DIR"; \
+	mkdir -p $$S3_TEST_DATA_DIR/${S3_TEST_BUCKET}; \
+	S3_CONFIG=$$(mktemp); \
+	printf '{"identities":[{"name":"admin_user","credentials":[{"accessKey":"${S3_TEST_ACCESS_KEY}","secretKey":"${S3_TEST_SECRET_KEY}"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > $$S3_CONFIG; \
+	cleanup() { \
+		rc=$$?; \
+		echo "Stopping weed..."; \
+		if [ -n "$$PYTEST_PID" ]; then \
+			kill $$PYTEST_PID 2>/dev/null || true; \
+			wait $$PYTEST_PID 2>/dev/null || true; \
+		fi; \
+		if [ -n "$$WEED_PID" ]; then \
+			kill -INT $$WEED_PID 2>/dev/null || true; \
+			i=0; while kill -0 $$WEED_PID 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done; \
+			kill -9 $$WEED_PID 2>/dev/null || true; \
+			wait $$WEED_PID 2>/dev/null || true; \
+		fi; \
+		rm -f $$S3_CONFIG; \
+		rm -rf $$S3_TEST_DATA_DIR; \
+		exit $$rc; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	weed mini -dir=$$S3_TEST_DATA_DIR -bucket=${S3_TEST_BUCKET} -s3.port=${S3_TEST_API_PORT} -s3.config=$$S3_CONFIG & \
+	WEED_PID=$$!; \
+	echo "weed PID is $$WEED_PID"; \
+	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_BUCKET=${S3_TEST_BUCKET} AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} WEED_PID=$$WEED_PID pytest s3/ & \
+	PYTEST_PID=$$!; \
+	wait $$PYTEST_PID
 
 gcs:
 	@echo "Starting Fake GCS Server on port ${FAKE_GCS_SERVER_API_PORT} with root directory ${FAKE_GCS_SERVER_ROOT}"; \
