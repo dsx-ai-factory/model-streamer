@@ -60,8 +60,8 @@ class FsAsyncRouter
         std::vector<size_t> blocks;
         std::vector<unsigned> depths;
 
-        // Whether each group's reads may use registered buffers. Per mount, because registration is
-        // worth 1.45x on virtiofs with O_DIRECT and -8% on NFS.
+        // Whether each group's reads may use registered buffers. Per mount, because it pays on some
+        // file systems and costs on others - see design_io_uring_registration.md.
         std::vector<bool> registers;
     };
 

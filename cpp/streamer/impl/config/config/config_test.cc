@@ -276,8 +276,8 @@ TEST_F(Creation, A_Plain_Number_Applies_Everywhere)
 }
 
 
-// NFS is denied by default because registration measured 0.92x there - a loss - while virtiofs with
-// O_DIRECT gained 1.45x. Prefix matched, so nfs4 is covered without naming it.
+// NFS is denied by default because registration costs there rather than paying. Prefix matched, so
+// nfs4 is covered without naming it.
 TEST_F(Creation, Register_Buffers_Denies_Nfs_By_Default)
 {
     const Config config;
@@ -308,6 +308,34 @@ TEST_F(Creation, Register_Buffers_Deny_List_Is_Configurable)
         const Config config;
 
         EXPECT_TRUE(config.registers_buffers("nfs4"));
+    }
+}
+
+// The master switch turns it off for every mount, whatever the deny list says. It exists so the feature
+// can be measured against itself on one host, and so an operator can disable it without naming types.
+TEST_F(Creation, Register_Buffers_Can_Be_Switched_Off_Entirely)
+{
+    {
+        const Config config;
+        EXPECT_TRUE(config.registers_buffers("ext4")) << "on by default";
+    }
+
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_REGISTER_BUFFERS", "0");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("ext4"));
+        EXPECT_FALSE(config.registers_buffers("virtiofs"));
+        EXPECT_FALSE(config.registers_buffers("nfs4"));
+    }
+
+    {
+        // The switch wins over an empty deny list, which would otherwise allow everything.
+        const utils::temp::Env off("RUNAI_STREAMER_FS_REGISTER_BUFFERS", "0");
+        const utils::temp::Env allow("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("ext4"));
     }
 }
 

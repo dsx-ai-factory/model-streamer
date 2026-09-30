@@ -77,9 +77,9 @@ class IoUringEngine : public IoEngine
     int registered_index(const Registration & registration);
 
     // How many regions the table holds. A SPARSE table is created once at this size and slots are
-    // filled in as slabs appear, because re-registering the whole set on every growth costs about
-    // 10 us per MiB against the total - a millisecond each time a 96 MiB pool adds a slab - where a
-    // single-slot update is 0.27 us.
+    // filled in as slabs appear, because re-registering the whole set on every growth costs time
+    // proportional to the WHOLE pool, where a single-slot update is a fixed and much smaller cost.
+    // See design_io_uring_registration.md.
     //
     // A staging pool cuts slabs of tens of MiB, so this is far more than any pool reaches. An id past
     // it reads the ordinary way rather than failing.

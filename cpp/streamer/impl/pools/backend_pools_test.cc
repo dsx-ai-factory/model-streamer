@@ -109,7 +109,7 @@ TEST(BackendPools, AConfiguredDepthSurvivesTheDiscoveryOrder)
 
 // Mounts that disagree about registered buffers must not share an engine, even at the default cap of
 // one. Registration is bound into an engine when it is built, so a shared engine would let whichever
-// mount arrived first decide for the other - and it is worth 1.45x on virtiofs and -8% on NFS, so
+// mount arrived first decide for the other - and it pays on some file systems and costs on others, so
 // either way round is wrong for somebody.
 //
 // Reachable with the DEFAULT configuration: a plain RUNAI_STREAMER_FS_QUEUE_DEPTH gives every mount the

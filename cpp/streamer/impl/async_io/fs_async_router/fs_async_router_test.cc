@@ -69,7 +69,7 @@ TEST(FsAsyncRouter, Queue_Depth_Is_Resolved_Per_Mount)
 //
 // The policy itself lives in Config with its own tests; what this checks is that the router ASKS and
 // carries the answer per group - without it an NFS mount would read through registered buffers, which
-// measured 8% worse.
+// costs there rather than paying.
 TEST(FsAsyncRouter, Registered_Buffers_Are_Decided_Per_Mount)
 {
     FsAsyncRouter router(async_candidates, with_mounts([](const std::string & directory)

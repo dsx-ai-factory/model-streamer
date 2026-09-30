@@ -147,7 +147,7 @@ class BackendPools
     // Keyed by the DEPTH AND the registration decision, because both are bound into an engine when it
     // is built and neither can change afterwards. Depth alone would let an NFS mount and an ext4 mount
     // share an engine at the default cap of one - and then whichever arrived first would decide
-    // registration for both, which measured 8% either way.
+    // registration for both, which is wrong for one of them whichever way it went.
     std::map<std::pair<unsigned, bool>, std::vector<std::unique_ptr<utils::ThreadPool<Workload>>>> _async_pools;
 
     // Which engine each mount uses. Separate from _async_pools because above the cap several mounts

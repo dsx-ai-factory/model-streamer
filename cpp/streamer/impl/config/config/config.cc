@@ -78,6 +78,11 @@ std::vector<std::string> Config::split_types(const std::string & value)
 
 bool Config::registers_buffers(const std::string & fs_type) const
 {
+    if (!fs_register_buffers)
+    {
+        return false;
+    }
+
     const auto type = lowered(fs_type);
 
     for (const auto & denied : fs_no_register_buffers)
@@ -110,7 +115,7 @@ unsigned Config::to_concurrency(unsigned long value, const char * source)
 Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_bytesize, size_t fs_sync_read_block_bytesize,
                bool enforce_minimum, size_t fs_async_chunk_bytesize, FsQueueDepth fs_async_queue_depth,
                std::string fs_strategy_candidates, unsigned long object_storage_retry_timeout_seconds,
-               std::string fs_no_register_buffers) :
+               std::string fs_no_register_buffers, bool fs_register_buffers) :
     concurrency(concurrency),
     s3_concurrency(s3_concurrency),
     s3_block_bytesize(s3_block_bytesize),
@@ -119,6 +124,7 @@ Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_by
     fs_strategy_candidates(std::move(fs_strategy_candidates)),
     fs_async_queue_depth(std::move(fs_async_queue_depth)),
     fs_no_register_buffers(split_types(fs_no_register_buffers)),
+    fs_register_buffers(fs_register_buffers),
     object_storage_retry_timeout(object_storage_retry_timeout_seconds)
 {
     // Resolved here, with the other configuration, so a malformed RUNAI_STREAMER_DIRECT_BLOCK fails
@@ -212,7 +218,8 @@ Config::Config(FsSettings fs, bool enforce_minimum) :
            utils::getenv<std::string>("RUNAI_STREAMER_FS_STRATEGY", default_fs_strategy_candidates),
            utils::getenv<unsigned long>("RUNAI_STREAMER_S3_TIMEOUT", 0UL),
            utils::getenv<std::string>("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS",
-                                      default_fs_no_register_buffers))
+                                      default_fs_no_register_buffers),
+           utils::getenv<bool>("RUNAI_STREAMER_FS_REGISTER_BUFFERS", default_fs_register_buffers))
 {}
 
 std::ostream & operator<<(std::ostream & os, const Config & config)

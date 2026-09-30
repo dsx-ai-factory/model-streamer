@@ -102,8 +102,9 @@ class StagingPool
 
     // One slab's memory, for a caller that wants to register it with the kernel.
     //
-    // The whole slab rather than one buffer: registration costs about 10 us per MiB whatever it
-    // covers, so registering each buffer would pay that per buffer instead of once per slab.
+    // The whole slab rather than one buffer: registration costs time proportional to the BYTES it
+    // covers whatever the shape, so registering each buffer would pay a per-call cost per buffer
+    // instead of once per slab.
     struct Slab
     {
         void * base = nullptr;

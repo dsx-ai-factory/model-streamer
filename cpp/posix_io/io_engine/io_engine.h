@@ -35,7 +35,8 @@ struct FileRef
 };
 
 // Host memory a caller offers for REGISTRATION with the kernel, so reads into it need no per-read page
-// mapping. Measured at 1.45x less read CPU on virtiofs with O_DIRECT, and 0.92x - a loss - on NFS.
+// mapping. What it is worth differs by file system, and is a CPU saving rather than a bandwidth one -
+// see design_io_uring_registration.md.
 //
 // `id` names this region on every read into it. THE SAME id MUST ALWAYS MEAN THE SAME MEMORY: an engine
 // registers the region once under that number and trusts the number afterwards. A staging pool's slab
@@ -153,9 +154,9 @@ struct AsyncIoConfig
 
     // Whether reads on this MOUNT should use registered buffers when the caller offers them.
     //
-    // Per mount, because it is worth different amounts on different filesystems: measured 1.45x less
-    // read CPU on virtiofs with O_DIRECT, and 0.92x - a LOSS - on NFS, where the data arrives over the
-    // network and there is no device DMA into our pages for registration to streamline.
+    // Per mount, because it is worth different amounts on different file systems, and on some it is a
+    // LOSS: where the data arrives over the network there is no device DMA into our pages for
+    // registration to streamline, so it only adds bookkeeping. See design_io_uring_registration.md.
     //
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
