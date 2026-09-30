@@ -41,7 +41,8 @@ struct Config
            FsQueueDepth fs_async_queue_depth = FsQueueDepth(default_fs_async_queue_depth),
            std::string fs_strategy_candidates = default_fs_strategy_candidates,
            unsigned long object_storage_retry_timeout_seconds = 0,
-           std::string fs_no_register_buffers = default_fs_no_register_buffers);
+           std::string fs_no_register_buffers = default_fs_no_register_buffers,
+           bool fs_register_buffers = default_fs_register_buffers);
     Config(bool enforce_minimum = true);
 
  private:
@@ -79,11 +80,21 @@ struct Config
     // that type rejects zero on purpose ("zero divides by zero downstream"), which is exactly the value
     // a boolean needs.
     //
-    // NFS is denied by default because registration COSTS there: 0.92x, all ten iterations between 0.90
-    // and 0.95, while virtiofs with O_DIRECT gained 1.45x. NFS data arrives over the network through
-    // the client stack, so there is no device DMA into our pages to streamline and registration only
-    // adds bookkeeping.
+    // NFS is denied by default because registration COSTS there rather than paying: its data arrives
+    // over the network through the client stack, so there is no device DMA into our pages to
+    // streamline and registration only adds bookkeeping. See design_io_uring_registration.md.
     static constexpr const char * default_fs_no_register_buffers = "nfs";
+
+    // RUNAI_STREAMER_FS_REGISTER_BUFFERS: the master switch, on by default.
+    //
+    // Separate from the deny list because they answer different questions. The list says WHICH file
+    // systems it is worth doing for; this says whether to do it at all - the switch a benchmark flips
+    // to measure the feature, and the one an operator flips if it ever misbehaves in the field.
+    //
+    // Default ON because it cannot cost correctness: every failure path falls back to an ordinary read.
+    // What it is WORTH is a CPU saving rather than a bandwidth one, so a throughput benchmark will not
+    // show it - see design_io_uring_registration.md before measuring.
+    static constexpr bool default_fs_register_buffers = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
     // than a queue slot.
@@ -128,6 +139,9 @@ struct Config
 
     // The types from RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS, lowercased, in the order written.
     std::vector<std::string> fs_no_register_buffers;
+
+    // The master switch. False turns registered buffers off for every mount, whatever the list says.
+    bool fs_register_buffers;
 
     // Whether reads on a mount of this type may use registered buffers. Prefix matched, so `nfs`
     // covers `nfs4`. An unknown or empty type registers - we deny what we have measured, not what we
