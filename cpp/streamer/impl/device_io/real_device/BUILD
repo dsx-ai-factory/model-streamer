@@ -1,4 +1,4 @@
-load("//:rules.bzl", "runai_cc_binary", "runai_cc_test")
+load("//:rules.bzl", "runai_cc_test")
 
 # The only test that talks to a real driver. It SKIPS where there is none, so it is safe on CPU CI.
 #
@@ -32,21 +32,6 @@ runai_cc_test(
         "-Wl,-rpath,$$ORIGIN/../../../../s3/s3_mock",
     ],
     env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
-)
-
-# Read performance into device memory, with a byte-wise check of every arm. Run by hand on a GPU
-# host - see project_benchmarks_run_manually.
-runai_cc_binary(
-    name = "device_stream_bench",
-    srcs = ["device_stream_bench.cc"],
-    deps = [
-        "//device/cuda",
-        "//streamer/impl/streamer",
-        "//utils/random",
-        "//utils/temp/file",
-        "@cuda//:cuda_headers",
-    ],
-    linkopts = ["-lpthread", "-lm", "-ldl"],
 )
 
 # Real object storage to a real device, through the public C API. Skips unless BOTH a usable GPU and an
