@@ -26,6 +26,11 @@ struct StagingBuffer
     size_t   bytesize = 0;
     unsigned index = 0;      // position in the pool, so release() needs no search
 
+    // Which slab this was cut from. Carried because a reader that registers its buffers with the
+    // kernel identifies them by INDEX rather than by address, and one slab is one registration - so
+    // this is that index. Meaningless to anyone who does not register.
+    unsigned slab = 0;
+
     bool valid() const { return data != nullptr; }
 };
 
@@ -95,6 +100,24 @@ class StagingPool
     // here rather than being carried separately and kept in step by hand.
     size_t buffer_bytesize() const;
 
+    // One slab's memory, for a caller that wants to register it with the kernel.
+    //
+    // The whole slab rather than one buffer: registration costs about 10 us per MiB whatever it
+    // covers, so registering each buffer would pay that per buffer instead of once per slab.
+    struct Slab
+    {
+        void * base = nullptr;
+        size_t bytesize = 0;
+
+        bool valid() const { return base != nullptr; }
+    };
+
+    // The slab a StagingBuffer::slab index names. Invalid for an index this pool has not grown to.
+    //
+    // A slab is never freed or moved while the pool lives, so what this returns stays good - which is
+    // what lets a caller register it once and keep using the index.
+    Slab slab_at(unsigned index) const;
+
     // Diagnostics.
     unsigned created() const;
     unsigned slabs() const;
@@ -129,7 +152,16 @@ class StagingPool
     // Held as owners rather than freed by hand in the destructor, so a throw part-way through
     // registration cannot leak a slab, and so the rule that they are released is a property of the
     // type.
-    std::vector<device::OwnedPinned> _slabs;
+    //
+    // The size rides along because OwnedPinned does not carry it and slab_at() must answer it. A
+    // parallel vector would be the same two facts with a way to disagree.
+    struct SlabRecord
+    {
+        device::OwnedPinned memory;
+        size_t bytesize = 0;
+    };
+
+    std::vector<SlabRecord> _slabs;
 
     // Every buffer that exists, in creation order. Never shrinks, so an index stays valid.
     std::vector<StagingBuffer> _buffers;

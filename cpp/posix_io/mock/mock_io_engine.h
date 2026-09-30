@@ -44,7 +44,11 @@ class MockIoEngine : public IoEngine
     Limits limits() const override;
     unsigned depth() const override;
 
-    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer) override;
+    // `registration` is recorded rather than used, so a test can assert what a caller offered.
+    using IoEngine::stage;   // keeps the no-registration overload visible through this type
+
+    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                               char * buffer, Registration registration) override;
 
     // Issues up to the flush limit, oldest first. The rest stays staged - both real APIs issue a
     // prefix, so the unissued set is always the tail.
@@ -65,6 +69,10 @@ class MockIoEngine : public IoEngine
     const Request & request(RequestId id) const;
 
     std::vector<RequestId> staged() const;      // stage order
+
+    // What the last stage() was offered. A mock engine registers nothing, so this is the only way to
+    // check that a caller described its buffer at all.
+    Registration last_registration() const;
     std::vector<RequestId> in_flight() const;   // issue order
 
     size_t staged_count() const;
@@ -166,6 +174,7 @@ class MockIoEngine : public IoEngine
 
     std::map<RequestId, Request> _live;      // staged or in flight, by id
     std::deque<RequestId> _staged;           // stage order
+    Registration _last_registration;
     std::deque<RequestId> _in_flight;        // issue order
     std::deque<Completion> _ready;           // the order the test completed them
 

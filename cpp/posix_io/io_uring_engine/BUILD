@@ -6,6 +6,7 @@ runai_cc_auto_library(
         "//common/exception",
         "//posix_io/alignment",
         "//posix_io/io_engine",
+        "//posix_io/io_uring_probe",
         "//common/response_code",
         "//utils/logging",
         "@uring//:uring",

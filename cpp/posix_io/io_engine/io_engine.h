@@ -34,6 +34,27 @@ struct FileRef
     bool direct = false;   // as opened, after any fallback
 };
 
+// Host memory a caller offers for REGISTRATION with the kernel, so reads into it need no per-read page
+// mapping. Measured at 1.45x less read CPU on virtiofs with O_DIRECT, and 0.92x - a loss - on NFS.
+//
+// `id` names this region on every read into it. THE SAME id MUST ALWAYS MEAN THE SAME MEMORY: an engine
+// registers the region once under that number and trusts the number afterwards. A staging pool's slab
+// index is one such number.
+//
+// Advisory in both directions. An engine that does not register ignores it, and an engine that does may
+// still decline - the kernel can refuse, RLIMIT_MEMLOCK above all. Either way the read is served the
+// ordinary way, so a caller never has to handle registration failing.
+//
+// Default-constructed means "ordinary read", which is what every caller without such memory passes.
+struct Registration
+{
+    void *   base = nullptr;
+    size_t   bytesize = 0;
+    unsigned id = 0;
+
+    bool valid() const { return base != nullptr; }
+};
+
 // What the engine imposes; AsyncIoConfig is what the caller chooses. Read once, at construction.
 struct Limits
 {
@@ -162,7 +183,20 @@ class IoEngine
     //
     // A non-Success return means nothing was staged and no completion will arrive; the caller has to
     // resolve the request itself.
-    virtual common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer) = 0;
+    //
+    // `registration` describes `buffer` for an engine that can read into registered memory.
+    virtual common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                                       char * buffer, Registration registration) = 0;
+
+    // For the callers with no registered memory to offer, which is most of them.
+    //
+    // An OVERLOAD rather than a default argument: a default is resolved from the static type, so one
+    // declared here would be invisible through a derived pointer - which is how every test holds its
+    // engine. Overriding classes need `using IoEngine::stage;` to keep this one visible.
+    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer)
+    {
+        return stage(id, file, offset, bytesize, buffer, Registration());
+    }
 
     // Issue what is staged, in as few syscalls as possible, and report how many went out.
     //
