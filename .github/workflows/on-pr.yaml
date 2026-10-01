@@ -45,10 +45,10 @@ jobs:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Download native packages
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v6
       with:
         pattern: packages-*-x86_64
         path: py
@@ -78,7 +78,7 @@ jobs:
       options: --security-opt seccomp=unconfined
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Build C++ library
       run: make ci-build-cpp
@@ -95,7 +95,7 @@ jobs:
       run: make ci-test-python
 
     - name: Upload architecture packages
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: packages-${{ matrix.component }}-${{ matrix.arch }}
         # Keep package/dist paths inside each artifact for the existing install targets.
@@ -108,35 +108,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Download both architectures
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v6
       with:
         pattern: packages-*
         path: py
         merge-multiple: true
 
     - name: Upload streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: runai_model_streamer
         path: py/runai_model_streamer/dist/*
         if-no-files-found: error
 
     - name: Upload s3 streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: runai_model_streamer_s3
         path: py/runai_model_streamer_s3/dist/*
         if-no-files-found: error
 
     - name: Upload GCS streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: runai_model_streamer_gcs
         path: py/runai_model_streamer_gcs/dist/*
         if-no-files-found: error
 
     - name: Upload Azure streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: runai_model_streamer_azure
         path: py/runai_model_streamer_azure/dist/*
@@ -148,7 +148,7 @@ jobs:
     needs: [build, tests, packages]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - name: Require every job to succeed
       env:
         CI_BUILD: ${{ needs.build.result }}
