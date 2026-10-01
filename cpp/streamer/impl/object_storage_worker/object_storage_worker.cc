@@ -434,6 +434,28 @@ void ObjectStorageWorker::drain_copies()
     }
 }
 
+void ObjectStorageWorker::quiesce_copies()
+{
+    // A copy already handed over is NOT cancelled: it completes on the waiter's thread and calls back
+    // into this worker. Two things depend on waiting for it here.
+    //
+    // The callback holds `this` and pushes onto a member deque, so a worker destroyed while a copy is
+    // in flight is written through after it is gone.
+    //
+    // The copy is also still writing into the caller's device memory. A response promises that nothing
+    // will write to that range again, so the copy must land before the range is reported - the same
+    // promise quiesce() keeps on the filesystem side.
+    //
+    // Cannot hang: the issuer reports every copy exactly once, on every path including the ones that
+    // never reach a device.
+    CopyDone done;
+
+    while (_copies_issued > 0 && _copies.pop(done))
+    {
+        --_copies_issued;
+    }
+}
+
 void ObjectStorageWorker::complete_chunk(InflightMap::iterator wlit, size_t chunk_idx,
                                         common::ResponseCode ret, bool free_slot)
 {
@@ -582,6 +604,11 @@ bool ObjectStorageWorker::holding_work() const
     return !_waiting.empty() || !_waiting_retries.empty() || _copies_issued > 0;
 }
 
+ObjectStorageWorker::~ObjectStorageWorker()
+{
+    quiesce_copies();
+}
+
 void ObjectStorageWorker::abort_all(common::ResponseCode code)
 {
     // Fail and drop every in-flight workload - including any whose reads are still outstanding at the
@@ -598,10 +625,14 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
     // OOM caller is expected to abort on UnknownError and tear the streamer down.
     _retry.clear();
 
+    // BEFORE anything is reported or released. Copies in flight are writing into caller memory, and
+    // their buffers come back to the pool as they retire.
+    quiesce_copies();
+
     // Every staging buffer still held by a chunk that will never complete. Before the workloads are
     // erased, because the chunks go with them - and a buffer lost here would shrink the pool for the
-    // life of the worker. A buffer already handed to the issuer is NOT here: that one comes back on
-    // its own, and its completion locates to end() and is dropped.
+    // life of the worker. A buffer already handed to the issuer is NOT here: the issuer returns it
+    // whatever happens, and quiesce_copies above already waited for that.
     if (_pool != nullptr)
     {
         for (auto & [base, wl] : _inflight)
@@ -624,10 +655,6 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
         finalize(it, code);   // fails every batch and erases `it`
         it = next;
     }
-
-    // Copies handed over are no longer anyone's business here: their workloads are gone, so their
-    // completions locate to end() and are dropped. Forgetting them is what lets idle() become true.
-    _copies_issued = 0;
 
     // With them, or a waiting chunk would name a workload that no longer exists - and it would keep
     // this worker busy for good, because a parked chunk is deferred work.

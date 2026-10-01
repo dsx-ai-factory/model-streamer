@@ -64,6 +64,12 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
                                  std::shared_ptr<DeviceWriter> writer = nullptr,
                                  std::shared_ptr<DeviceIssuer> issuer = nullptr);
 
+    // Waits for every copy still in flight. MUST come before anything else is destroyed: the
+    // completion lambda holds `this` and the waiter's thread is still running. The pool drains before
+    // joining, so this normally finds nothing - it is the teardown that does not go through abort_all
+    // that needs it.
+    ~ObjectStorageWorker();
+
     // Staging buffers this worker may hold BEYOND its in-flight window, so a chunk whose read has
     // landed can wait for its copy without costing another chunk its buffer.
     //
@@ -184,6 +190,10 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
 
     // Account every copy that has landed since the last turn.
     void drain_copies();
+
+    // Waits until every copy handed to the issuer has reported. Called where this worker is about to
+    // stop being a valid callback target, and before an abort reports its ranges.
+    void quiesce_copies();
 
     // Give every parked chunk another chance at a staging buffer. One pass per queue: a chunk the pool
     // still cannot serve goes back to the end of its own queue.
