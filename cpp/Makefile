@@ -15,6 +15,21 @@ build:
 		--define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
 		"--config=${ARCH}"
 
+.PHONY: build_streamer build_s3 build_gcs build_azure
+
+# Individual CI jobs use the same commands and flags as the full build above.
+build_streamer:
+	bazel build streamer:libstreamer.so "--config=${ARCH}"
+
+build_s3:
+	bazel build s3:libstreamers3.so --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} "--config=${ARCH}"
+
+build_gcs:
+	bazel build gcs:libstreamergcs.so --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} "--config=${ARCH}"
+
+build_azure:
+	bazel build azure:libstreamerazure.so --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} "--config=${ARCH}"
+
 # Build Azure library with Azurite testing support (enables AZURE_STORAGE_ACCOUNT_KEY)
 build_azure_test:
 	bazel build azure:libstreamerazure.so \

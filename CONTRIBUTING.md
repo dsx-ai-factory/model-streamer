@@ -110,6 +110,31 @@ merging environment changes, wait for image publication before rerunning depende
 PR checks. Keep CI's container options in sync with the required devcontainer
 `runArgs`, including the seccomp setting used by the io_uring tests.
 
+### Parallel PR checks
+
+A setup job computes `PACKAGE_VERSION` once. Eight build jobs then run
+`make ci-build COMPONENT=... ARCH=...`: core (`streamer`), S3, GCS, and Azure,
+each for `x86_64` and `aarch64`. Each job uses the same native build command and
+packaging target as the existing full build and uploads its wheel. After the builds
+succeed, three test jobs download the x86_64 wheels and run in parallel:
+
+- `make ci-test-cpp`
+- `make ci-test-python`
+- `make ci-test-integration` (integration suites followed by the filesystem strategy sweep)
+
+The CI test targets use `make ci-install` to install the downloaded wheels via
+the existing Python package Makefiles. Python distributed tests load the installed
+real library; the mock unit tests retain their existing override. The integration
+job also reuses the installed core library for the Python filesystem strategy
+tests through `test-unit-real-installed`, avoiding another full native build.
+The same tests still run for all four strategies. C++ test compilation and the
+Azure testing variant remain required. `make test` remains the full sequential
+local entry point and builds from source as before.
+
+Artifact assembly combines both architectures into the four existing package
+artifacts. The `Test, Build & Push` required check succeeds only when all eight
+builds, all three test jobs, and artifact assembly succeed.
+
 ## Getting Help
 Need support or have a question? We're here to help:
 - Report issues or ask questions by [opening an issue on GitHub](https://github.com/dsx-ai-factory/model-streamer/issues).
