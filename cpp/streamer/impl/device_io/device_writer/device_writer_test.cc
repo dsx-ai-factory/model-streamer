@@ -555,4 +555,75 @@ TEST_F(DeviceWriterTest, A_Type_With_No_Backend_Is_Unavailable)
     EXPECT_NE(channel, nullptr);
 }
 
+
+// A copy whose EVENT failed to record is still on the stream, reading out of the staging buffer.
+// Nothing marks when it ends, so the buffer must not go back to the pool until the stream is drained -
+// otherwise the next read overwrites the source while the device is still consuming it.
+TEST_F(DeviceWriterTest, A_Copy_Enqueued_Without_An_Event_Drains_The_Stream)
+{
+    DeviceWriter writer(lookup());
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+
+    auto device = _backend->opened(0);
+    ASSERT_NE(device, nullptr);
+
+    auto pool = pool_for(writer, channel, 2 /* buffers */);
+    StagingBuffer buffer;
+    ASSERT_EQ(pool->acquire(buffer), common::ResponseCode::Success);
+
+    // The copy is enqueued; only the event record fails.
+    device->fail_event_record = true;
+
+    std::vector<char> destination(Buffer, 0);
+    const auto before = device->stream_syncs.load();
+
+    EXPECT_NE(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+                           nullptr),
+              common::ResponseCode::Success);
+
+    EXPECT_GT(device->stream_syncs.load(), before)
+        << "the staging buffer went back to the pool without draining the stream; a copy is still"
+        << " reading out of it";
+
+    device->fail_event_record = false;
+}
+
+
+// And when the stream cannot be drained either, the buffer is RETAINED rather than returned. Nothing
+// is left that can say when the copy stops reading from it, so handing it to the next reader would
+// corrupt that read. One buffer is lost from the pool; the alternative is silent corruption.
+TEST_F(DeviceWriterTest, A_Buffer_Is_Retained_When_The_Stream_Cannot_Be_Drained)
+{
+    DeviceWriter writer(lookup());
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+
+    auto device = _backend->opened(0);
+    ASSERT_NE(device, nullptr);
+
+    // ONE buffer, so the pool is empty exactly when that buffer is not given back.
+    auto pool = pool_for(writer, channel, 1 /* buffer */);
+    StagingBuffer buffer;
+    ASSERT_EQ(pool->acquire(buffer), common::ResponseCode::Success);
+
+    device->fail_event_record = true;
+    device->fail_stream_synchronize = true;
+
+    std::vector<char> destination(Buffer, 0);
+    EXPECT_NE(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+                           nullptr),
+              common::ResponseCode::Success);
+
+    StagingBuffer again;
+    ASSERT_EQ(pool->try_acquire(again), common::ResponseCode::Success);
+    EXPECT_FALSE(again.valid())
+        << "the buffer went back to the pool although nothing can say when the copy stops reading it";
+
+    device->fail_event_record = false;
+    device->fail_stream_synchronize = false;
+}
+
 } // namespace runai::llm::streamer::impl
