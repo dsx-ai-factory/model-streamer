@@ -1,30 +1,33 @@
-FROM ubuntu:20.04
+FROM python:3.11.16-slim-bookworm@sha256:a36c24f9cbdf4fd0f52d67f0823eeac19c2028c637cecc392d97f980d4fec56b AS toolchain
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3 \
-    python3-pip \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+# Python and pip come from the base image. Install native build tools together;
+# both target toolchains are needed on x86_64 and ARM64 development hosts.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
     gcc-x86-64-linux-gnu g++-x86-64-linux-gnu binutils-x86-64-linux-gnu \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+    git \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
+    pkg-config \
+    wget \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aarch64-linux-gnu-ld.gold /usr/bin/ld.gold
 
-RUN pip install \
+# setup.py bdist_wheel needs these explicitly on the slim Python image.
+RUN python3 -m pip install --no-cache-dir \
+    setuptools==80.9.0 \
+    wheel==0.45.1 \
     boto3 \
     cpplint==1.5.4 \
     pytest
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    cmake \
-    git \
-    curl \
-    libssl-dev \
-    libcurl4-openssl-dev \
-    libxml2-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM toolchain AS devcontainer
 
 # weed (SeaweedFS), the S3-compatible object store used for local S3 tests. Checksummed like
 # liburing/libaio below.
@@ -54,26 +57,22 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 RUN curl -fsSL -o openssl-3.5.0.tar.gz https://www.openssl.org/source/openssl-3.5.0.tar.gz && \
     tar zxf openssl-3.5.0.tar.gz && \
     cd openssl-3.5.0 && \
-
     ./Configure no-ssl2 no-zlib no-shared no-comp no-dynamic-engine enable-ec_nistp_64_gcc_128 --cross-compile-prefix=/usr/bin/x86_64-linux-gnu- --prefix=/opt/x86_64-ssl --openssldir=/opt/x86_64-ssl --libdir=lib linux-x86_64 && \
         make -j4 > /dev/null && \
         make install_sw > /dev/null && \
         make clean > /dev/null && \
         make distclean > /dev/null && \
-
     ./Configure no-ssl2 no-zlib no-shared no-comp no-dynamic-engine enable-ec_nistp_64_gcc_128 --libdir=lib --cross-compile-prefix=/usr/bin/aarch64-linux-gnu- --prefix=/opt/aarch64-ssl --openssldir=/opt/aarch64-ssl linux-aarch64 && \
         make -j4 > /dev/null && \
         make install_sw > /dev/null && \
         make clean > /dev/null && \
         make distclean > /dev/null && \
-
     cd - && \
     rm -rf openssl-3.5.0 openssl-3.5.0.tar.gz
 
 RUN curl -fsSL -o curl-8.13.0.tar.gz https://github.com/curl/curl/releases/download/curl-8_13_0/curl-8.13.0.tar.gz && \
     tar zxf curl-8.13.0.tar.gz && \
     cd curl-8.13.0 && \
-
     AR=/usr/bin/x86_64-linux-gnu-ar \
     AS=/usr/bin/x86_64-linux-gnu-as \
     LD=/usr/bin/x86_64-linux-gnu-ld \
@@ -87,7 +86,6 @@ RUN curl -fsSL -o curl-8.13.0.tar.gz https://github.com/curl/curl/releases/downl
     make VERBOSE=1 -j4 > /dev/null && \
         make install > /dev/null && \
         make clean > /dev/null  && \
-
     AR=/usr/bin/aarch64-linux-gnu-ar \
     AS=/usr/bin/aarch64-linux-gnu-as \
     LD=/usr/bin/aarch64-linux-gnu-ld \
@@ -99,14 +97,12 @@ RUN curl -fsSL -o curl-8.13.0.tar.gz https://github.com/curl/curl/releases/downl
         make -j4 > /dev/null && \
         make install > /dev/null && \
         make clean > /dev/null && \
-
     cd - && \
     rm -rf curl-7.83.1 curl-7.83.1.tar.gz
 
 RUN curl -fsSL -o zlib-1.3.1.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz && \
     tar zxf zlib-1.3.1.tar.gz && \
     cd zlib-1.3.1 && \
-
     AR=/usr/bin/x86_64-linux-gnu-ar \
     AS=/usr/bin/x86_64-linux-gnu-as \
     LD=/usr/bin/x86_64-linux-gnu-ld \
@@ -117,7 +113,6 @@ RUN curl -fsSL -o zlib-1.3.1.tar.gz https://github.com/madler/zlib/releases/down
         make -j4 > /dev/null && \
         make install > /dev/null && \
         make clean > /dev/null && \
-
     AR=/usr/bin/aarch64-linux-gnu-ar \
     AS=/usr/bin/aarch64-linux-gnu-as \
     LD=/usr/bin/aarch64-linux-gnu-ld \
@@ -135,7 +130,6 @@ ADD aarch64-linux-gnu.cmake /opt/toolchains/aarch64-linux-gnu.cmake
 ADD x86_64-linux-gnu.cmake /opt/toolchains/x86_64-linux-gnu.cmake
 RUN git clone --recurse-submodules --depth 1 --branch "1.11.584" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp && \
     cd /opt/aws-sdk-cpp && \
-    
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/toolchains/x86_64-linux-gnu.cmake \
           -DBUILD_ONLY="s3-crt" \
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -155,10 +149,8 @@ RUN git clone --recurse-submodules --depth 1 --branch "1.11.584" https://github.
           -DOPENSSL_INCLUDE_DIR="/opt/x86_64-ssl/include" && \
     make -j4 && \
     make install && \
-
     make clean && \
     rm -rf CMakeCache.txt && \
-    
     cmake -DCMAKE_TOOLCHAIN_FILE=/opt/toolchains/aarch64-linux-gnu.cmake \
           -DBUILD_ONLY="s3-crt" \
           -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -183,7 +175,6 @@ RUN git clone --recurse-submodules --depth 1 --branch "1.11.584" https://github.
 RUN curl -fsSL -o libxml2-2.13.5.tar.xz https://download.gnome.org/sources/libxml2/2.13/libxml2-2.13.5.tar.xz && \
     tar xf libxml2-2.13.5.tar.xz && \
     cd libxml2-2.13.5 && \
-
     AR=/usr/bin/x86_64-linux-gnu-ar \
     AS=/usr/bin/x86_64-linux-gnu-as \
     LD=/usr/bin/x86_64-linux-gnu-ld \
@@ -201,7 +192,6 @@ RUN curl -fsSL -o libxml2-2.13.5.tar.xz https://download.gnome.org/sources/libxm
         make -j4 > /dev/null && \
         make install > /dev/null && \
         make distclean > /dev/null && \
-
     AR=/usr/bin/aarch64-linux-gnu-ar \
     AS=/usr/bin/aarch64-linux-gnu-as \
     LD=/usr/bin/aarch64-linux-gnu-ld \
@@ -216,7 +206,6 @@ RUN curl -fsSL -o libxml2-2.13.5.tar.xz https://download.gnome.org/sources/libxm
         make -j4 > /dev/null && \
         make install > /dev/null && \
         make distclean > /dev/null && \
-
     cd - && \
     rm -rf libxml2-2.13.5 libxml2-2.13.5.tar.xz
 
@@ -307,7 +296,6 @@ RUN curl -fsSL -o liburing-2.14.tar.gz https://github.com/axboe/liburing/archive
     echo "5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c  liburing-2.14.tar.gz" | sha256sum -c - && \
     tar zxf liburing-2.14.tar.gz && \
     cd liburing-liburing-2.14 && \
-
     CC=/usr/bin/x86_64-linux-gnu-gcc \
     ./configure --use-libc --prefix=/opt/x86_64-uring --libdir=/opt/x86_64-uring/lib && \
         AR=/usr/bin/x86_64-linux-gnu-ar \
@@ -316,7 +304,6 @@ RUN curl -fsSL -o liburing-2.14.tar.gz https://github.com/axboe/liburing/archive
         make -C src -j4 ENABLE_SHARED=0 CFLAGS="-fPIC -O2" > /dev/null && \
         make install ENABLE_SHARED=0 > /dev/null && \
         make clean > /dev/null && \
-
     CC=/usr/bin/aarch64-linux-gnu-gcc \
     ./configure --use-libc --prefix=/opt/aarch64-uring --libdir=/opt/aarch64-uring/lib && \
         AR=/usr/bin/aarch64-linux-gnu-ar \
@@ -325,7 +312,6 @@ RUN curl -fsSL -o liburing-2.14.tar.gz https://github.com/axboe/liburing/archive
         make -C src -j4 ENABLE_SHARED=0 CFLAGS="-fPIC -O2" > /dev/null && \
         make install ENABLE_SHARED=0 > /dev/null && \
         make clean > /dev/null && \
-
     cd - && \
     rm -rf liburing-liburing-2.14 liburing-2.14.tar.gz
 
@@ -349,7 +335,6 @@ RUN curl -fsSL -o libaio-0.3.113.tar.gz https://releases.pagure.org/libaio/libai
     echo "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz" | sha256sum -c - && \
     tar zxf libaio-0.3.113.tar.gz && \
     cd libaio-0.3.113 && \
-
     AR=/usr/bin/x86_64-linux-gnu-ar \
     RANLIB=/usr/bin/x86_64-linux-gnu-ranlib \
     CC=/usr/bin/x86_64-linux-gnu-gcc \
@@ -358,7 +343,6 @@ RUN curl -fsSL -o libaio-0.3.113.tar.gz https://releases.pagure.org/libaio/libai
         cp src/libaio.a /opt/x86_64-aio/lib/ && \
         cp src/libaio.h /opt/x86_64-aio/include/ && \
         make -C src clean > /dev/null && \
-
     AR=/usr/bin/aarch64-linux-gnu-ar \
     RANLIB=/usr/bin/aarch64-linux-gnu-ranlib \
     CC=/usr/bin/aarch64-linux-gnu-gcc \
@@ -367,7 +351,5 @@ RUN curl -fsSL -o libaio-0.3.113.tar.gz https://releases.pagure.org/libaio/libai
         cp src/libaio.a /opt/aarch64-aio/lib/ && \
         cp src/libaio.h /opt/aarch64-aio/include/ && \
         make -C src clean > /dev/null && \
-
     cd - && \
     rm -rf libaio-0.3.113 libaio-0.3.113.tar.gz
-

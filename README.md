@@ -40,6 +40,18 @@ with SafetensorsStreamer() as streamer:
 
 Our repository is built using devcontainer ([Further reading](https://containers.dev/))
 
+The devcontainer uses Python 3.11 on Debian Bookworm, with GCC toolchains for
+both x86_64 and ARM64. Python and pip come from the official Python image;
+native SDKs are built separately in the Dockerfile. Python 3.11 also supports
+the existing NumPy 1.24.4 test dependency.
+
+Wheels built in this environment use `manylinux_2_36_x86_64` and
+`manylinux_2_36_aarch64` tags and require glibc 2.36 or newer. This raises the
+Linux compatibility baseline: these wheels cannot be installed on older
+distributions such as Ubuntu 20.04 or 22.04. Building for older distributions
+requires an older build environment and validation of its native dependencies;
+changing the wheel tag alone does not provide compatibility.
+
 The following commands should run inside the dev container
 
 > [!NOTE]
@@ -68,5 +80,5 @@ pip3 install py/runai_model_streamer py/runai_model_streamer_s3
 ```
 
 > [!IMPORTANT]
-> In order to the CPP to run, you need to install libcurl4 and libssl1.1_1
-
+> Builds using `USE_SYSTEM_LIBS=1` require the matching system curl and OpenSSL
+> libraries at runtime (`libcurl4` and `libssl3` on Debian Bookworm).

@@ -1,5 +1,5 @@
 ARCH := $(shell uname -m)
-PLATFORM := manylinux2014_${ARCH}
+PLATFORM := manylinux_2_36_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 STREAMER_MOCK_LIB = ../../cpp/bazel-bin/mock/libstreamer-mock.so

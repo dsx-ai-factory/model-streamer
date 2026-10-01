@@ -7,7 +7,7 @@ SET(CMAKE_C_COMPILER /usr/bin/x86_64-linux-gnu-gcc)
 SET(CMAKE_CXX_COMPILER /usr/bin/x86_64-linux-gnu-g++)
 SET(CMAKE_LINKER /usr/bin/x86_64-linux-gnu-ld)
 SET(CMAKE_AR /usr/bin/x86_64-linux-gnu-ar)
-SET(CMAKE_NM /ousr/bin/x86_64-linux-gnu-nm)
+SET(CMAKE_NM /usr/bin/x86_64-linux-gnu-nm)
 SET(CMAKE_RANLIB /usr/bin/x86_64-linux-gnu-ranlib)
 
 # Specify sysroot if needed

@@ -1,5 +1,5 @@
 ARCH := $(shell uname -m)
-PLATFORM := manylinux2014_${ARCH}
+PLATFORM := manylinux_2_36_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 .PHONY: build test install_dev_dep clean
