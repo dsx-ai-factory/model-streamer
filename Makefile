@@ -33,6 +33,9 @@ FS_STRATEGIES := sync_buffered \
                  io_uring_direct,sync_buffered \
                  io_uring_buffered,sync_buffered
 
+# CI selects the target that reuses its installed wheel.
+PYTHON_STRATEGY_TEST ?= test-unit-real
+
 # Run the suites that actually respond to RUNAI_STREAMER_FS_STRATEGY, once per strategy.
 #
 # Replaces the old `test_iouring` target, which swept only three strategies, never covered
@@ -52,6 +55,46 @@ test_strategies:
 	for strategy in $(FS_STRATEGIES); do \
 	    echo "=== filesystem strategy: $$strategy ===" && \
 	    make -C cpp test_strategy FS_STRATEGY=$$strategy && \
-	    make -C py/runai_model_streamer test-unit-real FS_STRATEGY=$$strategy && \
+	    make -C py/runai_model_streamer $(PYTHON_STRATEGY_TEST) FS_STRATEGY=$$strategy && \
 	    make -C tests fuzzing FS_STRATEGY=$$strategy RUN_TIMES=3 || exit 1; \
 	done
+
+# CI installs wheels downloaded from the architecture build jobs. The local
+# `install` and `test` targets above still build from source as before.
+COMPONENT ?= streamer
+ARCH ?= $(shell uname -m)
+CI_PACKAGE_DIR = runai_model_streamer$(if $(filter-out streamer,$(COMPONENT)),_$(COMPONENT))
+
+.PHONY: ci-build ci-build-cpp ci-build-python ci-install ci-test-cpp ci-test-python ci-test-integration ci-check
+
+ci-build:
+	$(MAKE) ci-build-cpp
+	$(MAKE) ci-build-python
+
+ci-build-cpp:
+	$(MAKE) -C cpp build_$(COMPONENT) ARCH=$(ARCH)
+
+ci-build-python:
+	$(MAKE) -C py/$(CI_PACKAGE_DIR) build ARCH=$(ARCH)
+
+ci-install:
+	$(MAKE) -C py install
+
+ci-test-cpp:
+	$(MAKE) -C cpp test_$(COMPONENT) ARCH=$(ARCH)
+
+ci-test-python:
+	$(MAKE) -C py/runai_model_streamer install
+	# Distributed tests use the installed real library; unit tests override it with the mock.
+	library="$$(python3 -c 'from runai_model_streamer.libstreamer import DEFAULT_STREAMER_LIBRARY; print(DEFAULT_STREAMER_LIBRARY)')" && \
+		STREAMER_LIBRARY="$$library" $(MAKE) -C py test
+
+ci-test-integration: ci-install
+	$(MAKE) -C tests all
+	library="$$(python3 -c 'from runai_model_streamer.libstreamer import DEFAULT_STREAMER_LIBRARY; print(DEFAULT_STREAMER_LIBRARY)')" && \
+		$(MAKE) test_strategies PYTHON_STRATEGY_TEST=test-unit-real-installed STREAMER_REAL_LIB="$$library"
+
+ci-check:
+	test "$(CI_BUILD)" = success
+	test "$(CI_TESTS)" = success
+	test "$(CI_PACKAGES)" = success
