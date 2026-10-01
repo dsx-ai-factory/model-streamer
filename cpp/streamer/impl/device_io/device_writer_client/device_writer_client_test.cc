@@ -47,7 +47,7 @@ class DeviceWriterClientTest : public ::testing::Test
  protected:
     void SetUp() override
     {
-        _writer = std::make_shared<DeviceWriter>([this]() { ++_factory_calls; return _backend; });
+        _writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { ++_factory_calls; return _backend; }; });
     }
 
     std::shared_ptr<device::MockBackend> _backend = std::make_shared<device::MockBackend>();
@@ -76,7 +76,7 @@ TEST_F(DeviceWriterClientTest, The_First_Take_Opens_The_Device_And_Builds_The_Po
     DeviceWriterClient client(_writer, geometry(4 * Buffer), 4);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
     ASSERT_TRUE(buffer.valid());
 
     EXPECT_EQ(client.devices(), 1u);
@@ -93,8 +93,8 @@ TEST_F(DeviceWriterClientTest, One_Reader_Has_One_Pool_Across_Devices)
 
     StagingBuffer first;
     StagingBuffer second;
-    ASSERT_EQ(client.take(0, first), common::ResponseCode::Success);
-    ASSERT_EQ(client.take(1, second), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), first), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(1), second), common::ResponseCode::Success);
     ASSERT_TRUE(first.valid());
     ASSERT_TRUE(second.valid());
 
@@ -112,8 +112,8 @@ TEST_F(DeviceWriterClientTest, Two_Readers_Share_The_Device_And_Not_The_Buffers)
     DeviceWriterClient large(_writer, geometry(4 * Buffer), 4);
 
     StagingBuffer buffer;
-    ASSERT_EQ(small.take(0, buffer), common::ResponseCode::Success);
-    ASSERT_EQ(large.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(small.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
+    ASSERT_EQ(large.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
 
     EXPECT_EQ(small.buffers(), 1u) << "held to its own window, not the other reader's";
     EXPECT_EQ(large.buffers(), 4u);
@@ -123,19 +123,19 @@ TEST_F(DeviceWriterClientTest, Two_Readers_Share_The_Device_And_Not_The_Buffers)
     EXPECT_EQ(_factory_calls.load(), 1u) << "and one driver, for the whole streamer";
 }
 
-// The reader passes the ordinal it got from the Batch, and nothing else.
+// The reader passes the device it got from the Batch, and nothing else.
 TEST_F(DeviceWriterClientTest, Write_Copies_And_Returns_The_Buffer)
 {
     DeviceWriterClient client(_writer, geometry(), 1);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
     ASSERT_TRUE(buffer.valid());
     std::memset(buffer.data, 0x5a, Buffer);
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> reported{-1};
-    ASSERT_EQ(client.write(0, buffer, Buffer, destination.data(),
+    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destination.data(),
                            [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); }),
               common::ResponseCode::Success);
 
@@ -147,7 +147,7 @@ TEST_F(DeviceWriterClientTest, Write_Copies_And_Returns_The_Buffer)
     StagingBuffer next;
     ASSERT_TRUE(eventually([&]()
         {
-            return client.take(0, next) == common::ResponseCode::Success && next.valid();
+            return client.take(common::Device::cuda(0), next) == common::ResponseCode::Success && next.valid();
         }));
 }
 
@@ -158,15 +158,15 @@ TEST_F(DeviceWriterClientTest, A_Buffer_Can_Go_To_Any_Device_The_Reader_Has_Open
     DeviceWriterClient client(_writer, geometry(4 * Buffer), 4);
 
     StagingBuffer opened;
-    ASSERT_EQ(client.take(1, opened), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(1), opened), common::ResponseCode::Success);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
     std::memset(buffer.data, 0x33, Buffer);
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(client.write(1, buffer, Buffer, destination.data(),
+    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, Buffer, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
@@ -183,11 +183,11 @@ TEST_F(DeviceWriterClientTest, The_Ceiling_Is_The_Readers_Window)
     DeviceWriterClient client(_writer, geometry(), 1);
 
     StagingBuffer held;
-    ASSERT_EQ(client.take(0, held), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), held), common::ResponseCode::Success);
     ASSERT_TRUE(held.valid());
 
     StagingBuffer none;
-    EXPECT_EQ(client.take(0, none), common::ResponseCode::Success);
+    EXPECT_EQ(client.take(common::Device::cuda(0), none), common::ResponseCode::Success);
     EXPECT_FALSE(none.valid());
 }
 
@@ -198,15 +198,15 @@ TEST_F(DeviceWriterClientTest, Write_To_An_Unopened_Device_Is_Reported_And_The_B
     DeviceWriterClient client(_writer, geometry(), 1);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(client.write(3, buffer, Buffer, destination.data(), nullptr),
+    EXPECT_EQ(client.write(common::Device::cuda(3), buffer, Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
     EXPECT_EQ(_writer->devices(), 1u) << "and the device was not opened on the way";
 
     StagingBuffer again;
-    ASSERT_EQ(client.take(0, again), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), again), common::ResponseCode::Success);
     EXPECT_TRUE(again.valid()) << "the buffer came back";
 }
 
@@ -217,18 +217,18 @@ TEST_F(DeviceWriterClientTest, An_Unopenable_Device_Is_Reported)
     DeviceWriterClient client(_writer, geometry(), 4);
 
     StagingBuffer buffer;
-    EXPECT_EQ(client.take(0, buffer), common::ResponseCode::InvalidDevice);
+    EXPECT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::InvalidDevice);
     EXPECT_FALSE(buffer.valid());
     EXPECT_EQ(client.buffers(), 0u) << "nothing was pinned for a device that could not be opened";
 }
 
 TEST_F(DeviceWriterClientTest, No_Device_On_This_Machine_Is_Reported)
 {
-    auto writer = std::make_shared<DeviceWriter>([]() { return std::shared_ptr<device::Backend>(); });
+    auto writer = std::make_shared<DeviceWriter>([](common::DeviceType) -> DeviceWriter::BackendFactory { return []() { return std::shared_ptr<device::Backend>(); }; });
     DeviceWriterClient client(writer, geometry(), 4);
 
     StagingBuffer buffer;
-    EXPECT_EQ(client.take(0, buffer), common::ResponseCode::DeviceUnavailable);
+    EXPECT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::DeviceUnavailable);
     EXPECT_FALSE(buffer.valid());
     EXPECT_EQ(client.buffers(), 0u);
 }
@@ -244,9 +244,9 @@ TEST_F(DeviceWriterClientTest, Dropping_The_Client_Returns_Everything_It_Pinned)
         for (unsigned i = 0; i < 4; ++i)
         {
             StagingBuffer buffer;
-            ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+            ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid());
-            ASSERT_EQ(client.write(0, buffer, Buffer, destination.data() + i * Buffer, nullptr),
+            ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destination.data() + i * Buffer, nullptr),
                       common::ResponseCode::Success);
         }
 
@@ -292,13 +292,13 @@ TEST_F(DeviceWriterClientTest, Every_Worker_Has_Its_Own_Client)
                 for (unsigned i = 0; i < PerWorker; ++i)
                 {
                     StagingBuffer buffer;
-                    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+                    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
                     if (!buffer.valid())
                     {
                         continue;   // this worker's window is full - not an error
                     }
                     ++issued;
-                    ASSERT_EQ(client.write(0, buffer, Buffer, destinations[w].data(),
+                    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destinations[w].data(),
                                            [&](common::ResponseCode) { ++written; }),
                               common::ResponseCode::Success);
                 }
@@ -329,7 +329,7 @@ TEST_F(DeviceWriterClientTest, One_Slab_Yields_Many_Buffers)
     DeviceWriterClient client(_writer, geometry(4 * Buffer), 16);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
 
     EXPECT_EQ(client.buffers(), 4u) << "one slab, not the whole window";
     EXPECT_EQ(_backend->opened(0)->host_allocs, 1u);
@@ -347,7 +347,7 @@ TEST_F(DeviceWriterClientTest, The_Pool_Grows_On_Demand_Rather_Than_All_At_Once)
     for (unsigned i = 0; i < 16; ++i)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+        ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
         held.push_back(buffer);
 
@@ -366,7 +366,7 @@ TEST_F(DeviceWriterClientTest, A_Slab_Never_Overshoots_The_Window)
     DeviceWriterClient client(_writer, geometry(64 * Buffer), 3);
 
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
 
     EXPECT_EQ(client.buffers(), 3u);
     EXPECT_EQ(_backend->opened(0)->host_alloc_sizes.at(0), 3 * Buffer);
@@ -393,17 +393,17 @@ TEST_F(DeviceWriterClientTest, Copies_Interleave_Across_Devices)
         const unsigned ordinal = round % Devices;
 
         StagingBuffer buffer;
-        ASSERT_EQ(client.take(ordinal, buffer), common::ResponseCode::Success);
+        ASSERT_EQ(client.take(common::Device::cuda(ordinal), buffer), common::ResponseCode::Success);
         if (!buffer.valid())
         {
             // The window is full; let the copies retire and try this round again.
             ASSERT_TRUE(eventually([&]() { return done.load() == issued; }));
-            ASSERT_EQ(client.take(ordinal, buffer), common::ResponseCode::Success);
+            ASSERT_EQ(client.take(common::Device::cuda(ordinal), buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid());
         }
 
         std::memset(buffer.data, static_cast<int>('a' + ordinal), Buffer);
-        ASSERT_EQ(client.write(ordinal, buffer, Buffer, destinations[ordinal].data(),
+        ASSERT_EQ(client.write(common::Device::cuda(ordinal), buffer, Buffer, destinations[ordinal].data(),
                                [&](common::ResponseCode) { ++done; }),
                   common::ResponseCode::Success);
         ++issued;
@@ -425,7 +425,7 @@ TEST_F(DeviceWriterClientTest, Copies_Interleave_Across_Devices)
     // Every buffer is back, whichever device it went to.
     unsigned reacquired = 0;
     StagingBuffer buffer;
-    while (client.take(0, buffer) == common::ResponseCode::Success && buffer.valid())
+    while (client.take(common::Device::cuda(0), buffer) == common::ResponseCode::Success && buffer.valid())
     {
         ++reacquired;
     }

@@ -39,14 +39,14 @@ class DeviceIssuerTest : public ::testing::Test
  protected:
     void SetUp() override
     {
-        _writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+        _writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { return _backend; }; });
     }
 
     // A reading thread's own pool: small, and its own, which is the whole point of the split.
     std::shared_ptr<StagingPool> pool_for(unsigned ordinal, unsigned buffers)
     {
         DeviceWriter::Channel channel = nullptr;
-        EXPECT_EQ(_writer->open(ordinal, channel), common::ResponseCode::Success);
+        EXPECT_EQ(_writer->open(common::Device::cuda(ordinal), channel), common::ResponseCode::Success);
 
         StagingPool::Params params;
         params.buffer_bytesize = Buffer;
@@ -88,7 +88,7 @@ TEST_F(DeviceIssuerTest, Copies_And_Returns_The_Buffer_To_Its_Own_Pool)
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> reported{-1};
 
-    issuer.submit(0, pool, buffer, Buffer, destination.data(),
+    issuer.submit(common::Device::cuda(0), pool, buffer, Buffer, destination.data(),
                   [&](common::ResponseCode ret) { reported.store(static_cast<int>(ret)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
@@ -139,7 +139,7 @@ TEST_F(DeviceIssuerTest, Many_Readers_Each_With_Its_Own_Pool)
                     ASSERT_TRUE(buffer.valid()) << "reader " << r << " round " << i;
 
                     std::memset(buffer.data, static_cast<int>('a' + r), Buffer);
-                    issuer.submit(0, pools[r], buffer, Buffer, destinations[r].data(),
+                    issuer.submit(common::Device::cuda(0), pools[r], buffer, Buffer, destinations[r].data(),
                                   [&](common::ResponseCode ret)
                                   {
                                       EXPECT_EQ(ret, common::ResponseCode::Success);
@@ -183,7 +183,7 @@ TEST_F(DeviceIssuerTest, A_Copy_That_Cannot_Be_Issued_Still_Reports)
     std::atomic<int> reported{-1};
 
     // Ordinal 9 does not exist - the mock backend has four devices - so no lane can be built.
-    issuer.submit(9, pool, buffer, Buffer, destination.data(),
+    issuer.submit(common::Device::cuda(9), pool, buffer, Buffer, destination.data(),
                   [&](common::ResponseCode ret) { reported.store(static_cast<int>(ret)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
@@ -215,7 +215,7 @@ TEST_F(DeviceIssuerTest, Teardown_Issues_What_Is_Already_Queued)
         {
             StagingBuffer buffer;
             ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
-            issuer.submit(0, pool, buffer, Buffer, destination.data() + i * Buffer,
+            issuer.submit(common::Device::cuda(0), pool, buffer, Buffer, destination.data() + i * Buffer,
                           [&](common::ResponseCode) { ++done; });
         }
     }
@@ -251,7 +251,7 @@ TEST_F(DeviceIssuerTest, One_Thread_Per_Device)
             ASSERT_TRUE(buffer.valid());
 
             std::memset(buffer.data, static_cast<int>('a' + d), Buffer);
-            issuer.submit(d, pool, buffer, Buffer, destinations[d].data(),
+            issuer.submit(common::Device::cuda(d), pool, buffer, Buffer, destinations[d].data(),
                           [&](common::ResponseCode ret)
                           {
                               EXPECT_EQ(ret, common::ResponseCode::Success);

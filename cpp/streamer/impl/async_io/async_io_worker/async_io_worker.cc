@@ -1015,7 +1015,7 @@ AsyncIoWorker::Staged AsyncIoWorker::stage_into_device_buffer(posix_io::RequestI
                                                               common::ResponseCode & error)
 {
     StagingBuffer buffer;
-    error = _device_out->take(batch.device.id, buffer);
+    error = _device_out->take(batch.device, buffer);
     if (error != common::ResponseCode::Success)
     {
         LOG(ERROR) << "No staging buffer for " << batch.device << ": " << error;
@@ -1038,7 +1038,7 @@ bool AsyncIoWorker::issue_copy(posix_io::RequestId id, const InflightChunk & ent
     // chunk.bytesize, not what the last pass moved: every pass landed in this buffer, so the whole
     // extent is here by the time a chunk completes.
     const auto code = _device_out->write(
-        batch.device.id, entry.staging, entry.chunk.bytesize, entry.chunk.buffer,
+        batch.device, entry.staging, entry.chunk.bytesize, entry.chunk.buffer,
         [this, id](common::ResponseCode ret) { _copies.push(CopyDone{ id, ret }); });
 
     if (code != common::ResponseCode::Success)

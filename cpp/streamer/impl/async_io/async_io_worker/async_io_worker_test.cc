@@ -1381,7 +1381,7 @@ struct DeviceDriver : Driver
     explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock,
                           unsigned depth = Config::default_fs_async_queue_depth) :
         Driver(Strategy::IoUringBuffered, 4096, std::nullopt, depth,
-               std::make_shared<DeviceWriter>([mock]() { return mock; })),
+               std::make_shared<DeviceWriter>([mock](common::DeviceType) -> DeviceWriter::BackendFactory { return [mock]() { return mock; }; })),
         backend(std::move(mock))
     {}
 

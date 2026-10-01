@@ -97,7 +97,7 @@ TEST_F(FileSystemWorkerTest, Refuses_A_Device_Workload_With_No_Block_Size)
     std::vector<char> destination(Block);
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), 1, Block);
 
-    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { return _backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     FileSystemWorker worker(writer, issuer, 0 /* block */);
@@ -123,7 +123,7 @@ TEST_F(FileSystemWorkerTest, Reads_A_Device_Workload_Through_Pinned_Buffers)
 
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
 
-    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { return _backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     FileSystemWorker worker(writer, issuer, Block);
@@ -158,7 +158,7 @@ TEST_F(FileSystemWorkerTest, Each_Worker_Has_Its_Own_Buffers)
     const auto data = utils::random::buffer(4 * Block);
     utils::temp::File file(data);
 
-    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { return _backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     std::vector<std::vector<char>> destinations(2, std::vector<char>(4 * Block, 0));
@@ -210,12 +210,12 @@ TEST_F(FileSystemWorkerTest, A_Failed_Copy_Is_Never_Answered_As_Read)
 
     auto workload = workload_of(file.path, common::Device::cuda(0), destination.data(), Ranges, Block);
 
-    auto writer = std::make_shared<DeviceWriter>([this]() { return _backend; });
+    auto writer = std::make_shared<DeviceWriter>([this](common::DeviceType) -> DeviceWriter::BackendFactory { return [this]() { return _backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     // Every copy fails at the event, which is where a real transfer error surfaces.
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     _backend->opened(0)->fail_event_synchronize = true;
 
     FileSystemWorker worker(writer, issuer, Block);

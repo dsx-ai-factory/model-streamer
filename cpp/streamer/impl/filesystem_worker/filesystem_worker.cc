@@ -42,7 +42,7 @@ common::ResponseCode FileSystemWorker::staging_for(const Workload & workload, De
         // Through the device this workload names. Opening it here rather than in the issuer is what
         // gives this thread a context, which pinning needs.
         DeviceWriter::Channel channel = nullptr;
-        auto code = _writer->open(workload.device().id, channel);
+        auto code = _writer->open(workload.device(), channel);
         if (code != common::ResponseCode::Success)
         {
             return code;

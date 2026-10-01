@@ -247,7 +247,7 @@ void Batch::read_to_device(const DeviceStaging & staging, std::atomic<bool> & st
 
             _reader->read(bytesize, buffer.data);
 
-            staging.issuer->submit(device.id, staging.pool, buffer, bytesize,
+            staging.issuer->submit(device, staging.pool, buffer, bytesize,
                                    destination + (offset - range.start),
                                    [&landed, &failure, &retired](common::ResponseCode ret)
                                    {

@@ -88,7 +88,7 @@ class DeviceIssuer
     // still one short. With three buffers per reader and a blocking acquire(), that is a stall rather
     // than an error - the same mistake cost an async worker a wrongly failed chunk, where the pool
     // merely came back empty and said so.
-    void submit(unsigned device_ordinal,
+    void submit(common::Device device,
                 std::shared_ptr<StagingPool> pool,
                 const StagingBuffer & buffer,
                 size_t bytesize,
@@ -125,15 +125,15 @@ class DeviceIssuer
     // order would only imply it.
     struct Lane
     {
-        unsigned ordinal = 0;
+        common::Device device;
         std::shared_ptr<DeviceWriterClient> client;
         std::unique_ptr<utils::DrainingWorker<Request>> worker;
     };
 
     // This device's lane, built on first use. Null with `code` set when the device cannot be opened.
-    Lane * lane_for(unsigned ordinal, common::ResponseCode & code);
+    Lane * lane_for(common::Device device, common::ResponseCode & code);
 
-    void issue(unsigned ordinal, DeviceWriterClient & client, Request && request);
+    void issue(common::Device device, DeviceWriterClient & client, Request && request);
 
     const std::shared_ptr<DeviceWriter> _writer;
 
@@ -141,7 +141,7 @@ class DeviceIssuer
     // this, and pushes to the lane's own queue. A std::map keeps references stable, and lanes are
     // never removed.
     mutable std::mutex _mutex;
-    std::map<unsigned, Lane> _lanes;
+    std::map<common::Device, Lane> _lanes;
 };
 
 } // namespace runai::llm::streamer::impl

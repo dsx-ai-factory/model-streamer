@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 
+#include "common/device/device.h"
 #include "device/device.h"
 #include "device/owned/owned.h"
 #include "streamer/impl/device_io/staging_pool/staging_pool.h"
@@ -36,11 +37,15 @@ class DeviceWriter
     // targets are never removed, and a std::map keeps its references stable across inserts.
     using Channel = const void *;
 
-    // Asked for the backend on the first open() and never again. Returning null means there is no
-    // device on this machine, which open() reports as DeviceUnavailable.
+    // Asked for the backend on the first open() OF THAT TYPE and never again. Returning null means
+    // there is no such device on this machine, which open() reports as DeviceUnavailable.
     using BackendFactory = std::function<std::shared_ptr<device::Backend>()>;
 
-    explicit DeviceWriter(BackendFactory backend);
+    // The backend for a device type. One writer serves every type, so the type a submission names
+    // picks the implementation - see device/backends.
+    using BackendLookup = std::function<BackendFactory(common::DeviceType)>;
+
+    explicit DeviceWriter(BackendLookup backends);
 
     // Stops every waiter, so every buffer is back in its pool before this returns.
     //
@@ -54,7 +59,7 @@ class DeviceWriter
 
     // Opens a device, or returns the channel already opened for it. Idempotent: workers of the same
     // device share its stream and its waiter.
-    common::ResponseCode open(unsigned device_ordinal, Channel & out);
+    common::ResponseCode open(common::Device device, Channel & out);
 
     // So a client can allocate pinned memory, which needs a context. Null for a null channel.
     std::shared_ptr<device::Device> device(Channel channel) const;
@@ -104,21 +109,24 @@ class DeviceWriter
      public:
         ~Channels();
 
-        // Calls `backend` only if it has not already got one - the driver is reached once per writer.
-        common::ResponseCode open(const BackendFactory & backend, unsigned ordinal, Target ** out);
+        // Calls the lookup only for a type it has not opened yet - each driver is reached once per
+        // writer, whatever the ordinal.
+        common::ResponseCode open(const BackendLookup & backends, common::Device device, Target ** out);
 
         unsigned count() const;
 
      private:
         mutable std::mutex _mutex;
 
-        // Obtained from the factory on the first open(), then reused.
-        std::shared_ptr<device::Backend> _opened;
+        // One backend per device type, obtained on the first open() of that type and then reused.
+        std::map<common::DeviceType, std::shared_ptr<device::Backend>> _opened;
 
-        std::map<unsigned, Target> _targets;
+        // KEYED BY DEVICE, not by ordinal: two types can both have an ordinal 0, and they are not the
+        // same device.
+        std::map<common::Device, Target> _targets;
     };
 
-    const BackendFactory _backend;
+    const BackendLookup _backends;
     Channels _channels;
 };
 

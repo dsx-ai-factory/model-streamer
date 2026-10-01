@@ -51,4 +51,26 @@ TEST(Device, Printing)
     EXPECT_EQ(text(Device::cuda(2)), "cuda:2");
 }
 
+// A Device keys the channel map, so it needs an ordering that agrees with operator==.
+TEST(Device, Orders_By_Type_Then_Ordinal)
+{
+    EXPECT_TRUE(Device::host() < Device::cuda(0));
+    EXPECT_FALSE(Device::cuda(0) < Device::host());
+
+    EXPECT_TRUE(Device::cuda(0) < Device::cuda(1));
+    EXPECT_FALSE(Device::cuda(1) < Device::cuda(0));
+    EXPECT_FALSE(Device::cuda(1) < Device::cuda(1));
+}
+
+// Two hosts are ONE key. Built differently they must still not order against each other, or a map
+// would hold two entries for the same device.
+TEST(Device, Hosts_Never_Order_Against_Each_Other)
+{
+    const auto other = Device{ DeviceType::Cpu, 7 };
+
+    EXPECT_EQ(other, Device::host());
+    EXPECT_FALSE(other < Device::host());
+    EXPECT_FALSE(Device::host() < other);
+}
+
 } // namespace runai::llm::streamer::common

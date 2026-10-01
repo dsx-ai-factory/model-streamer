@@ -13,6 +13,7 @@
 // one for a test would be the wrong reason to widen it. Widening cuda.h to THIS package alone keeps
 // the dependency pointing downward, which a test under device/cuda could not.
 
+#include "device/backends/backends.h"
 #include "device/cuda/cuda_device.h"
 
 #include <gtest/gtest.h>
@@ -212,7 +213,7 @@ TEST_F(RealDevice, The_Writer_Client_Copies_To_A_Real_Device)
     constexpr unsigned Window = 4;
     constexpr unsigned Rounds = 12;
 
-    auto writer = std::make_shared<DeviceWriter>(device::cuda::backend);
+    auto writer = std::make_shared<DeviceWriter>(device::backend_for);
 
     DeviceWriterClient::Buffers geometry;
     geometry.buffer_bytesize = Buffer;
@@ -232,14 +233,14 @@ TEST_F(RealDevice, The_Writer_Client_Copies_To_A_Real_Device)
         // The pool's ceiling is the window, so this can only be empty while copies are in flight.
         for (unsigned attempt = 0; attempt < 10000 && !buffer.valid(); ++attempt)
         {
-            ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+            ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
         }
         ASSERT_TRUE(buffer.valid()) << "round " << round;
 
         written.push_back(utils::random::buffer(Buffer));
         std::memcpy(buffer.data, written.back().data(), Buffer);
 
-        ASSERT_EQ(client.write(0, buffer, Buffer, static_cast<char *>(target) + round * Buffer,
+        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, static_cast<char *>(target) + round * Buffer,
                                [&](common::ResponseCode ret)
                                {
                                    EXPECT_EQ(ret, common::ResponseCode::Success);
@@ -279,7 +280,7 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
         GTEST_SKIP() << "one device on this host; this needs two";
     }
 
-    auto writer = std::make_shared<DeviceWriter>(device::cuda::backend);
+    auto writer = std::make_shared<DeviceWriter>(device::backend_for);
 
     DeviceWriterClient::Buffers geometry;
     geometry.buffer_bytesize = Buffer;
@@ -298,20 +299,20 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
     // Taken for device 0, which is what builds the pool - so the memory is pinned through device 0's
     // context and then written to device 1.
     StagingBuffer buffer;
-    ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
     ASSERT_TRUE(buffer.valid());
 
     // Opens device 1 on this client, as a worker does by reading for it. write() refuses an ordinal
     // take() never opened, so this is the call that makes the next one legal.
     StagingBuffer opened;
-    ASSERT_EQ(client.take(1, opened), common::ResponseCode::Success);
+    ASSERT_EQ(client.take(common::Device::cuda(1), opened), common::ResponseCode::Success);
     ASSERT_TRUE(opened.valid());
 
     const auto data = utils::random::buffer(Buffer);
     std::memcpy(buffer.data, data.data(), Buffer);
 
     std::atomic<int> reported{-1};
-    ASSERT_EQ(client.write(1, buffer, Buffer, target,
+    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, Buffer, target,
                            [&](common::ResponseCode ret) { reported.store(static_cast<int>(ret)); }),
               common::ResponseCode::Success);
 
@@ -333,8 +334,8 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
     // taken for device 0. Events: one pool PER DEVICE, and only device 1 was copied to, so only its
     // pool made one.
     EXPECT_EQ(client.buffers(), 2u) << "one pool of buffers, shared";
-    EXPECT_EQ(client.events(1), 1u) << "the event came from device 1's own pool";
-    EXPECT_EQ(client.events(0), 0u) << "device 0 was never copied to, so it made no event";
+    EXPECT_EQ(client.events(common::Device::cuda(1)), 1u) << "the event came from device 1's own pool";
+    EXPECT_EQ(client.events(common::Device::cuda(0)), 0u) << "device 0 was never copied to, so it made no event";
 
     EXPECT_EQ(second->device_free(target), common::ResponseCode::Success);
 }
@@ -537,7 +538,7 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
     constexpr unsigned Window = 8;
     constexpr unsigned Rounds = 400;
 
-    auto writer = std::make_shared<DeviceWriter>(device::cuda::backend);
+    auto writer = std::make_shared<DeviceWriter>(device::backend_for);
 
     DeviceWriterClient::Buffers geometry;
     geometry.buffer_bytesize = Buffer;
@@ -555,7 +556,7 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
     for (unsigned round = 0; round < Rounds; ++round)
     {
         StagingBuffer buffer;
-        ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success) << "round " << round;
+        ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success) << "round " << round;
 
         if (!buffer.valid())
         {
@@ -572,14 +573,14 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
             {
                 ::usleep(100);
             }
-            ASSERT_EQ(client.take(0, buffer), common::ResponseCode::Success);
+            ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid()) << "still empty after every copy retired, round " << round;
         }
 
         ASSERT_LE(client.buffers(), Window) << "the pool grew past its window at round " << round;
 
         ++issued;
-        ASSERT_EQ(client.write(0, buffer, Buffer, target,
+        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, target,
                                [&](common::ResponseCode ret)
                                {
                                    EXPECT_EQ(ret, common::ResponseCode::Success);
@@ -595,10 +596,10 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
     EXPECT_EQ(done.load(), issued);
 
     EXPECT_LE(client.buffers(), Window);
-    EXPECT_LE(client.events(0), Window) << "one event per in-flight copy, so the same ceiling";
+    EXPECT_LE(client.events(common::Device::cuda(0)), Window) << "one event per in-flight copy, so the same ceiling";
 
     std::cerr << Rounds << " copies through a window of " << Window
-              << ": pool " << client.buffers() << " buffers, " << client.events(0) << " events, "
+              << ": pool " << client.buffers() << " buffers, " << client.events(common::Device::cuda(0)) << " events, "
               << refusals << " waits for a free buffer\n";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);

@@ -269,11 +269,11 @@ TEST(Read, A_Failed_Read_Returns_Its_Staging_Buffer)
     }
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
 
     StagingPool::Params pool_params;
     pool_params.buffer_bytesize = Block;
@@ -336,11 +336,11 @@ TEST(Read, A_Copy_That_Fails_Part_Way_Stops_The_Answers_There)
     }
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     backend->opened(0)->fail_event_synchronize_from = FailFrom;
 
     StagingPool::Params pool_params;
@@ -413,11 +413,11 @@ TEST(Read, A_Stopped_Pool_Is_Not_Answered_As_Read)
     }
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
 
     StagingPool::Params pool_params;
     pool_params.buffer_bytesize = Block;

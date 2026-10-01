@@ -41,9 +41,13 @@ class DeviceWriterTest : public ::testing::Test
  protected:
     // The writer asks for a backend rather than holding one, so the count below is what a test
     // watches to see whether the driver was reached at all.
-    DeviceWriter::BackendFactory factory()
+    // One backend, whatever the type is asked for - every test here names a single device type.
+    DeviceWriter::BackendLookup lookup()
     {
-        return [this]() { ++_factory_calls; return _backend; };
+        return [this](common::DeviceType) -> DeviceWriter::BackendFactory
+            {
+                return [this]() { ++_factory_calls; return _backend; };
+            };
     }
 
     // The writer owns neither buffers nor events, so a test brings both - as a client does.
@@ -91,7 +95,7 @@ class DeviceWriterTest : public ::testing::Test
 // device, no stream, no thread, no driver.
 TEST_F(DeviceWriterTest, Costs_Nothing_Until_The_First_Open)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     EXPECT_EQ(_factory_calls.load(), 0u) << "the driver was reached before any device was asked for";
     EXPECT_EQ(_backend->opens, 0u);
@@ -101,12 +105,12 @@ TEST_F(DeviceWriterTest, Costs_Nothing_Until_The_First_Open)
 // One device, one stream, one waiter - however many readers name it.
 TEST_F(DeviceWriterTest, Opening_Twice_Gives_The_Same_Channel)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel first = nullptr;
     DeviceWriter::Channel again = nullptr;
-    ASSERT_EQ(writer.open(0, first), common::ResponseCode::Success);
-    ASSERT_EQ(writer.open(0, again), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), first), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), again), common::ResponseCode::Success);
 
     EXPECT_EQ(first, again);
     EXPECT_EQ(writer.devices(), 1u);
@@ -117,10 +121,10 @@ TEST_F(DeviceWriterTest, Opening_Twice_Gives_The_Same_Channel)
 // device leaves the writer.
 TEST_F(DeviceWriterTest, The_Device_Behind_A_Channel_Is_Reachable)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(2, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(2), channel), common::ResponseCode::Success);
 
     EXPECT_EQ(writer.device(channel), _backend->opened(2));
     EXPECT_EQ(writer.device(nullptr), nullptr);
@@ -128,10 +132,10 @@ TEST_F(DeviceWriterTest, The_Device_Behind_A_Channel_Is_Reachable)
 
 TEST_F(DeviceWriterTest, Write_Copies_And_Returns_The_Buffer)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -163,10 +167,10 @@ TEST_F(DeviceWriterTest, Write_Copies_And_Returns_The_Buffer)
 // is split, and nothing depends on what the bytes contain.
 TEST_F(DeviceWriterTest, One_Buffer_Is_One_Copy)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 4);
 
     std::vector<char> destination(4 * Buffer, 0);
@@ -194,10 +198,10 @@ TEST_F(DeviceWriterTest, One_Buffer_Is_One_Copy)
 // A partly filled buffer - a short read - copies only what was read.
 TEST_F(DeviceWriterTest, Only_The_Bytes_Read_Are_Copied)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -219,12 +223,12 @@ TEST_F(DeviceWriterTest, Only_The_Bytes_Read_Are_Copied)
 // other. One pool still serves both: pinned memory reaches every context.
 TEST_F(DeviceWriterTest, A_Second_Device_Gets_Its_Own_Stream)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel first = nullptr;
     DeviceWriter::Channel second = nullptr;
-    ASSERT_EQ(writer.open(0, first), common::ResponseCode::Success);
-    ASSERT_EQ(writer.open(1, second), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), first), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(1), second), common::ResponseCode::Success);
     ASSERT_NE(first, second);
 
     const auto pool = pool_for(writer, first, 4);
@@ -253,10 +257,10 @@ TEST_F(DeviceWriterTest, An_Unopenable_Device_Is_Reported)
 {
     _backend->fail_open_device_at = 1;
 
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    EXPECT_EQ(writer.open(0, channel), common::ResponseCode::InvalidDevice);
+    EXPECT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::InvalidDevice);
     EXPECT_EQ(channel, nullptr);
 }
 
@@ -267,28 +271,29 @@ TEST_F(DeviceWriterTest, No_Backend_Is_Reported)
     DeviceWriter writer(nullptr);
 
     DeviceWriter::Channel channel = nullptr;
-    EXPECT_EQ(writer.open(0, channel), common::ResponseCode::DeviceUnavailable);
+    EXPECT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::DeviceUnavailable);
     EXPECT_EQ(channel, nullptr);
 }
 
 TEST_F(DeviceWriterTest, A_Backend_That_Cannot_Be_Loaded_Is_Reported)
 {
-    DeviceWriter writer([]() { return std::shared_ptr<device::Backend>(); });
+    DeviceWriter writer([](common::DeviceType) -> DeviceWriter::BackendFactory
+        { return []() { return std::shared_ptr<device::Backend>(); }; });
 
     DeviceWriter::Channel channel = nullptr;
-    EXPECT_EQ(writer.open(0, channel), common::ResponseCode::DeviceUnavailable);
+    EXPECT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::DeviceUnavailable);
     EXPECT_EQ(channel, nullptr);
 }
 
 // Every device after the first reuses the backend already loaded.
 TEST_F(DeviceWriterTest, The_Backend_Is_Asked_For_Once)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     for (unsigned ordinal : { 0u, 1u, 0u, 2u })
     {
         DeviceWriter::Channel channel = nullptr;
-        ASSERT_EQ(writer.open(ordinal, channel), common::ResponseCode::Success);
+        ASSERT_EQ(writer.open(common::Device::cuda(ordinal), channel), common::ResponseCode::Success);
     }
 
     EXPECT_EQ(_factory_calls.load(), 1u);
@@ -303,10 +308,11 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
     {
         std::shared_ptr<StagingPool> pool;
         {
-            DeviceWriter writer([mock]() { return mock; });
+            DeviceWriter writer([mock](common::DeviceType) -> DeviceWriter::BackendFactory
+            { return [mock]() { return mock; }; });
 
             DeviceWriter::Channel channel = nullptr;
-            ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+            ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
             pool = pool_for(writer, channel, 4);
 
             std::vector<char> destination(4 * Buffer, 0);
@@ -337,10 +343,10 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
 // does with its own share meanwhile. Checked inside the completion, which runs before the release.
 TEST_F(DeviceWriterTest, The_Pool_Outlives_A_Reader_That_Drops_It)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -371,12 +377,13 @@ TEST_F(DeviceWriterTest, Every_Stream_Is_Destroyed)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        DeviceWriter writer([mock]() { return mock; });
+        DeviceWriter writer([mock](common::DeviceType) -> DeviceWriter::BackendFactory
+            { return [mock]() { return mock; }; });
 
         DeviceWriter::Channel first = nullptr;
         DeviceWriter::Channel second = nullptr;
-        ASSERT_EQ(writer.open(0, first), common::ResponseCode::Success);
-        ASSERT_EQ(writer.open(1, second), common::ResponseCode::Success);
+        ASSERT_EQ(writer.open(common::Device::cuda(0), first), common::ResponseCode::Success);
+        ASSERT_EQ(writer.open(common::Device::cuda(1), second), common::ResponseCode::Success);
 
         EXPECT_EQ(mock->opened(0)->streams_created, 1u);
         EXPECT_EQ(mock->opened(1)->streams_created, 1u);
@@ -393,11 +400,12 @@ TEST_F(DeviceWriterTest, Moving_A_Target_Does_Not_Destroy_Its_Stream_Twice)
 {
     auto mock = std::make_shared<device::MockBackend>();
     {
-        DeviceWriter writer([mock]() { return mock; });
+        DeviceWriter writer([mock](common::DeviceType) -> DeviceWriter::BackendFactory
+            { return [mock]() { return mock; }; });
         for (unsigned ordinal = 0; ordinal < 4; ++ordinal)
         {
             DeviceWriter::Channel channel = nullptr;
-            ASSERT_EQ(writer.open(ordinal, channel), common::ResponseCode::Success);
+            ASSERT_EQ(writer.open(common::Device::cuda(ordinal), channel), common::ResponseCode::Success);
         }
         for (unsigned ordinal = 0; ordinal < 4; ++ordinal)
         {
@@ -416,10 +424,10 @@ TEST_F(DeviceWriterTest, Moving_A_Target_Does_Not_Destroy_Its_Stream_Twice)
 // comes back: a caller cannot know to return one itself, and one lost here is a deadlock later.
 TEST_F(DeviceWriterTest, Copying_More_Than_The_Buffer_Holds_Is_Refused_And_The_Buffer_Returned)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -447,10 +455,10 @@ TEST_F(DeviceWriterTest, Copying_More_Than_The_Buffer_Holds_Is_Refused_And_The_B
 // bad call into a crash.
 TEST_F(DeviceWriterTest, Write_Without_A_Pool_Or_Event_Is_Refused_Before_Anything_Is_Enqueued)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -475,10 +483,10 @@ TEST_F(DeviceWriterTest, Write_Without_A_Pool_Or_Event_Is_Refused_Before_Anythin
 // reaches here. The buffer is returned, because the pool is right there in the call.
 TEST_F(DeviceWriterTest, Write_Without_A_Channel_Still_Returns_The_Buffer)
 {
-    DeviceWriter writer(factory());
+    DeviceWriter writer(lookup());
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer.open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     const auto pool = pool_for(writer, channel, 1);
 
     StagingBuffer buffer;
@@ -491,6 +499,60 @@ TEST_F(DeviceWriterTest, Write_Without_A_Channel_Still_Returns_The_Buffer)
     StagingBuffer again;
     ASSERT_EQ(pool->try_acquire(again), common::ResponseCode::Success);
     EXPECT_TRUE(again.valid()) << "the buffer came back";
+}
+
+
+// The reason the channel map is keyed by DEVICE and not by ordinal. Two types both have an ordinal 0,
+// and they are different devices served by different drivers - keying on the ordinal alone would hand
+// the second one the first one's stream.
+//
+// A type the lookup was taught but the C header has not published yet stands in for a second vendor:
+// nothing else can tell a keyed map from an unkeyed one while CUDA is the only backend.
+TEST_F(DeviceWriterTest, Two_Types_With_The_Same_Ordinal_Are_Two_Devices)
+{
+    const auto second_type = static_cast<common::DeviceType>(99);
+
+    auto cuda = std::make_shared<device::MockBackend>();
+    auto other = std::make_shared<device::MockBackend>();
+
+    DeviceWriter writer([cuda, other, second_type](common::DeviceType type) -> DeviceWriter::BackendFactory
+        {
+            if (type == common::DeviceType::Cuda) { return [cuda]() { return cuda; }; }
+            if (type == second_type)              { return [other]() { return other; }; }
+            return DeviceWriter::BackendFactory();
+        });
+
+    DeviceWriter::Channel first = nullptr;
+    DeviceWriter::Channel second = nullptr;
+
+    ASSERT_EQ(writer.open(common::Device::cuda(0), first), common::ResponseCode::Success);
+    ASSERT_EQ(writer.open(common::Device{ second_type, 0 }, second), common::ResponseCode::Success);
+
+    EXPECT_NE(first, second) << "one channel served two different devices";
+
+    // Each driver was reached exactly once, for its own type.
+    EXPECT_EQ(cuda->opens, 1u);
+    EXPECT_EQ(other->opens, 1u);
+}
+
+// A type this build has no backend for is reported, not guessed at. Routed by TYPE, so a served type
+// still works in the same writer.
+TEST_F(DeviceWriterTest, A_Type_With_No_Backend_Is_Unavailable)
+{
+    DeviceWriter writer([this](common::DeviceType type) -> DeviceWriter::BackendFactory
+        {
+            if (type != common::DeviceType::Cuda) { return DeviceWriter::BackendFactory(); }
+            return [this]() { ++_factory_calls; return _backend; };
+        });
+
+    DeviceWriter::Channel channel = nullptr;
+    EXPECT_EQ(writer.open(common::Device{ static_cast<common::DeviceType>(99), 0 }, channel),
+              common::ResponseCode::DeviceUnavailable);
+    EXPECT_EQ(channel, nullptr);
+
+    EXPECT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success)
+        << "a type with no backend must not spoil the one that has";
+    EXPECT_NE(channel, nullptr);
 }
 
 } // namespace runai::llm::streamer::impl
