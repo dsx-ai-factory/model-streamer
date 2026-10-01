@@ -94,6 +94,22 @@ Each pull request should meet the following requirements:
 - Documentation – Update relevant documentation to reflect your changes.
 - PR description – Clearly describe what changed and why.
 
+## Pull Request CI Environment
+
+Pull request CI runs in GitHub Actions' native job container using
+`ghcr.io/dsx-ai-factory/model-streamer/devcontainer:latest`. The **Build and Push
+DevContainer** workflow publishes this image, including its devcontainer Features,
+when `.devcontainer/**` changes on `master` or when the workflow is run manually.
+The image must be published and readable by the repository before PR CI can start.
+
+PR jobs pull the published image; they do not rebuild `.devcontainer/Dockerfile`
+or apply `devcontainer.json`. When changing the development environment, rebuild
+the devcontainer locally and run `make test` there to validate the proposed image.
+A green PR check alone only validates against the currently published image. After
+merging environment changes, wait for image publication before rerunning dependent
+PR checks. Keep CI's container options in sync with the required devcontainer
+`runArgs`, including the seccomp setting used by the io_uring tests.
+
 ## Getting Help
 Need support or have a question? We're here to help:
 - Report issues or ask questions by [opening an issue on GitHub](https://github.com/dsx-ai-factory/model-streamer/issues).

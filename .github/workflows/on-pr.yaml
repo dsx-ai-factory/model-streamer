@@ -2,6 +2,10 @@ name: RunAI Model Streamer Library - Pull Request
 on:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   lifecycle-install-tests:
     name: Test, Build & Push
@@ -9,29 +13,35 @@ jobs:
     permissions:
       contents: read
       packages: read
+    container:
+      # Published by build-devcontainer.yml, including the devcontainer Features.
+      image: ghcr.io/${{ github.repository }}/devcontainer:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # Keep io_uring available, matching .devcontainer/devcontainer.json.
+      options: --security-opt seccomp=unconfined
+    defaults:
+      run:
+        shell: bash
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
     - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      run: |
+        set -euo pipefail
+        if [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::GITHUB_SHA must be a full 40-character commit SHA" >&2
+          exit 1
+        fi
+        printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
-    - name: Run tests and build
-      uses: devcontainers/ci@v0.3
-      with:
-        imageName: ghcr.io/${{ github.repository }}/devcontainer
-        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
-        push: never
-        runCmd: |
-          make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 && \
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+    - name: Run tests
+      run: make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+
+    - name: Build packages
+      run: make build
 
     - name: Upload streamer package to github action
       uses: actions/upload-artifact@v4
