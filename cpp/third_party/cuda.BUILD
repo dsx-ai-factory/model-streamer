@@ -7,11 +7,11 @@ cc_library(
     includes = ["include"],
     # Only the CUDA backend may see cuda.h: nothing above cpp/device/ includes a vendor header.
     #
-    # ONE exception, and it is a test: real_device_test reads device memory back to check what the
+    # ONE exception, and it is a test package: the device tests read memory back to check what the
     # streamer wrote, and the Device interface has no device-to-host copy. Adding one to the interface
     # for a test would widen more than this does.
     visibility = [
         "@//device/cuda:__subpackages__",
-        "@//streamer/impl/device_io/real_device:__pkg__",
+        "@//streamer/impl/device_io/tests:__pkg__",
     ],
 )
