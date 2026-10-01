@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 
+#include "common/device/device.h"
 #include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/device_io/event_pool/event_pool.h"
 #include "streamer/impl/device_io/staging_pool/staging_pool.h"
@@ -69,15 +70,15 @@ class DeviceWriterClient
     //
     // take() does this implicitly, so a client that reads never calls it. One that does NOT read -
     // the synchronous reader's issuer, whose buffers come from elsewhere - has no other first touch,
-    // and write() deliberately refuses an ordinal it has not seen.
-    common::ResponseCode open(unsigned device_ordinal);
+    // and write() deliberately refuses a device it has not seen.
+    common::ResponseCode open(common::Device device);
 
-    // A buffer to read into, for bytes bound for `device_ordinal`. Opens the device on first use,
+    // A buffer to read into, for bytes bound for `device`. Opens it on first use,
     // which also builds the pool - pinned memory needs a context, and this is the first call with one.
     //
     // An INVALID buffer means every one is in flight. Not an error: an async engine treats it as one
     // more reason to wait for completions instead of submitting.
-    common::ResponseCode take(unsigned device_ordinal, StagingBuffer & out);
+    common::ResponseCode take(common::Device device, StagingBuffer & out);
 
     // Copies `bytesize` bytes from the front of `buffer` to `destination`, then takes the buffer back
     // once that copy has landed. Returns as soon as the copy is ENQUEUED.
@@ -85,9 +86,9 @@ class DeviceWriterClient
     // `on_done` is called exactly when this returns Success, from the waiter's thread. On any error
     // the return value is the only report.
     //
-    // An ordinal that take() never opened is reported rather than opened: opening here would hide a
+    // A device that take() never opened is reported rather than opened: opening here would hide a
     // worker writing to a device it never read for.
-    common::ResponseCode write(unsigned device_ordinal,
+    common::ResponseCode write(common::Device device,
                                const StagingBuffer & buffer,
                                size_t bytesize,
                                void * destination,
@@ -96,7 +97,7 @@ class DeviceWriterClient
     // The same, for a buffer from someone else's pool. The synchronous reader keeps a pool per
     // reading thread and shares one issuer, so the buffer arrives from a pool this object does not
     // own - and must go back to that one.
-    common::ResponseCode write(unsigned device_ordinal,
+    common::ResponseCode write(common::Device device,
                                const std::shared_ptr<StagingPool> & pool,
                                const StagingBuffer & buffer,
                                size_t bytesize,
@@ -117,18 +118,18 @@ class DeviceWriterClient
     // Diagnostics.
     unsigned devices() const;
     unsigned buffers() const;
-    unsigned events(unsigned device_ordinal) const;
+    unsigned events(common::Device device) const;
 
  private:
-    // The channel for an ordinal, opening it on first use. The first call also builds the pool.
-    common::ResponseCode channel_for(unsigned ordinal, DeviceWriter::Channel & out);
+    // The channel for a device, opening it on first use. The first call also builds the pool.
+    common::ResponseCode channel_for(common::Device device, DeviceWriter::Channel & out);
 
-    // Make `ordinal`'s context current on this thread. A driver call without one fails with
+    // Make `device`'s context current on this thread. A driver call without one fails with
     // CUDA_ERROR_INVALID_CONTEXT, and a context is per THREAD - which is why this belongs here, in
     // the per-thread object, rather than in the shared writer.
     //
     // Only on a change, which is almost never: a submission names one device.
-    common::ResponseCode bind(unsigned ordinal, const DeviceWriter::Channel & channel);
+    common::ResponseCode bind(common::Device device, const DeviceWriter::Channel & channel);
 
     const std::shared_ptr<DeviceWriter> _writer;
     const Buffers _buffers;
@@ -137,12 +138,12 @@ class DeviceWriterClient
     // Touched only by this worker's thread. The writer behind them is shared, and locks only inside
     // open() - once per device, never per buffer.
     std::shared_ptr<StagingPool> _pool;
-    std::map<unsigned, DeviceWriter::Channel> _channels;
-    std::map<unsigned, std::shared_ptr<EventPool>> _events;
+    std::map<common::Device, DeviceWriter::Channel> _channels;
+    std::map<common::Device, std::shared_ptr<EventPool>> _events;
 
     // Which device's context this thread currently holds. Unset until the first bind.
     bool _bound = false;
-    unsigned _bound_ordinal = 0;
+    common::Device _bound_device;
 };
 
 } // namespace runai::llm::streamer::impl

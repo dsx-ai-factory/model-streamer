@@ -27,13 +27,13 @@ DeviceIssuer::DeviceIssuer(std::shared_ptr<DeviceWriter> writer) :
 
 DeviceIssuer::~DeviceIssuer() = default;
 
-DeviceIssuer::Lane * DeviceIssuer::lane_for(unsigned ordinal, common::ResponseCode & code)
+DeviceIssuer::Lane * DeviceIssuer::lane_for(common::Device device, common::ResponseCode & code)
 {
     code = common::ResponseCode::Success;
 
     const std::lock_guard<std::mutex> guard(_mutex);
 
-    const auto existing = _lanes.find(ordinal);
+    const auto existing = _lanes.find(device);
     if (existing != _lanes.end())
     {
         return &existing->second;
@@ -43,14 +43,14 @@ DeviceIssuer::Lane * DeviceIssuer::lane_for(unsigned ordinal, common::ResponseCo
 
     // Opened HERE rather than on the lane's thread so a device that cannot be reached is reported to
     // the reader while it is still listening, instead of through a completion.
-    code = client->open(ordinal);
+    code = client->open(device);
     if (code != common::ResponseCode::Success)
     {
         return nullptr;
     }
 
-    auto & lane = _lanes[ordinal];
-    lane.ordinal = ordinal;
+    auto & lane = _lanes[device];
+    lane.device = device;
     lane.client = client;
 
     // Started on its first message, and it binds this device's context then - once, never again,
@@ -59,12 +59,12 @@ DeviceIssuer::Lane * DeviceIssuer::lane_for(unsigned ordinal, common::ResponseCo
     // The handler holds the client, not the lane: the thread that calls into it owns a share of it,
     // so no destruction order can take it away while there is still queued work to drain.
     lane.worker = std::make_unique<utils::DrainingWorker<Request>>(
-        [this, ordinal, client](Request && request) { issue(ordinal, *client, std::move(request)); });
+        [this, device, client](Request && request) { issue(device, *client, std::move(request)); });
 
     return &lane;
 }
 
-void DeviceIssuer::submit(unsigned device_ordinal,
+void DeviceIssuer::submit(common::Device device,
                           std::shared_ptr<StagingPool> pool,
                           const StagingBuffer & buffer,
                           size_t bytesize,
@@ -72,11 +72,11 @@ void DeviceIssuer::submit(unsigned device_ordinal,
                           Completion on_done)
 {
     auto code = common::ResponseCode::Success;
-    Lane * const lane = lane_for(device_ordinal, code);
+    Lane * const lane = lane_for(device, code);
 
     if (lane == nullptr)
     {
-        LOG(ERROR) << "[RunAI Streamer] no copy path to device " << device_ordinal << ": " << code;
+        LOG(ERROR) << "[RunAI Streamer] no copy path to device " << device << ": " << code;
 
         // Returned before the report, as everywhere else on this path.
         pool->release(buffer);
@@ -92,9 +92,9 @@ void DeviceIssuer::submit(unsigned device_ordinal,
     lane->worker->push(Request{ std::move(pool), buffer, bytesize, destination, std::move(on_done) });
 }
 
-void DeviceIssuer::issue(unsigned ordinal, DeviceWriterClient & client, Request && request)
+void DeviceIssuer::issue(common::Device device, DeviceWriterClient & client, Request && request)
 {
-    const auto code = client.write(ordinal, request.pool, request.buffer,
+    const auto code = client.write(device, request.pool, request.buffer,
                                    request.bytesize, request.destination, request.on_done);
 
     if (code != common::ResponseCode::Success)
@@ -102,7 +102,7 @@ void DeviceIssuer::issue(unsigned ordinal, DeviceWriterClient & client, Request 
         // write() returned the buffer itself, but nobody is left to read that code: the reader moved
         // on the moment this was queued. So the completion is the only report, and it must fire here
         // because the waiter never saw this copy.
-        LOG(ERROR) << "[RunAI Streamer] could not issue a copy to device " << ordinal
+        LOG(ERROR) << "[RunAI Streamer] could not issue a copy to device " << device
                    << ": " << code;
 
         if (request.on_done)

@@ -259,7 +259,7 @@ TEST_F(ObjectStorageWorkerTest, Reads_A_Device_Submission_Through_Pinned_Buffers
     constexpr unsigned RangesPerFile = 4;
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     // One range is one chunk, because the block size is larger than any file the fixture generates.
@@ -327,11 +327,11 @@ TEST_F(ObjectStorageWorkerTest, A_Drained_Backend_Does_Not_Abort_Parked_Chunks)
     constexpr unsigned RangesPerFile = 2;
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     backend->opened(0)->hold_copies();
 
     auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
@@ -390,13 +390,13 @@ TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
     constexpr unsigned RangesPerFile = 2;
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     // Opened here so the mock device exists before the worker starts: holding its copies is what keeps
     // the staging buffers out and drives the pool dry.
     DeviceWriter::Channel channel = nullptr;
-    ASSERT_EQ(writer->open(0, channel), common::ResponseCode::Success);
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
     backend->opened(0)->hold_copies();
 
     auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
@@ -461,7 +461,7 @@ TEST_F(ObjectStorageWorkerTest, A_Retried_Chunk_Gives_Its_Buffer_Back)
     constexpr unsigned RangesPerFile = 1;
 
     auto backend = std::make_shared<device::MockBackend>();
-    auto writer = std::make_shared<DeviceWriter>([backend]() { return backend; });
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
     auto issuer = std::make_shared<DeviceIssuer>(writer);
 
     auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,

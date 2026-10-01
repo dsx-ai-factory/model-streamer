@@ -40,12 +40,10 @@ Streamer::Streamer() : Streamer(Config())
 Streamer::Streamer(Config config, Environment environment) :
     _config(std::make_shared<Config>(config)),
     _router(config.fs_strategy_candidates, std::move(environment)),
-    // A factory rather than a backend: obtaining one is a driver call, and a host-only load must not
-    // pay it. See DeviceWriter.
-    //
-    // ONE writer, so Cuda is asked for by name: it is the only device type served. backend_for is
-    // what maps that type to a vendor, which is why no vendor appears in this file.
-    _device_writer(std::make_shared<DeviceWriter>(device::backend_for(common::DeviceType::Cuda))),
+    // The LOOKUP, not a backend and not one type's factory: the device a submission names picks the
+    // implementation, and nothing is loaded until a submission names one. CUDA is the only type
+    // backend_for answers today, and this file does not need to know that.
+    _device_writer(std::make_shared<DeviceWriter>(device::backend_for)),
     _device_issuer(std::make_shared<DeviceIssuer>(_device_writer)),
     // Three worker factories, one per pool kind, in the order BackendPools takes them: the synchronous
     // filesystem reader (concurrency threads), the async one the strategy router builds per mount, and

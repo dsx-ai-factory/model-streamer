@@ -34,6 +34,10 @@ struct Device
 bool operator==(const Device & left, const Device & right);
 bool operator!=(const Device & left, const Device & right);
 
+// So a Device can key a map - DeviceWriter holds one channel per device. Agrees with operator== in
+// ignoring a host's ordinal, or two hosts would be two keys.
+bool operator<(const Device & left, const Device & right);
+
 std::ostream & operator<<(std::ostream & os, DeviceType type);
 std::ostream & operator<<(std::ostream & os, const Device & device);
 

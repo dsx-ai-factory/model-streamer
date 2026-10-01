@@ -13,6 +13,7 @@ runai_cc_test(
     srcs = ["real_device_test.cc"],
     deps = [
         "//device/cuda",
+        "//device/backends",
         "//streamer/impl/device_io/device_writer",
         "//streamer/impl/device_io/device_writer_client",
         "//streamer/impl/streamer",

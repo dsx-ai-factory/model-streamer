@@ -42,7 +42,7 @@ common::ResponseCode ObjectStorageWorker::staging_pool_for(const common::Device 
     // Through the device this chunk names. Pinned memory is reachable from every context, so the pool
     // built here serves any later device this worker reads for.
     DeviceWriter::Channel channel = nullptr;
-    const auto code = _writer->open(target.id, channel);
+    const auto code = _writer->open(target, channel);
     if (code != common::ResponseCode::Success)
     {
         return code;
@@ -403,7 +403,7 @@ void ObjectStorageWorker::issue_copy(InflightMap::iterator wlit, size_t chunk_id
     const StagingBuffer buffer = cs.staging;
     cs.staging = StagingBuffer{};
 
-    _issuer->submit(batch.device.id, _pool, buffer, cs.chunk.bytesize, cs.chunk.buffer,
+    _issuer->submit(batch.device, _pool, buffer, cs.chunk.bytesize, cs.chunk.buffer,
                     [this, handle](common::ResponseCode ret) { _copies.push(CopyDone{ handle, ret }); });
 
     ++_copies_issued;

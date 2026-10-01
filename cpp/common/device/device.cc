@@ -15,6 +15,16 @@ bool operator!=(const Device & left, const Device & right)
     return !(left == right);
 }
 
+bool operator<(const Device & left, const Device & right)
+{
+    if (left.type != right.type)
+    {
+        return left.type < right.type;
+    }
+
+    return left.is_host() ? false : left.id < right.id;
+}
+
 std::ostream & operator<<(std::ostream & os, DeviceType type)
 {
     switch (type)

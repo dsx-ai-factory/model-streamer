@@ -7,8 +7,8 @@
 namespace runai::llm::streamer::impl
 {
 
-DeviceWriter::DeviceWriter(BackendFactory backend) :
-    _backend(std::move(backend))
+DeviceWriter::DeviceWriter(BackendLookup backends) :
+    _backends(std::move(backends))
 {
 }
 
@@ -21,28 +21,30 @@ DeviceWriter::Channels::~Channels()
     _targets.clear();
 }
 
-common::ResponseCode DeviceWriter::Channels::open(const BackendFactory & backend, unsigned ordinal, Target ** out)
+common::ResponseCode DeviceWriter::Channels::open(const BackendLookup & backends, common::Device device, Target ** out)
 {
     const std::lock_guard<std::mutex> guard(_mutex);
 
-    const auto existing = _targets.find(ordinal);
+    const auto existing = _targets.find(device);
     if (existing != _targets.end())
     {
         *out = &existing->second;
         return common::ResponseCode::Success;
     }
 
-    if (_opened == nullptr)
+    auto & opened = _opened[device.type];
+    if (opened == nullptr)
     {
-        _opened = backend != nullptr ? backend() : nullptr;
-        if (_opened == nullptr)
+        const auto factory = backends ? backends(device.type) : BackendFactory();
+        opened = factory ? factory() : nullptr;
+        if (opened == nullptr)
         {
             return common::ResponseCode::DeviceUnavailable;
         }
     }
 
     Target target;
-    auto code = _opened->open_device(ordinal, target.device);
+    auto code = opened->open_device(device.id, target.device);
     if (code != common::ResponseCode::Success)
     {
         return code;
@@ -67,7 +69,7 @@ common::ResponseCode DeviceWriter::Channels::open(const BackendFactory & backend
 
     target.waiter = std::make_unique<StreamWaiter>(target.device);
 
-    *out = &_targets.emplace(ordinal, std::move(target)).first->second;
+    *out = &_targets.emplace(device, std::move(target)).first->second;
     return common::ResponseCode::Success;
 }
 
@@ -77,12 +79,12 @@ unsigned DeviceWriter::Channels::count() const
     return static_cast<unsigned>(_targets.size());
 }
 
-common::ResponseCode DeviceWriter::open(unsigned ordinal, Channel & out)
+common::ResponseCode DeviceWriter::open(common::Device device, Channel & out)
 {
     out = nullptr;
 
     Target * target = nullptr;
-    const auto code = _channels.open(_backend, ordinal, &target);
+    const auto code = _channels.open(_backends, device, &target);
     if (code != common::ResponseCode::Success)
     {
         return code;
