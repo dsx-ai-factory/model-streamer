@@ -1,8 +1,8 @@
 load("//:rules.bzl", "runai_cc_test")
 
-# The only test that talks to a real driver. It SKIPS where there is none, so it is safe on CPU CI.
+# The tests that need a REAL CUDA driver. Both SKIP where there is none, so they are safe on CPU CI.
 #
-# Its own package so that cuda.h can be made visible to exactly one test target - see
+# Their own package so that cuda.h reaches these two targets and nothing else - see
 # cpp/third_party/cuda.BUILD. The readback needs the driver directly, because the Device interface has
 # no device-to-host copy.
 runai_cc_test(
@@ -16,7 +16,7 @@ runai_cc_test(
         "//streamer/impl/device_io/device_writer",
         "//streamer/impl/device_io/device_writer_client",
         "//streamer/impl/streamer",
-        "//streamer",   # the public C API: the only test here that goes through it
+        "//streamer",
         "//utils/temp/file",
         "//utils/random",
         "//utils/temp/env",

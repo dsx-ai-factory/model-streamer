@@ -23,12 +23,20 @@ AZURITE_CONTAINER := test-bucket
 # container's cache, and that container usually has no GPU, while the host with the GPU has no
 # bazel-bin. Build there, copy the binary here, and point at it:
 #
-#   make gcs_device DEVICE_TEST=/path/to/object_device_test
-DEVICE_TEST ?= ../cpp/bazel-bin/streamer/impl/device_io/real_device/object_device_test
+#   make s3_device DEVICE_TEST=/path/to/object_device_test
+DEVICE_TEST ?= ../cpp/bazel-bin/streamer/impl/device_io/tests/object_device_test
 DEVICE_FIXTURE := /tmp/runai-object-fixture.bin
 DEVICE_OBJECT := device-fixture.bin
 
-.PHONY: gcs s3 azure fuzzing all gcs_device azure_device require_device
+# Where the S3 plugin is. The streamer dlopens it by BARE NAME, so without a directory the
+# loader can search, every range fails with S3NotSupported - and gtest then reports the mismatched
+# bytes, which reads like data corruption rather than a missing library.
+#
+# Overridable for the same reason DEVICE_TEST is: on a host with no bazel-bin these point nowhere, so
+# copy the plugin out and name its directory.
+S3_PLUGIN_DIR ?= ../cpp/bazel-bin/s3
+
+.PHONY: gcs s3 azure fuzzing all s3_device require_device
 
 s3:
 	@set -e; \
@@ -111,14 +119,14 @@ all: fuzzing s3 gcs azure
 
 # --- object storage to a device, byte-verified ------------------------------------------------------
 #
-# The Python suites read object storage to HOST memory and check the tensors. These read it to DEVICE
-# memory through the C API and check the bytes - the one thing the s3 mock can never answer, because it
-# never writes into the destination.
+# The Python suites read object storage to HOST memory and check the tensors. This reads it to DEVICE
+# memory through the C API and checks the bytes - the one thing the s3 mock can never answer, because
+# it never writes into the destination.
 #
 # The fixture is written here and uploaded by the same tool the suite already needs, so the expected
 # bytes have exactly one definition: the file on disk.
 #
-# Needs a GPU, which is why these are separate targets rather than part of `make all`.
+# Needs a GPU, which is why this is a separate target rather than part of `make all`.
 #
 # CHECKED BEFORE ANYTHING STARTS. The test SKIPS when there is no usable device, and a skipped gtest
 # exits 0 - so without this a machine with no GPU would start an emulator, upload a fixture, run
@@ -126,47 +134,49 @@ all: fuzzing s3 gcs azure
 # device path never ran.
 require_device:
 	@test -x "$(DEVICE_TEST)" || { \
-		echo "$(DEVICE_TEST) is missing - build it first: (cd ../cpp && bazel build //streamer/impl/device_io/real_device:object_device_test)"; \
+		echo "$(DEVICE_TEST) is missing - build it first: (cd ../cpp && bazel build //streamer/impl/device_io/tests:object_device_test)"; \
 		exit 1; }
 	@nvidia-smi -L 2>/dev/null | grep -q GPU || { \
-		echo "no usable GPU here. These targets read object storage into DEVICE memory; without one the"; \
+		echo "no usable GPU here. This target reads object storage into DEVICE memory; without one the"; \
 		echo "test skips and gtest still exits 0, so this would look like a pass."; \
 		exit 1; }
 
 $(DEVICE_FIXTURE):
 	head -c 33554432 /dev/urandom > $(DEVICE_FIXTURE)
 
-gcs_device: require_device $(DEVICE_FIXTURE)
-	@echo "Starting Fake GCS Server on port ${FAKE_GCS_SERVER_API_PORT}"; \
-	mkdir -p ${FAKE_GCS_SERVER_DATA_DIR}/${FAKE_GCS_SERVER_BUCKET}; \
-	cp $(DEVICE_FIXTURE) ${FAKE_GCS_SERVER_DATA_DIR}/${FAKE_GCS_SERVER_BUCKET}/$(DEVICE_OBJECT); \
-	fake-gcs-server -scheme http -port ${FAKE_GCS_SERVER_API_PORT} -data ${FAKE_GCS_SERVER_DATA_DIR} -filesystem-root ${FAKE_GCS_SERVER_ROOT} & \
-	FAKE_GCS_SERVER_PID=$$!; \
-	sleep 2; \
-	GOOGLE_CLOUD_PROJECT=fake-project API_ENDPOINT_OVERRIDE=http://localhost:${FAKE_GCS_SERVER_API_PORT} \
-	CLOUD_STORAGE_EMULATOR_ENDPOINT=http://localhost:${FAKE_GCS_SERVER_API_PORT} RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS=True \
-	RUNAI_TEST_OBJECT_URI=gs://${FAKE_GCS_SERVER_BUCKET}/$(DEVICE_OBJECT) RUNAI_TEST_OBJECT_FILE=$(DEVICE_FIXTURE) \
-	$(DEVICE_TEST); \
-	STATUS=$$?; \
-	kill $$FAKE_GCS_SERVER_PID; wait $$FAKE_GCS_SERVER_PID 2>/dev/null || true; \
-	rm -rf ${FAKE_GCS_SERVER_ROOT}; \
-	exit $$STATUS
-
-azure_device: require_device $(DEVICE_FIXTURE)
-	@make -C ../cpp build_azure_test; \
-	echo "Starting Azurite server on port ${AZURITE_API_PORT}"; \
-	azurite --silent --skipApiVersionCheck --location ${AZURITE_SERVER_WORKSPACE} --blobPort ${AZURITE_API_PORT} & \
-	AZURITE_PID=$$!; \
-	sleep 3; \
-	AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=${AZURITE_ACCOUNT_NAME};AccountKey=${AZURITE_ACCOUNT_KEY};BlobEndpoint=http://127.0.0.1:${AZURITE_API_PORT}/${AZURITE_ACCOUNT_NAME};" \
-	python3 -c "import os; from azure.storage.blob import BlobServiceClient as C; c=C.from_connection_string(os.environ['AZURE_STORAGE_CONNECTION_STRING']); \
-	           (c.create_container('${AZURITE_CONTAINER}') if '${AZURITE_CONTAINER}' not in [x.name for x in c.list_containers()] else None); \
-	           c.get_blob_client('${AZURITE_CONTAINER}', '$(DEVICE_OBJECT)').upload_blob(open('$(DEVICE_FIXTURE)','rb'), overwrite=True)"; \
-	LD_LIBRARY_PATH="../cpp/bazel-bin/azure:$${LD_LIBRARY_PATH}" \
-	AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=${AZURITE_ACCOUNT_NAME};AccountKey=${AZURITE_ACCOUNT_KEY};BlobEndpoint=http://127.0.0.1:${AZURITE_API_PORT}/${AZURITE_ACCOUNT_NAME};" \
-	RUNAI_TEST_OBJECT_URI=azure://${AZURITE_CONTAINER}/$(DEVICE_OBJECT) RUNAI_TEST_OBJECT_FILE=$(DEVICE_FIXTURE) \
-	$(DEVICE_TEST); \
-	STATUS=$$?; \
-	kill $$AZURITE_PID; wait $$AZURITE_PID 2>/dev/null || true; \
-	rm -rf ${AZURITE_SERVER_WORKSPACE}; \
-	exit $$STATUS
+s3_device: require_device $(DEVICE_FIXTURE)
+	@set -e; \
+	S3_TEST_DATA_DIR=$$(mktemp -d); \
+	echo "Starting SeaweedFS (weed mini) on port ${S3_TEST_API_PORT} with data directory $$S3_TEST_DATA_DIR"; \
+	mkdir -p $$S3_TEST_DATA_DIR/${S3_TEST_BUCKET}; \
+	S3_CONFIG=$$(mktemp); \
+	printf '{"identities":[{"name":"admin_user","credentials":[{"accessKey":"${S3_TEST_ACCESS_KEY}","secretKey":"${S3_TEST_SECRET_KEY}"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' > $$S3_CONFIG; \
+	cleanup() { \
+		rc=$$?; \
+		echo "Stopping weed..."; \
+		if [ -n "$$WEED_PID" ]; then \
+			kill -INT $$WEED_PID 2>/dev/null || true; \
+			i=0; while kill -0 $$WEED_PID 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done; \
+			kill -9 $$WEED_PID 2>/dev/null || true; \
+			wait $$WEED_PID 2>/dev/null || true; \
+		fi; \
+		rm -f $$S3_CONFIG; \
+		rm -rf $$S3_TEST_DATA_DIR; \
+		exit $$rc; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	weed mini -dir=$$S3_TEST_DATA_DIR -bucket=${S3_TEST_BUCKET} -s3.port=${S3_TEST_API_PORT} -s3.config=$$S3_CONFIG & \
+	WEED_PID=$$!; \
+	echo "weed PID is $$WEED_PID"; \
+	i=0; \
+	until AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} \
+	      python3 -c "import boto3,os; boto3.client('s3', endpoint_url=os.environ['AWS_ENDPOINT_URL']).upload_file('$(DEVICE_FIXTURE)', '${S3_TEST_BUCKET}', '$(DEVICE_OBJECT)')" 2>/dev/null; do \
+		i=$$((i+1)); \
+		test $$i -lt 150 || { echo "weed did not accept the fixture within 30s"; exit 1; }; \
+		sleep 0.2; \
+	done; \
+	LD_LIBRARY_PATH="$(S3_PLUGIN_DIR):$${LD_LIBRARY_PATH}" \
+	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
+	AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} \
+	RUNAI_TEST_OBJECT_URI=s3://${S3_TEST_BUCKET}/$(DEVICE_OBJECT) RUNAI_TEST_OBJECT_FILE=$(DEVICE_FIXTURE) \
+	$(DEVICE_TEST)
