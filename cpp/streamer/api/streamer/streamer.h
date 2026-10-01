@@ -98,8 +98,8 @@ int runai_file_streamer_set_fs_strategy(
 //
 // DEVICE - one per submission, so every destination in it lives on the same device. A load that
 // scatters across several GPUs is sent as several submissions, which run together and are drained by
-// their own ids. Only RUNAI_FILE_STREAMER_DEVICE_CPU is served today; anything else returns UnsupportedDeviceType and
-// commits nothing, so no responses are owed for it.
+// their own ids. CPU and CUDA destinations are both served; any other type returns UnsupportedDeviceType
+// and commits nothing, so no responses are owed for it.
 //
 // Credentials are NOT passed here - set them once via runai_file_streamer_set_credentials.
 //  out_submission_id : always set to this submission's id once one is assigned, and left 0 only
