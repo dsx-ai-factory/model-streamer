@@ -112,10 +112,12 @@ PR checks. Keep CI's container options in sync with the required devcontainer
 
 ### Parallel PR checks
 
-A setup job computes `PACKAGE_VERSION` once. Eight build jobs then run
-`make ci-build COMPONENT=... ARCH=...`: core (`streamer`), S3, GCS, and Azure,
-each for `x86_64` and `aarch64`. Each job uses the same native build command and
-packaging target as the existing full build. Each x86_64 job then runs
+A setup job computes `PACKAGE_VERSION` once. Eight build jobs cover core
+(`streamer`), S3, GCS, and Azure, each for `x86_64` and `aarch64`. Each job exposes
+separate steps for `make ci-build-cpp` and `make ci-build-python`, using the same
+native build command and packaging target as the existing full build. Both
+commands take `COMPONENT` and `ARCH`; `make ci-build` runs them in order locally.
+Each x86_64 job then runs
 `make ci-test-cpp COMPONENT=... ARCH=x86_64` before uploading its wheel. The test
 command uses the same architecture and backend defines as the preceding build,
 allowing Bazel to reuse compatible compiled outputs on that runner.

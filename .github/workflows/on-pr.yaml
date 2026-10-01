@@ -63,7 +63,7 @@ jobs:
       run: make "ci-test-$TEST_SUITE" BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
   build:
-    name: Build (${{ matrix.component }}, ${{ matrix.arch }})
+    name: ${{ matrix.arch == 'x86_64' && 'Build & C++ tests' || 'Build' }} (${{ matrix.component }}, ${{ matrix.arch }})
     needs: setup
     env:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
@@ -85,8 +85,11 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Build packages
-      run: make ci-build
+    - name: Build C++ library
+      run: make ci-build-cpp
+
+    - name: Build Python wheel
+      run: make ci-build-python
 
     - name: Run component C++ tests
       if: matrix.arch == 'x86_64'

@@ -65,10 +65,16 @@ COMPONENT ?= streamer
 ARCH ?= $(shell uname -m)
 CI_PACKAGE_DIR = runai_model_streamer$(if $(filter-out streamer,$(COMPONENT)),_$(COMPONENT))
 
-.PHONY: ci-build ci-install ci-test-cpp ci-test-python ci-test-integration ci-check
+.PHONY: ci-build ci-build-cpp ci-build-python ci-install ci-test-cpp ci-test-python ci-test-integration ci-check
 
 ci-build:
+	$(MAKE) ci-build-cpp
+	$(MAKE) ci-build-python
+
+ci-build-cpp:
 	$(MAKE) -C cpp build_$(COMPONENT) ARCH=$(ARCH)
+
+ci-build-python:
 	$(MAKE) -C py/$(CI_PACKAGE_DIR) build ARCH=$(ARCH)
 
 ci-install:
