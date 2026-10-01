@@ -68,6 +68,26 @@ BAZEL_TEST_LOGGING := --test_output=errors
 test:
 	bazel test //...:all $(BAZEL_TEST_LOGGING) $(BAZEL_TEST_FLAGS)
 
+.PHONY: test_streamer test_s3 test_gcs test_azure
+
+# Match each component build's architecture and defines to reuse compiled outputs.
+# Core owns every target outside the three backend trees, including shared utilities.
+test_streamer:
+	bazel test "--config=${ARCH}" $(BAZEL_TEST_LOGGING) $(BAZEL_TEST_FLAGS) \
+		-- //...:all -//s3/... -//gcs/... -//azure/...
+
+test_s3:
+	bazel test //s3/... "--config=${ARCH}" --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
+		$(BAZEL_TEST_LOGGING) $(BAZEL_TEST_FLAGS)
+
+test_gcs:
+	bazel test //gcs/... "--config=${ARCH}" --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
+		$(BAZEL_TEST_LOGGING) $(BAZEL_TEST_FLAGS)
+
+test_azure:
+	bazel test //azure/... "--config=${ARCH}" --define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
+		$(BAZEL_TEST_LOGGING) $(BAZEL_TEST_FLAGS)
+
 # The C++ half of the strategy sweep - see the root Makefile's test_strategies for the whole story.
 #
 # These two targets and no others. Every other test either pins its own strategy with

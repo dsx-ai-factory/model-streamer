@@ -74,8 +74,8 @@ ci-build:
 ci-install:
 	$(MAKE) -C py install
 
-ci-test-cpp: ci-install
-	$(MAKE) -C cpp test
+ci-test-cpp:
+	$(MAKE) -C cpp test_$(COMPONENT) ARCH=$(ARCH)
 
 ci-test-python: ci-install
 	# Distributed tests use the installed real library; unit tests override it with the mock.

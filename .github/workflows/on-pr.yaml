@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [cpp, python, integration]
+        suite: [python, integration]
     env:
       TEST_SUITE: ${{ matrix.suite }}
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
@@ -87,6 +87,10 @@ jobs:
 
     - name: Build packages
       run: make ci-build
+
+    - name: Run component C++ tests
+      if: matrix.arch == 'x86_64'
+      run: make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
     - name: Upload architecture packages
       uses: actions/upload-artifact@v4

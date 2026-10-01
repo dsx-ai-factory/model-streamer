@@ -115,25 +115,32 @@ PR checks. Keep CI's container options in sync with the required devcontainer
 A setup job computes `PACKAGE_VERSION` once. Eight build jobs then run
 `make ci-build COMPONENT=... ARCH=...`: core (`streamer`), S3, GCS, and Azure,
 each for `x86_64` and `aarch64`. Each job uses the same native build command and
-packaging target as the existing full build and uploads its wheel. After the builds
-succeed, three test jobs download the x86_64 wheels and run in parallel:
+packaging target as the existing full build. Each x86_64 job then runs
+`make ci-test-cpp COMPONENT=... ARCH=x86_64` before uploading its wheel. The test
+command uses the same architecture and backend defines as the preceding build,
+allowing Bazel to reuse compatible compiled outputs on that runner.
 
-- `make ci-test-cpp`
+S3, GCS, and Azure run their respective C++ test trees; core runs everything
+outside those three trees, including common, POSIX I/O, and utility tests.
+ARM64 jobs build packages only. After all eight jobs succeed, two test jobs
+download the x86_64 wheels and run in parallel:
+
 - `make ci-test-python`
 - `make ci-test-integration` (integration suites followed by the filesystem strategy sweep)
 
-The CI test targets use `make ci-install` to install the downloaded wheels via
-the existing Python package Makefiles. Python distributed tests load the installed
-real library; the mock unit tests retain their existing override. The integration
+The Python and integration targets use `make ci-install` to install the downloaded
+wheels via the existing Python package Makefiles. Python distributed tests load
+the installed real library; the mock unit tests retain their existing override. The integration
 job also reuses the installed core library for the Python filesystem strategy
 tests through `test-unit-real-installed`, avoiding another full native build.
-The same tests still run for all four strategies. C++ test compilation and the
-Azure testing variant remain required. `make test` remains the full sequential
-local entry point and builds from source as before.
+The same tests still run for all four strategies. The integration job still builds
+the two C++ strategy test targets and the Azure testing variant. `make test` remains
+the full sequential local entry point and builds from source as before.
 
 Artifact assembly combines both architectures into the four existing package
 artifacts. The `Test, Build & Push` required check succeeds only when all eight
-builds, all three test jobs, and artifact assembly succeed.
+builds (including their C++ tests), both downstream test jobs, and artifact
+assembly succeed. Peak concurrency is eight runners.
 
 ## Getting Help
 Need support or have a question? We're here to help:
