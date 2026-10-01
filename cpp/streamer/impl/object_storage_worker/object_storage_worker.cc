@@ -434,6 +434,37 @@ void ObjectStorageWorker::drain_copies()
     }
 }
 
+void ObjectStorageWorker::quiesce_reads()
+{
+    if (_reader == nullptr || _queue == nullptr || _queue->inflight() == 0)
+    {
+        return;
+    }
+
+    LOG(DEBUG) << "Waiting for " << _queue->inflight() << " object reads in flight before reporting";
+
+    while (_queue->inflight() > 0)
+    {
+        std::vector<common::backend_api::Response> responses;
+
+        const auto ret = _reader->async_response(responses, _max_responses);
+        if (ret != common::ResponseCode::Success)
+        {
+            // FinishedError is the backend saying it holds nothing, which is what this waits for.
+            // Anything else means it cannot tell us any more, and looping would spin.
+            break;
+        }
+
+        // NOT routed: the workloads are about to be failed, so routing would answer their ranges
+        // twice. The credit is all that matters here - it is what says the backend is done with our
+        // memory. Staging buffers come back in the loop below, once nothing can write to them.
+        for (size_t i = 0; i < responses.size(); ++i)
+        {
+            _queue->complete(1);
+        }
+    }
+}
+
 void ObjectStorageWorker::quiesce_copies()
 {
     // A copy already handed over is NOT cancelled: it completes on the waiter's thread and calls back
@@ -606,6 +637,10 @@ bool ObjectStorageWorker::holding_work() const
 
 ObjectStorageWorker::~ObjectStorageWorker()
 {
+    // Reads first, then copies - the order they fill and drain a staging buffer in. Both write into
+    // memory that is about to go: the reads into the pool's pinned slabs, the copies into the caller's
+    // device pointer, and the copy completion into this object.
+    quiesce_reads();
     quiesce_copies();
 }
 
@@ -625,8 +660,21 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
     // OOM caller is expected to abort on UnknownError and tear the streamer down.
     _retry.clear();
 
-    // BEFORE anything is reported or released. Copies in flight are writing into caller memory, and
-    // their buffers come back to the pool as they retire.
+    // Drop what never reached the backend. A pending chunk carries no pointer the backend has seen,
+    // so nothing escaped with it - while an in-flight one is being written into right now.
+    if (_queue != nullptr)
+    {
+        _queue->abort_pending();
+    }
+
+    // THEN WAIT, and only then release or report. A read still at the backend is writing into a
+    // staging buffer, and a copy still at the issuer is writing into the caller's device memory.
+    // Releasing a buffer under a live read hands the next chunk memory the plugin is still filling;
+    // reporting a range under a live copy breaks the promise a response makes.
+    //
+    // Waiting first also removes late completions entirely: nothing is abandoned, so no completion can
+    // arrive for a workload that has been erased.
+    quiesce_reads();
     quiesce_copies();
 
     // Every staging buffer still held by a chunk that will never complete. Before the workloads are

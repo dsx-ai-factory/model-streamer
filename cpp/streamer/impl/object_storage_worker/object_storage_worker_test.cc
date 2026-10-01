@@ -965,4 +965,56 @@ TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_A_Copy_In_Flight)
     EXPECT_TRUE(worker.idle()) << "the abort left work behind";
 }
 
+
+// An abort does not release a staging buffer while the backend is still reading into it.
+//
+// async_read is given buffer.data and the plugin fills it asynchronously. abort_all used to release
+// every staging buffer straight back to the pool, so the next chunk of this same worker could acquire
+// memory the plugin was still writing into - and at teardown the pool frees that pinned memory
+// outright. The reads are not cancelled, so the only safe order is to wait for them first.
+//
+// Before the fix this returned at once, having cleared the in-flight credit.
+TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_Reads_Still_At_The_Backend)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // The plugin takes its time, so a read is still outstanding when the abort lands. The mock spends
+    // about this long inside each obj_wait_for_completions.
+    constexpr unsigned HarvestRoundMs = 50;
+    set_response_time(HarvestRoundMs);
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+    ASSERT_GT(requests(), 0u) << "no read was submitted, so nothing is at the backend";
+
+    // Abort while the backend still holds reads. It must not return until they have reported, and the
+    // mock makes every harvest round cost real time - so an abort that waits cannot be instant.
+    stopped = true;
+
+    const auto start = std::chrono::steady_clock::now();
+    worker.drain(stopped);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_GE(elapsed, HarvestRoundMs / 2)
+        << "the abort returned in " << elapsed << " ms, without waiting for a harvest round: its reads"
+        << " were still at the backend and their staging buffers went back to the pool while the plugin"
+        << " was still writing into them";
+
+    EXPECT_TRUE(worker.idle()) << "the abort left reads outstanding";
+
+    set_response_time(0);
+}
+
 }; // namespace runai::llm::streamer::impl

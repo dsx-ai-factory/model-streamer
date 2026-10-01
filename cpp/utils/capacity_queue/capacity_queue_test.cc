@@ -207,4 +207,28 @@ TEST(CapacityQueue, ClearDropsPendingAndInflightInOneStep)
     EXPECT_EQ(q.capacity(), capacity);
 }
 
+
+// abort_pending drops what never reached the backend and keeps what did. The in-flight credit is the
+// only record that something out there may still be writing into our memory, so an abort that wants to
+// wait for it must not fabricate zero.
+TEST(CapacityQueue, Abort_Pending_Keeps_Inflight_Credit)
+{
+    CapacityQueue<int> queue(4);
+
+    queue.enqueue(1, 2);
+    queue.enqueue(2, 2);
+    queue.enqueue(3, 2);
+
+    ASSERT_TRUE(queue.try_take().has_value());   // 2 of 4 in flight, two still pending
+
+    queue.abort_pending();
+
+    EXPECT_TRUE(queue.empty()) << "pending items survived the abort";
+    EXPECT_EQ(queue.inflight(), 2u) << "in-flight credit was released without a completion";
+    EXPECT_FALSE(queue.idle()) << "the queue called itself idle with work still at the backend";
+
+    queue.complete(2);
+    EXPECT_TRUE(queue.idle());
+}
+
 } // namespace runai::llm::streamer::utils
