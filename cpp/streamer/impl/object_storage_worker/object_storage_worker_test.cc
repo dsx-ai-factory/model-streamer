@@ -134,6 +134,8 @@ struct Submission
     std::vector<std::set<int>> expected;
 };
 
+
+
 } // namespace
 
 // Fixture: owns the s3 mock handle, resets its knobs before each test, and releases the plugin's clients +
@@ -901,6 +903,66 @@ TEST_F(ObjectStorageWorkerTest, Empty_Workload)
 
     // no client was ever created and nothing was read
     EXPECT_EQ(clients(), 0);
+}
+
+// An abort does not return while a copy is still in flight.
+//
+// abort_all fails every workload and drops them, but a copy already handed to the issuer is NOT
+// cancelled. It completes later on the waiter's thread and calls back into THIS worker, pushing onto a
+// member deque - so a worker torn down first is written through after it is gone. The copy is also
+// still writing into the caller's device memory, and a response promises that nothing will write to
+// that range again.
+//
+// Before the fix this returned at once, having set the in-flight count to zero.
+TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_A_Copy_In_Flight)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // Turns until a read has landed and its copy is stuck in the issuer, holding its buffer.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so nothing is in flight";
+
+    // Abort on another thread, because it is supposed to block.
+    std::atomic<bool> returned{ false };
+    std::thread aborting([&]()
+        {
+            stopped = true;
+            worker.drain(stopped);
+            returned = true;
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_FALSE(returned.load())
+        << "the abort returned with a copy still in flight: the worker may now be destroyed, and the"
+        << " copy's completion would call back into freed memory";
+
+    backend->opened(0)->release_copies();
+    aborting.join();
+
+    EXPECT_TRUE(returned.load());
+    EXPECT_TRUE(worker.idle()) << "the abort left work behind";
 }
 
 }; // namespace runai::llm::streamer::impl
