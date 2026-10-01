@@ -24,11 +24,11 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Run tests
-      run: make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
-
     - name: Set PACKAGE_VERSION
       run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+    - name: Run tests
+      run: make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
     - name: Build packages
       run: make build
