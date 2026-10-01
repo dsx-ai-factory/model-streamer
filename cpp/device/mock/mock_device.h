@@ -63,6 +63,7 @@ class MockDevice : public Device
     std::atomic<unsigned> events_created{0};
     std::atomic<unsigned> events_destroyed{0};
     std::atomic<unsigned> event_syncs{0};
+    std::atomic<unsigned> stream_syncs{0};
     std::atomic<unsigned> copies{0};
 
     std::vector<size_t> host_alloc_sizes;   // in order, so slab sizing is checkable
@@ -77,6 +78,14 @@ class MockDevice : public Device
     // A driver call reaches an ASSERT, which is fatal, so a caller that only handles return codes
     // still has to survive an exception from here.
     unsigned throw_host_alloc_at = 0;
+
+    // Make every event_record fail, with the copy itself still enqueued. That is the one case where a
+    // copy is on the stream and no event marks it, so nothing can wait for it.
+    std::atomic<bool> fail_event_record{false};
+
+    // Make every stream_synchronize fail, so a caller that cannot wait for the stream either has no
+    // way left to know when a copy stops reading from its buffer.
+    std::atomic<bool> fail_stream_synchronize{false};
 
     // Make every event_synchronize report a failed copy.
     std::atomic<bool> fail_event_synchronize{false};

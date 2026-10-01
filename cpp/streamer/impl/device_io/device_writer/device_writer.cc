@@ -146,7 +146,10 @@ common::ResponseCode DeviceWriter::write(Channel channel,
     // them and this event then marks a later point on the stream. A stream is FIFO, so the event fires
     // late and never early: the buffer is held longer, the bytes are still right.
     auto code = target->device->memcpy_h2d_async(destination, buffer.data, bytesize, target->stream.get());
-    if (code == common::ResponseCode::Success)
+
+    // Which of the two failed decides whether this buffer is safe to give back.
+    const bool enqueued = code == common::ResponseCode::Success;
+    if (enqueued)
     {
         code = target->device->event_record(copy.event, target->stream.get());
     }
@@ -155,6 +158,27 @@ common::ResponseCode DeviceWriter::write(Channel channel,
     {
         LOG(ERROR) << "[RunAI Streamer] failed to enqueue a copy of " << bytesize
                    << " bytes: " << code;
+
+        if (enqueued)
+        {
+            // THE COPY IS ON THE STREAM and still reading out of this buffer; only its event failed,
+            // so nothing marks when it ends and the waiter has nothing to wait on. Returning the
+            // buffer now lets the next read overwrite the source mid-transfer.
+            //
+            // Synchronising the whole stream is heavier than waiting for one event, which is why it is
+            // not the normal path - but with no event there is nothing finer to wait for.
+            const auto drained = target->device->stream_synchronize(target->stream.get());
+            if (drained != common::ResponseCode::Success)
+            {
+                // The copy may still be reading. One buffer is leaked from the pool rather than handed
+                // to a reader that would corrupt it, and the pool shrinks by one for this worker.
+                LOG(ERROR) << "[RunAI Streamer] could not drain the stream after a failed event record ("
+                           << drained << "); the staging buffer is retained because a copy may still be"
+                           << " reading from it";
+                copy.events->release(copy.event);
+                return code;
+            }
+        }
 
         // on_done is NOT called: the return value is the report, and reporting both ways would tell
         // a caller twice.

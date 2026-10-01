@@ -118,7 +118,9 @@ common::ResponseCode MockDevice::stream_destroy(StreamHandle stream)
 
 common::ResponseCode MockDevice::stream_synchronize(StreamHandle)
 {
-    return common::ResponseCode::Success;
+    ++stream_syncs;
+    return fail_stream_synchronize ? common::ResponseCode::DeviceDriverError
+                                   : common::ResponseCode::Success;
 }
 
 common::ResponseCode MockDevice::stream_query(StreamHandle, Status & status)
@@ -167,6 +169,11 @@ common::ResponseCode MockDevice::event_record(EventHandle event, StreamHandle st
     {
         ++foreign_records;
         return common::ResponseCode::InvalidParameterError;
+    }
+
+    if (fail_event_record)
+    {
+        return common::ResponseCode::DeviceDriverError;
     }
 
     _ready[event] = false;
