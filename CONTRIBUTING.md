@@ -124,15 +124,16 @@ allowing Bazel to reuse compatible compiled outputs on that runner.
 
 S3, GCS, and Azure run their respective C++ test trees; core runs everything
 outside those three trees, including common, POSIX I/O, and utility tests.
-ARM64 jobs build packages only. After all eight jobs succeed, two test jobs
-download the x86_64 wheels and run in parallel:
+The core x86_64 job also runs `make ci-test-python`, installing only its core wheel
+and Python test dependencies before running unit and distributed tests. Python
+feedback therefore does not wait for the cloud backend builds. ARM64 jobs build
+packages only.
 
-- `make ci-test-python`
-- `make ci-test-integration` (integration suites followed by the filesystem strategy sweep)
-
-The Python and integration targets use `make ci-install` to install the downloaded
-wheels via the existing Python package Makefiles. Python distributed tests load
-the installed real library; the mock unit tests retain their existing override. The integration
+After all eight jobs succeed, the integration job downloads the x86_64 wheels
+and runs `make ci-test-integration`: integration suites followed by the filesystem
+strategy sweep. It uses `make ci-install` to install all four wheels via the
+existing Python package Makefiles. Python distributed tests load the installed
+real library; the mock unit tests retain their existing override. The integration
 job also reuses the installed core library for the Python filesystem strategy
 tests through `test-unit-real-installed`, avoiding another full native build.
 The same tests still run for all four strategies. The integration job still builds
@@ -141,7 +142,7 @@ the full sequential local entry point and builds from source as before.
 
 Artifact assembly combines both architectures into the four existing package
 artifacts. The `Test, Build & Push` required check succeeds only when all eight
-builds (including their C++ tests), both downstream test jobs, and artifact
+builds (including their C++ and Python tests), integration tests, and artifact
 assembly succeed. Peak concurrency is eight runners.
 
 ## Getting Help

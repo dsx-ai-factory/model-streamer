@@ -3,21 +3,14 @@
 ARCH := $$(uname -m)
 
 build:
-	bazel build streamer:libstreamer.so \
-		"--config=${ARCH}" && \
-	bazel build s3:libstreamers3.so \
-		--define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
-		"--config=${ARCH}" && \
-	bazel build gcs:libstreamergcs.so \
-		--define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
-		"--config=${ARCH}" && \
-	bazel build azure:libstreamerazure.so \
-		--define USE_SYSTEM_LIBS=${USE_SYSTEM_LIBS} \
-		"--config=${ARCH}"
+	$(MAKE) build_streamer
+	$(MAKE) build_s3
+	$(MAKE) build_gcs
+	$(MAKE) build_azure
 
 .PHONY: build_streamer build_s3 build_gcs build_azure
 
-# Individual CI jobs use the same commands and flags as the full build above.
+# Shared by the full build above and individual CI jobs.
 build_streamer:
 	bazel build streamer:libstreamer.so "--config=${ARCH}"
 

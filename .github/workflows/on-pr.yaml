@@ -32,7 +32,7 @@ jobs:
         printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
   tests:
-    name: Tests (${{ matrix.suite }})
+    name: Integration & strategies
     needs: [setup, build]
     runs-on: ubuntu-latest
     container:
@@ -41,12 +41,7 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: --security-opt seccomp=unconfined
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: [python, integration]
     env:
-      TEST_SUITE: ${{ matrix.suite }}
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
     steps:
     - name: Checkout code
@@ -59,11 +54,11 @@ jobs:
         path: py
         merge-multiple: true
 
-    - name: Install prerequisites and run test phase
-      run: make "ci-test-$TEST_SUITE" BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+    - name: Run integration tests and filesystem strategies
+      run: make ci-test-integration BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
   build:
-    name: ${{ matrix.arch == 'x86_64' && 'Build & C++ tests' || 'Build' }} (${{ matrix.component }}, ${{ matrix.arch }})
+    name: ${{ matrix.arch == 'x86_64' && 'Build & tests' || 'Build' }} (${{ matrix.component }}, ${{ matrix.arch }})
     needs: setup
     env:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
@@ -94,6 +89,10 @@ jobs:
     - name: Run component C++ tests
       if: matrix.arch == 'x86_64'
       run: make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+
+    - name: Run Python unit and distributed tests
+      if: matrix.arch == 'x86_64' && matrix.component == 'streamer'
+      run: make ci-test-python
 
     - name: Upload architecture packages
       uses: actions/upload-artifact@v4

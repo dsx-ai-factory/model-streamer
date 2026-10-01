@@ -83,7 +83,8 @@ ci-install:
 ci-test-cpp:
 	$(MAKE) -C cpp test_$(COMPONENT) ARCH=$(ARCH)
 
-ci-test-python: ci-install
+ci-test-python:
+	$(MAKE) -C py/runai_model_streamer install
 	# Distributed tests use the installed real library; unit tests override it with the mock.
 	library="$$(python3 -c 'from runai_model_streamer.libstreamer import DEFAULT_STREAMER_LIBRARY; print(DEFAULT_STREAMER_LIBRARY)')" && \
 		STREAMER_LIBRARY="$$library" $(MAKE) -C py test
