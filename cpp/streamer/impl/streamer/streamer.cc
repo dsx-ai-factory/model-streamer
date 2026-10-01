@@ -1,4 +1,4 @@
-#include "device/cuda/cuda_device.h"
+#include "device/backends/backends.h"
 #include "streamer/impl/streamer/streamer.h"
 
 #include <sys/sysmacros.h>   // major/minor
@@ -42,7 +42,10 @@ Streamer::Streamer(Config config, Environment environment) :
     _router(config.fs_strategy_candidates, std::move(environment)),
     // A factory rather than a backend: obtaining one is a driver call, and a host-only load must not
     // pay it. See DeviceWriter.
-    _device_writer(std::make_shared<DeviceWriter>(device::cuda::backend)),
+    //
+    // ONE writer, so Cuda is asked for by name: it is the only device type served. backend_for is
+    // what maps that type to a vendor, which is why no vendor appears in this file.
+    _device_writer(std::make_shared<DeviceWriter>(device::backend_for(common::DeviceType::Cuda))),
     _device_issuer(std::make_shared<DeviceIssuer>(_device_writer)),
     // Three worker factories, one per pool kind, in the order BackendPools takes them: the synchronous
     // filesystem reader (concurrency threads), the async one the strategy router builds per mount, and
