@@ -29,7 +29,13 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+      run: |
+        set -euo pipefail
+        if [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::GITHUB_SHA must be a full 40-character commit SHA" >&2
+          exit 1
+        fi
+        printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
 
     - name: Run tests
       run: make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
