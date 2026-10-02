@@ -94,6 +94,12 @@ class DistributedStreamer:
         free_memory, total_memory = torch.cuda.mem_get_info()
         return free_memory
 
+    def get_xpu_free_memory(self) -> int:
+        if not torch.xpu.is_available():
+            return 0
+        free_memory, total_memory = torch.xpu.mem_get_info()
+        return free_memory
+
     def set_is_distributed(self, is_distributed: bool, device: str) -> None:
         # check if distributed streaming should be used
 
@@ -130,13 +136,18 @@ class DistributedStreamer:
             elif backend_name == "gloo" and device != "cpu":
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for %s device - fallback to non distributed streaming", backend_name, device)
                 self.is_distributed = False
-            elif enable_dist == "auto" and backend_name != "nccl":
+            elif backend_name == "xccl" and torch.device(device).type != "xpu":
+                logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for %s device - fallback to non distributed streaming", backend_name, device)
+                self.is_distributed = False
+            elif enable_dist == "auto" and backend_name not in ("nccl", "xccl"):
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported by default for distributed streaming - To allow this backend, set RUNAI_STREAMER_DIST to `1`", backend_name)
                 self.is_distributed = False
 
+        cuda_dist = torch.cuda.is_available() and dist.is_initialized() and dist.get_backend() == "nccl"
+        xpu_dist = torch.xpu.is_available() and dist.is_initialized() and dist.get_backend() == "xccl"
         # check if there is enough free memory on the device
-        if self.is_distributed and torch.cuda.is_available() and dist.get_backend() == "nccl":
-            free_memory = self.get_cuda_free_memory()
+        if self.is_distributed and (cuda_dist or xpu_dist):
+            free_memory = self.get_cuda_free_memory() if cuda_dist else self.get_xpu_free_memory()
             if free_memory < 2 * self.params.max_chunk:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
                 self.is_distributed = False
