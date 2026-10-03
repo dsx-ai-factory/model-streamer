@@ -498,4 +498,52 @@ TEST(StagingPool, A_Retired_Buffer_Below_The_Ceiling_Is_Replaced)
     EXPECT_TRUE(again.valid());
 }
 
+
+// The slab a retired buffer came from must NOT be freed when the pool dies. Keeping the buffer out of
+// a reader's hands is only half of it: an enqueued copy may still be reading that memory, and
+// cuMemFreeHost under a live DMA is undefined. The pool cannot wait for it - waiting is what failed.
+TEST(StagingPool, A_Slab_With_A_Retired_Buffer_Is_Leaked_Not_Freed)
+{
+    auto device = std::make_shared<device::MockDevice>();
+
+    StagingPool::Params params;
+    params.buffer_bytesize = Buffer;
+    params.slab_bytesize = Buffer;
+    params.max_buffers = 1;
+
+    {
+        StagingPool pool(device, params);
+
+        StagingBuffer buffer;
+        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        ASSERT_EQ(device->host_allocs.load(), 1u);
+
+        pool.retire(buffer, common::ResponseCode::DeviceDriverError);
+    }
+
+    EXPECT_EQ(device->host_frees.load(), 0u)
+        << "the slab was freed although a copy may still have been reading from it";
+}
+
+// A pool with nothing retired still frees every slab - the leak is the exception, not the rule.
+TEST(StagingPool, An_Untouched_Pool_Frees_Its_Slabs)
+{
+    auto device = std::make_shared<device::MockDevice>();
+
+    StagingPool::Params params;
+    params.buffer_bytesize = Buffer;
+    params.slab_bytesize = Buffer;
+    params.max_buffers = 1;
+
+    {
+        StagingPool pool(device, params);
+
+        StagingBuffer buffer;
+        ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+        pool.release(buffer);
+    }
+
+    EXPECT_EQ(device->host_frees.load(), 1u) << "a healthy pool leaked its slab";
+}
+
 } // namespace runai::llm::streamer::impl
