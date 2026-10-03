@@ -50,6 +50,15 @@ bool ring_works()
     return true;
 }
 
+// WHERE THE ENGINE IS DECLARED, in every test that reads: AFTER the buffers it reads into.
+//
+// Locals are destroyed in reverse, so that order tears the ring down before any destination is freed.
+// The other way round, a test returning early from a failed assertion frees memory the kernel may
+// still be writing into - ~IoUringEngine does not wait for what is in flight, it says so itself.
+//
+// Production has the same order: AsyncIoWorker declares its engine after the staging pool it reads
+// into, for exactly this reason.
+
 // Skipping is silent, and on a host that is supposed to have io_uring a silent skip is
 // indistinguishable from a pass. RUNAI_STREAMER_REQUIRE_IO_URING says "io_uring works here", turning
 // the skip into a failure. CI sets it, through BAZEL_TEST_FLAGS (.github/workflows/on-pr.yaml).
@@ -176,9 +185,11 @@ TEST(IoUringEngine, Reads_A_File)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(7, fixture.ref(), 8192, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;
@@ -205,7 +216,6 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
-    IoUringEngine engine(config_with(8));
 
     // One region, several reads out of it at different offsets - the shape a slab of buffers has.
     constexpr size_t RegionBytes = 64 << 10;
@@ -213,6 +223,9 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
     utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, RegionBytes);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     Registration registration;
     registration.base = region;
@@ -270,19 +283,22 @@ TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
     }
 
     Fixture fixture(64 << 10);
-    IoUringEngine engine(config_with(8));
 
-    // One ordinary read, issued and deliberately NOT reaped: the ring is live from here.
     std::vector<char> plain(4096);
-    ASSERT_EQ(engine.stage(1, fixture.ref(), 0, plain.size(), plain.data()), common::ResponseCode::Success);
-    unsigned issued = 0;
-    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
-    ASSERT_EQ(issued, 1u);
 
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
     utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, 8192);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
+
+    // One ordinary read, issued and deliberately NOT reaped: the ring is live from here.
+    ASSERT_EQ(engine.stage(1, fixture.ref(), 0, plain.size(), plain.data()), common::ResponseCode::Success);
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    ASSERT_EQ(issued, 1u);
 
     Registration registration;
     registration.base = region;
@@ -318,9 +334,17 @@ TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
 
     constexpr unsigned Depth = 32;
     Fixture fixture(1 << 20);
-    IoUringEngine engine(config_with(Depth));
 
     std::vector<std::vector<char>> plain(Depth, std::vector<char>(4096));
+
+    void * region = nullptr;
+    ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
+    std::memset(region, 0, 8192);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(Depth));
+
     for (unsigned i = 0; i < Depth; ++i)
     {
         ASSERT_EQ(engine.stage(i, fixture.ref(), i * 4096, 4096, plain[i].data()),
@@ -332,11 +356,6 @@ TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
     ASSERT_EQ(issued, Depth) << "the ring must be full for this test to mean anything";
 
     // Not reaped: every one of those is still in flight.
-    void * region = nullptr;
-    ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
-    utils::ScopeGuard free_region([&region]() { ::free(region); });
-    std::memset(region, 0, 8192);
-
     Registration registration;
     registration.base = region;
     registration.bytesize = 8192;
@@ -402,12 +421,14 @@ TEST(IoUringEngine, A_Kernel_Refusal_Still_Reads)
 
     {
         Fixture fixture(64 << 10);
-        IoUringEngine engine(config_with(8));
 
         void * region = nullptr;
         ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
         utils::ScopeGuard free_region([&region]() { ::free(region); });
         std::memset(region, 0, 4096);
+
+        // After the buffers, so the ring goes first - see the note on declaration order above.
+        IoUringEngine engine(config_with(8));
 
         Registration registration;
         registration.base = region;
@@ -445,13 +466,15 @@ TEST(IoUringEngine, A_Buffer_Outside_Its_Region_Still_Reads)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
-    IoUringEngine engine(config_with(8));
 
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
     utils::ScopeGuard free_region([&region]() { ::free(region); });
 
     std::vector<char> elsewhere(4096);   // not in the region at all
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     Registration registration;
     registration.base = region;
@@ -478,9 +501,10 @@ TEST(IoUringEngine, An_Unregisterable_Region_Still_Reads)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
-    IoUringEngine engine(config_with(8));
-
     std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     Registration registration;
     registration.base = buffer.data();
@@ -509,12 +533,14 @@ TEST(IoUringEngine, Ids_Survive_The_Round_Trip)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(256 << 10);
-    IoUringEngine engine(config_with(16));
 
     // Ids well outside [0, depth) - they are opaque tokens, not slot indices, and the worker's are
     // monotonic and never reused.
     const std::vector<RequestId> ids{ 1000, 999999, 4294967296ULL };
     std::vector<std::vector<char>> buffers(ids.size(), std::vector<char>(4096));
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(16));
 
     for (size_t i = 0; i < ids.size(); ++i)
     {
@@ -547,9 +573,11 @@ TEST(IoUringEngine, Short_Read_At_Eof_Is_Not_An_Error)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(4096);
+    std::vector<char> buffer(8192);   // asking for twice the file
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(8192);   // asking for twice the file
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;
@@ -568,10 +596,11 @@ TEST(IoUringEngine, Bad_Fd_Fails_Only_Its_Own_Request)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(16 << 10);
-    IoUringEngine engine(config_with(8));
-
     std::vector<char> good(4096);
     std::vector<char> bad(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, good.size(), good.data()), common::ResponseCode::Success);
     ASSERT_EQ(engine.stage(2, FileRef{ -1, false }, 0, bad.size(), bad.data()), common::ResponseCode::Success)
@@ -606,9 +635,11 @@ TEST(IoUringEngine, Staging_Does_Not_Issue)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(16 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     // Nothing submitted yet, so nothing can complete.
@@ -661,10 +692,12 @@ TEST(IoUringEngine, Fills_The_Window)
     constexpr size_t Bytes = 4096;
 
     Fixture fixture(Depth * Bytes);
+    std::vector<std::vector<char>> buffers(Depth, std::vector<char>(Bytes));
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(Depth));
     ASSERT_EQ(engine.depth(), Depth);
 
-    std::vector<std::vector<char>> buffers(Depth, std::vector<char>(Bytes));
     for (unsigned i = 0; i < Depth; ++i)
     {
         ASSERT_EQ(engine.stage(i + 1, fixture.ref(), i * Bytes, Bytes, buffers[i].data()),
@@ -815,9 +848,11 @@ TEST(IoUringEngine, Direct_Read_Returns_The_Right_Bytes)
     DirectFixture fixture(Block * 8);
     SKIP_WITHOUT_O_DIRECT(fixture);
 
-    IoUringEngine engine(config_with(8));
     AlignedBuffer buffer(Block * 2);
     ASSERT_NE(buffer.get(), nullptr);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     // Offset, length and address are all multiples of the block size.
     const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
@@ -889,9 +924,11 @@ TEST(IoUringEngine, Submit_Time_Is_Measured)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;
