@@ -16,6 +16,7 @@
 
 #include "posix_io/alignment/alignment.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::posix_io
@@ -35,7 +36,7 @@ namespace
 // Whether this kernel will register a buffer, asked of the kernel for the same reason as ring_works()
 // below: an expectation must never be computed by the thing it is checking. Reading IoUringProbe or
 // the engine's own answer would make the assertion vacuous.
-bool ring_registers()
+bool ring_registers(size_t bytesize = 4096)
 {
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
@@ -46,13 +47,20 @@ bool ring_registers()
         return false;
     }
 
-    alignas(4096) static unsigned char probe[4096];
+    void * probe = nullptr;
+    if (::posix_memalign(&probe, 4096, bytesize) != 0)
+    {
+        ::close(fd);
+        return false;
+    }
+
     struct iovec iov;
     iov.iov_base = probe;
-    iov.iov_len = sizeof(probe);
+    iov.iov_len = bytesize;
 
     const long ret = ::syscall(__NR_io_uring_register, fd, IORING_REGISTER_BUFFERS, &iov, 1u);
     ::close(fd);
+    ::free(probe);
     return ret == 0;
 }
 
@@ -237,6 +245,7 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     constexpr size_t RegionBytes = 64 << 10;
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, RegionBytes);
 
     Registration registration;
@@ -281,8 +290,6 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
 
         EXPECT_EQ(std::vector<char>(into, into + Read), expected) << "read " << i << " holds wrong bytes";
     }
-
-    ::free(region);
 }
 
 // A pool grows WHILE READS ARE IN FLIGHT - that is the normal case, since it grows on demand under
@@ -308,6 +315,7 @@ TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
 
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, 8192);
 
     Registration registration;
@@ -329,8 +337,6 @@ TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
     {
         EXPECT_FALSE(completion.failed()) << "res " << completion.res;
     }
-
-    ::free(region);
 }
 
 // The same, with the ring FULL rather than holding one read. Registration happens exactly when the
@@ -362,6 +368,7 @@ TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
     // Not reaped: every one of those is still in flight.
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, 8192);
 
     Registration registration;
@@ -380,8 +387,6 @@ TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
 
     const auto completions = reap(engine, Depth + 1);
     EXPECT_EQ(completions.size(), Depth + 1);
-
-    ::free(region);
 }
 
 // BEST EFFORT, against a real kernel refusal rather than an argument.
@@ -406,13 +411,36 @@ TEST(IoUringEngine, A_Kernel_Refusal_Still_Reads)
         GTEST_SKIP() << "cannot lower RLIMIT_MEMLOCK here, so a refusal cannot be provoked";
     }
 
+    // Every ASSERT_* below returns from the test, and the engine constructor can throw. A limit left
+    // lowered would silently disable registration for every test that ran after this one.
+    utils::ScopeGuard restore([&original]()
+    {
+        EXPECT_EQ(::setrlimit(RLIMIT_MEMLOCK, &original), 0) << "the limit must go back for later tests";
+    });
+
+    // Before 5.12 the ring's own memory is charged to memlock too, so the engine below would throw
+    // rather than reach the registration this test is about.
+    if (!ring_works())
+    {
+        GTEST_SKIP() << "no ring can be created under the lowered limit, so the engine cannot be built";
+    }
+
+    constexpr size_t RegionBytes = 16 << 20;   // way past the limit just set
+
+    // A process holding CAP_IPC_LOCK is not charged for registration, so the lowered limit refuses
+    // nothing and the expectation below would be wrong rather than the engine.
+    if (ring_registers(RegionBytes))
+    {
+        GTEST_SKIP() << "registration is not charged to RLIMIT_MEMLOCK here (CAP_IPC_LOCK?)";
+    }
+
     {
         Fixture fixture(64 << 10);
         IoUringEngine engine(config_with(8));
 
-        constexpr size_t RegionBytes = 16 << 20;   // way past the limit just set
         void * region = nullptr;
         ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
+        utils::ScopeGuard free_region([&region]() { ::free(region); });
         std::memset(region, 0, 4096);
 
         Registration registration;
@@ -438,11 +466,7 @@ TEST(IoUringEngine, A_Kernel_Refusal_Still_Reads)
             << "the fallback read delivered the wrong bytes";
 
         EXPECT_EQ(engine.registered_regions(), 0u) << "the kernel refused, so nothing is registered";
-
-        ::free(region);
     }
-
-    ASSERT_EQ(::setrlimit(RLIMIT_MEMLOCK, &original), 0) << "the limit must go back for later tests";
 }
 
 // A buffer OUTSIDE the region it was offered with is read the ordinary way, not failed.
@@ -459,6 +483,7 @@ TEST(IoUringEngine, A_Buffer_Outside_Its_Region_Still_Reads)
 
     void * region = nullptr;
     ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
 
     std::vector<char> elsewhere(4096);   // not in the region at all
 
@@ -478,8 +503,6 @@ TEST(IoUringEngine, A_Buffer_Outside_Its_Region_Still_Reads)
     EXPECT_FALSE(completions[0].failed())
         << "res " << completions[0].res << " - a mismatched region must fall back, not fail";
     EXPECT_EQ(elsewhere, fixture.expected_at(0, elsewhere.size()));
-
-    ::free(region);
 }
 
 // An id past the table is served the ordinary way. Registration is an optimisation, so running out of
