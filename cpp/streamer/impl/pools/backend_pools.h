@@ -35,7 +35,8 @@ namespace runai::llm::streamer::impl
 // ObjectStorage pool serves one plugin. That small lock lives here too (an optional + leaf mutex).
 //
 // Keep this object in the streamer member slot the single ThreadPool used to occupy, so object-storage
-// workers still join between S3Stop and S3Cleanup on teardown.
+// workers still join before S3Cleanup on teardown: a worker drains its outstanding reads there, and a
+// shut-down plugin would never report them.
 class BackendPools
 {
  public:

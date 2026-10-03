@@ -200,18 +200,18 @@ struct Streamer
     AsyncIoStats _stats;
 
     std::unique_ptr<S3Cleanup> _s3;
-    // Lazily-created worker pools, one per backend kind. Occupies the slot the single ThreadPool used
-    // to, so object-storage workers still join between _s3_stop (S3Stop) and _s3 (S3Cleanup) on teardown.
+    // Lazily-created worker pools, one per backend kind. Declared after _s3 so object-storage workers
+    // join BEFORE S3Cleanup shuts the plugin down: a worker drains its outstanding reads on teardown,
+    // and a shut-down plugin would never report them.
     BackendPools _pools;
-    std::unique_ptr<S3Stop> _s3_stop;
     std::unique_ptr<utils::FdLimitSetter> _fd_limit;
     std::shared_ptr<common::Responder> _responder;
 
     // Lazy S3 init, each part exactly once in the streamer's lifetime and only for s3 paths.
-    // Split because _s3 is shared by list_files and streaming, while fd limit / stop are
+    // Split because _s3 is shared by list_files and streaming, while the fd limit is
     // streaming-only. std::call_once is thread-safe for concurrent submitters and retries if the
     // callable throws (InsufficientFdLimit), so the error resurfaces on the next s3 submission.
-    std::once_flag _s3_stream_init_flag;   // fd limit + S3Stop (streaming only)
+    std::once_flag _s3_stream_init_flag;   // fd limit (streaming only)
     std::once_flag _s3_cleanup_init_flag;  // S3Cleanup (list_files and streaming)
 
     // per-submission bookkeeping (id allocation + completion + throughput); owns its own mutex
