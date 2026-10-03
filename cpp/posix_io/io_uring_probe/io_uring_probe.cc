@@ -25,12 +25,15 @@ common::ResponseCode reason_for(int error)
     return (error == EPERM || error == EACCES) ? common::ResponseCode::FileAccessError : common::ResponseCode::UnknownError;
 }
 
-// Register one small buffer and give it straight back.
+// Register one small buffer the way the engine does, and give it straight back.
 //
-// The opcode being supported is not enough: registration also charges RLIMIT_MEMLOCK, which a kernel
-// version cannot tell us about. One page is small enough to pass under any limit that permits
-// registration at all, which is the question here - a pool sized against the limit is the caller's
-// problem, not the probe's.
+// IORING_OP_READ_FIXED being supported is not enough, for two reasons. The engine registers through a
+// sparse table, whose opcodes are younger than both that one and the classic registration - so a
+// kernel can offer fixed reads and still refuse the table. And registration charges RLIMIT_MEMLOCK,
+// which no kernel version can tell us about.
+//
+// One page is small enough to pass under any limit that permits registration at all, which is the
+// question here - a pool sized against the limit is the caller's problem, not the probe's.
 bool trial_registration(struct io_uring * ring, std::string & why_not)
 {
     alignas(4096) static unsigned char buffer[4096];
@@ -39,14 +42,22 @@ bool trial_registration(struct io_uring * ring, std::string & why_not)
     iov.iov_base = buffer;
     iov.iov_len = sizeof(buffer);
 
-    const int ret = io_uring_register_buffers(ring, &iov, 1);
+    int ret = io_uring_register_buffers_sparse(ring, 1);
     if (ret < 0)
     {
-        why_not = std::string("io_uring_register_buffers failed: ") + std::strerror(-ret);
+        why_not = std::string("io_uring_register_buffers_sparse failed: ") + std::strerror(-ret);
         return false;
     }
 
+    ret = io_uring_register_buffers_update_tag(ring, 0, &iov, nullptr, 1);
     io_uring_unregister_buffers(ring);
+
+    if (ret < 0)
+    {
+        why_not = std::string("io_uring_register_buffers_update_tag failed: ") + std::strerror(-ret);
+        return false;
+    }
+
     return true;
 }
 

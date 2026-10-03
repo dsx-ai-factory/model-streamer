@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include "posix_io/raw_uring/raw_uring.h"
+
 #include <liburing.h>       // for struct io_uring_params only
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -55,38 +57,6 @@ bool raw_has_ext_arg()
 
     ::close(fd);
     return (params.features & IORING_FEAT_EXT_ARG) != 0;
-}
-
-#ifndef __NR_io_uring_register
-#define __NR_io_uring_register 427
-#endif
-
-// Whether this kernel will register a buffer, asked with the raw syscall for the same reason as the
-// two above. Registering through liburing would share the code path being checked.
-//
-// The answer is not a kernel version: io_uring_register charges RLIMIT_MEMLOCK, so the same kernel
-// answers differently under a different limit. That is exactly why the probe registers rather than
-// tests a version, and why this test must register too.
-bool raw_can_register_buffer()
-{
-    struct io_uring_params params;
-    std::memset(&params, 0, sizeof(params));
-
-    const int fd = ::syscall(__NR_io_uring_setup, 8, &params);
-    if (fd < 0)
-    {
-        return false;
-    }
-
-    alignas(4096) static unsigned char buffer[4096];
-    struct iovec iov;
-    iov.iov_base = buffer;
-    iov.iov_len = sizeof(buffer);
-
-    const long ret = ::syscall(__NR_io_uring_register, fd, IORING_REGISTER_BUFFERS, &iov, 1u);
-    ::close(fd);
-
-    return ret == 0;
 }
 
 } // namespace
