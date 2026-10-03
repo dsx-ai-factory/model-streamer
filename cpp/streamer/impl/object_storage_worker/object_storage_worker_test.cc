@@ -23,6 +23,7 @@
 
 #include "utils/threadpool/threadpool.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/thread/thread.h"
 #include "utils/dylib/dylib.h"
 #include "utils/logging/logging.h"
@@ -341,6 +342,11 @@ TEST_F(ObjectStorageWorkerTest, A_Drained_Backend_Does_Not_Abort_Parked_Chunks)
     ASSERT_EQ(workloads.size(), 1u);
 
     ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
     std::atomic<bool> stopped{ false };
 
     worker.execute(std::move(workloads[0]), stopped);
@@ -406,6 +412,11 @@ TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
     ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
 
     ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
     std::atomic<bool> stopped{ false };
 
     worker.execute(std::move(workloads[0]), stopped);
@@ -932,6 +943,11 @@ TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_A_Copy_In_Flight)
     ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
 
     ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
     std::atomic<bool> stopped{ false };
 
     worker.execute(std::move(workloads[0]), stopped);
