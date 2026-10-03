@@ -20,6 +20,7 @@ runai_cc_test(
         ":io_uring_engine",
         "//posix_io/io_uring_probe",
         "//posix_io/alignment",
+        "//posix_io/raw_uring",
         "//utils/random",
         "//utils/scope_guard",
         "//utils/temp/env",

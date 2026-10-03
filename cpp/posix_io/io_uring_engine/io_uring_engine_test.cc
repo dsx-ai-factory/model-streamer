@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/raw_uring/raw_uring.h"
 #include "utils/random/random.h"
 #include "utils/scope_guard/scope_guard.h"
 #include "utils/temp/file/file.h"
@@ -28,41 +29,6 @@ namespace
 #ifndef __NR_io_uring_setup
 #define __NR_io_uring_setup 425
 #endif
-
-#ifndef __NR_io_uring_register
-#define __NR_io_uring_register 427
-#endif
-
-// Whether this kernel will register a buffer, asked of the kernel for the same reason as ring_works()
-// below: an expectation must never be computed by the thing it is checking. Reading IoUringProbe or
-// the engine's own answer would make the assertion vacuous.
-bool ring_registers(size_t bytesize = 4096)
-{
-    struct io_uring_params params;
-    std::memset(&params, 0, sizeof(params));
-
-    const int fd = ::syscall(__NR_io_uring_setup, 8, &params);
-    if (fd < 0)
-    {
-        return false;
-    }
-
-    void * probe = nullptr;
-    if (::posix_memalign(&probe, 4096, bytesize) != 0)
-    {
-        ::close(fd);
-        return false;
-    }
-
-    struct iovec iov;
-    iov.iov_base = probe;
-    iov.iov_len = bytesize;
-
-    const long ret = ::syscall(__NR_io_uring_register, fd, IORING_REGISTER_BUFFERS, &iov, 1u);
-    ::close(fd);
-    ::free(probe);
-    return ret == 0;
-}
 
 // Ask the kernel directly - not IoUringProbe, and not IoUringEngine.
 //
@@ -268,7 +234,7 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
 
     // THE PATH UNDER TEST ACTUALLY RAN. A fixed read and an ordinary one return identical bytes, so
     // without this the test would pass on a host that registered nothing.
-    EXPECT_EQ(engine.registered_regions(), ring_registers() ? 1u : 0u)
+    EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer() ? 1u : 0u)
         << "the engine disagreed with the kernel about whether this region could be registered";
 
     const auto completions = reap(engine, 3);
@@ -298,7 +264,7 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
 TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
 {
     SKIP_WITHOUT_RING();
-    if (!ring_registers())
+    if (!raw_can_register_buffer())
     {
         GTEST_SKIP() << "this kernel registers nothing, so there is no registration to time";
     }
@@ -345,7 +311,7 @@ TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
 TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
 {
     SKIP_WITHOUT_RING();
-    if (!ring_registers())
+    if (!raw_can_register_buffer())
     {
         GTEST_SKIP() << "this kernel registers nothing";
     }
@@ -429,7 +395,7 @@ TEST(IoUringEngine, A_Kernel_Refusal_Still_Reads)
 
     // A process holding CAP_IPC_LOCK is not charged for registration, so the lowered limit refuses
     // nothing and the expectation below would be wrong rather than the engine.
-    if (ring_registers(RegionBytes))
+    if (raw_can_register_buffer(RegionBytes))
     {
         GTEST_SKIP() << "registration is not charged to RLIMIT_MEMLOCK here (CAP_IPC_LOCK?)";
     }
