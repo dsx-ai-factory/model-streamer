@@ -66,7 +66,11 @@ class LibaioEngine : public IoEngine
     // from AsyncIoConfig::depth, so the window can never exceed what the context holds.
     unsigned depth() const override;
 
-    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer) override;
+    // `registration` is ignored: libaio has no registered-buffer concept, so every read is ordinary.
+    using IoEngine::stage;   // keeps the no-registration overload visible through this type
+
+    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                               char * buffer, Registration registration) override;
     common::ResponseCode flush(unsigned & out_issued) override;
     common::ResponseCode wait_for_completions(Completion * out, unsigned max, unsigned & out_count,
                                       WaitMode mode, unsigned timeout_ms = 0) override;

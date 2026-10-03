@@ -1,0 +1,53 @@
+load("//:rules.bzl", "runai_cc_test")
+
+# The tests that need a REAL CUDA driver. Both SKIP where there is none, so they are safe on CPU CI.
+#
+# Their own package so that cuda.h reaches these two targets and nothing else - see
+# cpp/third_party/cuda.BUILD. The readback needs the driver directly, because the Device interface has
+# no device-to-host copy.
+runai_cc_test(
+    name = "real_device_test",
+    # Excluded from --config=tsan for the same reason as streamer_s3_test: it dlopens
+    # libstreamers3.so, and the sanitized binary does not resolve $ORIGIN in its RUNPATH.
+    tags = ["no_tsan"],
+    srcs = ["real_device_test.cc"],
+    deps = [
+        "//device/cuda",
+        "//device/backends",
+        "//streamer/impl/device_io/device_writer",
+        "//streamer/impl/device_io/device_writer_client",
+        "//streamer/impl/streamer",
+        "//streamer",
+        "//utils/temp/file",
+        "//utils/random",
+        "//utils/temp/env",
+        "//utils/dylib",
+        "@cuda//:cuda_headers",
+        # The object storage path, driven through the s3 MOCK plugin: a real driver and a real staging
+        # pool, without a real bucket.
+        "//s3/s3_mock:libstreamers3.so",
+    ],
+    linkstatic = False,
+    data = ["//s3/s3_mock:libstreamers3.so"],
+    linkopts = [
+        "-Wl,-rpath,$$ORIGIN/../../../../s3/s3_mock",
+    ],
+    env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
+)
+
+# Real object storage to a real device, through the public C API. Skips unless BOTH a usable GPU and an
+# object to read are present, so it is inert under `bazel test //...`.
+#
+# The REAL plugin, not the mock: this is the only test that can say the right bytes arrived, and it can
+# only say it against a server that actually stores them. tests/Makefile starts one.
+runai_cc_test(
+    name = "object_device_test",
+    srcs = ["object_device_test.cc"],
+    deps = [
+        "//device/cuda",
+        "//streamer",
+        "@cuda//:cuda_headers",
+    ],
+    linkopts = ["-ldl"],
+    env = {"RUNAI_STREAMER_LOG_TO_STDERR": "1"},
+)

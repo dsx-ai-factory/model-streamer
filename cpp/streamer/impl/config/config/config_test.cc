@@ -2,10 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include "common/exception/exception.h"
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/s3_wrapper/s3_wrapper.h"
@@ -20,21 +23,35 @@ namespace runai::llm::streamer::impl
 // defaults are the defaults. Guarding per test was how Default and Chunk_Size came to assert the
 // concurrency defaults with nothing cleared: `--test_env` or running the binary directly then failed
 // them against correct code. (A plain `bazel test` scrubs the environment, so it did not.)
+//
+// By PREFIX rather than by a list of names. A list has to be extended whenever Config learns a
+// variable, and it was missed twice - most recently for the two register-buffers variables. The
+// sweep also clears variables this fixture does not read, which costs nothing: it only builds Config.
 class Creation : public ::testing::Test
 {
  protected:
+    static constexpr std::string_view Prefix = "RUNAI_STREAMER_";
+
     void SetUp() override
     {
-        for (const auto * variable : { "RUNAI_STREAMER_CONCURRENCY",
-                                       "RUNAI_STREAMER_OBJ_CONCURRENCY",
-                                       "RUNAI_STREAMER_FS_QUEUE_DEPTH",
-                                       "RUNAI_STREAMER_CHUNK_BYTESIZE",
-                                       "RUNAI_STREAMER_FS_CHUNK_BYTESIZE",
-                                       "RUNAI_STREAMER_FS_STRATEGY",
-                                       "RUNAI_STREAMER_S3_TIMEOUT",
-                                       "RUNAI_STREAMER_DIRECT_BLOCK" })
+        // Collected first, then unset: unsetenv rewrites environ, so unsetting during the walk would
+        // skip entries.
+        std::vector<std::string> names;
+
+        for (char ** entry = ::environ; *entry != nullptr; ++entry)
         {
-            _cleared.push_back(std::make_unique<utils::temp::UnsetEnv>(std::string(variable)));
+            const std::string assignment(*entry);
+            const auto separator = assignment.find('=');
+
+            if (separator != std::string::npos && assignment.compare(0, Prefix.size(), Prefix) == 0)
+            {
+                names.push_back(assignment.substr(0, separator));
+            }
+        }
+
+        for (const auto & name : names)
+        {
+            _cleared.push_back(std::make_unique<utils::temp::UnsetEnv>(name));
         }
     }
 
@@ -273,6 +290,79 @@ TEST_F(Creation, A_Plain_Number_Applies_Everywhere)
 
     EXPECT_EQ(config.fs_async_queue_depth.default_value(), 64u);
     EXPECT_EQ(config.fs_async_queue_depth.for_type("nfs"), 64u);
+}
+
+
+// NFS is denied by default because registration costs there rather than paying. Prefix matched, so
+// nfs4 is covered without naming it.
+TEST_F(Creation, Register_Buffers_Denies_Nfs_By_Default)
+{
+    const Config config;
+
+    EXPECT_TRUE(config.registers_buffers("ext4"));
+    EXPECT_TRUE(config.registers_buffers("virtiofs"));
+    EXPECT_TRUE(config.registers_buffers("xfs"));
+
+    EXPECT_FALSE(config.registers_buffers("nfs"));
+    EXPECT_FALSE(config.registers_buffers("nfs4")) << "a prefix must cover the versioned name";
+}
+
+// We have measured three file systems and a site may have a fourth, so the list is not a constant.
+TEST_F(Creation, Register_Buffers_Deny_List_Is_Configurable)
+{
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "nfs,virtiofs");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("virtiofs"));
+        EXPECT_FALSE(config.registers_buffers("nfs4"));
+        EXPECT_TRUE(config.registers_buffers("ext4"));
+    }
+
+    {
+        // Empty means register everywhere - the way to turn the denial off without naming a type.
+        const utils::temp::Env env("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "");
+        const Config config;
+
+        EXPECT_TRUE(config.registers_buffers("nfs4"));
+    }
+}
+
+// The master switch turns it off for every mount, whatever the deny list says. It exists so the feature
+// can be measured against itself on one host, and so an operator can disable it without naming types.
+TEST_F(Creation, Register_Buffers_Can_Be_Switched_Off_Entirely)
+{
+    {
+        const Config config;
+        EXPECT_TRUE(config.registers_buffers("ext4")) << "on by default";
+    }
+
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_REGISTER_BUFFERS", "0");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("ext4"));
+        EXPECT_FALSE(config.registers_buffers("virtiofs"));
+        EXPECT_FALSE(config.registers_buffers("nfs4"));
+    }
+
+    {
+        // The switch wins over an empty deny list, which would otherwise allow everything.
+        const utils::temp::Env off("RUNAI_STREAMER_FS_REGISTER_BUFFERS", "0");
+        const utils::temp::Env allow("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS", "");
+        const Config config;
+
+        EXPECT_FALSE(config.registers_buffers("ext4"));
+    }
+}
+
+// An unknown type registers. We deny what we have measured to be worse, not what we have not seen.
+TEST_F(Creation, An_Unknown_File_System_Registers)
+{
+    const Config config;
+
+    EXPECT_TRUE(config.registers_buffers("lustre"));
+    EXPECT_TRUE(config.registers_buffers(""));
 }
 
 }; // namespace runai::llm::streamer::impl

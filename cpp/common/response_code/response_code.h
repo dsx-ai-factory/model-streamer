@@ -63,6 +63,22 @@ enum class ResponseCode : int
     // The submission named a device this build cannot serve.
     UnsupportedDeviceType    = RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE,
 
+    // Device failures, one per remedy. NOT UnknownError: that code tells a caller to abort and
+    // distrust every response it already has, and none of these mean that.
+    //
+    // DeviceUnavailable is an error, not a signal to read into host memory instead. A caller that
+    // asked for a device destination gets no bytes if there is no device; choosing a host
+    // destination belongs to the layer above.
+    DeviceUnavailable        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_UNAVAILABLE,
+    InvalidDevice            = RUNAI_FILE_STREAMER_RESPONSE_INVALID_DEVICE,
+    DeviceOutOfMemory        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_OUT_OF_MEMORY,
+
+    // The copy did not land: these ranges were not written and the destination is unchanged. The
+    // driver's own code and message are in the log.
+    DeviceTransferError      = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_TRANSFER_ERROR,
+
+    DeviceDriverError        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_DRIVER_ERROR,
+
     __Max,
 };
 

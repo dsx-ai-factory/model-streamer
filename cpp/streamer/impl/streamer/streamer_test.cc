@@ -1,4 +1,5 @@
 #include "streamer/impl/streamer/streamer.h"
+#include "common/device/device.h"
 
 #include "posix_io/mock/mock_io_engine.h"
 
@@ -165,7 +166,7 @@ TEST(Async, ReadsThroughIoUringWhenResolvedToIt)
     Streamer streamer;   // reads RUNAI_STREAMER_FS_STRATEGY through Config
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     std::set<unsigned> seen;
     for (unsigned i = 0; i < ranges; ++i)
@@ -229,7 +230,7 @@ TEST(Async, StatsRecordTheStrategyPerFile)
     request[1].ranges.push_back(ReadRange{ 0, data.size(), dst2.data() });
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     for (unsigned i = 0; i < 2; ++i)
     {
@@ -265,7 +266,7 @@ TEST(Async, StatsSkipARejectedSubmission)
     Streamer streamer(Config(), without(posix_io::Strategy::LibaioDirect));
 
     SubmissionId submission_id = 0;
-    ASSERT_NE(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_NE(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     EXPECT_TRUE(streamer.stats().submissions().empty());
 }
@@ -311,7 +312,7 @@ TEST(Async, TwoMountsGetTwoEngines)
     request[1].ranges.push_back(ReadRange{ 0, data.size(), dst2.data() });
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     for (unsigned i = 0; i < 2; ++i)
     {
@@ -361,7 +362,7 @@ TEST(Async, TwoDirectoriesOnOneMountShareAnEngine)
     request[1].ranges.push_back(ReadRange{ 0, data.size(), dst2.data() });
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     for (unsigned i = 0; i < 2; ++i)
     {
@@ -391,7 +392,7 @@ TEST(Async, SetFsStrategyTakesEffect)
     ASSERT_EQ(streamer.set_fs_strategy("io_uring_buffered,sync_buffered"), common::ResponseCode::Success);
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     const bool expect_async = ring_works();
@@ -422,7 +423,7 @@ TEST(Async, SetFsStrategyIsRejectedAfterTheFirstRequest)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     // Read what resolved rather than naming it. The default list prefers io_uring and falls back, so
@@ -475,7 +476,7 @@ TEST(Async, TmpfsGoesToTheSynchronousPool)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     // The strategy still resolves to io_uring - the mount decides the POOL, not the strategy.
@@ -518,7 +519,7 @@ TEST(Async, DefaultStrategyPrefersIoUringDirect)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     EXPECT_EQ(streamer.fs_strategy(), posix_io::Strategy::IoUringDirect);
@@ -542,7 +543,7 @@ TEST(Async, AnEmptySubmissionDoesNotResolveTheStrategy)
         request[0].path = path;   // no ranges: nothing is read, so nothing needs a reader
 
         SubmissionId submission_id = 0;
-        EXPECT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success) << path;
+        EXPECT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success) << path;
         EXPECT_NE(submission_id, 0u) << path << ": the id is still minted and handed back";
     }
 }
@@ -568,7 +569,7 @@ TEST(Async, UnservableStrategyFailsTheRequest)
     // happens AFTER the submission is registered and its responses counted, and UnknownError tells
     // the caller to abort everything rather than just this request. The specific code is what
     // separates a clean refusal from a late collapse.
-    EXPECT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::FsStrategyUnavailable);
+    EXPECT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::FsStrategyUnavailable);
 
     // Nothing was committed: no id was minted, so the caller owes nothing and nothing owes it.
     EXPECT_EQ(submission_id, 0u);
@@ -594,7 +595,7 @@ TEST(Async, ReadFailureIsAttributableNotUnknown)
     std::vector<FileRanges> request;
     request.push_back(FileRanges{ dir.path, { ReadRange{ 0, size, dst.data() } } });
 
-    EXPECT_EQ(streamer.async_request(request), common::ResponseCode::Success);
+    EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::Success);
 
     bool done = false;
     const auto response = streamer.response(60000, done);
@@ -1070,7 +1071,7 @@ TEST(AsyncRequest, InvalidScheme)
     request.push_back(FileRanges{ "s3://s3-bucket/file-01.txt", { ReadRange{ 0, static_cast<size_t>(size), dst0.data() } } });
     request.push_back(FileRanges{ "az://az-account/file-02.txt", { ReadRange{ 0, static_cast<size_t>(size), dst1.data() } } });
 
-    EXPECT_EQ(streamer.async_request(request), common::ResponseCode::UnsupportedBackendMix);
+    EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::UnsupportedBackendMix);
 }
 
 TEST(AsyncRequest, MixedObjectPluginsRejected)
@@ -1091,7 +1092,7 @@ TEST(AsyncRequest, MixedObjectPluginsRejected)
     request.push_back(FileRanges{ "s3://bucket/a.txt", { ReadRange{ 0, static_cast<size_t>(size), dst0.data() } } });
     request.push_back(FileRanges{ "gs://bucket/b.txt", { ReadRange{ 0, static_cast<size_t>(size), dst1.data() } } });
 
-    EXPECT_EQ(streamer.async_request(request), common::ResponseCode::UnsupportedBackendMix);
+    EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::UnsupportedBackendMix);
 }
 
 // A submission must pick ONE backend kind. The streamer serves both across submissions (see
@@ -1121,14 +1122,14 @@ TEST(AsyncRequest, MixedFilesystemAndObjectStorageRejected)
         request.push_back(FileRanges{ file.path, { ReadRange{ 0, static_cast<size_t>(size), dst0.data() } } });
         request.push_back(FileRanges{ "s3://bucket/a.txt", { ReadRange{ 0, static_cast<size_t>(size), dst1.data() } } });
 
-        EXPECT_EQ(streamer.async_request(request), common::ResponseCode::UnsupportedBackendMix);
+        EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::UnsupportedBackendMix);
     }
     {
         std::vector<FileRanges> request;
         request.push_back(FileRanges{ "s3://bucket/a.txt", { ReadRange{ 0, static_cast<size_t>(size), dst0.data() } } });
         request.push_back(FileRanges{ file.path, { ReadRange{ 0, static_cast<size_t>(size), dst1.data() } } });
 
-        EXPECT_EQ(streamer.async_request(request), common::ResponseCode::UnsupportedBackendMix);
+        EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::UnsupportedBackendMix);
     }
 }
 
@@ -1152,11 +1153,11 @@ TEST(AsyncRequest, FilesWithoutRangesDoNotSelectTheBackend)
 
         std::vector<FileRanges> s3_only;
         s3_only.push_back(FileRanges{ "s3://bucket/empty.txt", {} });
-        EXPECT_EQ(streamer.async_request(s3_only), common::ResponseCode::Success);
+        EXPECT_EQ(streamer.async_request(s3_only, common::Device::host()), common::ResponseCode::Success);
 
         std::vector<FileRanges> gcs_only;
         gcs_only.push_back(FileRanges{ "gs://bucket/empty.txt", {} });
-        EXPECT_EQ(streamer.async_request(gcs_only), common::ResponseCode::Success);
+        EXPECT_EQ(streamer.async_request(gcs_only, common::Device::host()), common::ResponseCode::Success);
     }
 
     {
@@ -1170,7 +1171,7 @@ TEST(AsyncRequest, FilesWithoutRangesDoNotSelectTheBackend)
         request.push_back(FileRanges{ "s3://bucket/empty.txt", {} });
         request.push_back(FileRanges{ file.path, { ReadRange{ 0, static_cast<size_t>(size), dst.data() } } });
 
-        EXPECT_EQ(streamer.async_request(request), common::ResponseCode::Success);
+        EXPECT_EQ(streamer.async_request(request, common::Device::host()), common::ResponseCode::Success);
 
         // drain the single range and check it really read the filesystem file
         bool done = false;
@@ -1346,7 +1347,7 @@ TEST(Async, Scattered_Ranges_And_Destinations)
 
     std::vector<FileRanges> request{ file_ranges };
     SubmissionId submission_id = 0;
-    EXPECT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    EXPECT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
 
     std::set<unsigned> received;
     for (size_t i = 0; i < ranges.size(); ++i)
@@ -1404,7 +1405,7 @@ TEST(Async, LibaioSkipsAFileItCannotReadDirectly)
     Streamer streamer(Config(), std::move(environment));
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     EXPECT_FALSE(streamer.async_pool_used())
@@ -1443,7 +1444,7 @@ TEST(Async, LibaioSkipsAMountWithoutODirect)
     Streamer streamer(Config(), std::move(environment));
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     EXPECT_FALSE(streamer.async_pool_used())
@@ -1475,7 +1476,7 @@ TEST(Async, LibaioTakesAFileItCanReadDirectly)
     Streamer streamer(Config(), std::move(environment));
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     EXPECT_TRUE(streamer.async_pool_used());
@@ -1514,7 +1515,7 @@ TEST(Async, IoUringKeepsAFileItCannotReadDirectly)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     EXPECT_TRUE(streamer.async_pool_used())
@@ -1558,7 +1559,7 @@ TEST(Async, CongruentDestinationsBounceNothing)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     const auto counters = streamer.async_counters();
@@ -1598,7 +1599,7 @@ TEST(Async, ANonCongruentDestinationIsReadBufferedRatherThanBounced)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     const auto counters = streamer.async_counters();
@@ -1626,7 +1627,7 @@ TEST(Async, CountersAreZeroWithoutAnAsyncWorkload)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     const auto counters = streamer.async_counters();
@@ -1656,7 +1657,7 @@ TEST(Async, AchievedDepthOutlivesTheReads)
     Streamer streamer;
 
     SubmissionId submission_id = 0;
-    ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
     EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
 
     const auto counters = streamer.async_counters();
@@ -1760,7 +1761,7 @@ TEST(Async, ADeadEngineDropsItsMountToTheSynchronousReader)
         request[0].ranges.push_back(ReadRange{ 0, data.size(), dst.data() });
 
         SubmissionId submission_id = 0;
-        ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+        ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
         EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::FsAsyncEngineError);
     }
 
@@ -1772,7 +1773,7 @@ TEST(Async, ADeadEngineDropsItsMountToTheSynchronousReader)
         request[0].ranges.push_back(ReadRange{ 0, data.size(), dst.data() });
 
         SubmissionId submission_id = 0;
-        ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+        ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
         EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success)
             << "the storage is healthy - only the ring was lost, so this must still read";
 
@@ -1857,7 +1858,7 @@ TEST(Async, QueueDepthIsResolvedPerMount)
         request[0].ranges.push_back(ReadRange{ 0, data.size(), dst.data() });
 
         SubmissionId submission_id = 0;
-        ASSERT_EQ(streamer.async_request(request, &submission_id), common::ResponseCode::Success);
+        ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
         EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
         EXPECT_EQ(std::vector<uint8_t>(dst.begin(), dst.end()), data);
     }
@@ -1870,6 +1871,89 @@ TEST(Async, QueueDepthIsResolvedPerMount)
     // asserts.
     EXPECT_EQ(recorded, (std::vector<unsigned>{ 64, 512 }))
         << "the nfs4 mount is submitted first and takes the nfs entry; the ext4 mount takes the default";
+}
+
+
+// A worker serves submissions from several devices at once, and from the host at the same time. A
+// workload is homogeneous in its device, a SUBMISSION is - a worker is not, and must not be: the
+// same threads read for whatever is in flight.
+//
+// There is no CUDA driver on the test host, so the device submissions FAIL. That is the point: each
+// one fails on its own, the host submission beside them is served normally, and every range gets
+// exactly one response. A device we cannot reach must not hang the caller or disturb its neighbours.
+TEST(Device, Concurrent_Submissions_To_Different_Devices)
+{
+    const size_t range_size = 4096;
+    const unsigned ranges = 4;
+    auto data = utils::random::buffer(range_size * ranges);
+    utils::temp::File file(data);
+
+    Streamer streamer;
+
+    const std::vector<common::Device> devices =
+    {
+        common::Device::host(),
+        common::Device::cuda(0),
+        common::Device::cuda(1),
+        common::Device::cuda(0),   // the same device twice, from two submissions
+    };
+
+    std::vector<std::vector<char>> buffers(devices.size(), std::vector<char>(range_size * ranges));
+    std::vector<std::vector<FileRanges>> requests(devices.size());
+    std::map<SubmissionId, size_t> submitted;   // id -> its index in `devices`
+
+    for (size_t d = 0; d < devices.size(); ++d)
+    {
+        requests[d].resize(1);
+        requests[d][0].path = file.path;
+        for (unsigned i = 0; i < ranges; ++i)
+        {
+            requests[d][0].ranges.push_back(
+                ReadRange{ i * range_size, range_size, buffers[d].data() + i * range_size });
+        }
+
+        SubmissionId id = 0;
+        ASSERT_EQ(streamer.async_request(requests[d], devices[d], &id), common::ResponseCode::Success)
+            << "device " << devices[d];
+        submitted.emplace(id, d);
+    }
+
+    ASSERT_EQ(submitted.size(), devices.size()) << "every submission got its own id";
+
+    // Responses arrive interleaved, so they are counted per submission.
+    std::map<SubmissionId, unsigned> answered;
+    std::set<SubmissionId> finished;
+    for (unsigned i = 0; i < ranges * devices.size(); ++i)
+    {
+        const auto received = recv(streamer);
+        const auto id = received.response.submission_id;
+        ASSERT_EQ(submitted.count(id), 1u) << "response for an unknown submission";
+
+        if (devices[submitted.at(id)].is_host())
+        {
+            EXPECT_EQ(received.response.ret, common::ResponseCode::Success);
+        }
+        else
+        {
+            EXPECT_NE(received.response.ret, common::ResponseCode::Success)
+                << "there is no driver here, so a device submission cannot succeed";
+        }
+
+        ++answered[id];
+        if (received.submission_done)
+        {
+            finished.insert(id);
+        }
+    }
+
+    EXPECT_EQ(finished.size(), submitted.size()) << "every submission completed";
+    for (const auto & entry : submitted)
+    {
+        EXPECT_EQ(answered[entry.first], ranges) << "submission " << entry.first;
+    }
+
+    // The host submission is untouched by the failures beside it.
+    EXPECT_EQ(std::memcmp(buffers[0].data(), data.data(), data.size()), 0);
 }
 
 }; // namespace runai::llm::streamer::impl

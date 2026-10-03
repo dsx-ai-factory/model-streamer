@@ -14,5 +14,6 @@ runai_cc_test(
     srcs = ["io_uring_probe_test.cc"],
     deps = [
         ":io_uring_probe",
+        "//posix_io/raw_uring",
     ],
 )

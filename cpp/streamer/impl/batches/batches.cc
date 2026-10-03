@@ -89,7 +89,8 @@ Batches::Batches(SubmissionId submission_id,
                  const std::string & path,
                  const common::s3::S3ClientWrapper::Params & params,
                  const std::vector<size_t> & range_sizes,
-                 unsigned first_range_index) :
+                 unsigned first_range_index,
+                 common::Device device) :
     _submission_id(submission_id),
     _file_index(file_index),
     _first_range_index(first_range_index),
@@ -97,7 +98,7 @@ Batches::Batches(SubmissionId submission_id,
     _responder(responder)
 {
     _batches.reserve(file_read_tasks.size());
-    build_tasks(config, path, params, range_sizes);
+    build_tasks(config, path, params, range_sizes, device);
 }
 
 unsigned Batches::size() const
@@ -116,7 +117,7 @@ size_t Batches::total() const
     return _total;
 }
 
-void Batches::build_tasks(std::shared_ptr<const Config> config, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const std::vector<size_t> & range_sizes)
+void Batches::build_tasks(std::shared_ptr<const Config> config, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const std::vector<size_t> & range_sizes, common::Device device)
 {
     const auto num_workers = _itr.workers();
     LOG(DEBUG) << "Building tasks for " <<num_workers << " workers";
@@ -166,7 +167,7 @@ void Batches::build_tasks(std::shared_ptr<const Config> config, const std::strin
         }
 
         // The same chunk size the tasks were cut with, so the chunks cover whole tasks.
-        _batches.emplace_back(_submission_id, workload_index, _file_index, path, params, std::move(tasks), _responder, config, chunk_bytesize);
+        _batches.emplace_back(_submission_id, workload_index, _file_index, path, params, std::move(tasks), _responder, config, chunk_bytesize, device);
     }
 
     for (auto & batch : _batches)
