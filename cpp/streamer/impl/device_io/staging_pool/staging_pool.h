@@ -10,6 +10,7 @@
 
 #include "device/device.h"
 #include "device/owned/owned.h"
+#include "utils/deque/deque.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -196,5 +197,19 @@ class StagingPool
     // the device may still be reading it.
     std::set<unsigned> _leaked_slabs;
 };
+
+// Keeps pools alive past the worker that made them.
+//
+// An object-storage read is given the pool's pinned memory and the plugin fills it asynchronously. A
+// sent request cannot be cancelled, and removing a client only parks it - the client's destructor,
+// which is what waits for the SDK, runs later, when the backend is cleaned up. A pool freed with its
+// worker would therefore be freed while the plugin may still be writing.
+//
+// So the streamer holds one of these, declared before the backend cleanup so it is destroyed after it.
+// By then every client has been destroyed and every read has reported, and the pinned memory can go.
+//
+// A Deque because workers register from their own threads and it is already a tested type - this needs
+// a thread-safe container, not a queue, and only ever pushes.
+using StagingPoolRetainer = utils::Deque<std::shared_ptr<StagingPool>>;
 
 } // namespace runai::llm::streamer::impl

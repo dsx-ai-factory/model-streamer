@@ -1033,4 +1033,57 @@ TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_Reads_Still_At_The_Backend)
     set_response_time(0);
 }
 
+// A staging pool is not freed with the worker that made it.
+//
+// The plugin is given the pool's pinned memory and fills it asynchronously. A sent request cannot be
+// cancelled, and removing a client only parks it - the client's destructor, which is what waits for
+// the SDK, runs later. So the pool has to outlive the worker, and the streamer holds it until the
+// backend has been cleaned up.
+//
+// Measured here as "no host_free while the worker is destroyed", because freeing the slab is exactly
+// what would hand the plugin freed memory.
+TEST_F(ObjectStorageWorkerTest, A_Staging_Pool_Outlives_Its_Worker)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+    auto retainer = std::make_shared<StagingPoolRetainer>();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    {
+        ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer, retainer);
+        std::atomic<bool> stopped{ false };
+
+        worker.execute(std::move(workloads[0]), stopped);
+
+        for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+        {
+            worker.drain(stopped);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        ASSERT_GT(backend->opened(0)->host_allocs.load(), 0u) << "nothing was pinned, so nothing is retained";
+    }
+
+    const auto device = backend->opened(0);
+
+    // THE POINT. The worker is gone and its _pool member with it, but the retainer still holds the
+    // pool - so not one slab has been freed.
+    EXPECT_EQ(device->host_frees.load(), 0u)
+        << "a staging slab was freed with its worker: the plugin's client is only parked at that"
+        << " point, so a read still at the backend would be writing into freed pinned memory";
+
+    // And it is the retainer holding it: dropping that is what frees them.
+    retainer.reset();
+
+    EXPECT_EQ(device->host_frees.load(), device->host_allocs.load())
+        << "dropping the retainer did not free the slabs, so something else still holds the pool";
+}
+
 }; // namespace runai::llm::streamer::impl

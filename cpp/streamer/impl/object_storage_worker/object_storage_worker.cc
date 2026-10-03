@@ -20,10 +20,12 @@ namespace runai::llm::streamer::impl
 
 ObjectStorageWorker::ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider,
                                          std::shared_ptr<DeviceWriter> writer,
-                                         std::shared_ptr<DeviceIssuer> issuer) :
+                                         std::shared_ptr<DeviceIssuer> issuer,
+                                         std::shared_ptr<StagingPoolRetainer> retainer) :
     _credentials_provider(std::move(credentials_provider)),
     _writer(std::move(writer)),
-    _issuer(std::move(issuer))
+    _issuer(std::move(issuer)),
+    _retainer(std::move(retainer))
 {}
 
 common::ResponseCode ObjectStorageWorker::staging_pool_for(const common::Device & target)
@@ -79,6 +81,14 @@ common::ResponseCode ObjectStorageWorker::staging_pool_for(const common::Device 
     params.max_buffers = static_cast<unsigned>(std::min(window, SaneWindowChunks)) + CopyDepth;
 
     _pool = std::make_shared<StagingPool>(device, params);
+
+    // HANDED OVER HERE, not at teardown: the pool's memory is exposed to the plugin from the very
+    // first read, and a worker unwinding from a throw may never reach a teardown hand-over at all.
+    if (_retainer != nullptr)
+    {
+        _retainer->push(std::shared_ptr<StagingPool>(_pool));
+    }
+
     return common::ResponseCode::Success;
 }
 
@@ -450,8 +460,10 @@ void ObjectStorageWorker::quiesce_reads()
         const auto ret = _reader->async_response(responses, _max_responses);
         if (ret != common::ResponseCode::Success)
         {
-            // FinishedError is the backend saying it holds nothing, which is what this waits for.
-            // Anything else means it cannot tell us any more, and looping would spin.
+            // GIVING UP, not finishing. A stopped responder reports FinishedError while its reads are
+            // still running, and S3Stop stops it before this runs - so at teardown this usually leaves
+            // with reads outstanding. Safe only because the staging pool outlives this worker: the
+            // buffers those reads are filling are not freed until the clients have been destroyed.
             break;
         }
 

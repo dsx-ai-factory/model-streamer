@@ -58,10 +58,12 @@ Streamer::Streamer(Config config, Environment environment) :
         // each object-storage worker reads the streamer's credentials once, at client creation, via this
         // provider. It captures the shared credentials state by value, so the state outlives the worker
         // regardless of destruction order (it never captures `this`).
-        [state = _credentials_state, writer = _device_writer, issuer = _device_issuer]()
+        [state = _credentials_state, writer = _device_writer, issuer = _device_issuer,
+         retainer = _retained_pools]()
             -> std::unique_ptr<utils::Worker<Workload>>
         {
-            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); }, writer, issuer);
+            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); }, writer, issuer,
+                                                         retainer);
         },
         _config->concurrency, _config->s3_concurrency),
     // One PERSISTENT responder for the streamer's lifetime, shared by all submissions and
