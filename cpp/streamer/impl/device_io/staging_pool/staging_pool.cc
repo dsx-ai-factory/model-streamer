@@ -139,6 +139,14 @@ common::ResponseCode StagingPool::try_acquire(StagingBuffer & out)
                 return barren();
             }
 
+            if (_retired >= _buffers.size())
+            {
+                // No slab is coming and every buffer is retired, so nothing is ever coming back. An
+                // invalid buffer would read as "try again later", and the caller would keep trying
+                // for the rest of the load.
+                return _retired_code;
+            }
+
             // At the ceiling with everything in flight. out stays invalid, which is not an error.
             return common::ResponseCode::Success;
         }
@@ -172,6 +180,13 @@ common::ResponseCode StagingPool::acquire(StagingBuffer & out)
                     return barren();
                 }
 
+                if (_retired >= _buffers.size())
+                {
+                    // No slab is coming and every buffer is retired, so no release can ever come.
+                    // Waiting here is what would leave a submission undrained.
+                    return _retired_code;
+                }
+
                 // Everything is in flight and the pool is at its ceiling, so no slab is coming: the
                 // only way forward is a buffer coming back. These threads have nothing else to do,
                 // unlike an async engine's worker, so they wait rather than spin.
@@ -194,6 +209,29 @@ common::ResponseCode StagingPool::acquire(StagingBuffer & out)
         // The slab was dropped because another consumer filled the window first. Go round: either
         // one of its buffers is free, or this thread waits for one.
     }
+}
+
+void StagingPool::retire(const StagingBuffer & buffer, common::ResponseCode code)
+{
+    {
+        const std::lock_guard<std::mutex> guard(_mutex);
+
+        ++_retired;
+        if (_retired_code == common::ResponseCode::Success)
+        {
+            _retired_code = code;   // the first reason is the real one; later ones are consequences
+        }
+
+        LOG(ERROR) << "[RunAI Streamer] staging buffer " << buffer.index << " is retained because the"
+                   << " device may still be reading from it (" << code << "). The pool is down to "
+                   << (_buffers.size() - _retired) << " of " << _buffers.size() << " buffers."
+                   << " Restart the streamer once the device is healthy: a retained buffer is never"
+                   << " recovered.";
+    }
+
+    // Wakes anyone parked in acquire(): if that was the last buffer, they must now be told rather
+    // than keep waiting for it.
+    _ready.notify_all();
 }
 
 void StagingPool::release(const StagingBuffer & buffer)
@@ -240,6 +278,12 @@ StagingPool::Slab StagingPool::slab_at(unsigned index) const
     }
 
     return Slab{ _slabs[index].memory.get(), _slabs[index].bytesize };
+}
+
+unsigned StagingPool::retired() const
+{
+    const std::lock_guard<std::mutex> guard(_mutex);
+    return _retired;
 }
 
 unsigned StagingPool::created() const

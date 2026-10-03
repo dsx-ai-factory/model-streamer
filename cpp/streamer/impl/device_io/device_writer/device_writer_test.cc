@@ -617,10 +617,12 @@ TEST_F(DeviceWriterTest, A_Buffer_Is_Retained_When_The_Stream_Cannot_Be_Drained)
                            nullptr),
               common::ResponseCode::Success);
 
+    // RETIRED, not merely unavailable: the pool reports why rather than answering "none right now",
+    // which a caller would read as try again later and wait for the rest of the load.
     StagingBuffer again;
-    ASSERT_EQ(pool->try_acquire(again), common::ResponseCode::Success);
-    EXPECT_FALSE(again.valid())
+    EXPECT_EQ(pool->try_acquire(again), common::ResponseCode::DeviceDriverError)
         << "the buffer went back to the pool although nothing can say when the copy stops reading it";
+    EXPECT_FALSE(again.valid());
 
     device->fail_event_record = false;
     device->fail_stream_synchronize = false;
