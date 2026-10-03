@@ -5,6 +5,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include "device/device.h"
@@ -71,6 +72,9 @@ class StagingPool
     // synchronised, so this is also what guarantees no DMA is still reading out of this memory when
     // it is freed. The streamer drains its in-flight requests before teardown anyway, and every
     // StreamWaiter is stopped first.
+    //
+    // A slab holding a RETIRED buffer is the one case that precondition cannot be met for, so that
+    // slab is leaked rather than freed - see retire().
     ~StagingPool();
 
     StagingPool(const StagingPool &) = delete;
@@ -96,8 +100,11 @@ class StagingPool
     // reading from it. `code` is why, and is what acquire() reports once every buffer has gone this
     // way - a caller cannot be left waiting for a buffer that can never come back.
     //
-    // The memory is not freed: it belongs to a slab the pool owns until it is destroyed. What is lost
-    // is the slot.
+    // ITS SLAB IS THEN LEAKED, not freed at teardown. Keeping the buffer out of a reader's hands is
+    // only half of it: cuMemFreeHost on memory an enqueued copy is still reading from is undefined,
+    // and the pool cannot wait for that copy - waiting is what already failed. One slab of pinned
+    // memory is lost for the life of the process, which is bounded and reported, where freeing it is
+    // neither.
     void retire(const StagingBuffer & buffer, common::ResponseCode code);
 
     // Wakes every acquire(), which then gets an invalid buffer. Without it one sleeps for a
@@ -184,6 +191,10 @@ class StagingPool
     // returns, so once every buffer is retired no acquire() can ever succeed.
     unsigned _retired = 0;
     common::ResponseCode _retired_code = common::ResponseCode::Success;
+
+    // Slabs that must outlive this pool, by slab index. A retired buffer was cut from one of them and
+    // the device may still be reading it.
+    std::set<unsigned> _leaked_slabs;
 };
 
 } // namespace runai::llm::streamer::impl

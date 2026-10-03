@@ -17,7 +17,22 @@ StagingPool::StagingPool(std::shared_ptr<device::Device> device, Params params) 
 // Nothing to wait for: a buffer comes back only after its copy's event was synchronised, so every
 // buffer being back - which is this class's precondition - already means no DMA is reading out of
 // this memory. The slabs are freed by their owners.
-StagingPool::~StagingPool() = default;
+StagingPool::~StagingPool()
+{
+    // A slab a retired buffer came from is released from its owner rather than freed: an enqueued
+    // copy may still be reading it, and nothing left can say when that stops. The memory is lost for
+    // the life of the process - the alternative is freeing pinned memory under a live DMA.
+    for (const auto index : _leaked_slabs)
+    {
+        if (index < _slabs.size())
+        {
+            LOG(ERROR) << "[RunAI Streamer] leaking staging slab " << index << " of "
+                       << _slabs[index].bytesize << " bytes: a retired buffer was cut from it and the"
+                       << " device may still be reading";
+            (void)_slabs[index].memory.release();
+        }
+    }
+}
 
 bool StagingPool::hand_out(StagingBuffer & out)
 {
@@ -221,6 +236,10 @@ void StagingPool::retire(const StagingBuffer & buffer, common::ResponseCode code
         {
             _retired_code = code;   // the first reason is the real one; later ones are consequences
         }
+
+        // Its slab outlives this pool: freeing memory a copy may still be reading is undefined, and
+        // the wait that would have proved otherwise is what failed.
+        _leaked_slabs.insert(buffer.slab);
 
         LOG(ERROR) << "[RunAI Streamer] staging buffer " << buffer.index << " is retained because the"
                    << " device may still be reading from it (" << code << "). The pool is down to "
