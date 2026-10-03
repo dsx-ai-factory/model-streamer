@@ -9,6 +9,7 @@ runai_cc_auto_library(
     deps = [
         "//device",
         "//device/owned",
+        "//utils/deque",
         "//utils/logging",
     ],
 )

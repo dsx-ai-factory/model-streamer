@@ -60,9 +60,13 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // `writer` and `issuer` are the streamer's copy path, shared by every worker. Null in tests that
     // read to host memory only: a device workload is then refused rather than read, because writing a
     // device pointer through the plugin is a segmentation fault and not an error.
+    // `retainer` keeps this worker's staging pool alive past the worker, so its pinned memory is not
+    // freed while a parked client may still be writing into it. Null in tests, which have no client
+    // outliving them.
     explicit ObjectStorageWorker(std::function<common::s3::Credentials()> credentials_provider,
                                  std::shared_ptr<DeviceWriter> writer = nullptr,
-                                 std::shared_ptr<DeviceIssuer> issuer = nullptr);
+                                 std::shared_ptr<DeviceIssuer> issuer = nullptr,
+                                 std::shared_ptr<StagingPoolRetainer> retainer = nullptr);
 
     // Waits for every read and copy still in flight. MUST come before anything else is destroyed: a
     // read is writing into the staging pool's pinned memory, and a copy's completion holds `this`
@@ -238,6 +242,9 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // driver itself. Borrowed, not owned: the streamer outlives its pools.
     const std::shared_ptr<DeviceWriter> _writer;
     const std::shared_ptr<DeviceIssuer> _issuer;
+
+    // Outlives this worker, and the pool is handed to it on creation. See StagingPoolRetainer.
+    const std::shared_ptr<StagingPoolRetainer> _retainer;
 
     std::shared_ptr<StagingPool> _pool;
 

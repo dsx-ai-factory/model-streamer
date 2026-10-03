@@ -197,6 +197,12 @@ struct Streamer
     // nothing until a device workload reaches the synchronous pool. Also BEFORE _pools.
     std::shared_ptr<DeviceIssuer> _device_issuer;
 
+    // Staging pools kept alive past the workers that made them. Declared BEFORE _s3 and _pools, so it
+    // is destroyed AFTER both: the workers go first, then the clients - whose destructors wait for the
+    // SDK - and only then is the pinned memory freed. Removing a client merely parks it, so without
+    // this the slabs would be freed while a plugin could still be writing into them.
+    std::shared_ptr<StagingPoolRetainer> _retained_pools = std::make_shared<StagingPoolRetainer>();
+
     AsyncIoStats _stats;
 
     std::unique_ptr<S3Cleanup> _s3;
