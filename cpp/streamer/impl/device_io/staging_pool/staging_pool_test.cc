@@ -416,4 +416,86 @@ TEST_F(StagingPoolTest, Stop_Wakes_A_Waiter)
     pool.release(held);
 }
 
+
+// A retired buffer never comes back, so once every buffer has gone that way acquire() must REPORT
+// rather than wait. Waiting is what would leave a submission undrained: the synchronous reader parks
+// on _ready for a buffer that can never be released.
+TEST(StagingPool, Acquire_Reports_When_Every_Buffer_Is_Retired)
+{
+    auto device = std::make_shared<device::MockDevice>();
+
+    StagingPool::Params params;
+    params.buffer_bytesize = Buffer;
+    params.slab_bytesize = Buffer;
+    params.max_buffers = 1;
+
+    StagingPool pool(device, params);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.acquire(buffer), common::ResponseCode::Success);
+    ASSERT_TRUE(buffer.valid());
+
+    pool.retire(buffer, common::ResponseCode::DeviceDriverError);
+    EXPECT_EQ(pool.retired(), 1u);
+
+    // Would block for ever before the fix.
+    StagingBuffer again;
+    EXPECT_EQ(pool.acquire(again), common::ResponseCode::DeviceDriverError);
+    EXPECT_FALSE(again.valid());
+
+    // try_acquire must not answer "none right now", which reads as try again later.
+    StagingBuffer polled;
+    EXPECT_EQ(pool.try_acquire(polled), common::ResponseCode::DeviceDriverError);
+}
+
+// One retired buffer out of several is not fatal: the rest still circulate.
+TEST(StagingPool, Retiring_One_Buffer_Leaves_The_Others_Usable)
+{
+    auto device = std::make_shared<device::MockDevice>();
+
+    StagingPool::Params params;
+    params.buffer_bytesize = Buffer;
+    params.slab_bytesize = Buffer * 2;
+    params.max_buffers = 2;
+
+    StagingPool pool(device, params);
+
+    StagingBuffer first;
+    StagingBuffer second;
+    ASSERT_EQ(pool.acquire(first), common::ResponseCode::Success);
+    ASSERT_EQ(pool.acquire(second), common::ResponseCode::Success);
+
+    pool.retire(first, common::ResponseCode::DeviceDriverError);
+    pool.release(second);
+
+    StagingBuffer again;
+    EXPECT_EQ(pool.acquire(again), common::ResponseCode::Success)
+        << "a single retired buffer stopped the pool serving the others";
+    EXPECT_TRUE(again.valid());
+}
+
+
+// A retired buffer below the ceiling is replaceable: the pool can still grow a slab, so it must do
+// that rather than report. Reporting here would fail a load the device can still serve.
+TEST(StagingPool, A_Retired_Buffer_Below_The_Ceiling_Is_Replaced)
+{
+    auto device = std::make_shared<device::MockDevice>();
+
+    StagingPool::Params params;
+    params.buffer_bytesize = Buffer;
+    params.slab_bytesize = Buffer;      // one buffer per slab
+    params.max_buffers = 4;             // room to grow
+
+    StagingPool pool(device, params);
+
+    StagingBuffer first;
+    ASSERT_EQ(pool.acquire(first), common::ResponseCode::Success);
+    pool.retire(first, common::ResponseCode::DeviceDriverError);
+
+    StagingBuffer again;
+    EXPECT_EQ(pool.acquire(again), common::ResponseCode::Success)
+        << "the pool reported a failure although it had room to grow a replacement";
+    EXPECT_TRUE(again.valid());
+}
+
 } // namespace runai::llm::streamer::impl

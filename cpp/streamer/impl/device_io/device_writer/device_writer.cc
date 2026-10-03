@@ -170,11 +170,12 @@ common::ResponseCode DeviceWriter::write(Channel channel,
             const auto drained = target->device->stream_synchronize(target->stream.get());
             if (drained != common::ResponseCode::Success)
             {
-                // The copy may still be reading. One buffer is leaked from the pool rather than handed
-                // to a reader that would corrupt it, and the pool shrinks by one for this worker.
-                LOG(ERROR) << "[RunAI Streamer] could not drain the stream after a failed event record ("
-                           << drained << "); the staging buffer is retained because a copy may still be"
-                           << " reading from it";
+                // The copy may still be reading, and nothing left can say when it stops. Retiring is
+                // what keeps it out of the next reader's hands; the pool reports once every buffer has
+                // gone this way, so no one waits for it.
+                //
+                // The event is safe to return: the record failed, so it was never put on the stream.
+                pool->retire(buffer, code);
                 copy.events->release(copy.event);
                 return code;
             }

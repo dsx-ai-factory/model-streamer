@@ -92,6 +92,14 @@ class StagingPool
     // Hand a buffer back once its copy has landed. The StreamWaiter calls this.
     void release(const StagingBuffer & buffer);
 
+    // Take a buffer OUT of circulation for good, because nothing can say when the device stops
+    // reading from it. `code` is why, and is what acquire() reports once every buffer has gone this
+    // way - a caller cannot be left waiting for a buffer that can never come back.
+    //
+    // The memory is not freed: it belongs to a slab the pool owns until it is destroyed. What is lost
+    // is the slot.
+    void retire(const StagingBuffer & buffer, common::ResponseCode code);
+
     // Wakes every acquire(), which then gets an invalid buffer. Without it one sleeps for a
     // StreamWaiter that has already stopped.
     void stop();
@@ -120,6 +128,7 @@ class StagingPool
     Slab slab_at(unsigned index) const;
 
     // Diagnostics.
+    unsigned retired() const;
     unsigned created() const;
     unsigned slabs() const;
 
@@ -167,8 +176,14 @@ class StagingPool
     // Every buffer that exists, in creation order. Never shrinks, so an index stays valid.
     std::vector<StagingBuffer> _buffers;
 
-    // Indices of the buffers that are free, oldest first. A buffer is either here or in flight.
+    // Indices of the buffers that are free, oldest first. A buffer is either here, in flight, or
+    // retired.
     std::deque<unsigned> _free;
+
+    // Buffers taken out of circulation, and why the first one was. A buffer counted here never
+    // returns, so once every buffer is retired no acquire() can ever succeed.
+    unsigned _retired = 0;
+    common::ResponseCode _retired_code = common::ResponseCode::Success;
 };
 
 } // namespace runai::llm::streamer::impl
