@@ -2,10 +2,13 @@
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include "common/exception/exception.h"
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/s3_wrapper/s3_wrapper.h"
@@ -20,21 +23,35 @@ namespace runai::llm::streamer::impl
 // defaults are the defaults. Guarding per test was how Default and Chunk_Size came to assert the
 // concurrency defaults with nothing cleared: `--test_env` or running the binary directly then failed
 // them against correct code. (A plain `bazel test` scrubs the environment, so it did not.)
+//
+// By PREFIX rather than by a list of names. A list has to be extended whenever Config learns a
+// variable, and it was missed twice - most recently for the two register-buffers variables. The
+// sweep also clears variables this fixture does not read, which costs nothing: it only builds Config.
 class Creation : public ::testing::Test
 {
  protected:
+    static constexpr std::string_view Prefix = "RUNAI_STREAMER_";
+
     void SetUp() override
     {
-        for (const auto * variable : { "RUNAI_STREAMER_CONCURRENCY",
-                                       "RUNAI_STREAMER_OBJ_CONCURRENCY",
-                                       "RUNAI_STREAMER_FS_QUEUE_DEPTH",
-                                       "RUNAI_STREAMER_CHUNK_BYTESIZE",
-                                       "RUNAI_STREAMER_FS_CHUNK_BYTESIZE",
-                                       "RUNAI_STREAMER_FS_STRATEGY",
-                                       "RUNAI_STREAMER_S3_TIMEOUT",
-                                       "RUNAI_STREAMER_DIRECT_BLOCK" })
+        // Collected first, then unset: unsetenv rewrites environ, so unsetting during the walk would
+        // skip entries.
+        std::vector<std::string> names;
+
+        for (char ** entry = ::environ; *entry != nullptr; ++entry)
         {
-            _cleared.push_back(std::make_unique<utils::temp::UnsetEnv>(std::string(variable)));
+            const std::string assignment(*entry);
+            const auto separator = assignment.find('=');
+
+            if (separator != std::string::npos && assignment.compare(0, Prefix.size(), Prefix) == 0)
+            {
+                names.push_back(assignment.substr(0, separator));
+            }
+        }
+
+        for (const auto & name : names)
+        {
+            _cleared.push_back(std::make_unique<utils::temp::UnsetEnv>(name));
         }
     }
 
