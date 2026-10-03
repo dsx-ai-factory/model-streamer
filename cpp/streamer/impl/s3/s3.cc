@@ -73,4 +73,15 @@ S3Cleanup::~S3Cleanup()
     }
 }
 
+S3Stop::~S3Stop()
+{
+    try
+    {
+        common::s3::S3ClientWrapper::stop();
+    }
+    catch(...)
+    {
+    }
+}
+
 }; // namespace runai::llm::streamer::impl

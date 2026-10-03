@@ -680,6 +680,7 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
                 LOG(INFO) << "Increasing fd soft limit to " << desired_fd_limit << " for concurrency level " << _config->s3_concurrency;
                 _fd_limit = std::make_unique<utils::FdLimitSetter>(desired_fd_limit);
             }
+            _s3_stop = std::make_unique<S3Stop>();
         });
 
         // S3Cleanup: shared by list_files and streaming, created once

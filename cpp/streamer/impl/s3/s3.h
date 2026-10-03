@@ -17,6 +17,13 @@ struct S3Cleanup
     ~S3Cleanup();
 };
 
+struct S3Stop
+{
+    S3Stop() = default;
+
+    ~S3Stop();
+};
+
 struct S3 : Reader
 {
     S3(std::shared_ptr<common::s3::S3ClientWrapper> client, const Config & config);
