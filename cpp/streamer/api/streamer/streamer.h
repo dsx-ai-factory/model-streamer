@@ -86,7 +86,11 @@ int runai_file_streamer_set_fs_strategy(
 // device        : where those destinations live - one device for the whole submission
 //
 // The three flat arrays are indexed identically and grouped by file in the order of paths: file f's
-// ranges occupy [sum(num_ranges[0..f)), sum(num_ranges[0..f])). Destinations must not overlap.
+// ranges occupy [sum(num_ranges[0..f)), sum(num_ranges[0..f])).
+//
+// DESTINATIONS MUST NOT OVERLAP - not within this submission, and not with the destination of any
+// range of another submission still in flight. Submissions run concurrently, so two ranges sharing
+// bytes race whatever their outcome. Not verified; the caller owns it.
 //
 // DESTINATION LIFETIME - a destination must stay valid until runai_file_streamer_end() returns, NOT
 // merely until its range is answered.
@@ -99,7 +103,8 @@ int runai_file_streamer_set_fs_strategy(
 // REUSING A DESTINATION AFTER A FAILED RANGE depends on which failure it was:
 //
 //   - a storage error (FileAccessError, FileTruncatedError) came from a completion, so the backend has
-//     finished with that memory. Free or reuse it at once. This is the ordinary recoverable case;
+//     finished with that memory. Free or reuse it at once - no other outstanding range can reach those
+//     bytes, by the non-overlap rule above. This is the ordinary recoverable case;
 //   - UnknownError may mean the streamer stopped waiting while the read was still outstanding. Do not
 //     reuse that destination. This costs nothing in practice: UnknownError already means abort the
 //     whole load (see runai_file_streamer_response);

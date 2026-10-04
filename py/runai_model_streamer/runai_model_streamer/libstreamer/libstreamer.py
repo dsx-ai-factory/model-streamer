@@ -94,8 +94,9 @@ def runai_request(
 
     paths carries one entry per file, however many ranges that file has. The three range arrays are flat,
     indexed identically, and grouped by file in the order of paths: file f's ranges occupy
-    [sum(num_ranges[:f]), sum(num_ranges[:f+1])). Destinations must not overlap - that is the caller's
-    responsibility and is not verified.
+    [sum(num_ranges[:f]), sum(num_ranges[:f+1])). Destinations must not overlap - not within this
+    submission, and not with the destination of any range of another submission still in flight, since
+    submissions run concurrently. That is the caller's responsibility and is not verified.
 
     range_dsts holds ABSOLUTE integer addresses - one complete pointer per range, not offsets from a
     base, and in no required order. Deliberately not memoryviews:
