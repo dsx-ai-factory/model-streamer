@@ -26,7 +26,8 @@ void * token(uintptr_t value)
 common::ResponseCode MockDevice::bind_thread()
 {
     ++bind_calls;
-    return common::ResponseCode::Success;
+    // AS CUDA DOES: cuCtxSetCurrent failing reports DeviceDriverError (cuda_device.cc).
+    return fail_bind_thread ? common::ResponseCode::DeviceDriverError : common::ResponseCode::Success;
 }
 
 common::ResponseCode MockDevice::get_attribute(Attribute, int & value) const

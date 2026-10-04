@@ -87,6 +87,10 @@ class MockDevice : public Device
     // way left to know when a copy stops reading from its buffer.
     std::atomic<bool> fail_stream_synchronize{false};
 
+    // Fails bind_thread, as a dead or unusable context does. bind_calls still counts the attempt, so
+    // a test can show the waiter retried rather than giving up after the first failure.
+    std::atomic<bool> fail_bind_thread{false};
+
     // Make every event_synchronize report a failed copy.
     std::atomic<bool> fail_event_synchronize{false};
 

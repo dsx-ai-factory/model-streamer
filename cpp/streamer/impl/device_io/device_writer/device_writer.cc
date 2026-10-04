@@ -167,6 +167,16 @@ common::ResponseCode DeviceWriter::write(Channel channel,
             //
             // Synchronising the whole stream is heavier than waiting for one event, which is why it is
             // not the normal path - but with no event there is nothing finer to wait for.
+            //
+            // WHAT IT ACTUALLY SAVES is narrow. A record fails either because the event is bad, which
+            // leaves the context healthy and this wait able to confirm the copy, or because the context
+            // is broken, which fails this wait too. Our events cannot be from the wrong context -
+            // EventPool is per device - so the first case means an invalid handle, which would be our
+            // own bug. Kept because it costs one call on a path that has already failed, and because
+            // the alternative is retiring a buffer whose copy had in fact finished.
+            //
+            // StreamWaiter has no equivalent fallback, and that is deliberate: by the time it runs the
+            // record has already succeeded, so only a broken context can fail its wait.
             const auto drained = target->device->stream_synchronize(target->stream.get());
             if (drained != common::ResponseCode::Success)
             {

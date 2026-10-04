@@ -77,8 +77,13 @@ class StreamWaiter
 
     const std::shared_ptr<device::Device> _device;
 
-    // Touched only by the worker's own thread, so it needs no synchronisation.
+    // Touched only by the worker's own thread, so they need no synchronisation.
+    //
+    // _thread_bound is set only on SUCCESS: a failed bind leaves every driver call on this thread
+    // broken, and the next copy should try again rather than inherit a context we never got. The
+    // second flag keeps that retry quiet after the first report.
     bool _thread_bound = false;
+    bool _bind_failure_logged = false;
 
     // The thread, the queue and the drain-before-stop are all in here. Concurrency belongs in a
     // tested primitive rather than in this class - see general_directions.md.

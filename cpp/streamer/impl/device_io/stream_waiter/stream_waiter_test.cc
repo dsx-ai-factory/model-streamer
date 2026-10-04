@@ -170,8 +170,17 @@ TEST_F(StreamWaiterTest, Completions_Are_Reported_In_Issue_Order)
     }
 }
 
-// A buffer lost on an error path is a deadlock that arrives later, so it comes back either way.
-TEST_F(StreamWaiterTest, A_Failed_Copy_Still_Returns_Its_Buffer)
+// A COPY THAT CANNOT BE WAITED FOR DOES NOT GIVE ITS BUFFER BACK.
+//
+// The wait is what would prove the copy stopped reading, and the wait is what failed - so the DMA may
+// still be reading this buffer and writing the caller's destination. Handing it to the next chunk
+// would corrupt that chunk's read, silently. The pool loses one buffer instead; the same decision
+// DeviceWriter::write makes when it cannot drain the stream.
+//
+// This test used to assert the opposite ("returned despite the failure"), on the grounds that a lost
+// buffer is a later deadlock. It is not: the pool reports a retired buffer rather than blocking, so a
+// caller is told why instead of waiting for one that can never come back.
+TEST_F(StreamWaiterTest, A_Copy_That_Cannot_Be_Waited_For_Keeps_Its_Buffer)
 {
     auto pool = std::make_shared<StagingPool>(_mock, params(1));
     StreamWaiter waiter(_mock);
@@ -185,11 +194,80 @@ TEST_F(StreamWaiterTest, A_Failed_Copy_Still_Returns_Its_Buffer)
     waiter.enqueue(copy_of(pool, buffer), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
 
     ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
-    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceTransferError);
+
+    // NOT the driver's DeviceTransferError, which tells a caller the destination is free. The copy may
+    // still be landing in it.
+    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceDriverError);
+
+    StagingBuffer again;
+    EXPECT_EQ(pool->try_acquire(again), common::ResponseCode::DeviceDriverError)
+        << "the buffer went back to the pool although nothing can say when the copy stops reading it";
+    EXPECT_FALSE(again.valid());
+    EXPECT_EQ(pool->retired(), 1u);
+
+    _mock->fail_event_synchronize = false;
+}
+
+// A CONTEXT THAT COULD NOT BE BOUND IS RETRIED, and its copies keep their buffers.
+//
+// bind_thread used to be marked done whether or not it succeeded, so one failure left every later copy
+// running without a context - each failing in event_synchronize, naming the wait rather than the bind
+// that never happened. The flag is now set only on success.
+TEST_F(StreamWaiterTest, A_Failed_Bind_Is_Retried_And_Keeps_The_Buffer)
+{
+    auto pool = std::make_shared<StagingPool>(_mock, params(2));
+    StreamWaiter waiter(_mock);
+
+    StagingBuffer first;
+    ASSERT_EQ(pool->try_acquire(first), common::ResponseCode::Success);
+
+    _mock->fail_bind_thread = true;
+
+    std::atomic<int> reported{-1};
+    waiter.enqueue(copy_of(pool, first), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+
+    ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
+
+    // The copy was enqueued on the writer's thread and is beyond reach from here, so its buffer is
+    // retained exactly as a failed wait would retain it.
+    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceDriverError);
+    EXPECT_EQ(pool->retired(), 1u);
+
+    // THE POINT: the next copy tries to bind again rather than running with a context we never got.
+    const auto binds = _mock->bind_calls.load();
+    _mock->fail_bind_thread = false;
+
+    StagingBuffer second;
+    ASSERT_EQ(pool->try_acquire(second), common::ResponseCode::Success);
+
+    reported.store(-1);
+    waiter.enqueue(copy_of(pool, second), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+
+    ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
+    EXPECT_GT(_mock->bind_calls.load(), binds) << "the waiter never tried to bind again";
+    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::Success)
+        << "the bind succeeded this time, so the copy completes normally";
+}
+
+// And a copy that CAN be waited for still gives it back - the ordinary path, unchanged.
+TEST_F(StreamWaiterTest, A_Failed_Copy_Returns_Its_Buffer_When_The_Wait_Succeeded)
+{
+    auto pool = std::make_shared<StagingPool>(_mock, params(1));
+    StreamWaiter waiter(_mock);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
+
+    std::atomic<int> reported{-1};
+    waiter.enqueue(copy_of(pool, buffer), [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); });
+
+    ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
+    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::Success);
 
     StagingBuffer again;
     ASSERT_EQ(pool->try_acquire(again), common::ResponseCode::Success);
-    EXPECT_TRUE(again.valid()) << "returned despite the failure";
+    EXPECT_TRUE(again.valid()) << "the wait succeeded, so the buffer is free";
+    EXPECT_EQ(pool->retired(), 0u);
 }
 
 // The pool's teardown assumes every buffer is back, so stopping must drain rather than abandon.
