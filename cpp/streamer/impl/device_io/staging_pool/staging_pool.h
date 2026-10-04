@@ -97,15 +97,16 @@ class StagingPool
     // Hand a buffer back once its copy has landed. The StreamWaiter calls this.
     void release(const StagingBuffer & buffer);
 
-    // Take a buffer OUT of circulation for good, because nothing can say when the device stops
-    // reading from it. `code` is why, and is what acquire() reports once every buffer has gone this
-    // way - a caller cannot be left waiting for a buffer that can never come back.
+    // Take a buffer OUT of circulation for good, because nothing can say when whoever is using it
+    // stops. TWO CALLERS, and the code says which: a device copy whose stream could not be drained,
+    // and an object read the backend never reported. `code` is what acquire() reports once every
+    // buffer has gone this way - a caller cannot be left waiting for one that can never come back.
     //
-    // ITS SLAB IS THEN LEAKED, not freed at teardown. Keeping the buffer out of a reader's hands is
-    // only half of it: cuMemFreeHost on memory an enqueued copy is still reading from is undefined,
-    // and the pool cannot wait for that copy - waiting is what already failed. One slab of pinned
-    // memory is lost for the life of the process, which is bounded and reported, where freeing it is
-    // neither.
+    // ITS SLAB IS THEN LEAKED, not freed at teardown. Keeping the buffer out of the next reader's
+    // hands is only half of it: freeing pinned memory that an enqueued copy or a live plugin write is
+    // still touching is undefined, and the pool cannot wait for either - waiting is what already
+    // failed. One slab is lost for the life of the process, which is bounded and reported, where
+    // freeing it is neither.
     void retire(const StagingBuffer & buffer, common::ResponseCode code);
 
     // Wakes every acquire(), which then gets an invalid buffer. Without it one sleeps for a

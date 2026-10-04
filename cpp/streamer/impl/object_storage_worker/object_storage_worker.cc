@@ -283,6 +283,9 @@ void ObjectStorageWorker::enqueue(Workload && workload)
         // responses we fail this worker's in-flight workloads (this one included - the bulk allocations run
         // after the move, so it is already in _inflight) and zero the window, clearing the half-built entry
         // and any chunks enqueued before the throw (else a stale one later hits submit()'s unknown-handle ASSERT).
+        //
+        // NOT narrowed to the failing workload. A sibling kept alive here is torn down moments later by
+        // the caller anyway, so the extra phase and catch would buy nothing for a disaster case.
         abort_all(common::ResponseCode::UnknownError);
     }
 }
@@ -444,11 +447,11 @@ void ObjectStorageWorker::drain_copies()
     }
 }
 
-void ObjectStorageWorker::quiesce_reads()
+bool ObjectStorageWorker::quiesce_reads()
 {
     if (_reader == nullptr || _queue == nullptr || _queue->inflight() == 0)
     {
-        return;
+        return true;
     }
 
     LOG(DEBUG) << "Waiting for " << _queue->inflight() << " object reads in flight before reporting";
@@ -460,21 +463,47 @@ void ObjectStorageWorker::quiesce_reads()
         const auto ret = _reader->async_response(responses, _max_responses);
         if (ret != common::ResponseCode::Success)
         {
-            // GIVING UP, not finishing. A stopped responder reports FinishedError while its reads are
-            // still running, and S3Stop stops it before this runs - so at teardown this usually leaves
-            // with reads outstanding. Safe only because the staging pool outlives this worker: the
-            // buffers those reads are filling are not freed until the clients have been destroyed.
-            break;
+            // The plugin cannot tell us any more. Looping would spin on the same answer.
+            LOG(ERROR) << "Could not drain " << _queue->inflight() << " object reads: " << ret;
+            return false;
         }
 
-        // NOT routed: the workloads are about to be failed, so routing would answer their ranges
-        // twice. The credit is all that matters here - it is what says the backend is done with our
-        // memory. Staging buffers come back in the loop below, once nothing can write to them.
-        for (size_t i = 0; i < responses.size(); ++i)
+        // BY PROGRESS, not by the marker alone. A FinishedError event says the responder has nothing
+        // to hand out - which may mean nothing THIS ROUND (azure and gcs append it when their ready
+        // queue empties) or nothing ever (the responder was stopped). A round that completed nothing
+        // and carried the marker is the second: no completion is coming, so waiting cannot end.
+        //
+        // Counting the marker as a completion is what this replaced. It drove the credit to zero
+        // without a single read landing, and the buffers went back to the pool under a live write.
+        unsigned completed = 0;
+        bool nothing_to_give = responses.empty();
+
+        for (const auto & response : responses)
         {
+            if (response.ret == common::ResponseCode::FinishedError)
+            {
+                nothing_to_give = true;
+                break;
+            }
+
+            // NOT routed: the workloads are about to be failed, so routing would answer their ranges
+            // twice. The credit is all that matters here - it is what says the backend is done with
+            // our memory.
             _queue->complete(1);
+            ++completed;
+        }
+
+        if (completed == 0 && nothing_to_give)
+        {
+            // WARNING, not ERROR. This is the ordinary shape of an aborted or torn-down load: the
+            // client was stopped while reads were still out. Nothing is wrong with the streamer.
+            LOG(WARNING) << "Object responder has nothing left to give with " << _queue->inflight()
+                         << " reads still in flight; they will never report";
+            return false;
         }
     }
+
+    return true;
 }
 
 void ObjectStorageWorker::quiesce_copies()
@@ -649,14 +678,17 @@ bool ObjectStorageWorker::holding_work() const
 
 ObjectStorageWorker::~ObjectStorageWorker()
 {
-    // Reads first, then copies - the order they fill and drain a staging buffer in. Both write into
-    // memory that is about to go: the reads into the pool's pinned slabs, the copies into the caller's
-    // device pointer, and the copy completion into this object.
-    quiesce_reads();
+    // Reads first, then copies - the order they fill and drain a staging buffer in. A copy writes into
+    // the caller's device pointer and its completion writes into this object, and both are about to go.
+    //
+    // The drain's answer is DISCARDED here, unlike in abort_all: there is no buffer left to decide
+    // about, and the pool outlives this worker anyway (see StagingPoolRetainer), so a read that never
+    // reported is writing into memory that is still mapped.
+    (void)quiesce_reads();
     quiesce_copies();
 }
 
-void ObjectStorageWorker::abort_all(common::ResponseCode code)
+void ObjectStorageWorker::abort_all(common::ResponseCode code, bool worker_continues)
 {
     // Fail and drop every in-flight workload - including any whose reads are still outstanding at the
     // backend. Those reads are not cancelled: they can still finish and be delivered later as "late
@@ -686,7 +718,7 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
     //
     // Waiting first also removes late completions entirely: nothing is abandoned, so no completion can
     // arrive for a workload that has been erased.
-    quiesce_reads();
+    const bool drained = quiesce_reads();
     quiesce_copies();
 
     // Every staging buffer still held by a chunk that will never complete. Before the workloads are
@@ -702,7 +734,21 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code)
             {
                 if (cs.staging.valid())
                 {
-                    _pool->release(cs.staging);
+                    // RETIRED, not released, when the drain failed and this worker keeps going: the
+                    // read never reported, so the plugin may still be writing into that buffer, and
+                    // the next chunk to acquire it would read into memory being overwritten.
+                    //
+                    // At teardown releasing is right - the pool outlives the clients, whose
+                    // destructors wait for the SDK, so retiring there would leak for nothing.
+                    if (drained || !worker_continues)
+                    {
+                        _pool->release(cs.staging);
+                    }
+                    else
+                    {
+                        _pool->retire(cs.staging, code);
+                    }
+
                     cs.staging = StagingBuffer{};
                 }
             }
@@ -741,7 +787,8 @@ void ObjectStorageWorker::drain_batch(std::atomic<bool> & stopped)
 
     if (stopped)
     {
-        abort_all(common::ResponseCode::FinishedError);   // teardown: fail all in flight, empty the window
+        // teardown: fail all in flight, empty the window
+        abort_all(common::ResponseCode::FinishedError, false /* worker_continues */);
         return;
     }
 

@@ -241,10 +241,13 @@ void StagingPool::retire(const StagingBuffer & buffer, common::ResponseCode code
         // the wait that would have proved otherwise is what failed.
         _leaked_slabs.insert(buffer.slab);
 
-        LOG(ERROR) << "[RunAI Streamer] staging buffer " << buffer.index << " is retained because the"
-                   << " device may still be reading from it (" << code << "). The pool is down to "
+        // NOT "the device": a buffer is retired whenever something that may still be writing into it
+        // cannot be waited for. That is a stalled device copy, and also an object read the backend
+        // never reported. The code says which.
+        LOG(ERROR) << "[RunAI Streamer] staging buffer " << buffer.index << " is retained because a"
+                   << " reader or writer may still be using it (" << code << "). The pool is down to "
                    << (_buffers.size() - _retired) << " of " << _buffers.size() << " buffers."
-                   << " Restart the streamer once the device is healthy: a retained buffer is never"
+                   << " Restart the streamer once the cause is cleared: a retained buffer is never"
                    << " recovered.";
     }
 

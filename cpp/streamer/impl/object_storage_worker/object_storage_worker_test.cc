@@ -1086,4 +1086,121 @@ TEST_F(ObjectStorageWorkerTest, A_Staging_Pool_Outlives_Its_Worker)
         << "dropping the retainer did not free the slabs, so something else still holds the pool";
 }
 
+// A staging buffer whose read never reported is NOT given back to the pool.
+//
+// THE BUG THIS REPRODUCES: quiesce_reads() counted every event the plugin handed it, including the
+// FinishedError marker that azure and gcs append when their ready queue empties. A stopped responder
+// produces nothing but that marker, so the loop drove the in-flight credit to zero without a single
+// read landing, declared itself drained, and abort_all handed the buffers back. A later chunk could
+// then acquire memory the plugin was still writing into.
+//
+// Driven with the sentinel enabled, because that is the shape that returns Success WITH a marker
+// event - the case the old code miscounted. The worker keeps running afterwards, which is what makes
+// a recycled buffer reachable.
+TEST_F(ObjectStorageWorkerTest, A_Buffer_Whose_Read_Never_Reported_Is_Not_Reused)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 1;
+
+    set_sentinel(true);
+    set_response_time(60000);   // no read completes during this test
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+    auto retainer = std::make_shared<StagingPoolRetainer>();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer, retainer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+    ASSERT_GT(requests(), 0u) << "no read was submitted, so no buffer is held by one";
+
+    // The reads are now at the backend, holding their staging buffers. Stopping the client makes the
+    // responder answer with the marker and nothing else - exactly what teardown does, but with this
+    // worker still alive.
+    common::s3::S3ClientWrapper::stop();
+
+    // NOT the stopped flag: this is a mid-life abort, so the worker survives and keeps its pool.
+    worker.drain(stopped);
+
+    std::shared_ptr<StagingPool> pool;
+    ASSERT_TRUE(retainer->try_pop(pool)) << "no staging pool was ever built";
+    ASSERT_NE(pool, nullptr);
+
+    EXPECT_GT(pool->retired(), 0u)
+        << "a staging buffer went back to the pool although its read never reported: the plugin may"
+        << " still be writing into it, and the next chunk to acquire it would read torn bytes";
+
+    EXPECT_EQ(pool->retired(), pool->created())
+        << "every buffer this pool made was held by an unreported read, so none may be handed out again";
+
+    set_response_time(0);
+}
+
+// idle() must stay FALSE while this worker still owes something. The pool reads it to decide a worker
+// has nothing left, so an idle() that lies lets teardown start under live work.
+//
+// THE SUBTLE CASE IS THE COPY. issue_copy gives the window slot back as soon as the read lands, so the
+// capacity queue reports idle while the copy is still in flight. Only has_deferred_work() keeps the
+// answer honest. A reader who assumes "queue idle means worker idle" would get this wrong.
+TEST_F(ObjectStorageWorkerTest, Idle_Is_False_While_Work_Is_Outstanding)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 1;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker so it runs BEFORE ~worker: a failed ASSERT below would otherwise leave
+    // quiesce_copies waiting for a copy this test is still holding.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
+
+    std::atomic<bool> stopped{ false };
+
+    EXPECT_TRUE(worker.idle()) << "a worker with no window yet owes nothing";
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    EXPECT_FALSE(worker.idle()) << "reads are in flight, so this worker still owes responses";
+
+    // Turn until a copy is held. The read has landed by then and its window slot is back, so the
+    // capacity queue alone would say idle.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so the point is untested";
+
+    EXPECT_FALSE(worker.idle())
+        << "a copy is still in flight: its range is unanswered and its completion will call back into"
+        << " this worker, so the pool must not treat it as finished";
+
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "everything completed, so the worker owes nothing";
+}
+
 }; // namespace runai::llm::streamer::impl

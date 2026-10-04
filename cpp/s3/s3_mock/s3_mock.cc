@@ -363,7 +363,19 @@ common::backend_api::ResponseCode_t obj_wait_for_completions(common::backend_api
 
     if (__stopped)
     {
-        return common::ResponseCode::FinishedError;
+        // AS THE REAL PLUGIN DOES: Success, with the marker carried in the event. obj_wait_for_completions
+        // returns a failing code only for bad arguments; a stopped responder is reported by pop() as a
+        // FinishedError response, and s3.cc copies that into event.response_code. Returning the marker as
+        // the function code instead made this mock the only backend whose stop is visible without reading
+        // the events - and hid a caller that counted the event as a completed read.
+        *out_num_events_retrieved = 0;
+        if (max_events_to_retrieve > 0)
+        {
+            event_buffer[0].request_id = 0;
+            event_buffer[0].response_code = common::ResponseCode::FinishedError;
+            *out_num_events_retrieved = 1;
+        }
+        return common::ResponseCode::Success;
     }
 
     auto r = get_response_code(client_handle);

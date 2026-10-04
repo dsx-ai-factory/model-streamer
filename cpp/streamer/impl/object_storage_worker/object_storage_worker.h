@@ -202,7 +202,10 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
     // Waits until the backend holds none of our reads. Every submitted read reports exactly once, so
     // the in-flight credit reaching zero is the proof - the same condition AsyncIoWorker::quiesce()
     // waits on.
-    void quiesce_reads();
+    //
+    // FALSE when it could not get there: the responder has nothing left to give while reads are still
+    // outstanding, so those reads will never report and their buffers are unsafe to hand back.
+    bool quiesce_reads();
 
     // Give every parked chunk another chance at a staging buffer. One pass per queue: a chunk the pool
     // still cannot serve goes back to the end of its own queue.
@@ -222,7 +225,10 @@ class ObjectStorageWorker : public utils::CapacityWorker<Workload, ObjectChunk>
 
     // Fail every in-flight workload with `code` and zero the window, so the worker becomes idle and the
     // pool can join. Used on teardown (stopped) and when the responder drains early.
-    void abort_all(common::ResponseCode code);
+    // `worker_continues` is false only at teardown. It decides what happens to a staging buffer whose
+    // read never reported: a worker that keeps running must not hand that memory to another chunk,
+    // while at teardown the pool outlives the clients anyway (see StagingPoolRetainer).
+    void abort_all(common::ResponseCode code, bool worker_continues = true);
 
     // This worker, not the backend, is what the submission is waiting for: a chunk parked for a staging
     // buffer was never submitted, and a copy still in flight will return the buffer that releases one.
