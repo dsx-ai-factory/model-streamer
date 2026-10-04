@@ -709,7 +709,24 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code, bool worker_conti
     if (_queue != nullptr)
     {
         _queue->abort_pending();
+
+        // AND GIVE BACK WHAT THE PARKED CHUNKS HOLD. A chunk waiting for a staging buffer keeps its
+        // window slot but never reached the backend, so its credit is not a read to wait for. Left in
+        // place, inflight() never falls to zero and the wait below ends on the drained marker instead -
+        // reporting reads still in flight that do not exist.
+        //
+        const size_t parked = _waiting.size() + _waiting_retries.size();
+        if (parked > 0)
+        {
+            _queue->complete(parked);
+        }
     }
+
+    // The queues go too, and MUST: a parked chunk counts as deferred work, so leaving one would keep
+    // idle() false for good and the pool could never join. It would also name a workload that is erased
+    // below. Emptied here rather than after the workloads, so the credit above is given back once.
+    _waiting.clear();
+    _waiting_retries.clear();
 
     // THEN WAIT, and only then release or report. A read still at the backend is writing into a
     // staging buffer, and a copy still at the issuer is writing into the caller's device memory.
@@ -761,11 +778,6 @@ void ObjectStorageWorker::abort_all(common::ResponseCode code, bool worker_conti
         finalize(it, code);   // fails every batch and erases `it`
         it = next;
     }
-
-    // With them, or a waiting chunk would name a workload that no longer exists - and it would keep
-    // this worker busy for good, because a parked chunk is deferred work.
-    _waiting.clear();
-    _waiting_retries.clear();
 
     // Zero the window so idle() becomes true and the pool can join. clear() drops every pending chunk and
     // releases all in-flight credit in one step - the workloads those chunks belonged to were already failed
