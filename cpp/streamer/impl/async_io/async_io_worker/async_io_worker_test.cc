@@ -147,7 +147,8 @@ struct Driver
     explicit Driver(Strategy strategy = Strategy::IoUringBuffered, size_t block = 4096,
                     std::optional<size_t> mount_block = std::nullopt,
                     unsigned depth = Config::default_fs_async_queue_depth,
-                    std::shared_ptr<DeviceWriter> writer = nullptr) :
+                    std::shared_ptr<DeviceWriter> writer = nullptr,
+                    bool register_buffers = false) :
         worker(strategy,
                mount_block.value_or(block),
                depth,
@@ -163,7 +164,8 @@ struct Driver
                    return owned;
                },
                {} /* on_engine_dead */,
-               std::move(writer))
+               std::move(writer),
+               register_buffers)
     {}
 
     // execute() stages everything, since the window is larger than the chunk count. Staged is not
@@ -1379,9 +1381,11 @@ namespace
 struct DeviceDriver : Driver
 {
     explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock,
-                          unsigned depth = Config::default_fs_async_queue_depth) :
+                          unsigned depth = Config::default_fs_async_queue_depth,
+                          bool register_buffers = false) :
         Driver(Strategy::IoUringBuffered, 4096, std::nullopt, depth,
-               std::make_shared<DeviceWriter>([mock](common::DeviceType) -> DeviceWriter::BackendFactory { return [mock]() { return mock; }; })),
+               std::make_shared<DeviceWriter>([mock](common::DeviceType) -> DeviceWriter::BackendFactory { return [mock]() { return mock; }; }),
+               register_buffers),
         backend(std::move(mock))
     {}
 
@@ -1401,6 +1405,55 @@ struct DeviceDriver : Driver
 };
 
 } // namespace
+
+// A HOST READ OFFERS NO REGISTRATION, even from a worker that is fully able to register.
+//
+// This is the CPU-caller guarantee: registration belongs to the device path, where the buffer offered
+// is a staging slab. A host read has none, so registration_for() returns a default Registration, the
+// engine short-circuits on it and uses the ordinary read opcode.
+//
+// DRIVEN THROUGH DeviceDriver, with registration ON, and both matter. A plain Driver has no
+// DeviceWriter, so registration_for() returns early on `_device_out == nullptr`; with registration off
+// it returns earlier still. Either way this would assert nothing at all.
+TEST(AsyncIoWorkerDevice, A_Host_Read_Offers_No_Registration)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, true /* register_buffers */);
+
+    driver.execute(fixture.workload());   // host destination
+
+    ASSERT_GT(driver.engine->staged_count(), 0u) << "nothing was staged, so nothing was offered";
+
+    EXPECT_FALSE(driver.engine->last_registration().valid())
+        << "a host destination offered a registration - the CPU read path must stay unregistered";
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+}
+
+// THE COUNTERPART to A_Host_Read_Offers_No_Registration. Without this one that test could pass simply
+// because nothing ever records a registration, which would make it prove nothing.
+TEST(AsyncIoWorkerDevice, A_Device_Read_Offers_Its_Staging_Slab)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, true /* register_buffers */);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    ASSERT_GT(driver.engine->staged_count(), 0u) << "nothing was staged, so nothing was offered";
+
+    const auto registration = driver.engine->last_registration();
+    EXPECT_TRUE(registration.valid()) << "a device read staged without offering its slab";
+    EXPECT_GT(registration.bytesize, 0u);
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+}
 
 // The whole point of the step: a device range is read into pinned host memory and copied from there,
 // and the caller is answered only once the copy has landed.
