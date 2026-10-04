@@ -19,18 +19,32 @@ StagingPool::StagingPool(std::shared_ptr<device::Device> device, Params params) 
 // this memory. The slabs are freed by their owners.
 StagingPool::~StagingPool()
 {
-    // A slab a retired buffer came from is released from its owner rather than freed: an enqueued
-    // copy may still be reading it, and nothing left can say when that stops. The memory is lost for
-    // the life of the process - the alternative is freeing pinned memory under a live DMA.
+    // A slab a retired buffer came from is released from its owner rather than freed: an enqueued copy
+    // or a plugin read may still be touching it, and nothing left can say when that stops. The memory
+    // is lost for the life of the process - the alternative is freeing it under a live write.
+    size_t leaked_slabs = 0;
+    size_t leaked_bytes = 0;
+
     for (const auto index : _leaked_slabs)
     {
         if (index < _slabs.size())
         {
-            LOG(ERROR) << "[RunAI Streamer] leaking staging slab " << index << " of "
-                       << _slabs[index].bytesize << " bytes: a retired buffer was cut from it and the"
-                       << " device may still be reading";
+            LOG(DEBUG) << "[RunAI Streamer] leaking staging slab " << index << " of "
+                       << _slabs[index].bytesize << " bytes";
+            leaked_bytes += _slabs[index].bytesize;
+            ++leaked_slabs;
             (void)_slabs[index].memory.release();
         }
+    }
+
+    // ONE line an operator can alert on, rather than one per slab saying the same thing. The per-slab
+    // detail stays at DEBUG for whoever is diagnosing rather than watching.
+    if (leaked_slabs > 0)
+    {
+        LOG(ERROR) << "[RunAI Streamer] leaked " << leaked_slabs << " staging slab(s), "
+                   << utils::logging::human_readable_size(leaked_bytes) << " of pinned memory, for the"
+                   << " life of this process: a retired buffer was cut from each and something may still"
+                   << " be reading or writing it. Restart once the cause is cleared.";
     }
 }
 

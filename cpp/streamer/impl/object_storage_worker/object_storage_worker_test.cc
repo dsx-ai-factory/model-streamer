@@ -1139,6 +1139,20 @@ TEST_F(ObjectStorageWorkerTest, A_Buffer_Whose_Read_Never_Reported_Is_Not_Reused
     EXPECT_EQ(pool->retired(), pool->created())
         << "every buffer this pool made was held by an unreported read, so none may be handed out again";
 
+    // AND THE CALLER IS TOLD. A retirement is never silent: the ranges whose buffers were taken out of
+    // circulation are failed in the same abort, so capacity is never lost behind the caller's back.
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut)
+            << "range " << i << " was never answered, so the retirement was silent";
+        // THE ABORT'S OWN CODE, not a device one: what failed here is the object backend, which stopped
+        // answering while its reads were outstanding. DeviceDriverError is what the two device paths
+        // report, because there the thing that may still be writing is a copy.
+        EXPECT_EQ(response.ret, common::ResponseCode::FinishedError)
+            << "range " << i << " was not failed with the code the abort carried";
+    }
+
     set_response_time(0);
 }
 

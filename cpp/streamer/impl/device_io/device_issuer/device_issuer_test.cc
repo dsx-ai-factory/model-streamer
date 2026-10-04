@@ -196,6 +196,43 @@ TEST_F(DeviceIssuerTest, A_Copy_That_Cannot_Be_Issued_Still_Reports)
     EXPECT_TRUE(again.valid());
 }
 
+// A RETIRED BUFFER IS STILL REPORTED. DeviceWriter::write keeps the buffer when it cannot drain the
+// stream, and answers its caller - but the reader moved on the moment this was queued, so the issuer
+// is the only one left to deliver that answer.
+//
+// The point for the API: capacity is never lost behind the caller's back. Every retirement costs a
+// range, and that range is failed with the code that says its destination may still be written.
+TEST_F(DeviceIssuerTest, A_Copy_Whose_Buffer_Is_Retired_Still_Reports)
+{
+    auto pool = pool_for(0, 1);
+    DeviceIssuer issuer(_writer);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
+
+    // The copy is enqueued, its event cannot be recorded, and the stream cannot be drained - the one
+    // branch in write() that retires rather than releases.
+    auto device = _backend->opened(0);
+    ASSERT_NE(device, nullptr);
+    device->fail_event_record = true;
+    device->fail_stream_synchronize = true;
+
+    std::vector<char> destination(Buffer, 0);
+    std::atomic<int> reported{-1};
+
+    issuer.submit(common::Device::cuda(0), pool, buffer, Buffer, destination.data(),
+                  [&](common::ResponseCode ret) { reported.store(static_cast<int>(ret)); });
+
+    ASSERT_TRUE(eventually([&]() { return reported.load() >= 0; }));
+    EXPECT_EQ(static_cast<common::ResponseCode>(reported.load()), common::ResponseCode::DeviceDriverError);
+
+    // And the buffer did NOT come back, which is what the report is paying for.
+    EXPECT_EQ(pool->retired(), 1u);
+
+    device->fail_event_record = false;
+    device->fail_stream_synchronize = false;
+}
+
 // Teardown waits for what is queued, so no copy is dropped and no completion is lost.
 TEST_F(DeviceIssuerTest, Teardown_Issues_What_Is_Already_Queued)
 {
