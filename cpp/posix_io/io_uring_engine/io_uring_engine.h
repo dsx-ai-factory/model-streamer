@@ -3,6 +3,7 @@
 #include <liburing.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -71,6 +72,10 @@ class IoUringEngine : public IoEngine
     // look exactly like a run that registered all of them.
     unsigned refused_regions() const;
 
+    // Reads served the ordinary way because their region's id is past the table. Counted per read and
+    // not per region, unlike the two above: a region too large to hold has no slot to remember it in.
+    uint64_t over_table_reads() const;
+
  private:
     // The buffer index to read through, or -1 for an ordinary read. Registers the region on first
     // sight, and remembers a refusal so the kernel is asked once and not once per read.
@@ -89,6 +94,10 @@ class IoUringEngine : public IoEngine
     // so a run that registers nothing carries nothing.
     enum class RegionState : unsigned char { Unknown, Registered, Refused };
     std::vector<RegionState> _regions;
+
+    // Reads whose region id is past the table. Not in _regions, which is indexed by that same id and
+    // so cannot hold them.
+    uint64_t _over_table_reads = 0;
 
     // The sparse table exists. Created on the first region offered, not at construction, so a load
     // that never reads into registered memory makes no registration syscall at all.

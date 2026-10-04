@@ -129,6 +129,14 @@ IoUringEngine::~IoUringEngine()
                   << refused_regions() << " refused";
     }
 
+    if (_over_table_reads > 0)
+    {
+        // WARNING, not INFO: the cause is a pool sized past what this engine can register, not anything
+        // the kernel decided.
+        LOG(WARNING) << "io_uring registered buffers: " << _over_table_reads << " read(s) used a region"
+                     << " id past the table of " << MaxRegisteredRegions << " and were not registered";
+    }
+
     // Unmaps the rings and closes the ring fd. Anything still in flight is the caller's failure to
     // quiesce (io_engine.h) - the kernel drops it here, having possibly already written to a
     // destination the caller believes is free.
@@ -155,6 +163,11 @@ unsigned IoUringEngine::refused_regions() const
     return static_cast<unsigned>(std::count(_regions.begin(), _regions.end(), RegionState::Refused));
 }
 
+uint64_t IoUringEngine::over_table_reads() const
+{
+    return _over_table_reads;
+}
+
 int IoUringEngine::registered_index(const Registration & registration)
 {
     if (!registration.valid() || !_fixed_buffers)
@@ -165,7 +178,9 @@ int IoUringEngine::registered_index(const Registration & registration)
     if (registration.id >= MaxRegisteredRegions)
     {
         // More regions than the table holds. An ordinary read rather than a failure: registration is
-        // an optimisation, and a pool this large is a sizing problem to report elsewhere.
+        // an optimisation. COUNTED, because the read still succeeds, so a pool that outgrew the table
+        // otherwise looks exactly like one that never offered a region at all.
+        ++_over_table_reads;
         return -1;
     }
 

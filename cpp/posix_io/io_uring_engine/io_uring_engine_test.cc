@@ -250,6 +250,9 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer() ? 1u : 0u)
         << "the engine disagreed with the kernel about whether this region could be registered";
 
+    EXPECT_EQ(engine.over_table_reads(), 0u)
+        << "a region the table holds must not be counted as one past it";
+
     const auto completions = reap(engine, 3);
     ASSERT_EQ(completions.size(), 3u);
 
@@ -524,6 +527,8 @@ TEST(IoUringEngine, An_Unregisterable_Region_Still_Reads)
     EXPECT_EQ(engine.registered_regions(), 0u) << "an id past the table must register nothing";
     EXPECT_EQ(engine.refused_regions(), 0u)
         << "an id the table cannot hold is not a refusal by the kernel, and must not be counted as one";
+    EXPECT_EQ(engine.over_table_reads(), 1u)
+        << "it must still be counted somewhere, or a pool that outgrew the table reads slower in silence";
 }
 
 // Ids are echoed, not positional. Completions arrive in whatever order the kernel finishes them, so
