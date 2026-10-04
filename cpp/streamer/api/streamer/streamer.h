@@ -88,6 +88,25 @@ int runai_file_streamer_set_fs_strategy(
 // The three flat arrays are indexed identically and grouped by file in the order of paths: file f's
 // ranges occupy [sum(num_ranges[0..f)), sum(num_ranges[0..f])). Destinations must not overlap.
 //
+// DESTINATION LIFETIME - a destination must stay valid until runai_file_streamer_end() returns, NOT
+// merely until its range is answered.
+//
+// An object-storage read is handed the destination pointer and the backend fills it asynchronously. A
+// request already sent cannot be cancelled, and the client that owns it is destroyed by
+// runai_file_streamer_end(); that destructor is what waits for the backend SDK. Freeing a destination
+// before then can leave the backend writing into memory that is gone.
+//
+// REUSING A DESTINATION AFTER A FAILED RANGE depends on which failure it was:
+//
+//   - a storage error (FileAccessError, FileTruncatedError) came from a completion, so the backend has
+//     finished with that memory. Free or reuse it at once. This is the ordinary recoverable case;
+//   - UnknownError may mean the streamer stopped waiting while the read was still outstanding. Do not
+//     reuse that destination. This costs nothing in practice: UnknownError already means abort the
+//     whole load (see runai_file_streamer_response);
+//   - DeviceDriverError, for a device destination, may mean a copy is still landing in it. Do not free
+//     or reuse it;
+//   - FinishedError is teardown, which the lifetime rule above already covers.
+//
 // RESPONSE COUNT - a submission owes exactly sum(num_ranges) responses, one per range:
 //   - a ZERO-SIZED range still gets its own response (it is completed immediately, without reaching
 //     storage), so it must be counted like any other;
