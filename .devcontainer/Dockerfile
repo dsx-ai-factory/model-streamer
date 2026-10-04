@@ -1,3 +1,5 @@
+FROM nvidia/cuda:12.8.0-devel-ubuntu20.04@sha256:cd0f8e1c41628ff2513e9f7c42dd9bd8740fe87fd6615b9c4a6f392995a589c0 AS cuda-headers
+
 FROM ubuntu:20.04
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
@@ -11,6 +13,31 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/aarch64-linux-gnu-ld.gold /usr/bin/ld.gold
+
+# ThreadSanitizer (`bazel test --config=tsan`).
+#
+# Ubuntu 20.04 ships libtsan.so for gcc-9 but NOT libtsan_preinit.o, so -fsanitize=thread fails to
+# link. This is that file, which is all of GCC's own libsanitizer/tsan/tsan_preinit.c: it registers
+# __tsan_init in .preinit_array so the runtime starts before any constructor runs.
+#
+# Built with the CROSS compiler that will consume it, so the object matches its target whatever the
+# host architecture is. x86_64 only - there is no libtsan for the aarch64 cross toolchain.
+#
+# The `test -f libtsan.so` is not a formality: -print-file-name echoes its argument back when the
+# file is not there, so without it the object would land in the build directory and --config=tsan
+# would keep failing with the same confusing error. The second test never shadows a real
+# libtsan_preinit.o, in case a later base image ships one.
+RUN printf '%s\n' \
+        'extern void __tsan_init(void);' \
+        'static void __local_tsan_preinit(void) { __tsan_init(); }' \
+        '__attribute__((section(".preinit_array"), used))' \
+        'static void (*tsan_preinit)(void) = __local_tsan_preinit;' \
+        > /tmp/tsan_preinit.c \
+    && TSAN_DIR="$(dirname "$(x86_64-linux-gnu-gcc -print-file-name=libtsan.so)")" \
+    && test -f "$TSAN_DIR/libtsan.so" \
+    && { test -f "$TSAN_DIR/libtsan_preinit.o" \
+         || x86_64-linux-gnu-gcc -c -fPIC /tmp/tsan_preinit.c -o "$TSAN_DIR/libtsan_preinit.o"; } \
+    && rm /tmp/tsan_preinit.c
 
 RUN pip install \
     boto3 \
@@ -37,6 +64,11 @@ RUN WEED_ARCH=$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64") \
     && chmod +x weed \
     && mv weed /usr/local/bin/weed \
     && rm -f weed.tar.gz
+
+# CUDA headers only, for compile-time type checking of the driver API. No runtime and no
+# libraries: libcuda.so.1 is loaded with dlopen, so the build has no link-time CUDA dependency
+# and the image needs no driver.
+COPY --from=cuda-headers /usr/local/cuda/include/ /usr/local/cuda/include/
 
 RUN curl -fsSL -o fake-gcs-server_1.52.2.tar.gz https://github.com/fsouza/fake-gcs-server/releases/download/v1.52.2/fake-gcs-server_1.52.2_Linux_$([ "$(uname -m)" = "aarch64" ] && echo "arm64" || echo "amd64").tar.gz \
     && mkdir -p fake-gcs-server \
