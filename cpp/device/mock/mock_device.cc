@@ -119,7 +119,10 @@ common::ResponseCode MockDevice::stream_destroy(StreamHandle stream)
 common::ResponseCode MockDevice::stream_synchronize(StreamHandle)
 {
     ++stream_syncs;
-    return fail_stream_synchronize ? common::ResponseCode::DeviceDriverError
+    // AS CUDA DOES: cuStreamSynchronize failing reports DeviceTransferError (cuda_device.cc). The
+    // mock reported DeviceDriverError, which is the code DeviceWriter decides on afterwards - so a
+    // test could expect the right answer for the wrong reason.
+    return fail_stream_synchronize ? common::ResponseCode::DeviceTransferError
                                    : common::ResponseCode::Success;
 }
 
@@ -173,7 +176,8 @@ common::ResponseCode MockDevice::event_record(EventHandle event, StreamHandle st
 
     if (fail_event_record)
     {
-        return common::ResponseCode::DeviceDriverError;
+        // AS CUDA DOES: cuEventRecord failing reports DeviceTransferError (cuda_device.cc).
+        return common::ResponseCode::DeviceTransferError;
     }
 
     _ready[event] = false;

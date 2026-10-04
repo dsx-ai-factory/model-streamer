@@ -175,9 +175,13 @@ common::ResponseCode DeviceWriter::write(Channel channel,
                 // gone this way, so no one waits for it.
                 //
                 // The event is safe to return: the record failed, so it was never put on the stream.
-                pool->retire(buffer, code);
+                //
+                // DeviceDriverError, NOT the code event_record gave us. That is DeviceTransferError,
+                // which tells a caller the destination is free - and the copy is on the stream here
+                // and may still land in it.
+                pool->retire(buffer, common::ResponseCode::DeviceDriverError);
                 copy.events->release(copy.event);
-                return code;
+                return common::ResponseCode::DeviceDriverError;
             }
         }
 

@@ -579,9 +579,11 @@ TEST_F(DeviceWriterTest, A_Copy_Enqueued_Without_An_Event_Drains_The_Stream)
     std::vector<char> destination(Buffer, 0);
     const auto before = device->stream_syncs.load();
 
-    EXPECT_NE(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+    // The driver's own code, passed through: the stream drained, so the copy has ended and this
+    // memory is nobody's any more. Only the branch that CANNOT drain reports DeviceDriverError.
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
                            nullptr),
-              common::ResponseCode::Success);
+              common::ResponseCode::DeviceTransferError);
 
     EXPECT_GT(device->stream_syncs.load(), before)
         << "the staging buffer went back to the pool without draining the stream; a copy is still"
@@ -613,9 +615,14 @@ TEST_F(DeviceWriterTest, A_Buffer_Is_Retained_When_The_Stream_Cannot_Be_Drained)
     device->fail_stream_synchronize = true;
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_NE(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+
+    // DeviceDriverError SPECIFICALLY, not just any failure. The driver reports DeviceTransferError for
+    // the failed record, and that code promises the destination is unchanged - while the copy is on
+    // the stream here and may still land in it. This is the caller's only signal that its memory is
+    // still live.
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
                            nullptr),
-              common::ResponseCode::Success);
+              common::ResponseCode::DeviceDriverError);
 
     // RETIRED, not merely unavailable: the pool reports why rather than answering "none right now",
     // which a caller would read as try again later and wait for the rest of the load.
