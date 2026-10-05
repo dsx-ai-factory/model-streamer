@@ -6,67 +6,152 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-jobs:
-  lifecycle-install-tests:
-    name: Test, Build & Push
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    container:
-      # Published by build-devcontainer.yml, including the devcontainer Features.
-      image: ghcr.io/${{ github.repository }}/devcontainer:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # Keep io_uring available, matching .devcontainer/devcontainer.json.
-      options: --security-opt seccomp=unconfined
-    defaults:
-      run:
-        shell: bash
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+permissions:
+  contents: read
+  packages: read
 
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
+    steps:
     - name: Set PACKAGE_VERSION
+      id: version
       run: |
         set -euo pipefail
         if [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
           echo "::error::GITHUB_SHA must be a full 40-character commit SHA" >&2
           exit 1
         fi
-        printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+        printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
-    - name: Run tests
-      run: make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+  tests:
+    name: Integration & strategies
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/devcontainer:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --security-opt seccomp=unconfined
+    env:
+      PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
 
-    - name: Build packages
-      run: make build
+    - name: Download native packages
+      uses: actions/download-artifact@v7
+      with:
+        pattern: packages-*-x86_64
+        path: py
+        merge-multiple: true
+
+    - name: Run integration tests and filesystem strategies
+      run: make ci-test-integration BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+
+  build:
+    name: ${{ matrix.arch == 'x86_64' && 'Build & tests' || 'Build' }} (${{ matrix.component }}, ${{ matrix.arch }})
+    needs: setup
+    env:
+      PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
+      ARCH: ${{ matrix.arch }}
+      COMPONENT: ${{ matrix.component }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        component: [streamer, s3, gcs, azure]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/${{ github.repository }}/devcontainer:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --security-opt seccomp=unconfined
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Build C++ library
+      run: make ci-build-cpp
+
+    - name: Build Python wheel
+      run: make ci-build-python
+
+    - name: Run component C++ tests
+      if: matrix.arch == 'x86_64'
+      run: make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+
+    - name: Run Python unit and distributed tests
+      if: matrix.arch == 'x86_64' && matrix.component == 'streamer'
+      run: make ci-test-python
+
+    - name: Upload architecture packages
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-${{ matrix.component }}-${{ matrix.arch }}
+        # Keep package/dist paths inside each artifact for the existing install targets.
+        path: py/*/dist/*.whl
+        if-no-files-found: error
+
+  packages:
+    name: Assemble packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download both architectures
+      uses: actions/download-artifact@v7
+      with:
+        pattern: packages-*
+        path: py
+        merge-multiple: true
 
     - name: Upload streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: runai_model_streamer
         path: py/runai_model_streamer/dist/*
         if-no-files-found: error
 
     - name: Upload s3 streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: runai_model_streamer_s3
         path: py/runai_model_streamer_s3/dist/*
         if-no-files-found: error
 
     - name: Upload GCS streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: runai_model_streamer_gcs
         path: py/runai_model_streamer_gcs/dist/*
         if-no-files-found: error
 
     - name: Upload Azure streamer package to github action
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: runai_model_streamer_azure
         path: py/runai_model_streamer_azure/dist/*
         if-no-files-found: error
+
+  lifecycle-install-tests:
+    name: Test, Build & Push
+    if: always()
+    needs: [build, tests, packages]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - name: Require every job to succeed
+      env:
+        CI_BUILD: ${{ needs.build.result }}
+        CI_TESTS: ${{ needs.tests.result }}
+        CI_PACKAGES: ${{ needs.packages.result }}
+      run: make ci-check

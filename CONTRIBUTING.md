@@ -110,6 +110,41 @@ merging environment changes, wait for image publication before rerunning depende
 PR checks. Keep CI's container options in sync with the required devcontainer
 `runArgs`, including the seccomp setting used by the io_uring tests.
 
+### Parallel PR checks
+
+A setup job computes `PACKAGE_VERSION` once. Eight build jobs cover core
+(`streamer`), S3, GCS, and Azure, each for `x86_64` and `aarch64`. Each job exposes
+separate steps for `make ci-build-cpp` and `make ci-build-python`, using the same
+native build command and packaging target as the existing full build. Both
+commands take `COMPONENT` and `ARCH`; `make ci-build` runs them in order locally.
+Each x86_64 job then runs
+`make ci-test-cpp COMPONENT=... ARCH=x86_64` before uploading its wheel. The test
+command uses the same architecture and backend defines as the preceding build,
+allowing Bazel to reuse compatible compiled outputs on that runner.
+
+S3, GCS, and Azure run their respective C++ test trees; core runs everything
+outside those three trees, including common, POSIX I/O, and utility tests.
+The core x86_64 job also runs `make ci-test-python`, installing only its core wheel
+and Python test dependencies before running unit and distributed tests. Python
+feedback therefore does not wait for the cloud backend builds. ARM64 jobs build
+packages only.
+
+After all eight jobs succeed, the integration job downloads the x86_64 wheels
+and runs `make ci-test-integration`: integration suites followed by the filesystem
+strategy sweep. It uses `make ci-install` to install all four wheels via the
+existing Python package Makefiles. Python distributed tests load the installed
+real library; the mock unit tests retain their existing override. The integration
+job also reuses the installed core library for the Python filesystem strategy
+tests through `test-unit-real-installed`, avoiding another full native build.
+The same tests still run for all four strategies. The integration job still builds
+the two C++ strategy test targets and the Azure testing variant. `make test` remains
+the full sequential local entry point and builds from source as before.
+
+Artifact assembly combines both architectures into the four existing package
+artifacts. The `Test, Build & Push` required check succeeds only when all eight
+builds (including their C++ and Python tests), integration tests, and artifact
+assembly succeed. Peak concurrency is eight runners.
+
 ## Getting Help
 Need support or have a question? We're here to help:
 - Report issues or ask questions by [opening an issue on GitHub](https://github.com/dsx-ai-factory/model-streamer/issues).
