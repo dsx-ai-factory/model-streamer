@@ -166,6 +166,29 @@ only when all eight builds (including their C++ and Python tests) and integratio
 tests succeed. Changed devcontainers are built once before the matrix starts;
 peak matrix concurrency remains eight runners.
 
+## Release CI
+
+Creating a release runs `on-release.yaml` with the release tag as the package
+version. It builds the tag's devcontainer once through `devcontainer.yml` with
+`publish: false`, then shares that image with eight calls to `build.yml`. The
+four components build for both architectures in parallel, with the same native
+C++ tests and core Python tests as PR builds. ARM64 remains build-only; the
+separate PR integration and filesystem-strategy job is not part of release CI.
+
+After every component build and test succeeds, a separate publishing job
+downloads the eight wheels and eight C++ artifacts. It attaches wheels and
+component/architecture C++ tarballs to the existing GitHub release, then publishes
+all wheels to PyPI. Only this job receives repository write permission and the
+PyPI token; it does not check out or execute repository build scripts. Retrying
+publication replaces same-named GitHub assets and skips files already on PyPI.
+PyPI files already published are never replaced.
+
+Pushes to master continue to publish only the development image when its
+configuration or image workflows change. They do not publish Python packages.
+The release image is built from the release tag and is not pushed over GHCR's
+`latest` tag. The temporary image artifact retains the one-day lifetime described
+above; after expiry, rerun image preparation and the builds together.
+
 ## Getting Help
 Need support or have a question? We're here to help:
 - Report issues or ask questions by [opening an issue on GitHub](https://github.com/dsx-ai-factory/model-streamer/issues).
