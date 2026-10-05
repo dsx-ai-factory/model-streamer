@@ -4,7 +4,7 @@ import glob
 import shutil
 import fnmatch
 from pathlib import Path
-from typing import List, Optional, Iterator, Any
+from typing import List, Optional, Iterator, Any, Collection
 from urllib.parse import urlparse
 import logging
 import torch
@@ -194,22 +194,24 @@ class StreamerPatcher:
             return self.original_streamer.__exit__(exc_type, exc_value, traceback)
 
         def stream_file(self, path: str, s3_credentials: Optional[S3Credentials] = None,
-                          device: Optional[str] = "cpu", is_distributed: bool = False) -> None:
+                          device: Optional[str] = "cpu", is_distributed: bool = False,
+                          tensor_names: Optional[Collection[str]] = None) -> None:
             logger.debug(f"[RunAI Streamer][SHIM] stream_file is called with path: {path}")
             self.files_to_tensors_metadata = {}
             rewritten_path = self.patcher.convert_remote_path_to_local_path(path)
             res = self.original_streamer.stream_file(
-                rewritten_path, s3_credentials, device, is_distributed
+                rewritten_path, s3_credentials, device, is_distributed, tensor_names
             )
             self.files_to_tensors_metadata = self.original_streamer.files_to_tensors_metadata
             return res
 
         def stream_files(self, paths: List[str], s3_credentials: Optional[S3Credentials] = None,
-                           device: Optional[str] = "cpu", is_distributed: bool = False) -> None:
+                           device: Optional[str] = "cpu", is_distributed: bool = False,
+                           tensor_names: Optional[Collection[str]] = None) -> None:
             logger.debug(f"[RunAI Streamer][SHIM] stream_files is called")
             rewritten_paths = [self.patcher.convert_remote_path_to_local_path(p) for p in paths]
             return self.original_streamer.stream_files(
-                rewritten_paths, s3_credentials, device, is_distributed
+                rewritten_paths, s3_credentials, device, is_distributed, tensor_names
             )
 
         def get_tensors(self) -> Iterator[torch.tensor]:
