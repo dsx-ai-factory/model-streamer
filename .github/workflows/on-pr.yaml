@@ -20,7 +20,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
+      devcontainer_changed: ${{ steps.devcontainer_changes.outputs.any_modified }}
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Detect devcontainer changes
+      id: devcontainer_changes
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96
+      with:
+        files: .devcontainer/**
+        skip_initial_fetch: true
+        output_renamed_files_as_deleted_and_added: true
+
     - name: Set PACKAGE_VERSION
       id: version
       run: |
@@ -30,6 +45,14 @@ jobs:
           exit 1
         fi
         printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+  devcontainer:
+    name: Validate devcontainer
+    needs: setup
+    if: needs.setup.outputs.devcontainer_changed == 'true'
+    uses: ./.github/workflows/devcontainer.yml
+    with:
+      publish: false
 
   tests:
     name: Integration & strategies
@@ -145,10 +168,15 @@ jobs:
   lifecycle-install-tests:
     name: Test, Build & Push
     if: always()
-    needs: [build, tests, packages]
+    needs: [setup, devcontainer, build, tests, packages]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+    - name: Require changed devcontainer to build successfully
+      if: needs.setup.outputs.devcontainer_changed == 'true'
+      env:
+        CI_DEVCONTAINER: ${{ needs.devcontainer.result }}
+      run: test "$CI_DEVCONTAINER" = success
     - name: Require every job to succeed
       env:
         CI_BUILD: ${{ needs.build.result }}

@@ -1,0 +1,33 @@
+name: Build devcontainer
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: Push the built image to GHCR.
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build devcontainer image
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build devcontainer
+      uses: devcontainers/ci@v0.3
+      with:
+        imageName: ghcr.io/${{ github.repository }}/devcontainer
+        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
+        push: ${{ inputs.publish && 'always' || 'never' }}

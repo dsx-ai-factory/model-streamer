@@ -102,10 +102,14 @@ DevContainer** workflow publishes this image, including its devcontainer Feature
 when `.devcontainer/**` changes on `master` or when the workflow is run manually.
 The image must be published and readable by the repository before PR CI can start.
 
-PR jobs pull the published image; they do not rebuild `.devcontainer/Dockerfile`
-or apply `devcontainer.json`. When changing the development environment, rebuild
-the devcontainer locally and run `make test` there to validate the proposed image.
-A green PR check alone only validates against the currently published image. After
+When `.devcontainer/**` changes, a separate PR job validates that the devcontainer
+builds using the same reusable `devcontainer.yml` workflow as master. Its `publish`
+input is `false` for PRs and `true` for master publication. PRs do not push or
+upload the image, and the final required check includes this build's result.
+
+Build and test jobs still pull the published image. When changing the development
+environment, rebuild the devcontainer locally and run `make test` there to test
+the proposed image. PR tests exercise the currently published image. After
 merging environment changes, wait for image publication before rerunning dependent
 PR checks. Keep CI's container options in sync with the required devcontainer
 `runArgs`, including the seccomp setting used by the io_uring tests.
