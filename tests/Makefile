@@ -58,26 +58,30 @@ gcs:
 	FAKE_GCS_SERVER_PID=$$!; \
 	echo "Fake GCS Server PID is $$FAKE_GCS_SERVER_PID"; \
 	GOOGLE_CLOUD_PROJECT=fake-project GCS_BUCKET=${FAKE_GCS_SERVER_BUCKET} API_ENDPOINT_OVERRIDE=http://localhost:${FAKE_GCS_SERVER_API_PORT} CLOUD_STORAGE_EMULATOR_ENDPOINT=http://localhost:${FAKE_GCS_SERVER_API_PORT} RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS=True pytest gcs/; \
+	test_status=$$?; \
 	echo "Stopping Fake GCS Server..."; \
 	kill $$FAKE_GCS_SERVER_PID; \
 	wait $$FAKE_GCS_SERVER_PID 2>/dev/null || true; \
-	rm -rf ${FAKE_GCS_SERVER_ROOT}
+	rm -rf ${FAKE_GCS_SERVER_ROOT}; \
+	exit $$test_status
 
 azure:
 # Developer note: To enable C++ debug logging, add these env vars to the pytest command:
 #   RUNAI_STREAMER_LOG_LEVEL=DEBUG RUNAI_STREAMER_LOG_FILE=/tmp/azure_cpp.log
 # Build Azure library with AZURITE_TESTING flag enabled
 	@echo "Building Azure library with Azurite testing support..."; \
-	make -C ../cpp build_azure_test; \
+	make -C ../cpp build_azure_test || exit $$?; \
 	echo "Starting Azurite server on port ${AZURITE_API_PORT}"; \
 	azurite --silent --skipApiVersionCheck --location ${AZURITE_SERVER_WORKSPACE} --blobPort ${AZURITE_API_PORT} & \
 	AZURITE_PID=$$!; \
 	echo "Azurite PID is $$AZURITE_PID"; \
 	LD_LIBRARY_PATH="../cpp/bazel-bin/azure:$${LD_LIBRARY_PATH}" AZURE_STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=${AZURITE_ACCOUNT_NAME};AccountKey=${AZURITE_ACCOUNT_KEY};BlobEndpoint=http://127.0.0.1:${AZURITE_API_PORT}/${AZURITE_ACCOUNT_NAME};" AZURE_CONTAINER=${AZURITE_CONTAINER} pytest -v azure/ 2>&1; \
+	test_status=$$?; \
 	echo "Stopping Azurite..."; \
 	kill $$AZURITE_PID; \
 	wait $$AZURITE_PID 2>/dev/null || true; \
-	rm -rf ${AZURITE_SERVER_WORKSPACE}
+	rm -rf ${AZURITE_SERVER_WORKSPACE}; \
+	exit $$test_status
 
 # Which filesystem reader to use. Unset means "leave it to the library", which is what a plain
 # `make all` does; the root Makefile's test_strategies target passes each strategy in turn.
@@ -92,7 +96,7 @@ fuzzing:
 	for i in $(shell seq 1 ${RUN_TIMES}); \
 	do \
 		echo "Running test iteration $$i"; \
-		${FS_ENV} pytest fuzzing/; \
+		${FS_ENV} pytest fuzzing/ || exit $$?; \
 	done
 
 all: fuzzing s3 gcs azure
