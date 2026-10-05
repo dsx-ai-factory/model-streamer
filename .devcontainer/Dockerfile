@@ -9,8 +9,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # `make build` runs `setup.py bdist_wheel` directly, with no PEP 517 isolation, so it never
-# reads py/*/pyproject.toml's setuptools pin. Keep this in sync with that pin by hand.
-RUN python3 -m pip install --upgrade "setuptools>=70.1" wheel
+# reads py/*/pyproject.toml's setuptools pin. Keep this in sync with that pin by hand. Exact
+# pin, not a floor: an unpinned `--upgrade` would let a reproducible build drift on image
+# rebuild, same as every other dependency pinned in this file.
+RUN python3 -m pip install "setuptools==84.0.0" "wheel==0.48.0"
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gcc-x86-64-linux-gnu g++-x86-64-linux-gnu binutils-x86-64-linux-gnu \
