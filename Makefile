@@ -97,4 +97,3 @@ ci-test-integration: ci-install
 ci-check:
 	test "$(CI_BUILD)" = success
 	test "$(CI_TESTS)" = success
-	test "$(CI_PACKAGES)" = success

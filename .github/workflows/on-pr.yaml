@@ -47,28 +47,87 @@ jobs:
         printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
   devcontainer:
-    name: Validate devcontainer
+    name: Prepare devcontainer
     needs: setup
     if: needs.setup.outputs.devcontainer_changed == 'true'
     uses: ./.github/workflows/devcontainer.yml
     with:
       publish: false
 
+  build_x86:
+    name: Build & tests (${{ matrix.component }}, x86_64)
+    needs: [setup, devcontainer]
+    # The optional image job is skipped when the published image can be reused.
+    if: >-
+      ${{ !cancelled() && needs.setup.result == 'success' &&
+          (needs.setup.outputs.devcontainer_changed != 'true' || needs.devcontainer.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, s3, gcs, azure]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: x86_64
+      component: ${{ matrix.component }}
+      package_version: ${{ needs.setup.outputs.package_version }}
+      devcontainer_image: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
+      devcontainer_artifact: ${{ needs.devcontainer.outputs.artifact }}
+
+  build_arm:
+    name: Build (${{ matrix.component }}, aarch64)
+    needs: [setup, devcontainer]
+    # The optional image job is skipped when the published image can be reused.
+    if: >-
+      ${{ !cancelled() && needs.setup.result == 'success' &&
+          (needs.setup.outputs.devcontainer_changed != 'true' || needs.devcontainer.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, s3, gcs, azure]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: aarch64
+      component: ${{ matrix.component }}
+      package_version: ${{ needs.setup.outputs.package_version }}
+      devcontainer_image: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
+      devcontainer_artifact: ${{ needs.devcontainer.outputs.artifact }}
+
   tests:
     name: Integration & strategies
-    needs: [setup, build]
+    needs: [setup, devcontainer, build_x86]
+    if: ${{ !cancelled() && needs.build_x86.result == 'success' }}
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/${{ github.repository }}/devcontainer:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --security-opt seccomp=unconfined
     env:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
+      CI_IMAGE: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
+
+    - name: Log in to GitHub Container Registry
+      if: needs.setup.outputs.devcontainer_changed != 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Download PR devcontainer
+      if: needs.setup.outputs.devcontainer_changed == 'true'
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ needs.devcontainer.outputs.artifact }}
+        path: ${{ runner.temp }}/devcontainer
+
+    - name: Load PR devcontainer
+      if: needs.setup.outputs.devcontainer_changed == 'true'
+      run: docker load --input "$RUNNER_TEMP/devcontainer/devcontainer.tar"
+
+    - name: Configure selected devcontainer
+      run: |
+        jq --null-input --arg image "$CI_IMAGE" \
+          '{image: $image, runArgs: ["--security-opt", "seccomp=unconfined"]}' \
+          > "$RUNNER_TEMP/devcontainer.json"
 
     - name: Download native packages
       uses: actions/download-artifact@v7
@@ -78,97 +137,21 @@ jobs:
         merge-multiple: true
 
     - name: Run integration tests and filesystem strategies
-      run: make ci-test-integration BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
-
-  build:
-    name: ${{ matrix.arch == 'x86_64' && 'Build & tests' || 'Build' }} (${{ matrix.component }}, ${{ matrix.arch }})
-    needs: setup
-    env:
-      PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
-      ARCH: ${{ matrix.arch }}
-      COMPONENT: ${{ matrix.component }}
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x86_64, aarch64]
-        component: [streamer, s3, gcs, azure]
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/${{ github.repository }}/devcontainer:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: --security-opt seccomp=unconfined
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
-
-    - name: Build C++ library
-      run: make ci-build-cpp
-
-    - name: Build Python wheel
-      run: make ci-build-python
-
-    - name: Run component C++ tests
-      if: matrix.arch == 'x86_64'
-      run: make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
-
-    - name: Run Python unit and distributed tests
-      if: matrix.arch == 'x86_64' && matrix.component == 'streamer'
-      run: make ci-test-python
-
-    - name: Upload architecture packages
-      uses: actions/upload-artifact@v6
+      uses: devcontainers/ci@v0.3
+      env:
+        # The daemon-backed builder can see images imported with docker load.
+        BUILDX_BUILDER: default
       with:
-        name: packages-${{ matrix.component }}-${{ matrix.arch }}
-        # Keep package/dist paths inside each artifact for the existing install targets.
-        path: py/*/dist/*.whl
-        if-no-files-found: error
-
-  packages:
-    name: Assemble packages
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-    - name: Download both architectures
-      uses: actions/download-artifact@v7
-      with:
-        pattern: packages-*
-        path: py
-        merge-multiple: true
-
-    - name: Upload streamer package to github action
-      uses: actions/upload-artifact@v6
-      with:
-        name: runai_model_streamer
-        path: py/runai_model_streamer/dist/*
-        if-no-files-found: error
-
-    - name: Upload s3 streamer package to github action
-      uses: actions/upload-artifact@v6
-      with:
-        name: runai_model_streamer_s3
-        path: py/runai_model_streamer_s3/dist/*
-        if-no-files-found: error
-
-    - name: Upload GCS streamer package to github action
-      uses: actions/upload-artifact@v6
-      with:
-        name: runai_model_streamer_gcs
-        path: py/runai_model_streamer_gcs/dist/*
-        if-no-files-found: error
-
-    - name: Upload Azure streamer package to github action
-      uses: actions/upload-artifact@v6
-      with:
-        name: runai_model_streamer_azure
-        path: py/runai_model_streamer_azure/dist/*
-        if-no-files-found: error
+        configFile: ${{ runner.temp }}/devcontainer.json
+        push: never
+        env: |
+          PACKAGE_VERSION
+        runCmd: make ci-test-integration BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
   lifecycle-install-tests:
     name: Test, Build & Push
     if: always()
-    needs: [setup, devcontainer, build, tests, packages]
+    needs: [setup, devcontainer, build_x86, build_arm, tests]
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
@@ -179,7 +162,6 @@ jobs:
       run: test "$CI_DEVCONTAINER" = success
     - name: Require every job to succeed
       env:
-        CI_BUILD: ${{ needs.build.result }}
+        CI_BUILD: ${{ needs.build_x86.result == 'success' && needs.build_arm.result == 'success' && 'success' || 'failure' }}
         CI_TESTS: ${{ needs.tests.result }}
-        CI_PACKAGES: ${{ needs.packages.result }}
       run: make ci-check
