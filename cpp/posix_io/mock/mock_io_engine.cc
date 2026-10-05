@@ -57,8 +57,11 @@ size_t MockIoEngine::misaligned_direct_stages() const
     return _misaligned_direct_stages;
 }
 
-common::ResponseCode MockIoEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer)
+common::ResponseCode MockIoEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                                         char * buffer, Registration registration)
 {
+    _last_registration = registration;
+
     if (_stage_result != common::ResponseCode::Success)
     {
         // Nothing is recorded: no completion will arrive, and the caller must resolve it itself.
@@ -190,6 +193,11 @@ const MockIoEngine::Request & MockIoEngine::request(RequestId id) const
     const auto it = _live.find(id);
     ASSERT(it != _live.end()) << "id " << id << " is not live";
     return it->second;
+}
+
+Registration MockIoEngine::last_registration() const
+{
+    return _last_registration;
 }
 
 std::vector<RequestId> MockIoEngine::staged() const

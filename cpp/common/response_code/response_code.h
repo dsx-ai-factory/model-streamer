@@ -63,6 +63,32 @@ enum class ResponseCode : int
     // The submission named a device this build cannot serve.
     UnsupportedDeviceType    = RUNAI_FILE_STREAMER_RESPONSE_UNSUPPORTED_DEVICE_TYPE,
 
+    // Device failures, one per remedy. NOT UnknownError: that code tells a caller to abort and
+    // distrust every response it already has, and none of these mean that.
+    //
+    // DeviceUnavailable is an error, not a signal to read into host memory instead. A caller that
+    // asked for a device destination gets no bytes if there is no device; choosing a host
+    // destination belongs to the layer above.
+    DeviceUnavailable        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_UNAVAILABLE,
+    InvalidDevice            = RUNAI_FILE_STREAMER_RESPONSE_INVALID_DEVICE,
+    DeviceOutOfMemory        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_OUT_OF_MEMORY,
+
+    // The copy failed, so these ranges must not be trusted. The driver's own code and message are in
+    // the log. SAFE to free or reuse the destination: whatever was enqueued has ended by the time this
+    // is reported - which is what separates it from DeviceDriverError below.
+    DeviceTransferError      = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_TRANSFER_ERROR,
+
+    // The driver would not answer. Reported for anything from a failed context bind to a stream that
+    // could not be drained, so it is a broad code.
+    //
+    // TREAT THE DESTINATION AS STILL LIVE - do not free or reuse it. That is true of one producer: a
+    // copy was enqueued and the stream could not be drained, so nothing can say when it ends. It is
+    // over-cautious for the others, where the destination was never touched, but a caller cannot tell
+    // them apart and the driver is already broken either way.
+    //
+    // A dedicated code would carry this better than widening this one. See the device notes.
+    DeviceDriverError        = RUNAI_FILE_STREAMER_RESPONSE_DEVICE_DRIVER_ERROR,
+
     __Max,
 };
 

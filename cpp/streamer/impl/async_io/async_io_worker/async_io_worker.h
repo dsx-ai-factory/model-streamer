@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -19,8 +20,10 @@
 #include "streamer/impl/async_io/async_io_stats/async_io_stats.h"
 #include "streamer/impl/async_io/inflight_chunks/inflight_chunks.h"
 #include "streamer/impl/batch/batch.h"
+#include "streamer/impl/device_io/device_writer_client/device_writer_client.h"
 #include "streamer/impl/workload/workload.h"
 #include "utils/capacity_worker/capacity_worker.h"
+#include "utils/deque/deque.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -68,11 +71,16 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // streamer uses it to route this mount to the synchronous reader from then on - the files are
     // still readable, it is only the ring that is gone. Empty in tests that do not care.
     // `node_wide_depth` is RUNAI_STREAMER_FS_QUEUE_DEPTH resolved for this mount's file system type.
+    // `writer` is the streamer's copy path onto a device. Shared by every worker, and untouched by a
+    // workload whose destinations are host memory - so it is taken unconditionally, not conditionally.
+    // Null in tests that read to the host only.
     explicit AsyncIoWorker(posix_io::Strategy strategy,
                            size_t block = 0,
                            unsigned node_wide_depth = Config::default_fs_async_queue_depth,
                            EngineFactory factory = posix_io::make_io_engine,
-                           std::function<void()> on_engine_dead = {});
+                           std::function<void()> on_engine_dead = {},
+                           std::shared_ptr<DeviceWriter> writer = nullptr,
+                           bool register_buffers = false);
     ~AsyncIoWorker() override;
 
     // Bytes copied out of a scratch buffer, over this worker's life.
@@ -101,6 +109,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // from slightly different moments. That is fine for what they are for - a ratio and a high-water
     // mark - and a lock would put contention on the read path for no gain.
     AsyncIoCounters counters() const;
+
+    // Pinned buffers this worker's pool has registered. Zero until a device workload arrives, and
+    // never more than the window plus the copy depth. Diagnostics.
+    unsigned staging_buffers() const;
+
+    // Reads that landed no buffer and are waiting for one. Diagnostics.
+    unsigned waiting_for_a_buffer() const;
 
  protected:
     // Builds the engine and returns the window size, on the FIRST workload.
@@ -143,6 +158,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // produce a completion, so omitting them leaves tasks unfinalized.
     void drain_batch(std::atomic<bool> & stopped) override;
 
+    // A copy still in flight is work this worker owes, even with an empty window and an idle engine.
+    // Without this the pool would park on its queue and the workload would never finalize.
+    bool has_deferred_work() const override;
+
+    // Buffers beyond the window, by default. RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH overrides it.
+    static constexpr unsigned DefaultCopyDepth = 2;
+
  private:
     // Per workload, kept until its last task is accounted.
     // A batch's descriptor, opened by the first chunk of it that actually issues.
@@ -174,9 +196,6 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         // Chunks, not tasks. Every chunk completes exactly once, and every non-empty task is in
         // exactly one chunk - so all chunks done already means all tasks answered, and the zero-sized
         // ones (answered at enqueue, and able to sit inside a span) never enter the arithmetic.
-        //
-        // ObjectStorageWorker counts tasks because there a task spans several chunks. After the task
-        // cut ours is the inverse, so the counter inverts with it.
         size_t remaining_chunks = 0;
         std::map<unsigned, common::ResponseCode> error_by_file_index;   // first error per file
     };
@@ -187,13 +206,57 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // short read. Resolves it here if it cannot be staged, since no completion would then arrive.
     void stage_pending(posix_io::RequestId id);
 
+    // A copy that has landed, handed back from the StreamWaiter's thread.
+    struct CopyDone
+    {
+        posix_io::RequestId id = 0;
+        common::ResponseCode ret = common::ResponseCode::Success;
+    };
+
+    // What staging a device chunk did. NoBuffer is not a failure: the pool holds the window plus a
+    // little, so it runs dry exactly when the link has fallen behind storage. The read then waits
+    // rather than failing.
+    enum class Staged
+    {
+        Yes,
+        NoBuffer,
+        Failed,
+    };
+
+    // Give this chunk somewhere to land when its destination is a device. `error` is set only on
+    // Failed.
+    Staged stage_into_device_buffer(posix_io::RequestId id, const Batch & batch, common::ResponseCode & error);
+
+    // Issue the copy for a landed chunk. Its tasks are answered from complete_copy() instead, once the
+    // bytes are actually on the device. False when the copy could not be enqueued at all, and the
+    // caller then accounts the chunk itself.
+    bool issue_copy(posix_io::RequestId id, const InflightChunk & entry, const Batch & batch);
+
+    // Give every parked read another chance at a buffer. One pass: a read the pool still cannot serve
+    // goes back to the end of the queue.
+    void resume_waiting();
+
+    // Take whatever copies have landed and account their chunks. `wait` blocks for one, which is safe
+    // only while a copy is outstanding - one is then guaranteed to arrive.
+    bool drain_copies(bool wait);
+
+    // Account a chunk whose copy has retired: answer its tasks, free its window slot.
+    void complete_copy(posix_io::RequestId id, common::ResponseCode ret);
+
     // Push each batch's aggregate result: the whole-workload code if non-Success, else that file's
     // recorded error.
     void report_workload(Inflight & wl, common::ResponseCode code);
 
-    // Account every task a landed chunk covered - one read carried them all, so they share its
-    // outcome - and finalize the workload once its last task lands.
+    // A landed chunk. For a host destination this accounts it; for a device one it issues the copy
+    // and accounts nothing yet.
     void complete_chunk(posix_io::RequestId id, common::ResponseCode ret);
+
+    // Account every task a chunk covered - one read carried them all, so they share its outcome -
+    // and finalize the workload once its last chunk is accounted.
+    //
+    // `free_slot` is false for a chunk whose copy has just retired: its window slot went back when the
+    // READ landed, which is what keeps copies from narrowing the read window.
+    void account_chunk(posix_io::RequestId id, common::ResponseCode ret, bool free_slot = true);
 
     // The batch's descriptor, opening it on first use. Returns -1 and sets out_error if it cannot be
     // opened - that is this file's failure, not the storage's.
@@ -255,6 +318,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         size_t wanted = 0;          // how many of them this pass yields
     };
 
+    // The staging buffer this pass reads into, described for the engine, or nothing.
+    //
+    // NOTHING for a bounced direct pass: that reads into a scratch buffer, which is not the staging
+    // pool's memory and is not registered. Offering the staging slab for it would name a region the
+    // read does not land in, and the engine would decline anyway.
+    posix_io::Registration registration_for(const StagingBuffer & staging, const DirectPass & pass) const;
+
     bool plan_direct_pass(const Chunk & pending, size_t block, DirectPass & out);
 
     // Copy a bounced pass out of its scratch buffer, give the buffer back, and return how many WANTED
@@ -313,6 +383,10 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
 
     const unsigned _node_wide_depth;
 
+    // Whether this mount's reads may use registered buffers. Decided by the router from the file
+    // system type, and handed to the engine, which also has the host's answer.
+    const bool _register_buffers;
+
     // Set once a measurement was refused for being larger than the scratch buffers. It only silences
     // the warning: _block_measured stays false, so a later submission reporting a block this engine
     // CAN serve is still adopted. Without it the same line would be logged on every submission for
@@ -348,6 +422,32 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // Block-sized buffers for the partial blocks at the edges of a region. Empty on a buffered
     // engine, which never bounces.
     std::unique_ptr<posix_io::ScratchPool> _scratch;
+
+    // The copy path onto a device. The CLIENT is this worker's own - its pool is sized by this
+    // worker's window - and is built in capacity() beside the engine, where that window is decided.
+    const std::shared_ptr<DeviceWriter> _writer;
+    std::unique_ptr<DeviceWriterClient> _device_out;
+
+    // Copies issued and not yet accounted. Written only by this worker's thread: the waiter thread
+    // pushes to _copies and touches nothing else.
+    size_t _copies_issued = 0;
+
+    // Buffers the pool may hold beyond the read window, so a read never waits for a copy. Small: the
+    // copy stage holds well under one buffer at the rates we have measured, and the pool never
+    // shrinks, so headroom bought here is pinned for the life of the worker.
+    unsigned _copy_depth = DefaultCopyDepth;
+
+    // Reads that landed no buffer and have not been issued. They hold their window slot, so the base
+    // admits no more work for them, and resume_waiting() retries them on every turn.
+    //
+    // EVERY TURN rather than on a copy completion: a buffer also comes back from a copy that could
+    // not be issued and from a failed read, and neither of those reports anything. Cleared by
+    // abort_all(), which drops the records these name.
+    std::deque<posix_io::RequestId> _waiting;
+
+    // Filled by the StreamWaiter's thread, drained by this one. A completion cannot be accounted where
+    // it is reported: answering a task and freeing a window slot are this thread's business.
+    utils::Deque<CopyDone> _copies;
 
     std::optional<AsyncIoSettings> _settings;          // resolved with the engine, on the first workload
     std::unique_ptr<posix_io::IoEngine> _engine;
