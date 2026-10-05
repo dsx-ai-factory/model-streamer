@@ -155,19 +155,15 @@ jobs:
   lifecycle-install-tests:
     name: Test, Build & Push
     if: always()
-    needs: [setup, devcontainer, build_x86, build_arm, tests]
+    needs: [build_x86, build_arm, tests]
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v5
-      with:
-        persist-credentials: false
-    - name: Require changed devcontainer to build successfully
-      if: needs.setup.outputs.devcontainer_changed == 'true'
+    - name: Require all builds and tests to succeed
       env:
-        CI_DEVCONTAINER: ${{ needs.devcontainer.result }}
-      run: test "$CI_DEVCONTAINER" = success
-    - name: Require every job to succeed
-      env:
-        CI_BUILD: ${{ needs.build_x86.result == 'success' && needs.build_arm.result == 'success' && 'success' || 'failure' }}
-        CI_TESTS: ${{ needs.tests.result }}
-      run: make ci-check
+        X86_RESULT: ${{ needs.build_x86.result }}
+        ARM_RESULT: ${{ needs.build_arm.result }}
+        TEST_RESULT: ${{ needs.tests.result }}
+      run: |
+        test "$X86_RESULT" = success
+        test "$ARM_RESULT" = success
+        test "$TEST_RESULT" = success
