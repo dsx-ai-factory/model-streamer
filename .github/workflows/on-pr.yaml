@@ -105,6 +105,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
+      with:
+        persist-credentials: false
 
     - name: Log in to GitHub Container Registry
       if: needs.setup.outputs.devcontainer_changed != 'true'
@@ -157,6 +159,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v5
+      with:
+        persist-credentials: false
     - name: Require changed devcontainer to build successfully
       if: needs.setup.outputs.devcontainer_changed == 'true'
       env:
