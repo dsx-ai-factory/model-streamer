@@ -94,9 +94,27 @@ jobs:
       if: inputs.arch == 'x86_64' && inputs.component == 'streamer'
       run: docker exec ci-build make ci-test-python
 
+    - name: Collect C++ library
+      run: |
+        artifact="$RUNNER_TEMP/cpp-artifact"
+        mkdir -p "$artifact"/{lib,include}
+        # Resolve Bazel's symlinks while the container and its output tree exist.
+        docker cp --follow-link \
+          "ci-build:/workspace/cpp/bazel-bin/$COMPONENT/libstreamer${COMPONENT#streamer}.so" \
+          "$artifact/lib/"
+        cp -R cpp/streamer/api/streamer "$artifact/include/"
+        cp LICENSE "$artifact/"
+
     - name: Stop build container
       if: ${{ always() && steps.container.outcome == 'success' }}
       run: docker stop ci-build
+
+    - name: Upload C++ library
+      uses: actions/upload-artifact@v6
+      with:
+        name: cpp-${{ inputs.component }}-${{ inputs.arch }}
+        path: ${{ runner.temp }}/cpp-artifact/
+        if-no-files-found: error
 
     - name: Upload architecture packages
       uses: actions/upload-artifact@v6
