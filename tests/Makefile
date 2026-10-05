@@ -132,17 +132,20 @@ all: fuzzing s3 gcs azure
 #
 # Needs a GPU, which is why this is a separate target rather than part of `make all`.
 #
-# CHECKED BEFORE ANYTHING STARTS. The test SKIPS when there is no usable device, and a skipped gtest
-# exits 0 - so without this a machine with no GPU would start an emulator, upload a fixture, run
-# nothing and report success. A target that exists to exercise the device path must not pass when the
-# device path never ran.
+# A PRE-FLIGHT, not the real guard. It fails early so a machine with no GPU does not start an
+# emulator and upload a 32 MB fixture before finding out.
+#
+# It cannot be the guard, because nvidia-smi is a separate NVML binary: it ignores
+# CUDA_VISIBLE_DEVICES, and it says nothing about whether the TEST PROCESS can load libcuda or open a
+# device. Each of those still skips, and a skipped gtest exits 0. What makes the target honest is
+# RUNAI_TEST_REQUIRE_DEVICE=1 in the recipe below, which turns those skips into failures.
 require_device:
 	@test -x "$(DEVICE_TEST)" || { \
 		echo "$(DEVICE_TEST) is missing - build it first: (cd ../cpp && bazel build //streamer/impl/device_io/tests:object_device_test)"; \
 		exit 1; }
 	@nvidia-smi -L 2>/dev/null | grep -q GPU || { \
-		echo "no usable GPU here. This target reads object storage into DEVICE memory; without one the"; \
-		echo "test skips and gtest still exits 0, so this would look like a pass."; \
+		echo "no GPU listed here. This target reads object storage into DEVICE memory, so there is"; \
+		echo "nothing for it to do."; \
 		exit 1; }
 
 $(DEVICE_FIXTURE):
@@ -183,4 +186,5 @@ s3_device: require_device $(DEVICE_FIXTURE)
 	RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
 	AWS_ENDPOINT_URL=http://127.0.0.2:${S3_TEST_API_PORT} AWS_ACCESS_KEY_ID=${S3_TEST_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${S3_TEST_SECRET_KEY} \
 	RUNAI_TEST_OBJECT_URI=s3://${S3_TEST_BUCKET}/$(DEVICE_OBJECT) RUNAI_TEST_OBJECT_FILE=$(DEVICE_FIXTURE) \
+	RUNAI_TEST_REQUIRE_DEVICE=1 \
 	$(DEVICE_TEST)

@@ -28,10 +28,43 @@ namespace runai::llm::streamer
 // the URI and the credentials in the environment - which is exactly what the Makefile targets set up.
 //
 // SKIPS unless both halves are present: a usable CUDA device, and an object to read. That keeps it out
-// of the way of `bazel test //...`, which runs with neither.
+// of the way of `bazel test //...`, which runs with neither - unless RUNAI_TEST_REQUIRE_DEVICE says
+// the device half must be there, which turns that skip into a failure.
 //
 //   RUNAI_TEST_OBJECT_URI    s3://bucket/key, gs://bucket/key or azure://container/blob
 //   RUNAI_TEST_OBJECT_FILE   the same bytes on disk, which is what the result is compared against
+//   RUNAI_TEST_REQUIRE_DEVICE=1  turns a skipped device into a failure - see below
+
+namespace
+{
+
+// A skipped gtest exits 0, so on a host that is supposed to have a device a silent skip is
+// indistinguishable from a pass. This says "a device works here". tests/Makefile sets it for the
+// s3_device target, which exists to exercise the device path and must not pass without it.
+//
+// NOT ANSWERED BY nvidia-smi, which that target also checks: it is a separate NVML binary, so it
+// ignores CUDA_VISIBLE_DEVICES and says nothing about whether THIS process can load the driver or
+// open a device.
+bool require_device()
+{
+    const char * const value = ::getenv("RUNAI_TEST_REQUIRE_DEVICE");
+    return value != nullptr && std::string(value) == "1";
+}
+
+// A MACRO rather than a function: GTEST_SKIP() returns from whatever function contains it, so from a
+// helper it would mark the test skipped and let SetUp() carry on into a null backend.
+#define SKIP_OR_FAIL(reason)                                                                   \
+    do {                                                                                       \
+        if (require_device())                                                                  \
+        {                                                                                      \
+            FAIL() << (reason) << ", but RUNAI_TEST_REQUIRE_DEVICE=1 says this host has one";  \
+        }                                                                                      \
+        GTEST_SKIP() << (reason)                                                               \
+                     << "; set RUNAI_TEST_REQUIRE_DEVICE=1 where a device should be found";    \
+    } while (0)
+
+} // namespace
+
 class ObjectStorageDevice : public ::testing::Test
 {
  protected:
@@ -40,6 +73,9 @@ class ObjectStorageDevice : public ::testing::Test
         const char * const uri = ::getenv("RUNAI_TEST_OBJECT_URI");
         const char * const file = ::getenv("RUNAI_TEST_OBJECT_FILE");
 
+        // FIRST, and an unconditional skip. It is what keeps a stray RUNAI_TEST_REQUIRE_DEVICE=1 in
+        // the environment from failing `bazel test //...` on a machine with no GPU: nothing asked for
+        // an object here, so there is nothing to require a device for.
         if (uri == nullptr || file == nullptr)
         {
             GTEST_SKIP() << "RUNAI_TEST_OBJECT_URI and RUNAI_TEST_OBJECT_FILE are unset, so there is"
@@ -52,7 +88,10 @@ class ObjectStorageDevice : public ::testing::Test
 
         if (device::cuda::CudaLib::get() == nullptr)
         {
-            GTEST_SKIP() << "no CUDA driver on this host";
+            // Covers three causes - the library did not load, it was missing symbols, or cuInit
+            // failed - because CudaLib::get() returns null for all of them. cuInit is the one a GPU
+            // host still reaches: it answers NO_DEVICE when CUDA_VISIBLE_DEVICES hides everything.
+            SKIP_OR_FAIL("no usable CUDA driver in this process");
         }
 
         _backend = device::cuda::backend();
@@ -61,13 +100,13 @@ class ObjectStorageDevice : public ::testing::Test
         unsigned count = 0;
         if (_backend->device_count(count) != common::ResponseCode::Success || count == 0)
         {
-            GTEST_SKIP() << "a CUDA driver, but no device this process can use";
+            SKIP_OR_FAIL("a CUDA driver, but no device this process can use");
         }
 
         if (_backend->open_device(0, _device) != common::ResponseCode::Success ||
             _device->bind_thread() != common::ResponseCode::Success)
         {
-            GTEST_SKIP() << "device 0 could not be opened here";
+            SKIP_OR_FAIL("device 0 could not be opened here");
         }
     }
 

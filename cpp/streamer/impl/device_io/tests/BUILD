@@ -36,7 +36,8 @@ runai_cc_test(
 )
 
 # Real object storage to a real device, through the public C API. Skips unless BOTH a usable GPU and an
-# object to read are present, so it is inert under `bazel test //...`.
+# object to read are present, so it is inert under `bazel test //...`. tests/Makefile runs it with
+# RUNAI_TEST_REQUIRE_DEVICE=1, which turns a missing device into a failure there and only there.
 #
 # The REAL plugin, not the mock: this is the only test that can say the right bytes arrived, and it can
 # only say it against a server that actually stores them. tests/Makefile starts one.
