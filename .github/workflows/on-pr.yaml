@@ -32,7 +32,9 @@ jobs:
       id: devcontainer_changes
       uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96
       with:
-        files: .devcontainer/**
+        files: |
+          .devcontainer/**
+          .github/workflows/devcontainer.yml
         skip_initial_fetch: true
         output_renamed_files_as_deleted_and_added: true
 
