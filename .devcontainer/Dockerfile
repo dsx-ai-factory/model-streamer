@@ -2,6 +2,8 @@ FROM nvidia/cuda:12.8.0-devel-ubuntu20.04@sha256:cd0f8e1c41628ff2513e9f7c42dd9bd
 
 FROM ubuntu:20.04
 
+LABEL org.opencontainers.image.description="Development and CI environment for Model Streamer"
+
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 \
     python3-pip \
