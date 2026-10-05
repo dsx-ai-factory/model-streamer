@@ -14,12 +14,12 @@
 namespace runai::llm::streamer::impl
 {
 
-BackendPools::BackendPools(Handler filesystem_handler,
+BackendPools::BackendPools(WorkerFactory filesystem_factory,
                            AsyncWorkerFactory filesystem_async_factory,
                            WorkerFactory object_storage_factory,
                            unsigned filesystem_size,
                            unsigned object_storage_size) :
-    _filesystem_handler(std::move(filesystem_handler)),
+    _filesystem_factory(std::move(filesystem_factory)),
     _filesystem_async_factory(std::move(filesystem_async_factory)),
     _object_storage_factory(std::move(object_storage_factory)),
     _filesystem_size(filesystem_size),
@@ -49,12 +49,12 @@ void BackendPools::push(Pool pool, Workload && workload)
     // filesystem has no plugin to wait for, so create its pool lazily on first use
     std::call_once(_filesystem_once, [this]()
     {
-        _filesystem_pool = std::make_unique<utils::ThreadPool<Workload>>(_filesystem_handler, _filesystem_size);
+        _filesystem_pool = std::make_unique<utils::ThreadPool<Workload>>(_filesystem_factory, _filesystem_size);
     });
     _filesystem_pool->push(std::move(workload));
 }
 
-void BackendPools::push_async(dev_t device, size_t block, unsigned depth, Workload && workload)
+void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool register_buffers, Workload && workload)
 {
     utils::ThreadPool<Workload> * pool = nullptr;
 
@@ -70,10 +70,11 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, Worklo
         }
         else
         {
-            // Routed by the depth the mount resolved, so a mount never lands on an engine built for
-            // another depth. The cap applies within the depth, which is why discovery order cannot
-            // cost a mount its configured value.
-            auto & engines = _async_pools[depth];
+            // Routed by what is BOUND into an engine and cannot change afterwards: the depth the
+            // mount resolved, and whether it registers buffers. So a mount never lands on an engine
+            // built for another answer, and the cap applies within each - which is why discovery
+            // order cannot cost a mount either of its configured values.
+            auto & engines = _async_pools[{ depth, register_buffers }];
 
             if (engines.size() < _max_async_engines)
             {
@@ -83,7 +84,8 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, Worklo
                 // no agreement at all. (The mutex above guards the map, not a decision.)
                 // The block is bound HERE and never changes for this engine.
                 auto created = std::make_unique<utils::ThreadPool<Workload>>(
-                    [factory = _filesystem_async_factory, device, block, depth]() { return factory(device, block, depth); }, 1);
+                    [factory = _filesystem_async_factory, device, block, depth, register_buffers]()
+                    { return factory(device, block, depth, register_buffers); }, 1);
                 pool = created.get();
                 engines.push_back(std::move(created));
 
@@ -221,9 +223,9 @@ unsigned BackendPools::pools_created() const
 unsigned BackendPools::count_async_engines() const
 {
     unsigned total = 0;
-    for (const auto & [depth, engines] : _async_pools)
+    for (const auto & [key, engines] : _async_pools)
     {
-        (void)depth;
+        (void)key;
         total += static_cast<unsigned>(engines.size());
     }
     return total;

@@ -12,6 +12,7 @@
 #include "posix_io/mount_capabilities/mount_capabilities.h"
 #include "posix_io/strategy/strategy.h"
 
+#include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
 #include "streamer/impl/config/fs_queue_depth/fs_queue_depth.h"
 #include "streamer/impl/request/request.h"
@@ -58,18 +59,34 @@ class FsAsyncRouter
         std::vector<dev_t> devices;
         std::vector<size_t> blocks;
         std::vector<unsigned> depths;
+
+        // Whether each group's reads may use registered buffers. Per mount, because it pays on some
+        // file systems and costs on others - see design_io_uring_registration.md.
+        std::vector<bool> registers;
     };
 
-    // One group per MOUNT: an engine serves one mount, and a workload goes to one engine.
+    // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
+    // rather than the list, so the matching rule lives in Config with its tests.
+    using RegisterPolicy = std::function<bool(const std::string & fs_type)>;
+
+    // One group per MOUNT, and a workload goes to one group. Groups are not engines: several mounts
+    // can share an engine once the engine cap is reached (BackendPools), which is why every per-mount
+    // answer is carried here rather than assumed to be the engine's.
     //
     // Stats once per directory, not once per file. Never fails a submission - an unreadable directory
     // sends its file to the synchronous reader.
-    Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth);
+    //
+    // A null `registers` means every mount registers, which is what a caller that does not care wants.
+    Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
+                  const RegisterPolicy & registers = nullptr);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
-    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned)>;
-    WorkerFactory worker_factory() const;
+    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool)>;
+
+    // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
+    // by value like everything else here, so a worker outlives this object whatever the order.
+    WorkerFactory worker_factory(std::shared_ptr<DeviceWriter> writer) const;
 
     // The largest direct-I/O block any of these mounts requires. `paths` must exclude object-storage
     // URIs, which name no mount.

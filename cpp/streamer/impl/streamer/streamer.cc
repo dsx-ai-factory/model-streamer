@@ -1,3 +1,4 @@
+#include "device/backends/backends.h"
 #include "streamer/impl/streamer/streamer.h"
 
 #include <sys/sysmacros.h>   // major/minor
@@ -22,6 +23,7 @@
 
 #include "streamer/impl/workload/workload.h"
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
+#include "streamer/impl/filesystem_worker/filesystem_worker.h"
 #include "streamer/impl/object_storage_worker/object_storage_worker.h"
 #include "streamer/impl/assigner/assigner.h"
 #include "streamer/impl/batches/batches.h"
@@ -38,21 +40,30 @@ Streamer::Streamer() : Streamer(Config())
 Streamer::Streamer(Config config, Environment environment) :
     _config(std::make_shared<Config>(config)),
     _router(config.fs_strategy_candidates, std::move(environment)),
-    // Filesystem reads are synchronous (concurrency threads, stateless handler); object-storage reads are
-    // asynchronous (s3_concurrency ObjectStorageWorkers, each owning a client + in-flight capacity window).
-    // Pools are created lazily on first use of each kind.
+    // The LOOKUP, not a backend and not one type's factory: the device a submission names picks the
+    // implementation, and nothing is loaded until a submission names one. CUDA is the only type
+    // backend_for answers today, and this file does not need to know that.
+    _device_writer(std::make_shared<DeviceWriter>(device::backend_for)),
+    _device_issuer(std::make_shared<DeviceIssuer>(_device_writer)),
+    // Three worker factories, one per pool kind, in the order BackendPools takes them: the synchronous
+    // filesystem reader (concurrency threads), the async one the strategy router builds per mount, and
+    // object storage (s3_concurrency threads). Pools are created lazily on first use of each kind.
     _pools(
-        [](Workload&& workload, std::atomic<bool> & stopped)
+        [writer = _device_writer, issuer = _device_issuer, block = config.fs_sync_read_block_bytesize]()
+            -> std::unique_ptr<utils::Worker<Workload>>
         {
-            workload.execute(stopped);
+            return std::make_unique<FileSystemWorker>(writer, issuer, block);
         },
-        _router.worker_factory(),
+        _router.worker_factory(_device_writer),
         // each object-storage worker reads the streamer's credentials once, at client creation, via this
         // provider. It captures the shared credentials state by value, so the state outlives the worker
         // regardless of destruction order (it never captures `this`).
-        [state = _credentials_state]() -> std::unique_ptr<utils::Worker<Workload>>
+        [state = _credentials_state, writer = _device_writer, issuer = _device_issuer,
+         retainer = _retained_pools]()
+            -> std::unique_ptr<utils::Worker<Workload>>
         {
-            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); });
+            return std::make_unique<ObjectStorageWorker>([state]() { return state->get(); }, writer, issuer,
+                                                         retainer);
         },
         _config->concurrency, _config->s3_concurrency),
     // One PERSISTENT responder for the streamer's lifetime, shared by all submissions and
@@ -126,7 +137,7 @@ common::ResponseCode Streamer::async_read(const std::string & path, size_t file_
             destination += internal_sizes[i];
         }
 
-        ret = async_request(request);
+        ret = async_request(request, common::Device::host());
     }
     catch(const common::Exception & e)
     {
@@ -223,6 +234,7 @@ common::Response Streamer::response(unsigned timeout_ms, bool & submission_done)
 
 common::ResponseCode Streamer::async_request(
     std::vector<FileRanges> & request,
+    common::Device device,
     SubmissionId * out_submission_id)
 {
     // Default the caller's id to 0 ("none"). It is overwritten with the real id the instant one is
@@ -317,7 +329,9 @@ common::ResponseCode Streamer::async_request(
 
     // Object storage has no mount to probe and no strategy to consult, so it is not asked.
     const auto groups = object_storage ? FsAsyncRouter::Groups{}
-                                       : _router.groups(request, _config->fs_async_queue_depth);
+                                       : _router.groups(request, _config->fs_async_queue_depth,
+                                                        [this](const std::string & fs_type)
+                                                        { return _config->registers_buffers(fs_type); });
     Assigner assigner(request, _config, groups.by_file);
 
     std::vector<Workload> workloads(assigner.num_workloads());
@@ -348,7 +362,7 @@ common::ResponseCode Streamer::async_request(
                    << " ranges " << transfer.range_sizes.size() << " from index " << transfer.first_range_index;
 
         Batches batches(submission_id, transfer.file_index, transfer.tasks, _config, _responder, path, params,
-                        transfer.range_sizes, transfer.first_range_index);
+                        transfer.range_sizes, transfer.first_range_index, device);
         const auto num_batches = batches.size();
         LOG(DEBUG) << "Created " << num_batches << " batches for file index " << transfer.file_index;
         for (size_t j = 0; j < num_batches; ++j)
@@ -426,6 +440,7 @@ common::ResponseCode Streamer::async_request(
 
                     workloads[next].direct_block = groups.blocks[group];
                     _pools.push_async(groups.devices[group], groups.blocks[group], groups.depths[group],
+                                      groups.registers[group],
                                       std::move(workloads[next]));
                 }
             }

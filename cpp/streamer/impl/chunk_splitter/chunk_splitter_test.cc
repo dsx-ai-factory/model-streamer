@@ -1,4 +1,5 @@
 #include "streamer/impl/chunk_splitter/chunk_splitter.h"
+#include "common/device/device.h"
 
 #include <gtest/gtest.h>
 
@@ -202,7 +203,7 @@ TEST(ChunkSplitter, Ranges_With_A_Hole_Become_Separate_Batches)
     {
         const auto & transfer = assigner.transfers()[t];
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                        ranges.path, s3_params, transfer.range_sizes, transfer.first_range_index);
+                        ranges.path, s3_params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
 
         ASSERT_EQ(batches.size(), 1);
 

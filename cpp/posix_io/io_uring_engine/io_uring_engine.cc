@@ -8,6 +8,7 @@
 
 #include "common/exception/exception.h"
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/io_uring_probe/io_uring_probe.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::posix_io
@@ -37,10 +38,29 @@ int error_of(int ret)
     return -ret;
 }
 
+// Whether this read lands INSIDE the region it was offered with. The kernel answers EFAULT for a fixed
+// read that does not, and io_engine.h promises registration never costs a caller a read - a mismatched
+// pair is the one way it could.
+bool offers_this_buffer(const Registration & registration, const char * buffer, size_t bytesize)
+{
+    if (!registration.valid())
+    {
+        return false;
+    }
+
+    const auto * const base = static_cast<const char *>(registration.base);
+    return buffer >= base && buffer + bytesize <= base + registration.bytesize;
+}
+
 } // namespace
 
 IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytesize)
 {
+    // Both gates, asked once. The host's answer cannot change while we run, and the mount's cannot
+    // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
+    // keyed by it, so an engine never serves two mounts that answered differently.
+    _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
+
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
 
@@ -101,6 +121,22 @@ IoUringEngine::~IoUringEngine()
                   << " us in total, worst call " << _submit_stats.max_nanos / 1000 << " us";
     }
 
+    // What registration settled on. Silent when nothing was offered, because most loads offer nothing -
+    // only a device destination reads through a staging pool.
+    if (!_regions.empty())
+    {
+        LOG(INFO) << "io_uring registered buffers: " << registered_regions() << " regions registered, "
+                  << refused_regions() << " refused";
+    }
+
+    if (_over_table_reads > 0)
+    {
+        // WARNING, not INFO: the cause is a pool sized past what this engine can register, not anything
+        // the kernel decided.
+        LOG(WARNING) << "io_uring registered buffers: " << _over_table_reads << " read(s) used a region"
+                     << " id past the table of " << MaxRegisteredRegions << " and were not registered";
+    }
+
     // Unmaps the rings and closes the ring fd. Anything still in flight is the caller's failure to
     // quiesce (io_engine.h) - the kernel drops it here, having possibly already written to a
     // destination the caller believes is free.
@@ -117,8 +153,110 @@ unsigned IoUringEngine::depth() const
     return _depth;
 }
 
-common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer)
+unsigned IoUringEngine::registered_regions() const
 {
+    return static_cast<unsigned>(std::count(_regions.begin(), _regions.end(), RegionState::Registered));
+}
+
+unsigned IoUringEngine::refused_regions() const
+{
+    return static_cast<unsigned>(std::count(_regions.begin(), _regions.end(), RegionState::Refused));
+}
+
+uint64_t IoUringEngine::over_table_reads() const
+{
+    return _over_table_reads;
+}
+
+int IoUringEngine::registered_index(const Registration & registration)
+{
+    if (!registration.valid() || !_fixed_buffers)
+    {
+        return -1;
+    }
+
+    if (registration.id >= MaxRegisteredRegions)
+    {
+        // More regions than the table holds. An ordinary read rather than a failure: registration is
+        // an optimisation. COUNTED, because the read still succeeds, so a pool that outgrew the table
+        // otherwise looks exactly like one that never offered a region at all.
+        ++_over_table_reads;
+        return -1;
+    }
+
+    if (_regions.size() <= registration.id)
+    {
+        _regions.resize(registration.id + 1, RegionState::Unknown);
+    }
+
+    if (_regions[registration.id] == RegionState::Registered)
+    {
+        return static_cast<int>(registration.id);
+    }
+
+    if (_regions[registration.id] == RegionState::Refused)
+    {
+        return -1;
+    }
+
+    // SPARSE and once. Every slot is empty until filled, so a slab that appears later is one update
+    // rather than a re-registration of everything already pinned.
+    if (!_table)
+    {
+        const int ret = io_uring_register_buffers_sparse(&_ring, MaxRegisteredRegions);
+        if (ret < 0)
+        {
+            // Nothing can be registered on this ring. Said once, and not asked again.
+            LOG(WARNING) << "io_uring_register_buffers_sparse failed: " << std::strerror(error_of(ret))
+                         << ". Reads will not use registered buffers";
+            _fixed_buffers = false;
+            return -1;
+        }
+        _table = true;
+    }
+
+    struct iovec iov;
+    iov.iov_base = registration.base;
+    iov.iov_len = registration.bytesize;
+
+    // The tagged variant is the only one liburing offers; no tags means no completion on release,
+    // which is what we want - the pool owns the memory and outlives the registration.
+    const int ret = io_uring_register_buffers_update_tag(&_ring, registration.id, &iov, nullptr, 1);
+    if (ret < 0)
+    {
+        // Per region, because a refusal is usually RLIMIT_MEMLOCK and the NEXT region may still fit.
+        LOG(WARNING) << "io_uring_register_buffers_update_tag(" << registration.id << ", "
+                     << registration.bytesize << " bytes) failed: " << std::strerror(error_of(ret))
+                     << ". This region will be read the ordinary way";
+
+        // REMEMBERED, even for a cause that might pass. A pool registers as it GROWS, so every retry
+        // would land on a ring that is just as busy - a failed syscall on every read of this slab
+        // rather than one. Losing the optimisation for one slab is the cheaper failure.
+        //
+        // EBUSY is the one worth naming, and it is not seen: registration succeeds with the ring full
+        // (Registers_A_Region_With_A_Full_Ring), because the sparse update path is built for a live
+        // ring. If it ever appears, the line above names it.
+        _regions[registration.id] = RegionState::Refused;
+        return -1;
+    }
+
+    LOG(DEBUG) << "registered buffer " << registration.id << " of "
+               << registration.bytesize << " bytes with io_uring";
+
+    _regions[registration.id] = RegionState::Registered;
+    return static_cast<int>(registration.id);
+}
+
+common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                                          char * buffer, Registration registration)
+{
+    // Decided BEFORE a submission slot is taken: registering a new region is a syscall, and holding an
+    // unprepared SQE across it buys nothing.
+    //
+    // Falls back to an ordinary read whenever this is not a region we hold - which is most of the time,
+    // since only a device destination reads through a staging pool.
+    const int index = offers_this_buffer(registration, buffer, bytesize) ? registered_index(registration) : -1;
+
     struct io_uring_sqe * sqe = io_uring_get_sqe(&_ring);
     if (sqe == nullptr)
     {
@@ -136,7 +274,15 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
         return common::ResponseCode::UnknownError;
     }
 
-    io_uring_prep_read(sqe, file.fd, buffer, bytesize, offset);
+    if (index >= 0)
+    {
+        io_uring_prep_read_fixed(sqe, file.fd, buffer, bytesize, offset, index);
+    }
+    else
+    {
+        io_uring_prep_read(sqe, file.fd, buffer, bytesize, offset);
+    }
+
     io_uring_sqe_set_data64(sqe, id);
 
     if (!file.direct)

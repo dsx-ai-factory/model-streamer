@@ -3,6 +3,9 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "async_io_worker",
     deps = [
+        "//utils/env",
+        "//streamer/impl/device_io/device_writer_client",
+        "//utils/deque",
         "//posix_io/engine_factory",
         "//posix_io/alignment",
         "//posix_io/completion_mapper",
@@ -25,6 +28,7 @@ runai_cc_test(
     name = "async_io_worker_test",
     srcs = ["async_io_worker_test.cc"],
     deps = [
+        "//device/mock",
         ":async_io_worker",
         "//posix_io/alignment",
         "//posix_io/mock",

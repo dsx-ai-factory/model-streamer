@@ -65,8 +65,18 @@ Chunk InflightChunks::pending(posix_io::RequestId id) const
     Chunk rest = entry.chunk;
     rest.offset = entry.cursor;
     rest.bytesize = entry.remaining;
-    rest.buffer = entry.chunk.buffer + (entry.cursor - entry.chunk.offset);
+
+    char * const base = entry.staging.valid() ? entry.staging.data : entry.chunk.buffer;
+    rest.buffer = base + (entry.cursor - entry.chunk.offset);
     return rest;
+}
+
+void InflightChunks::set_staging(posix_io::RequestId id, const StagingBuffer & buffer)
+{
+    const auto it = _chunks.find(id);
+    ASSERT(it != _chunks.end()) << "no in-flight chunk for request " << id;
+
+    it->second.staging = buffer;
 }
 
 Chunk InflightChunks::release(posix_io::RequestId id)
@@ -124,6 +134,19 @@ void InflightChunks::release_all_scratch(const std::function<void(char *)> & giv
             entry.scratch = nullptr;
             entry.scratch_skip = 0;
             entry.scratch_wanted = 0;
+        }
+    }
+}
+
+void InflightChunks::release_all_staging(const std::function<void(const StagingBuffer &)> & give)
+{
+    for (auto & [id, entry] : _chunks)
+    {
+        (void)id;
+        if (entry.staging.valid())
+        {
+            give(entry.staging);
+            entry.staging = StagingBuffer{};
         }
     }
 }

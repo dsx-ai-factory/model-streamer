@@ -40,6 +40,20 @@ struct IoUringCapability
     // So this gates `available` rather than describing it: false means we decline io_uring. It is
     // never true and unused.
     bool timed_wait_is_free = false;
+
+    // IORING_OP_READ_FIXED works here, and a buffer could actually be registered.
+    //
+    // DESCRIPTIVE, not a gate: a ring without it reads perfectly well with plain IORING_OP_READ. Unlike
+    // the two above, false costs us an optimisation rather than correctness.
+    //
+    // Answered by REGISTERING ONE FOR REAL rather than by a version test. Registration can fail for
+    // reasons no version knows - RLIMIT_MEMLOCK above all, which io_uring charges and CUDA pinning does
+    // not.
+    //
+    // NOT a promise that the staging pool will register, for the same reason `available` is not a
+    // promise about depth: the trial is a few KiB and a pool is megabytes against a limit. A caller
+    // that registers for real has to handle its own failure.
+    bool fixed_buffers = false;
 };
 
 // Create a small ring, read its features, probe the opcode, tear it down.
