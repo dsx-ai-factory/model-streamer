@@ -205,6 +205,10 @@ class SafetensorsStreamer:
         self.total_size = 0
         self.device_str = None
         self.start_time = None
+        # Tensors this session had to copy because their address was unusable for their dtype. Per
+        # session, not per module: a process can load two models, and a threaded consumer would lose
+        # increments to a shared counter.
+        self.unaligned_copies = 0
 
     def __enter__(self) -> SafetensorsStreamer:
         self.file_streamer.__enter__()
@@ -229,6 +233,13 @@ class SafetensorsStreamer:
         logger.info(
             f"[RunAI Streamer] Overall time to stream {humanize.naturalsize(size, binary=True)} of all files to {self.device_str}: {round(elapsed_time, 2)}s, {humanize.naturalsize(throughput, binary=True)}/s"
         )
+        # Only when it happened. A zero every load would train the reader to skip the line, which is
+        # the one case where it carries information.
+        if self.unaligned_copies:
+            logger.debug(
+                f"[RunAI Streamer] Copied {self.unaligned_copies} tensor(s) whose address their dtype "
+                f"could not use"
+            )
 
     def stream_file(
             self,
@@ -263,6 +274,7 @@ class SafetensorsStreamer:
         self.files_to_tensors_metadata = {}
         self.total_size = 0
         self.device_str = device
+        self.unaligned_copies = 0
 
         file_stream_requests: List[FileChunks] = []
 
@@ -352,9 +364,28 @@ class SafetensorsStreamer:
     def get_tensors(self) -> Iterator[torch.tensor]:
         for file_index, ready_chunk_index, buffer in self.file_streamer.get_chunks():
             tensor_metadata = self.files_to_tensors_metadata[file_index][ready_chunk_index]
-            yield tensor_metadata.name, safetensors_pytorch.create_torch_tensor(
-                buffer, tensor_metadata
-            )
+
+            # Copied BEFORE the dtype view, and on the uint8 buffer: a copy afterwards would already
+            # have had to interpret the address this is here to avoid. Only what has to be copied is,
+            # so a model whose tensors all sit where their dtypes can use them pays nothing.
+            if safetensors_pytorch.requires_alignment_copy(buffer, tensor_metadata):
+                buffer = buffer.clone()
+                self.unaligned_copies += 1
+
+            tensor = safetensors_pytorch.create_torch_tensor(buffer, tensor_metadata)
+
+            # AUTHORITATIVE, where the check above only decides whether to copy. Making the copy
+            # aligned relies on the allocator handing back a suitably aligned block, which is an
+            # implementation detail of torch and not a promise to us. Verified rather than assumed, so
+            # the day it stops holding is a failed load and not a model that is quietly wrong.
+            element_size = tensor_metadata.get_element_size()
+            if tensor.data_ptr() % element_size:
+                raise ValueError(
+                    f"Tensor '{tensor_metadata.name}' is at {tensor.data_ptr():#x}, which "
+                    f"{tensor_metadata.dtype} cannot be read from ({element_size}-byte elements)"
+                )
+
+            yield tensor_metadata.name, tensor
 
         # All tensors delivered (the underlying get_chunks() is exhausted). Log the session throughput here,
         # during active consumption while the logging system is still alive.

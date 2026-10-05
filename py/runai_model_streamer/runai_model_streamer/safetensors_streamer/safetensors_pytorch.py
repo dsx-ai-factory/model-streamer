@@ -60,6 +60,28 @@ def get_safetensors_dtype_map() -> dict:
 
 safetensors_to_torch_dtype = get_safetensors_dtype_map()
 
+# torch.dtype.itemsize arrived in torch 2.1, and the package declares torch>=2.0 - so ask once whether
+# this torch has it, rather than assume or parse a version string. A capability check answers the
+# question we actually have.
+_DTYPE_HAS_ITEMSIZE = hasattr(torch.float32, "itemsize")
+
+# The fallback, for torch 2.0: the only way to ask is to build a tensor, which is far too much to do
+# once per tensor streamed. Memoised by dtype, so a model costs a handful of entries rather than one
+# allocation per tensor.
+#
+# Safe to share: it memoises an immutable mapping, so two threads racing compute the same value.
+_element_sizes = {}
+
+
+def element_size_of(torch_dtype: torch.dtype) -> int:
+    """Bytes per element. Asked once per tensor streamed, so it must not allocate."""
+    if _DTYPE_HAS_ITEMSIZE:
+        return torch_dtype.itemsize
+
+    if torch_dtype not in _element_sizes:
+        _element_sizes[torch_dtype] = torch.tensor([], dtype=torch_dtype).element_size()
+    return _element_sizes[torch_dtype]
+
 
 def _get_actual_file_size(path: str) -> Optional[int]:
     """Physical size of path, local filesystem only. Object storage not checked - costs extra
@@ -202,7 +224,7 @@ class SafetensorMetadata:
         self.shape = safetensorMetadata[SAFETENSORS_SHAPE_KEY]
         self.dtype = safetensorMetadata[SAFETENSORS_DTYPE_KEY]
         self.offsets = Offsets(safetensorMetadata[SAFETENSORS_DATA_OFFSETS_KEY])
-        
+
         self._validate_shape_consistency()
 
     def _validate_shape_consistency(self):
@@ -214,9 +236,7 @@ class SafetensorMetadata:
         # 2. Identify the actual bytes reserved in the file
         actual_bytes = self.offsets.get_diff()        
 
-        torch_dtype = self.get_torch_dtype()
-        element_size = torch.tensor([], dtype=torch_dtype).element_size()
-        expected_bytes = num_elements * element_size
+        expected_bytes = num_elements * self.get_element_size()
 
         # 3. Final Validation
         if expected_bytes != actual_bytes:
@@ -234,6 +254,9 @@ class SafetensorMetadata:
         for dim in self.shape:
             count *= dim
         return count
+
+    def get_element_size(self) -> int:
+        return element_size_of(self.get_torch_dtype())
 
     def get_torch_dtype(self) -> torch.dtype:
         # Handle unknown/unsupported dtypes
@@ -260,6 +283,28 @@ def prepare_request(
         safetensors_metadata.tensors_metadata,
         safetensors_metadata.read_sizes,
     ) for safetensors_metadata in safetensors_metadatas]
+
+
+def requires_alignment_copy(buffer: Any, tensor_metadata: SafetensorMetadata) -> bool:
+    """Whether this buffer's address is one the tensor's dtype cannot be read from.
+
+    A tensor is placed where the ring puts it, and the ring cannot always choose: under O_DIRECT a
+    range's address must be CONGRUENT to its file offset modulo the block, which is not alignment, so a
+    tensor at an odd file offset gets an odd address. safetensors has 1-byte dtypes, so one odd-sized
+    tensor leaves everything packed after it odd.
+
+    Torch does not catch this. Its rule is `storage_offset`, and `torch.from_numpy` gives 0 whatever
+    the address, so `create_torch_tensor` succeeds on a misaligned buffer and hands out a tensor that
+    looks correct. It survives a plain copy, which is all a weight loader does with it today - but not
+    a caller that keeps the tensor and quantizes or casts it on the host.
+
+    A PREDICATE, so the copy and its accounting stay with the session that owns them.
+    """
+    if tensor_metadata.get_item_count() == 0:
+        return False
+
+    element_size = tensor_metadata.get_element_size()
+    return element_size > 1 and buffer.data_ptr() % element_size != 0
 
 
 def create_torch_tensor(
