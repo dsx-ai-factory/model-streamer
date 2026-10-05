@@ -8,6 +8,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
+# `make build` runs `setup.py bdist_wheel` directly, with no PEP 517 isolation, so it never
+# reads py/*/pyproject.toml's setuptools pin. Keep this in sync with that pin by hand. Exact
+# pin, not a floor, to match this file's other dependencies. Newest versions still compatible
+# with this image's Python 3.8 - setuptools 76.0.0 needs >=3.9, wheel 0.46.0 needs >=3.9.
+RUN python3 -m pip install "setuptools==75.3.4" "wheel==0.45.1"
+
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gcc-x86-64-linux-gnu g++-x86-64-linux-gnu binutils-x86-64-linux-gnu \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
