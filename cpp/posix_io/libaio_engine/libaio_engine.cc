@@ -194,7 +194,8 @@ SubmitStats LibaioEngine::submit_stats() const
     return _submit_stats;
 }
 
-common::ResponseCode LibaioEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer)
+common::ResponseCode LibaioEngine::stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                                         char * buffer, Registration)
 {
     if (_free.empty())
     {

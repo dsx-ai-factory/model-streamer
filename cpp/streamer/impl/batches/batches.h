@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "common/device/device.h"
 #include "common/responder/responder.h"
 #include "common/storage_uri/storage_uri.h"
 #include "streamer/impl/batch/batch.h"
@@ -36,7 +37,8 @@ struct Batches
            const std::string & path,
            const common::s3::S3ClientWrapper::Params & params,
            const std::vector<size_t> & range_sizes,
-           unsigned first_range_index);
+           unsigned first_range_index,
+           common::Device device);
 
     Batches(Batches &&) = default;
     Batches & operator=(Batches &&) = default;
@@ -71,7 +73,7 @@ struct Batches
     };
 
     // create all the tasks
-    void build_tasks(std::shared_ptr<const Config> config, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const std::vector<size_t> & range_sizes);
+    void build_tasks(std::shared_ptr<const Config> config, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const std::vector<size_t> & range_sizes, common::Device device);
 
     // create tasks of a given range; range_index is the index within the FILE, not within this transfer.
     // Tasks are cut at worker boundaries and at multiples of chunk_bytesize, so none straddles a chunk.

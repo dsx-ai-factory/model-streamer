@@ -4,6 +4,12 @@ load("//toolchain:deps.bzl", "load_toolchain_deps")
 load_toolchain_deps()
 
 new_local_repository(
+    name = "cuda",
+    path = "/usr/local/cuda",
+    build_file = "//third_party:cuda.BUILD"
+)
+
+new_local_repository(
     name = "aws",
     path = "/opt",
     build_file = "//third_party:aws.BUILD"

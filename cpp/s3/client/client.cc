@@ -273,6 +273,15 @@ common::backend_api::ResponseCode_t S3Client::async_read(const char* path,
                                                          char* destination_buffer,
                                                          common::backend_api::ObjectRequestId_t request_id)
 {
+    // Nothing new once stopping. The request would be sent and paid for, then reported FinishedError
+    // like every other read on a stopped client - and until it lands it writes into a staging buffer
+    // the pool has already taken back. Before the increment, so no response is expected for a read
+    // never issued.
+    if (_stop)
+    {
+        return common::ResponseCode::FinishedError;
+    }
+
     if (_responder == nullptr)
     {
         _responder = std::make_shared<Responder>(1);

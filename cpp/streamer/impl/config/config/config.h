@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 #include <ostream>
 
@@ -39,10 +40,15 @@ struct Config
            size_t fs_async_chunk_bytesize = default_fs_async_chunk_bytesize,
            FsQueueDepth fs_async_queue_depth = FsQueueDepth(default_fs_async_queue_depth),
            std::string fs_strategy_candidates = default_fs_strategy_candidates,
-           unsigned long object_storage_retry_timeout_seconds = 0);
+           unsigned long object_storage_retry_timeout_seconds = 0,
+           std::string fs_no_register_buffers = default_fs_no_register_buffers,
+           bool fs_register_buffers = default_fs_register_buffers);
     Config(bool enforce_minimum = true);
 
  private:
+    // The deny list as written, into lowercased entries with empties dropped.
+    static std::vector<std::string> split_types(const std::string & value);
+
     // Both file system settings come from the same variable, so they are resolved together: reading it
     // twice would parse it twice and state the precedence rule twice.
     struct FsSettings
@@ -65,6 +71,30 @@ struct Config
 
     // Node-wide, so it means the same thing at TP=1 and TP=8.
     static constexpr unsigned default_fs_async_queue_depth = 512;
+
+    // RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS: file system types whose reads must NOT use registered
+    // buffers, comma separated, prefix matched so `nfs` covers `nfs4`. Empty registers everywhere.
+    //
+    // A DENY LIST rather than a value per type, because that is the shape of what we know: registration
+    // helps unless the storage is one we have measured it to hurt. FsQueueDepth is not reused for it -
+    // that type rejects zero on purpose ("zero divides by zero downstream"), which is exactly the value
+    // a boolean needs.
+    //
+    // NFS is denied by default because registration COSTS there rather than paying: its data arrives
+    // over the network through the client stack, so there is no device DMA into our pages to
+    // streamline and registration only adds bookkeeping. See design_io_uring_registration.md.
+    static constexpr const char * default_fs_no_register_buffers = "nfs";
+
+    // RUNAI_STREAMER_FS_REGISTER_BUFFERS: the master switch, on by default.
+    //
+    // Separate from the deny list because they answer different questions. The list says WHICH file
+    // systems it is worth doing for; this says whether to do it at all - the switch a benchmark flips
+    // to measure the feature, and the one an operator flips if it ever misbehaves in the field.
+    //
+    // Default ON because it cannot cost correctness: every failure path falls back to an ordinary read.
+    // What it is WORTH is a CPU saving rather than a bandwidth one, so a throughput benchmark will not
+    // show it - see design_io_uring_registration.md before measuring.
+    static constexpr bool default_fs_register_buffers = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
     // than a queue slot.
@@ -106,6 +136,17 @@ struct Config
     // divided by the streamer processes on the node, which is not known this early - AsyncIoSettings
     // does it.
     FsQueueDepth fs_async_queue_depth;
+
+    // The types from RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS, lowercased, in the order written.
+    std::vector<std::string> fs_no_register_buffers;
+
+    // The master switch. False turns registered buffers off for every mount, whatever the list says.
+    bool fs_register_buffers;
+
+    // Whether reads on a mount of this type may use registered buffers. Prefix matched, so `nfs`
+    // covers `nfs4`. An unknown or empty type registers - we deny what we have measured, not what we
+    // have not seen.
+    bool registers_buffers(const std::string & fs_type) const;
 
     // Application-level retry budget for each object chunk, starting when that chunk is first submitted to
     // the backend. Zero preserves fail-fast behavior after the storage plugin's native retry policy expires.
