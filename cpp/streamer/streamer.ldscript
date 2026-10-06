@@ -21,8 +21,6 @@
 #   its relationship to Python package versions, before the first standalone release. Native programs
 #   record the full version node when linking; renaming or removing it later breaks those programs.
 #
-# Keep the current 1.0 node unchanged in this CI change.
-#
 # Without version nodes, a program built against a newer streamer.h and run against an older
 # libstreamer.so binds any symbol with a matching name and then fails in unclear ways. The node
 # turns that into a clear load error.
