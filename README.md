@@ -42,8 +42,8 @@ Our repository is built using devcontainer ([Further reading](https://containers
 
 The devcontainer uses digest-pinned PyPA `manylinux_2_28` images (AlmaLinux 8,
 GCC 14, Python 3.12.15). Python 3.12–3.14 are tested in CI; published packages
-require Python 3.12 or newer. Linux wheels retain the existing glibc 2.30 minimum
-and `manylinux_2_30` tags, including compatibility with Ubuntu 20.04 and 22.04
+require Python 3.12 or newer. Linux wheels use `manylinux_2_28` tags (glibc 2.28 or newer), preserving
+compatibility with Ubuntu 20.04 and 22.04
 when a supported Python interpreter is installed.
 
 Each container builds its native architecture: x86_64 on an x86_64 host and

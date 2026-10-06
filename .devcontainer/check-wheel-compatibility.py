@@ -1,4 +1,4 @@
-"""Fail CI if a wheel violates our existing glibc 2.30 / architecture contract."""
+"""Fail CI if a wheel violates our glibc 2.28 / architecture contract."""
 
 import glob
 import re
@@ -12,7 +12,7 @@ from pathlib import Path
 def check(wheel):
     arch = "aarch64" if wheel.name.endswith("_aarch64.whl") else "x86_64"
     expected_machine = "AArch64" if arch == "aarch64" else "Advanced Micro Devices X86-64"
-    if not wheel.name.endswith(f"-manylinux_2_30_{arch}.whl"):
+    if not wheel.name.endswith(f"-manylinux_2_28_{arch}.whl"):
         raise ValueError(f"Unexpected wheel platform: {wheel.name}")
     libraries = 0
     with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as directory:
@@ -28,8 +28,8 @@ def check(wheel):
                 raise ValueError(f"Wrong architecture in {wheel.name}: {name}")
             symbols = subprocess.check_output(["readelf", "--version-info", str(path)], text=True)
             versions = {(int(a), int(b)) for a, b in re.findall(r"GLIBC_(\d+)\.(\d+)", symbols)}
-            if "GLIBC_PRIVATE" in symbols or any(version > (2, 30) for version in versions):
-                raise ValueError(f"{wheel.name}: {name} exceeds glibc 2.30: {sorted(versions)}")
+            if "GLIBC_PRIVATE" in symbols or any(version > (2, 28) for version in versions):
+                raise ValueError(f"{wheel.name}: {name} exceeds glibc 2.28: {sorted(versions)}")
             print(f"{wheel.name}: {name}: {arch}, maximum GLIBC {max(versions, default=(0, 0))}")
     if not libraries:
         raise ValueError(f"No native library found in {wheel.name}")

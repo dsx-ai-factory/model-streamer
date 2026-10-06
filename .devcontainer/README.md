@@ -7,10 +7,12 @@ build utilities. AlmaLinux 8 receives security support through June 2029; Python
 interpreter is 3.12; CI also exercises 3.13 and 3.14 from the same pinned images.
 
 A Debian-based official Python image would raise the native libraries' glibc
-requirements. The manylinux base preserves the existing glibc 2.30 contract.
+requirements. The manylinux base builds against glibc 2.28, preserving support for all
+previously supported glibc 2.30+ systems. The wheels use `manylinux_2_28` tags
+so they can also be installed and tested inside the build image itself.
 Native runners build both x86_64 and aarch64; `make build` builds the host
 architecture. `.devcontainer/check-wheel-compatibility.py` checks every ELF in
-each wheel for the correct architecture and GLIBC symbol versions at most 2.30.
+each wheel for the correct architecture and GLIBC symbol versions at most 2.28.
 Changing a filename alone does not make a binary compatible with an older libc.
 
 ## Pins

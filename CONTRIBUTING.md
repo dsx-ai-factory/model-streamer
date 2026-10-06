@@ -104,7 +104,7 @@ published `devcontainer:latest-x86_64` and `devcontainer:latest-aarch64` images.
 The published images and PR images use the same pinned dependency definitions.
 
 Each architecture has four component jobs (core, S3, GCS, Azure). They build the
-native library and wheel, check ELF architecture and the existing glibc 2.30
+native library and wheel, check ELF architecture and the glibc 2.28
 limit, then run the component's C++ tests. The core job also runs the Python
 unit and distributed suites on Python 3.12, 3.13, and 3.14. Each job reuses one
 container through `docker exec`, including its build outputs and dependencies.

@@ -4,7 +4,7 @@ FROM quay.io/pypa/manylinux_2_28_aarch64@sha256:f5f03dedf61b47d69d0742d36047db78
 
 # AlmaLinux 8 + GCC 14, glibc 2.28 and Python 3.12.15, pinned by image digest.
 # Build natively on each architecture; newer distro toolchains would raise the
-# runtime glibc floor even if the wheel were labelled manylinux_2_30.
+# runtime glibc floor even if the wheel were labelled manylinux_2_28.
 FROM base-${TARGETARCH} AS toolchain
 ENV PATH="/opt/python/cp312-cp312/bin:${PATH}"
 COPY rpm-packages.lock /opt/build/
