@@ -19,6 +19,76 @@ The main building blocks of Model Streamer are documented in the [docs](docs/REA
 We recommend reviewing the [README](README.md) to understand the system architecture and build process before making significant contributions.
 
 ## How to Contribute
+### Signing Off Your Work
+
+We require that all contributors "sign-off" on their commits. This certifies
+that the contribution is your original work, or you have rights to submit it
+under the same license, or a compatible license.
+
+Any contribution which contains commits that are not Signed-Off will not be
+accepted. Read the full [Developer Certificate of Origin 1.1](DCO) before
+signing off. The upstream text is at [developercertificate.org](https://developercertificate.org/).
+
+Use the `--signoff` (or `-s`) option when committing your changes:
+
+```bash
+git commit -s -m "Add cool feature."
+```
+
+This appends a line using your configured Git identity:
+
+```text
+Signed-off-by: Your Name <your@email.com>
+```
+
+Only add your own sign-off when you can make the DCO certification. Preserve
+the sign-offs and attribution of other contributors.
+
+### Full Text of the DCO
+
+```text
+Developer Certificate of Origin
+Version 1.1
+
+Copyright (C) 2004, 2006 The Linux Foundation and its contributors.
+
+Everyone is permitted to copy and distribute verbatim copies of this
+license document, but changing it is not allowed.
+
+
+Developer's Certificate of Origin 1.1
+
+By making a contribution to this project, I certify that:
+
+(a) The contribution was created in whole or in part by me and I
+    have the right to submit it under the open source license
+    indicated in the file; or
+
+(b) The contribution is based upon previous work that, to the best
+    of my knowledge, is covered under an appropriate open source
+    license and I have the right under that license to submit that
+    work with modifications, whether created in whole or in part
+    by me, under the same open source license (unless I am
+    permitted to submit under a different license), as indicated
+    in the file; or
+
+(c) The contribution was provided directly to me by some other
+    person who certified (a), (b) or (c) and I have not modified
+    it.
+
+(d) I understand and agree that this project and the contribution
+    are public and that a record of the contribution (including all
+    personal information I submit with it, including my sign-off) is
+    maintained indefinitely and may be redistributed consistent with
+    this project or the open source license(s) involved.
+```
+
+### NVIDIA IP Review
+
+NVIDIA contributors and maintainers must follow the
+[NVIDIA IP review process](https://nv/ip_review_process) for ongoing changes
+and third-party contributions before accepting or distributing them.
+
 ### Reporting Issues
 Open an issue with a clear description, steps to reproduce, and relevant environment details.
 
@@ -93,6 +163,7 @@ Each pull request should meet the following requirements:
 - Test coverage – Add or update tests for any affected code.
 - Documentation – Update relevant documentation to reflect your changes.
 - PR description – Clearly describe what changed and why.
+- DCO – Every commit has the contributor's `Signed-off-by` line.
 
 ## Pull Request CI Environment
 
