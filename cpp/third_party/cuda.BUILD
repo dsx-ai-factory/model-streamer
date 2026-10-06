@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # CUDA driver API headers, for compile-time type checking only.
 # libcuda.so is not linked here - it is loaded with dlopen at run time, so the built
 # library depends on no particular CUDA version and runs where there is no driver.

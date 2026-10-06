@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef RUNAI_FILE_STREAMER_DEVICE_H
 #define RUNAI_FILE_STREAMER_DEVICE_H
 

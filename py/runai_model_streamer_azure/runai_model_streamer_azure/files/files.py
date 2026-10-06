@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from typing import Optional, List, Tuple
 from runai_model_streamer_azure.credentials.credentials import AzureCredentials, get_credentials
 

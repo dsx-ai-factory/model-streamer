@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "posix_io/mount_capabilities/mount_capabilities.h"
 
 #include "posix_io/alignment/alignment.h"   // direct_block_size - what the probe reads at

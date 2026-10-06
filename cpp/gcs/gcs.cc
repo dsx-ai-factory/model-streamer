@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "gcs/gcs.h"
 #include "gcs/client/client.h"
 #include "common/backend_api/object_storage/list_files_impl.h"

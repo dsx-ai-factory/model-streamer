@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Configures the C++ toolchain."""
 
 load("//toolchain:rules.bzl", "get_target_triplet", "runai_crosstool_tools")

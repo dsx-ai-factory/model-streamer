@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // A fake libcuda.so.1, for testing the LOADER without a driver.
 //
 // Everything else about CudaDevice and CudaBackend is testable by filling CudaLib's function pointers

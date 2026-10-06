@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 .PHONY: build build_mock build_azure_test test test_strategy clean
 
 ARCH := $$(uname -m)
