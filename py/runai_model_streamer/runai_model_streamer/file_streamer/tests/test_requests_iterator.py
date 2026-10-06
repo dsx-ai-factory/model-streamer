@@ -593,7 +593,7 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
             5,
         )
         self.assertEqual(requests_iterator.buffer_size, 7)
-        base = requests_iterator.buffer_addresses[0]
+        base = requests_iterator._pool._slots[0].address
 
         files_requests = requests_iterator.next_request()
         self.assertEqual([f.id for f in files_requests.files], [17])
@@ -602,11 +602,13 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         self.assertEqual(files_requests.range_dsts, [base + 10, base + 11, base + 13])
         self.assert_congruent(files_requests)
 
-        # largest_chunk mode is a ring of one, so the single buffer has to come back before the next
-        # request can be built - and the next request then places from that same base.
+        # largest_chunk mode is a ring of one, so the single slot has to come back before the next
+        # request can be built. Owning it means the memory that comes back is NOT the memory that went
+        # away, so the base is read again - the same index, a different address.
         requests_iterator.release(files_requests)
 
         files_requests = requests_iterator.next_request()
+        base = requests_iterator._pool._slots[0].address
         self.assertEqual([f.id for f in files_requests.files], [17, 18])
         # a.txt's remaining 4 bytes at file offset 16, then b.txt's 1 and 2 at file offsets 10 and 11.
         # Crossing into b.txt sends the file offset BACKWARDS (16 -> 10) while the cursor only moves
@@ -629,7 +631,7 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
             [FileChunks.contiguous(17, "a.txt", 10, [1, 2, 3, 4])],
             5,
         )
-        base = requests_iterator.buffer_addresses[0]
+        base = requests_iterator._pool._slots[0].address
 
         files_requests = requests_iterator.next_request()
         self.assertEqual(files_requests.range_dsts, [base, base + 1])
@@ -653,9 +655,9 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         # view. That is the invariant: the two must agree. Deriving the index from range_dsts rather
         # than hardcoding it keeps this test about aliasing, not about where placement chose to put
         # things - test_range_dsts_place_the_request_congruently covers that.
-        base = requests_iterator.buffer_addresses[0]
-        requests_iterator.buffers[0][request.range_dsts[request.flat_index(0, 0)] - base] = 9
-        requests_iterator.buffers[0][request.range_dsts[request.flat_index(1, 0)] - base] = 8
+        base = requests_iterator._pool._slots[0].address
+        requests_iterator._pool._slots[0].memory[request.range_dsts[request.flat_index(0, 0)] - base] = 9
+        requests_iterator._pool._slots[0].memory[request.range_dsts[request.flat_index(1, 0)] - base] = 8
 
         file_id, range_index, view = requests_iterator.get_global_file_and_range(request, 0, 0)
         self.assertEqual((file_id, range_index), (17, 0))
@@ -693,9 +695,8 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         requests_iterator.release(first)
         third = requests_iterator.next_request()
         self.assertEqual(third.buffer_index, first_index)
-        self.assertEqual(third.range_dsts, [requests_iterator.buffer_addresses[first_index] + 18])
+        self.assertEqual(third.range_dsts, [requests_iterator._pool._slots[first_index].address + 18])
 
-    @patch.dict(os.environ, {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
     def test_releasing_twice_is_rejected(self):
         # a double release would put the same buffer in the free list twice, so two live requests would
         # silently share it and overwrite each other's data
@@ -708,60 +709,59 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
             requests_iterator.release(request)
 
     @patch.dict(os.environ, {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "3"})
-    def test_buffers_are_distinct_slices_of_one_allocation(self):
+    def test_buffers_are_distinct_and_do_not_overlap(self):
         requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_cap(
             MemoryCapMode.limited, [FileChunks.contiguous(17, "a.txt", 10, [4, 4, 4])], 12
         )
-        self.assertEqual(len(requests_iterator.buffers), 3)
+        self.assertEqual(len(requests_iterator._pool._slots), 3)
 
-        # A slot is the caller's bytes plus room for the pads that make a direct read possible, so the
-        # pool is bigger than the memory cap asked for. That overshoot is fixed per slot, not
-        # proportional, so it disappears next to a real ring.
+        # A slot is the caller's bytes plus room for the pads that make a direct read possible, so it
+        # is bigger than the memory cap asked for. That overshoot is fixed per slot, not proportional,
+        # so it disappears next to a real ring.
         slot_size = requests_iterator.buffer_size + DIRECT_IO_BLOCK * _max_pads_per_buffer()
-        self.assertEqual(len(requests_iterator.pool), slot_size * 3)
+        for slot in requests_iterator._pool._slots:
+            self.assertEqual(len(slot.memory), slot_size)
 
-        # The base must be block aligned. Without it no range in any slot could be placed congruently,
-        # because a pad can only move an address forward within the block it already sits in.
-        self.assertEqual(requests_iterator.pool.ctypes.data % DIRECT_IO_BLOCK, 0)
         self.assertEqual(
-            requests_iterator.buffer_addresses,
-            [requests_iterator.pool.ctypes.data + slot_size * i for i in range(3)],
+            [slot.address for slot in requests_iterator._pool._slots],
+            [slot.memory.ctypes.data for slot in requests_iterator._pool._slots],
         )
 
-        # writing through one buffer must not disturb another, and each view must alias the pool
-        for index, buffer in enumerate(requests_iterator.buffers):
-            buffer[:] = index
-        for index in range(3):
-            # first and last byte of each slot, rather than the whole pool - the slots are megabytes
-            self.assertEqual(requests_iterator.pool[slot_size * index], index)
-            self.assertEqual(requests_iterator.pool[slot_size * (index + 1) - 1], index)
+        # Writing through one slot must not disturb another. Separate allocations make this nearly
+        # tautological, but it is the property the ring depends on and it held under the old shared
+        # pool too - so it is asserted rather than assumed from the layout.
+        for index, slot in enumerate(requests_iterator._pool._slots):
+            slot.memory[:] = index
+        for index, slot in enumerate(requests_iterator._pool._slots):
+            # first and last byte of each slot, rather than the whole slot - they are megabytes
+            self.assertEqual(slot.memory[0], index)
+            self.assertEqual(slot.memory[-1], index)
 
-    def test_every_slot_base_is_block_aligned_when_the_buffer_size_is(self):
-        """Only WHEN THE BUFFER SIZE IS a multiple of the block, which is why it is spelled out.
+    def test_every_slot_base_is_block_aligned(self):
+        """Unconditional, because _alloc_slot() aligns each slot itself rather than carving them out
+        of one region. The buffer size no longer reaches this: it decides how long a slot is, not
+        where it starts.
 
-        A slot base is the pool base plus a multiple of the slot size, and the slot size carries the
-        caller's buffer size - so an unaligned buffer size leaves every slot after the first off the
-        block. That is harmless: _place() makes each address congruent to its file offset from
-        whatever base it is given. The alignment is a property worth knowing, not a requirement.
+        A convenience, not a requirement - _place() reaches a congruent address from any base.
         """
         requests_iterator = FilesRequestsIteratorWithBuffer(
             buffer_size=4 * 1024 * 1024,
             num_buffers=4,
             files_chunks=[FileChunks.contiguous(0, "a.bin", 0, [1024, 1024])],
         )
-        for address in requests_iterator.buffer_addresses:
-            self.assertEqual(address % DIRECT_IO_BLOCK, 0)
+        for slot in requests_iterator._pool._slots:
+            self.assertEqual(slot.address % DIRECT_IO_BLOCK, 0)
 
     def test_every_slot_is_a_whole_slot(self):
-        # The over-allocation has to cover the base shift AND every slot. A short last slot would be
+        # The over-allocation has to cover the base shift AND the slot itself. A short slot would be
         # found only by a read that happened to land in it.
         requests_iterator = FilesRequestsIteratorWithBuffer(
             buffer_size=4 * 1024 * 1024,
             num_buffers=4,
             files_chunks=[FileChunks.contiguous(0, "a.bin", 0, [1024, 1024])],
         )
-        for buffer in requests_iterator.buffers:
-            self.assertEqual(len(buffer), requests_iterator._slot_size)
+        for slot in requests_iterator._pool._slots:
+            self.assertEqual(len(slot.memory), requests_iterator._slot_size)
 
     def test_end_of_stream_does_not_consume_a_buffer(self):
         requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_cap(

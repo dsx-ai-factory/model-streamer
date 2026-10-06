@@ -248,8 +248,11 @@ class SafetensorsStreamer:
             device: Optional[str] = "cpu",
             is_distributed: bool = False,
             tensor_names: Optional[Collection[str]] = None,
+            owned: bool = True,
         ) -> None:
-        return self.stream_files([path], s3_credentials, device, is_distributed, tensor_names)
+        return self.stream_files(
+            [path], s3_credentials, device, is_distributed, tensor_names, owned
+        )
 
 
     def stream_files(
@@ -259,6 +262,7 @@ class SafetensorsStreamer:
             device: Optional[str] = "cpu",
             is_distributed: bool = False,
             tensor_names: Optional[Collection[str]] = None,
+            owned: bool = True,
         ) -> None:
         # None = no filter (today's behavior). str satisfies Collection[str] structurally, so
         # reject it - otherwise `in` below silently becomes substring matching.
@@ -332,6 +336,7 @@ class SafetensorsStreamer:
             credentials=s3_credentials,
             device=device,
             is_distributed=is_distributed,
+            owned=owned,
         )
         self._log_ring()
 

@@ -147,6 +147,7 @@ class DistributedStreamer:
             credentials: Optional[S3Credentials],
             device: str,
             is_distributed: bool,
+            owned: bool = True,
     ) -> None:
 
         # Cleared before dispatch, so a call that builds no ring - or raises before it does - reports
@@ -159,7 +160,12 @@ class DistributedStreamer:
         self.set_is_distributed(is_distributed, device)
 
         if not self.is_distributed:
-            self.file_streamer.stream_files(file_stream_requests, credentials, device)
+            # Ownership is delivered where the caller's tensor lives. With a device destination the
+            # FileStreamer yields tensor.to(device), a fresh allocation the caller already owns, so the
+            # ring stays ours to reuse. Only a host destination hands its slots over.
+            self.file_streamer.stream_files(
+                file_stream_requests, credentials, device, owned=owned and device == "cpu"
+            )
             built_ring = True
         else:
             self.distributed_streamer.stream_files(file_stream_requests, credentials, device, self.params)
@@ -440,8 +446,14 @@ class _distributedStreamer:
             return
 
         # read files
+        #
+        # owned=False whatever the caller asked for: this ring is internal. prefill() copies each chunk
+        # into the staging buffer and keeps no view, so nobody outside holds host memory and giving a
+        # slot away would only buy a fresh allocation per submission. Ownership on this path is the
+        # per tensor clone out of the staging buffer.
         self.file_streamer.stream_files(
-            self.rank_file_chunks_list, credentials, "cpu", memory_limit=self.rank_memory_limit()
+            self.rank_file_chunks_list, credentials, "cpu",
+            memory_limit=self.rank_memory_limit(), owned=False
         )
         self.reading_from_storage = True
 

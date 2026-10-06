@@ -7,6 +7,7 @@ import numpy as np
 import os
 import humanize
 
+from runai_model_streamer.file_streamer.slot_pool import Slot, SlotPool
 from runai_model_streamer.libstreamer.libstreamer import runai_probe_direct_block_size
 
 import logging
@@ -127,7 +128,7 @@ DIRECT_IO_BLOCK = os.sysconf("SC_PAGESIZE")
 
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
-                 direct_block: int = DIRECT_IO_BLOCK) -> None:
+                 direct_block: int = DIRECT_IO_BLOCK, owned: bool = True) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
@@ -146,33 +147,30 @@ class FilesRequestsIteratorWithBuffer:
             f"= {humanize.naturalsize(buffer_size * num_buffers, binary=True)} for files: "
             f"{[file_chunks.path for file_chunks in files_chunks]}"
         )
-        # ONE allocation sliced into num_buffers views. The pool is fixed at construction and never
-        # grows, so a single contiguous region is simpler for the OS to manage than N separate ones.
-        #
-        # THE BASE IS ALIGNED TO A BLOCK, and each slot carries a little extra room. Both are for
-        # direct reads:
-        #
-        #   A direct read needs the destination address and the file offset to leave the same
-        #   remainder when divided by the block - not merely for the address to be aligned. The file
-        #   offset comes from the file's own layout and cannot be chosen, so the ADDRESS has to be
-        #   moved to match it. That is what the extra room is for: the packing loop below skips a few
-        #   bytes before a range so the two line up.
-        #
-        #   Without this, no part of a region can be read directly, and O_DIRECT would copy every byte
-        #   instead of about 0.1% of it.
-        #
-        # np.empty gives about 16 or 32 bytes of alignment, so the base is moved forward by hand.
-        #
         self._slot_size = buffer_size + self.direct_block * _max_pads_per_buffer()
-        self._raw = np.empty(self._slot_size * num_buffers + DIRECT_IO_BLOCK, dtype=np.uint8)
-        shift = (-self._raw.ctypes.data) % DIRECT_IO_BLOCK
-        self.pool = self._raw[shift: shift + self._slot_size * num_buffers]
-        self.buffers = [self.pool[i * self._slot_size: (i + 1) * self._slot_size] for i in range(num_buffers)]
-        # Destinations are absolute addresses (that is the C contract), and this class packs them
-        # itself, so it can recover a range's slice by subtracting its buffer's base. That is local
-        # knowledge of its own allocation, not an assumption the range API makes.
-        self.buffer_addresses = [buffer.ctypes.data for buffer in self.buffers]
-        self._free_buffers = deque(range(num_buffers))
+
+        # `owned` is WHO OWNS A YIELDED TENSOR'S MEMORY, and the pool is where that is decided - see
+        # SlotPool. ONE ALLOCATION PER SLOT, so a slot that has been given away can die on its own: a
+        # view into a shared pool would keep the whole pool alive for as long as the caller holds any
+        # one slot.
+        self._pool = SlotPool(num_buffers, self._alloc_slot, owned)
+
+    def _alloc_slot(self) -> Slot:
+        """A fresh slot, with room for the pads a direct read needs.
+
+        THE PADS ARE THE POINT. A direct read needs its destination address, its file offset and its
+        length each to be a multiple of the block (cpp/posix_io/alignment). The file offset is the
+        file's to choose, so _place() moves the ADDRESS to match it - and this extra room is what it
+        moves within. Without it no range could be read directly and O_DIRECT would copy every byte
+        instead of about 0.1% of it.
+
+        The base is aligned too, but only as a convenience: _place() reaches a congruent address from
+        any base, as test_every_slot_base_is_block_aligned records.
+        """
+        raw = np.empty(self._slot_size + DIRECT_IO_BLOCK, dtype=np.uint8)
+        shift = (-raw.ctypes.data) % DIRECT_IO_BLOCK
+        array = raw[shift: shift + self._slot_size]
+        return Slot(array, array.ctypes.data)
 
     def _place(self, request: FilesRequest, base: int, aligned: bool) -> Optional[List[int]]:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.
@@ -200,14 +198,14 @@ class FilesRequestsIteratorWithBuffer:
         return dsts
 
     def has_free_buffer(self) -> bool:
-        return len(self._free_buffers) > 0
+        return self._pool.has_free()
 
     def release(self, request: FilesRequest) -> None:
-        """Return a drained request's buffer to the pool. The caller must not touch any view handed
-        out for that request afterwards - the next request will overwrite it."""
+        """Hand a drained request's slot back to the pool, which decides whether it survives."""
         if request.buffer_index is None:
             raise ValueError("request has no buffer to release (released twice?)")
-        self._free_buffers.append(request.buffer_index)
+
+        self._pool.release(request.buffer_index)
         request.buffer_index = None
 
     def get_global_file_and_range(
@@ -216,14 +214,14 @@ class FilesRequestsIteratorWithBuffer:
         file_id, global_range_index = self.files_requests_iterator.get_global_file_and_range(
             request, local_file_index, local_range_index
         )
-        buffer = self.buffers[request.buffer_index]
+        slot = self._pool.slot(request.buffer_index)
         start = (request.range_dsts[request.flat_index(local_file_index, local_range_index)]
-                 - self.buffer_addresses[request.buffer_index])
+                 - slot.address)
         size = request.files[local_file_index].sizes[local_range_index]
-        return file_id, global_range_index, buffer[start: start + size]
+        return file_id, global_range_index, slot.memory[start: start + size]
 
     def next_request(self) -> Optional[FilesRequest]:
-        if not self._free_buffers:
+        if not self._pool.has_free():
             raise RuntimeError("no free ring buffer - release a drained request before building another")
 
         request = self.files_requests_iterator.next_request()
@@ -231,7 +229,7 @@ class FilesRequestsIteratorWithBuffer:
             return None
 
         # Take the buffer only once there is a request to put in it, so end of stream does not consume one.
-        request.buffer_index = self._free_buffers.popleft()
+        request.buffer_index = self._pool.take()
 
         # Place this request's ranges in its buffer, one absolute address per range. Each range carries
         # its own destination, so placement is free - it is just a running cursor.
@@ -240,7 +238,7 @@ class FilesRequestsIteratorWithBuffer:
         # remainder when divided by the block. That is what lets the reader use a direct read. Skipping
         # a few bytes is all it takes, and once the first range of a file lines up, the ranges after it
         # follow by themselves as long as they are laid out one after another in the file.
-        base = self.buffer_addresses[request.buffer_index]
+        base = self._pool.slot(request.buffer_index).address
         dsts = self._place(request, base, aligned=True)
 
         if dsts is None:
@@ -259,15 +257,19 @@ class FilesRequestsIteratorWithBuffer:
         files_chunks: List[FileChunks],
         user_memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
+        owned: bool = True,
     ) -> FilesRequestsIteratorWithBuffer:
         buffer_size, num_buffers = _ring_sizing(memory_mode, files_chunks, user_memory_limit)
-        return FilesRequestsIteratorWithBuffer(buffer_size, num_buffers, files_chunks, direct_block)
+        return FilesRequestsIteratorWithBuffer(
+            buffer_size, num_buffers, files_chunks, direct_block, owned
+        )
 
     @staticmethod
     def with_memory_mode(
         files_chunks: List[FileChunks],
         memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
+        owned: bool = True,
     ) -> FilesRequestsIteratorWithBuffer:
         """memory_limit, when given, overrides the environment.
 
@@ -277,7 +279,7 @@ class FilesRequestsIteratorWithBuffer:
             configured = os.getenv(RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME)
             memory_limit = int(configured if configured is not None else DEFAULT_MEMORY_LIMIT_STRING)
         return FilesRequestsIteratorWithBuffer.with_memory_cap(
-            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block
+            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block, owned
         )
 
 class FilesRequestsIterator:

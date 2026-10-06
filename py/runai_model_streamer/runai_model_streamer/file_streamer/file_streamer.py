@@ -154,6 +154,7 @@ class FileStreamer:
             credentials: Optional[S3Credentials] = None,
             device: Optional[str] = "cpu",
             memory_limit: Optional[int] = None,
+            owned: bool = True,
 ) -> None:
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
@@ -203,7 +204,7 @@ class FileStreamer:
                         else runai_probe_direct_block_size(self.streamer, paths))
 
         self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
-            file_stream_requests, memory_limit, direct_block
+            file_stream_requests, memory_limit, direct_block, owned
         )
         self.live_requests = {}
         self.outstanding = 0
