@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <stdio.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <string>
@@ -161,7 +162,8 @@ TEST(Prefix, TID)
         LOG(ERROR) << random::string();
     }
 
-    EXPECT_TRUE(log.find(std::to_string(::gettid())) != std::string::npos);
+    // Use the kernel syscall so this test also builds with glibc older than 2.30.
+    EXPECT_TRUE(log.find(std::to_string(::syscall(SYS_gettid))) != std::string::npos);
 }
 
 TEST(LOG, Sanity)
