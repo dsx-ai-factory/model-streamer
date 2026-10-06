@@ -65,7 +65,7 @@ COMPONENT ?= streamer
 ARCH ?= $(shell uname -m)
 CI_PACKAGE_DIR = runai_model_streamer$(if $(filter-out streamer,$(COMPONENT)),_$(COMPONENT))
 
-.PHONY: ci-build ci-build-cpp ci-build-python ci-install ci-test-cpp ci-test-python ci-test-integration ci-check
+.PHONY: ci-build ci-build-cpp ci-build-python ci-install ci-test-cpp ci-test-python ci-test-integration
 
 ci-build:
 	$(MAKE) ci-build-cpp
@@ -93,8 +93,3 @@ ci-test-integration: ci-install
 	$(MAKE) -C tests all
 	library="$$(python3 -c 'from runai_model_streamer.libstreamer import DEFAULT_STREAMER_LIBRARY; print(DEFAULT_STREAMER_LIBRARY)')" && \
 		$(MAKE) test_strategies PYTHON_STRATEGY_TEST=test-unit-real-installed STREAMER_REAL_LIB="$$library"
-
-ci-check:
-	test "$(CI_BUILD)" = success
-	test "$(CI_TESTS)" = success
-	test "$(CI_PACKAGES)" = success

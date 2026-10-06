@@ -1,0 +1,127 @@
+name: Build component
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: Target architecture (x86_64 or aarch64).
+        type: string
+        required: true
+      component:
+        description: Component to build (streamer, s3, gcs, or azure).
+        type: string
+        required: true
+      package_version:
+        description: Version embedded in the wheel.
+        type: string
+        required: true
+      devcontainer_image:
+        description: Image tag to run, either published or loaded from the artifact.
+        type: string
+        required: true
+      devcontainer_artifact:
+        description: Optional image artifact from this run; empty to use the registry.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build component
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_VERSION: ${{ inputs.package_version }}
+      CI_IMAGE: ${{ inputs.devcontainer_image }}
+      ARCH: ${{ inputs.arch }}
+      COMPONENT: ${{ inputs.component }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Log in to GitHub Container Registry
+      if: inputs.devcontainer_artifact == ''
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Download PR devcontainer
+      if: inputs.devcontainer_artifact != ''
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ inputs.devcontainer_artifact }}
+        path: ${{ runner.temp }}/devcontainer
+
+    - name: Load PR devcontainer
+      if: inputs.devcontainer_artifact != ''
+      run: docker load --input "$RUNNER_TEMP/devcontainer/devcontainer.tar"
+
+    - name: Pull published devcontainer
+      if: inputs.devcontainer_artifact == ''
+      run: docker pull "$CI_IMAGE"
+
+    - name: Start build container
+      id: container
+      run: |
+        docker run --detach --rm --init --pull never \
+          --name ci-build \
+          --security-opt seccomp=unconfined \
+          --volume "$GITHUB_WORKSPACE:/workspace" \
+          --workdir /workspace \
+          --env PACKAGE_VERSION --env ARCH --env COMPONENT \
+          --entrypoint sleep \
+          "$CI_IMAGE" infinity
+
+    - name: Build C++
+      run: docker exec ci-build make ci-build-cpp
+
+    - name: Build Python package
+      run: docker exec ci-build make ci-build-python
+
+    - name: Test C++
+      if: inputs.arch == 'x86_64'
+      run: docker exec ci-build make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
+
+    - name: Test Python
+      if: inputs.arch == 'x86_64' && inputs.component == 'streamer'
+      run: docker exec ci-build make ci-test-python
+
+    - name: Collect C++ library
+      run: |
+        artifact="$RUNNER_TEMP/cpp-artifact"
+        mkdir -p "$artifact"/{lib,include}
+        # Resolve Bazel's symlinks while the container and its output tree exist.
+        docker cp --follow-link \
+          "ci-build:/workspace/cpp/bazel-bin/$COMPONENT/libstreamer${COMPONENT#streamer}.so" \
+          "$artifact/lib/"
+        cp -R cpp/streamer/api/streamer "$artifact/include/"
+        cp LICENSE "$artifact/"
+
+    - name: Stop build container
+      if: ${{ always() && steps.container.outcome == 'success' }}
+      run: docker stop ci-build
+
+    - name: Upload C++ library
+      uses: actions/upload-artifact@v6
+      with:
+        name: cpp-${{ inputs.component }}-${{ inputs.arch }}
+        path: ${{ runner.temp }}/cpp-artifact/
+        if-no-files-found: error
+
+    - name: Upload architecture packages
+      uses: actions/upload-artifact@v6
+      with:
+        name: packages-${{ inputs.component }}-${{ inputs.arch }}
+        # Keep package/dist paths inside each artifact for the existing install targets.
+        path: py/*/dist/*.whl
+        if-no-files-found: error
