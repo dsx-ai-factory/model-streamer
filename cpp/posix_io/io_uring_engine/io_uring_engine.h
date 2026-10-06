@@ -3,7 +3,9 @@
 #include <liburing.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "posix_io/io_engine/io_engine.h"
 
@@ -25,9 +27,11 @@ namespace runai::llm::streamer::posix_io
 //                         the only way the window could exceed the queue (5.7). Without it the kernel
 //                         rounds up or refuses.
 //   fixed files           ~64 us/s saved at our request rate, against real machinery (5.4)
-//   registered buffers    destinations belong to the caller, and the Python ring frees them out from
-//                         under us (5.10)
 //   cancellation          teardown is quiesce-then-report in the worker; see io_engine.h
+//
+// REGISTERED BUFFERS ARE PRESENT, but only for memory a caller offers with a Registration - which in
+// practice means a staging pool's slab. Caller destinations are still never registered: they belong to
+// the caller, and the Python ring frees them out from under us (5.10).
 class IoUringEngine : public IoEngine
 {
  public:
@@ -45,7 +49,10 @@ class IoUringEngine : public IoEngine
     // window can never exceed the queue.
     unsigned depth() const override;
 
-    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize, char * buffer) override;
+    using IoEngine::stage;   // keeps the no-registration overload visible through this type
+
+    common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
+                               char * buffer, Registration registration) override;
     common::ResponseCode flush(unsigned & out_issued) override;
     common::ResponseCode wait_for_completions(Completion * out, unsigned max, unsigned & out_count,
                                       WaitMode mode, unsigned timeout_ms = 0) override;
@@ -55,7 +62,51 @@ class IoUringEngine : public IoEngine
     // inline, and that is a claim worth checking rather than assuming.
     SubmitStats submit_stats() const override;
 
+    // Regions this ring has registered. Diagnostics, and the only way a test can tell a fixed read
+    // from an ordinary one - both return the same bytes, so a test without this would pass whether or
+    // not the path under test ran.
+    unsigned registered_regions() const;
+
+    // Regions the kernel REFUSED. Counted because a refusal costs speed and nothing else, so nothing
+    // else would ever show it: the reads still succeed, and a run that quietly registered none would
+    // look exactly like a run that registered all of them.
+    unsigned refused_regions() const;
+
+    // Reads served the ordinary way because their region's id is past the table. Counted per read and
+    // not per region, unlike the two above: a region too large to hold has no slot to remember it in.
+    uint64_t over_table_reads() const;
+
  private:
+    // The buffer index to read through, or -1 for an ordinary read. Registers the region on first
+    // sight, and remembers a refusal so the kernel is asked once and not once per read.
+    int registered_index(const Registration & registration);
+
+    // How many regions the table holds. A SPARSE table is created once at this size and slots are
+    // filled in as slabs appear, because re-registering the whole set on every growth costs time
+    // proportional to the WHOLE pool, where a single-slot update is a fixed and much smaller cost.
+    // See design_io_uring_registration.md.
+    //
+    // A staging pool cuts slabs of tens of MiB, so this is far more than any pool reaches. An id past
+    // it reads the ordinary way rather than failing.
+    static constexpr unsigned MaxRegisteredRegions = 1024;
+
+    // What the kernel has been told about each region, indexed by Registration::id. Grown on demand,
+    // so a run that registers nothing carries nothing.
+    enum class RegionState : unsigned char { Unknown, Registered, Refused };
+    std::vector<RegionState> _regions;
+
+    // Reads whose region id is past the table. Not in _regions, which is indexed by that same id and
+    // so cannot hold them.
+    uint64_t _over_table_reads = 0;
+
+    // The sparse table exists. Created on the first region offered, not at construction, so a load
+    // that never reads into registered memory makes no registration syscall at all.
+    bool _table = false;
+
+    // This ring may register. Read from the probe once: false means never ask, because the answer
+    // cannot change while we run and a refused registration costs a syscall per attempt.
+    bool _fixed_buffers = false;
+
     // Prepared with io_uring_get_sqe() and not yet handed to io_uring_submit(). The kernel has not
     // seen these; only flush() makes them real.
     unsigned _staged = 0;

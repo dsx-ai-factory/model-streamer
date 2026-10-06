@@ -1,5 +1,5 @@
 ARCH := $(shell uname -m)
-PLATFORM := manylinux2014_${ARCH}
+PLATFORM := manylinux_2_30_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 STREAMER_MOCK_LIB = ../../cpp/bazel-bin/mock/libstreamer-mock.so
@@ -13,7 +13,7 @@ STREAMER_REAL_LIB = ../../cpp/bazel-bin/streamer/libstreamer.so
 # fails at once, which looks like a product fault and is not one.
 FS_STRATEGY ?= sync_buffered
 
-.PHONY: install_dev_dep build mock real test test-unit test-unit-real test-dist clean
+.PHONY: install_dev_dep build mock real test test-unit test-unit-real test-unit-real-installed test-dist clean
 
 install_dev_dep:
 	python3 -m pip download torch --index-url https://download.pytorch.org/whl/cpu --no-deps --dest ./dst && \
@@ -45,6 +45,10 @@ test-unit: mock install_dev_dep
 # reported. A bug where zero-sized ranges on a missing file returned Success was invisible to the
 # whole suite until these tests ran against the real library.
 test-unit-real: real install_dev_dep
+
+# CI supplies STREAMER_REAL_LIB from its installed wheel and has already installed
+# development dependencies via ci-install. Run the identical tests without rebuilding.
+test-unit-real test-unit-real-installed:
 	STREAMER_LIBRARY=$(STREAMER_REAL_LIB) RUNAI_STREAMER_FS_STRATEGY=$(FS_STRATEGY) \
 		python3 -m unittest discover -b runai_model_streamer
 

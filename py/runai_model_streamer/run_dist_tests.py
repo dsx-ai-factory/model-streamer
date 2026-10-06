@@ -13,11 +13,12 @@ def run_tests():
     
     # Run the discovered tests in the default (alphabetical) order
     runner = unittest.TextTestRunner()
-    runner.run(suite)
+    result = runner.run(suite)
 
     # 3. GLOBAL TEARDOWN: Destroy the process group ONCE
     dist.barrier()
     dist.destroy_process_group()
+    return 0 if result.wasSuccessful() else 1
 
 if __name__ == '__main__':
-    run_tests()
+    raise SystemExit(run_tests())

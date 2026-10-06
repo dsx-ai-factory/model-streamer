@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -14,7 +15,9 @@
 #include <vector>
 
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/raw_uring/raw_uring.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::posix_io
@@ -47,6 +50,15 @@ bool ring_works()
     return true;
 }
 
+// WHERE THE ENGINE IS DECLARED, in every test that reads: AFTER the buffers it reads into.
+//
+// Locals are destroyed in reverse, so that order tears the ring down before any destination is freed.
+// The other way round, a test returning early from a failed assertion frees memory the kernel may
+// still be writing into - ~IoUringEngine does not wait for what is in flight, it says so itself.
+//
+// Production has the same order: AsyncIoWorker declares its engine after the staging pool it reads
+// into, for exactly this reason.
+
 // Skipping is silent, and on a host that is supposed to have io_uring a silent skip is
 // indistinguishable from a pass. RUNAI_STREAMER_REQUIRE_IO_URING says "io_uring works here", turning
 // the skip into a failure. CI sets it, through BAZEL_TEST_FLAGS (.github/workflows/on-pr.yaml).
@@ -75,6 +87,10 @@ AsyncIoConfig config_with(unsigned depth)
     AsyncIoConfig config;
     config.depth = depth;
     config.chunk_bytesize = 1 << 20;
+
+    // On, because the registration tests below are the reason this file exists in its current form.
+    // The mount policy is tested where it is decided, in the router - not here.
+    config.register_buffers = true;
     return config;
 }
 
@@ -169,9 +185,11 @@ TEST(IoUringEngine, Reads_A_File)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(7, fixture.ref(), 8192, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;
@@ -186,6 +204,333 @@ TEST(IoUringEngine, Reads_A_File)
     EXPECT_EQ(buffer, fixture.expected_at(8192, buffer.size()));
 }
 
+// The same read, through a REGISTERED buffer. Same bytes, or the optimisation is worse than useless.
+//
+// The registration is a plain page-aligned allocation rather than a staging pool's slab: what the
+// engine needs is a region and an id, and it has no opinion about where they came from.
+//
+// Skipped where the kernel will not register, asked of the kernel rather than of IoUringProbe - a probe
+// that wrongly said no would otherwise skip the only test that exercises this path.
+TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
+{
+    SKIP_WITHOUT_RING();
+
+    Fixture fixture(64 << 10);
+
+    // One region, several reads out of it at different offsets - the shape a slab of buffers has.
+    constexpr size_t RegionBytes = 64 << 10;
+    void * region = nullptr;
+    ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
+    std::memset(region, 0, RegionBytes);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
+
+    Registration registration;
+    registration.base = region;
+    registration.bytesize = RegionBytes;
+    registration.id = 0;
+
+    constexpr size_t Read = 4096;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        char * const into = static_cast<char *>(region) + static_cast<size_t>(i) * Read;
+
+        ASSERT_EQ(engine.stage(100 + i, fixture.ref(), i * Read, Read, into, registration),
+                  common::ResponseCode::Success);
+    }
+
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    ASSERT_EQ(issued, 3u);
+
+    // THE PATH UNDER TEST ACTUALLY RAN. A fixed read and an ordinary one return identical bytes, so
+    // without this the test would pass on a host that registered nothing.
+    EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer() ? 1u : 0u)
+        << "the engine disagreed with the kernel about whether this region could be registered";
+
+    EXPECT_EQ(engine.over_table_reads(), 0u)
+        << "a region the table holds must not be counted as one past it";
+
+    const auto completions = reap(engine, 3);
+    ASSERT_EQ(completions.size(), 3u);
+
+    for (const auto & completion : completions)
+    {
+        ASSERT_FALSE(completion.failed())
+            << "a registered read failed with " << completion.res
+            << " - the engine must fall back to an ordinary read rather than fail one";
+        EXPECT_EQ(completion.bytes_transferred(), Read);
+    }
+
+    // The bytes, which is the whole point: a wrong buffer index reads into memory that is not ours.
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        const char * const into = static_cast<const char *>(region) + static_cast<size_t>(i) * Read;
+        const auto expected = fixture.expected_at(i * Read, Read);
+
+        EXPECT_EQ(std::vector<char>(into, into + Read), expected) << "read " << i << " holds wrong bytes";
+    }
+}
+
+// A pool grows WHILE READS ARE IN FLIGHT - that is the normal case, since it grows on demand under
+// load. So a region offered then must still register: if the kernel refuses a live ring, the engine
+// would mark that slab refused forever and never register it again.
+TEST(IoUringEngine, Registers_A_Region_While_Reads_Are_In_Flight)
+{
+    SKIP_WITHOUT_RING();
+    if (!raw_can_register_buffer())
+    {
+        GTEST_SKIP() << "this kernel registers nothing, so there is no registration to time";
+    }
+
+    Fixture fixture(64 << 10);
+
+    std::vector<char> plain(4096);
+
+    void * region = nullptr;
+    ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
+    std::memset(region, 0, 8192);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
+
+    // One ordinary read, issued and deliberately NOT reaped: the ring is live from here.
+    ASSERT_EQ(engine.stage(1, fixture.ref(), 0, plain.size(), plain.data()), common::ResponseCode::Success);
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    ASSERT_EQ(issued, 1u);
+
+    Registration registration;
+    registration.base = region;
+    registration.bytesize = 8192;
+    registration.id = 0;
+
+    ASSERT_EQ(engine.stage(2, fixture.ref(), 0, 4096, static_cast<char *>(region), registration),
+              common::ResponseCode::Success);
+
+    EXPECT_EQ(engine.registered_regions(), 1u)
+        << "a region offered while the ring was live was not registered";
+
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+
+    const auto completions = reap(engine, 2);
+    ASSERT_EQ(completions.size(), 2u);
+    for (const auto & completion : completions)
+    {
+        EXPECT_FALSE(completion.failed()) << "res " << completion.res;
+    }
+}
+
+// The same, with the ring FULL rather than holding one read. Registration happens exactly when the
+// staging pool grows, and a pool grows under load - so if a busy ring refuses registration, it refuses
+// it in the only conditions that ever ask.
+TEST(IoUringEngine, Registers_A_Region_With_A_Full_Ring)
+{
+    SKIP_WITHOUT_RING();
+    if (!raw_can_register_buffer())
+    {
+        GTEST_SKIP() << "this kernel registers nothing";
+    }
+
+    constexpr unsigned Depth = 32;
+    Fixture fixture(1 << 20);
+
+    std::vector<std::vector<char>> plain(Depth, std::vector<char>(4096));
+
+    void * region = nullptr;
+    ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
+    std::memset(region, 0, 8192);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(Depth));
+
+    for (unsigned i = 0; i < Depth; ++i)
+    {
+        ASSERT_EQ(engine.stage(i, fixture.ref(), i * 4096, 4096, plain[i].data()),
+                  common::ResponseCode::Success);
+    }
+
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    ASSERT_EQ(issued, Depth) << "the ring must be full for this test to mean anything";
+
+    // Not reaped: every one of those is still in flight.
+    Registration registration;
+    registration.base = region;
+    registration.bytesize = 8192;
+    registration.id = 0;
+
+    ASSERT_EQ(engine.stage(1000, fixture.ref(), 0, 4096, static_cast<char *>(region), registration),
+              common::ResponseCode::Success);
+
+    EXPECT_EQ(engine.registered_regions(), 1u)
+        << "a full ring refused registration - the lazy-register-on-growth design would then pay a"
+           " failed syscall on every read of that slab";
+
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+
+    const auto completions = reap(engine, Depth + 1);
+    EXPECT_EQ(completions.size(), Depth + 1);
+}
+
+// BEST EFFORT, against a real kernel refusal rather than an argument.
+//
+// RLIMIT_MEMLOCK is the refusal production will actually meet - io_uring charges registration against
+// it and CUDA pinning does not, so a host with a small limit registers nothing while the staging pool
+// still allocates happily. The read must still be served, with the right bytes.
+//
+// The limit is lowered and restored inside this test: gtest runs every test in one process, so leaving
+// it lowered would silently disable registration for whatever ran next.
+TEST(IoUringEngine, A_Kernel_Refusal_Still_Reads)
+{
+    SKIP_WITHOUT_RING();
+
+    struct rlimit original;
+    ASSERT_EQ(::getrlimit(RLIMIT_MEMLOCK, &original), 0);
+
+    struct rlimit tiny = original;
+    tiny.rlim_cur = 4096;   // far under the region below
+    if (::setrlimit(RLIMIT_MEMLOCK, &tiny) != 0)
+    {
+        GTEST_SKIP() << "cannot lower RLIMIT_MEMLOCK here, so a refusal cannot be provoked";
+    }
+
+    // Every ASSERT_* below returns from the test, and the engine constructor can throw. A limit left
+    // lowered would silently disable registration for every test that ran after this one.
+    utils::ScopeGuard restore([&original]()
+    {
+        EXPECT_EQ(::setrlimit(RLIMIT_MEMLOCK, &original), 0) << "the limit must go back for later tests";
+    });
+
+    // Before 5.12 the ring's own memory is charged to memlock too, so the engine below would throw
+    // rather than reach the registration this test is about.
+    if (!ring_works())
+    {
+        GTEST_SKIP() << "no ring can be created under the lowered limit, so the engine cannot be built";
+    }
+
+    constexpr size_t RegionBytes = 16 << 20;   // way past the limit just set
+
+    // A process holding CAP_IPC_LOCK is not charged for registration, so the lowered limit refuses
+    // nothing and the expectation below would be wrong rather than the engine.
+    if (raw_can_register_buffer(RegionBytes))
+    {
+        GTEST_SKIP() << "registration is not charged to RLIMIT_MEMLOCK here (CAP_IPC_LOCK?)";
+    }
+
+    {
+        Fixture fixture(64 << 10);
+
+        void * region = nullptr;
+        ASSERT_EQ(::posix_memalign(&region, 4096, RegionBytes), 0);
+        utils::ScopeGuard free_region([&region]() { ::free(region); });
+        std::memset(region, 0, 4096);
+
+        // After the buffers, so the ring goes first - see the note on declaration order above.
+        IoUringEngine engine(config_with(8));
+
+        Registration registration;
+        registration.base = region;
+        registration.bytesize = RegionBytes;
+        registration.id = 0;
+
+        ASSERT_EQ(engine.stage(31, fixture.ref(), 0, 4096, static_cast<char *>(region), registration),
+                  common::ResponseCode::Success)
+            << "a refused registration must not fail the staging";
+
+        unsigned issued = 0;
+        ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+
+        const auto completions = reap(engine, 1);
+        ASSERT_EQ(completions.size(), 1u);
+        EXPECT_FALSE(completions[0].failed())
+            << "res " << completions[0].res << " - a refused registration must not fail the read";
+
+        const auto expected = fixture.expected_at(0, 4096);
+        EXPECT_EQ(std::vector<char>(static_cast<char *>(region), static_cast<char *>(region) + 4096),
+                  expected)
+            << "the fallback read delivered the wrong bytes";
+
+        EXPECT_EQ(engine.registered_regions(), 0u) << "the kernel refused, so nothing is registered";
+    }
+}
+
+// A buffer OUTSIDE the region it was offered with is read the ordinary way, not failed.
+//
+// The kernel answers EFAULT for a fixed read whose buffer is not inside its registered region, so
+// passing one through would turn a caller's bookkeeping slip into a failed read - which io_engine.h
+// promises registration can never do.
+TEST(IoUringEngine, A_Buffer_Outside_Its_Region_Still_Reads)
+{
+    SKIP_WITHOUT_RING();
+
+    Fixture fixture(64 << 10);
+
+    void * region = nullptr;
+    ASSERT_EQ(::posix_memalign(&region, 4096, 8192), 0);
+    utils::ScopeGuard free_region([&region]() { ::free(region); });
+
+    std::vector<char> elsewhere(4096);   // not in the region at all
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
+
+    Registration registration;
+    registration.base = region;
+    registration.bytesize = 8192;
+    registration.id = 0;
+
+    ASSERT_EQ(engine.stage(21, fixture.ref(), 0, elsewhere.size(), elsewhere.data(), registration),
+              common::ResponseCode::Success);
+
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+
+    const auto completions = reap(engine, 1);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_FALSE(completions[0].failed())
+        << "res " << completions[0].res << " - a mismatched region must fall back, not fail";
+    EXPECT_EQ(elsewhere, fixture.expected_at(0, elsewhere.size()));
+}
+
+// An id past the table is served the ordinary way. Registration is an optimisation, so running out of
+// slots must cost speed and never a read.
+TEST(IoUringEngine, An_Unregisterable_Region_Still_Reads)
+{
+    SKIP_WITHOUT_RING();
+
+    Fixture fixture(64 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
+
+    Registration registration;
+    registration.base = buffer.data();
+    registration.bytesize = buffer.size();
+    registration.id = 1u << 20;   // far past any table this engine builds
+
+    ASSERT_EQ(engine.stage(11, fixture.ref(), 0, buffer.size(), buffer.data(), registration),
+              common::ResponseCode::Success);
+
+    unsigned issued = 0;
+    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+
+    const auto completions = reap(engine, 1);
+    ASSERT_EQ(completions.size(), 1u);
+    EXPECT_FALSE(completions[0].failed());
+    EXPECT_EQ(buffer, fixture.expected_at(0, buffer.size()));
+    EXPECT_EQ(engine.registered_regions(), 0u) << "an id past the table must register nothing";
+    EXPECT_EQ(engine.refused_regions(), 0u)
+        << "an id the table cannot hold is not a refusal by the kernel, and must not be counted as one";
+    EXPECT_EQ(engine.over_table_reads(), 1u)
+        << "it must still be counted somewhere, or a pool that outgrew the table reads slower in silence";
+}
+
 // Ids are echoed, not positional. Completions arrive in whatever order the kernel finishes them, so
 // routing depends entirely on user_data surviving the round trip.
 TEST(IoUringEngine, Ids_Survive_The_Round_Trip)
@@ -193,12 +538,14 @@ TEST(IoUringEngine, Ids_Survive_The_Round_Trip)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(256 << 10);
-    IoUringEngine engine(config_with(16));
 
     // Ids well outside [0, depth) - they are opaque tokens, not slot indices, and the worker's are
     // monotonic and never reused.
     const std::vector<RequestId> ids{ 1000, 999999, 4294967296ULL };
     std::vector<std::vector<char>> buffers(ids.size(), std::vector<char>(4096));
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(16));
 
     for (size_t i = 0; i < ids.size(); ++i)
     {
@@ -231,9 +578,11 @@ TEST(IoUringEngine, Short_Read_At_Eof_Is_Not_An_Error)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(4096);
+    std::vector<char> buffer(8192);   // asking for twice the file
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(8192);   // asking for twice the file
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;
@@ -252,10 +601,11 @@ TEST(IoUringEngine, Bad_Fd_Fails_Only_Its_Own_Request)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(16 << 10);
-    IoUringEngine engine(config_with(8));
-
     std::vector<char> good(4096);
     std::vector<char> bad(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, good.size(), good.data()), common::ResponseCode::Success);
     ASSERT_EQ(engine.stage(2, FileRef{ -1, false }, 0, bad.size(), bad.data()), common::ResponseCode::Success)
@@ -290,9 +640,11 @@ TEST(IoUringEngine, Staging_Does_Not_Issue)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(16 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     // Nothing submitted yet, so nothing can complete.
@@ -345,10 +697,12 @@ TEST(IoUringEngine, Fills_The_Window)
     constexpr size_t Bytes = 4096;
 
     Fixture fixture(Depth * Bytes);
+    std::vector<std::vector<char>> buffers(Depth, std::vector<char>(Bytes));
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(Depth));
     ASSERT_EQ(engine.depth(), Depth);
 
-    std::vector<std::vector<char>> buffers(Depth, std::vector<char>(Bytes));
     for (unsigned i = 0; i < Depth; ++i)
     {
         ASSERT_EQ(engine.stage(i + 1, fixture.ref(), i * Bytes, Bytes, buffers[i].data()),
@@ -499,9 +853,11 @@ TEST(IoUringEngine, Direct_Read_Returns_The_Right_Bytes)
     DirectFixture fixture(Block * 8);
     SKIP_WITHOUT_O_DIRECT(fixture);
 
-    IoUringEngine engine(config_with(8));
     AlignedBuffer buffer(Block * 2);
     ASSERT_NE(buffer.get(), nullptr);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
+    IoUringEngine engine(config_with(8));
 
     // Offset, length and address are all multiples of the block size.
     const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
@@ -573,9 +929,11 @@ TEST(IoUringEngine, Submit_Time_Is_Measured)
     SKIP_WITHOUT_RING();
 
     Fixture fixture(64 << 10);
+    std::vector<char> buffer(4096);
+
+    // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
-    std::vector<char> buffer(4096);
     ASSERT_EQ(engine.stage(1, fixture.ref(), 0, buffer.size(), buffer.data()), common::ResponseCode::Success);
 
     unsigned issued = 0;

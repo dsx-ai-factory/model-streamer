@@ -2,61 +2,168 @@ name: RunAI Model Streamer Library - Pull Request
 on:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  lifecycle-install-tests:
-    name: Test, Build & Push
+  setup:
+    name: Setup
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
+    outputs:
+      package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
+      devcontainer_changed: ${{ steps.devcontainer_changes.outputs.any_modified }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+
+    - name: Detect devcontainer changes
+      id: devcontainer_changes
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96
+      with:
+        files: |
+          .devcontainer/**
+          .github/workflows/devcontainer.yml
+        skip_initial_fetch: true
+        output_renamed_files_as_deleted_and_added: true
+
+    - name: Set PACKAGE_VERSION
+      id: version
+      run: |
+        set -euo pipefail
+        if [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::GITHUB_SHA must be a full 40-character commit SHA" >&2
+          exit 1
+        fi
+        printf 'PACKAGE_VERSION=0.0.0+dev.%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+  devcontainer:
+    name: Prepare devcontainer
+    needs: setup
+    if: needs.setup.outputs.devcontainer_changed == 'true'
+    uses: ./.github/workflows/devcontainer.yml
+    with:
+      publish: false
+
+  build_x86:
+    name: Build & tests (${{ matrix.component }}, x86_64)
+    needs: [setup, devcontainer]
+    # The optional image job is skipped when the published image can be reused.
+    if: >-
+      ${{ !cancelled() && needs.setup.result == 'success' &&
+          (needs.setup.outputs.devcontainer_changed != 'true' || needs.devcontainer.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, s3, gcs, azure]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: x86_64
+      component: ${{ matrix.component }}
+      package_version: ${{ needs.setup.outputs.package_version }}
+      devcontainer_image: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
+      devcontainer_artifact: ${{ needs.devcontainer.outputs.artifact }}
+
+  build_arm:
+    name: Build (${{ matrix.component }}, aarch64)
+    needs: [setup, devcontainer]
+    # The optional image job is skipped when the published image can be reused.
+    if: >-
+      ${{ !cancelled() && needs.setup.result == 'success' &&
+          (needs.setup.outputs.devcontainer_changed != 'true' || needs.devcontainer.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [streamer, s3, gcs, azure]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: aarch64
+      component: ${{ matrix.component }}
+      package_version: ${{ needs.setup.outputs.package_version }}
+      devcontainer_image: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
+      devcontainer_artifact: ${{ needs.devcontainer.outputs.artifact }}
+
+  tests:
+    name: Integration & strategies
+    needs: [setup, devcontainer, build_x86]
+    if: ${{ !cancelled() && needs.build_x86.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
+      CI_IMAGE: ${{ needs.devcontainer.outputs.image || format('ghcr.io/{0}/devcontainer:latest', github.repository) }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
 
     - name: Log in to GitHub Container Registry
+      if: needs.setup.outputs.devcontainer_changed != 'true'
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=0.0.0+dev.$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+    - name: Download PR devcontainer
+      if: needs.setup.outputs.devcontainer_changed == 'true'
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ needs.devcontainer.outputs.artifact }}
+        path: ${{ runner.temp }}/devcontainer
 
-    - name: Run tests and build
+    - name: Load PR devcontainer
+      if: needs.setup.outputs.devcontainer_changed == 'true'
+      run: docker load --input "$RUNNER_TEMP/devcontainer/devcontainer.tar"
+
+    - name: Configure selected devcontainer
+      run: |
+        jq --null-input --arg image "$CI_IMAGE" \
+          '{image: $image, runArgs: ["--security-opt", "seccomp=unconfined"]}' \
+          > "$RUNNER_TEMP/devcontainer.json"
+
+    - name: Download native packages
+      uses: actions/download-artifact@v7
+      with:
+        pattern: packages-*-x86_64
+        path: py
+        merge-multiple: true
+
+    - name: Run integration tests and filesystem strategies
       uses: devcontainers/ci@v0.3
+      env:
+        # The daemon-backed builder can see images imported with docker load.
+        BUILDX_BUILDER: default
       with:
-        imageName: ghcr.io/${{ github.repository }}/devcontainer
-        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
+        configFile: ${{ runner.temp }}/devcontainer.json
         push: never
-        runCmd: |
-          make test BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 && \
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
+        env: |
+          PACKAGE_VERSION
+        runCmd: make ci-test-integration BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
-    - name: Upload streamer package to github action
-      uses: actions/upload-artifact@v4
-      with:
-        name: runai_model_streamer
-        path: py/runai_model_streamer/dist/*
-        if-no-files-found: error
-
-    - name: Upload s3 streamer package to github action
-      uses: actions/upload-artifact@v4
-      with:
-        name: runai_model_streamer_s3
-        path: py/runai_model_streamer_s3/dist/*
-        if-no-files-found: error
-
-    - name: Upload GCS streamer package to github action
-      uses: actions/upload-artifact@v4
-      with:
-        name: runai_model_streamer_gcs
-        path: py/runai_model_streamer_gcs/dist/*
-        if-no-files-found: error
-
-    - name: Upload Azure streamer package to github action
-      uses: actions/upload-artifact@v4
-      with:
-        name: runai_model_streamer_azure
-        path: py/runai_model_streamer_azure/dist/*
-        if-no-files-found: error
+  lifecycle-install-tests:
+    name: Test, Build & Push
+    if: always()
+    needs: [build_x86, build_arm, tests]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Require all builds and tests to succeed
+      env:
+        X86_RESULT: ${{ needs.build_x86.result }}
+        ARM_RESULT: ${{ needs.build_arm.result }}
+        TEST_RESULT: ${{ needs.tests.result }}
+      run: |
+        test "$X86_RESULT" = success
+        test "$ARM_RESULT" = success
+        test "$TEST_RESULT" = success
