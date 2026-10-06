@@ -9,7 +9,7 @@
 #include "utils/logging/logging.h"
 
 // Prefer CLOCK_MONOTONIC (immune to host wall-clock changes) via sem_clockwait, added in
-// glibc 2.30. The repo floor is glibc 2.29, so fall back to sem_timedwait/CLOCK_REALTIME there.
+// glibc 2.30. The repo floor is glibc 2.28, so fall back to sem_timedwait/CLOCK_REALTIME there.
 #if defined(__GLIBC_PREREQ)
 #  if __GLIBC_PREREQ(2, 30)
 #    define RUNAI_HAVE_SEM_CLOCKWAIT 1
