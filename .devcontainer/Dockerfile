@@ -7,28 +7,28 @@ FROM quay.io/pypa/manylinux_2_28_aarch64@sha256:f5f03dedf61b47d69d0742d36047db78
 # runtime glibc floor even if the wheel were labelled manylinux_2_28.
 FROM base-${TARGETARCH} AS toolchain
 ENV PATH="/opt/python/cp312-cp312/bin:${PATH}"
-COPY rpm-packages.lock /opt/build/
+COPY dependencies/rpm-packages.lock /opt/build/
 RUN xargs -a /opt/build/rpm-packages.lock dnf install -y --setopt=install_weak_deps=False \
     && dnf clean all
-COPY downloads.sha256 install-tools.sh /opt/build/
+COPY dependencies/downloads.sha256 scripts/install-tools.sh /opt/build/
 RUN bash /opt/build/install-tools.sh
-COPY azurite/package.json azurite/package-lock.json /opt/azurite/
+COPY dependencies/azurite/package.json dependencies/azurite/package-lock.json /opt/azurite/
 RUN cd /opt/azurite && npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 ENV PATH="/opt/azurite/node_modules/.bin:${PATH}"
 
 FROM toolchain AS native
-COPY native-common.sh build-native.sh /opt/build/
+COPY scripts/native-common.sh scripts/build-native.sh /opt/build/
 RUN bash /opt/build/build-native.sh
-COPY build-aws.sh /opt/build/
+COPY scripts/build-aws.sh /opt/build/
 RUN bash /opt/build/build-aws.sh
-COPY build-azure.sh /opt/build/
+COPY scripts/build-azure.sh /opt/build/
 RUN bash /opt/build/build-azure.sh
-COPY build-io.sh /opt/build/
+COPY scripts/build-io.sh /opt/build/
 RUN bash /opt/build/build-io.sh
 
 FROM native AS devcontainer
 # Python dependency changes do not invalidate the native SDK build cache.
-COPY requirements.lock /opt/build/requirements.lock
+COPY dependencies/requirements.lock /opt/build/requirements.lock
 RUN python3 -m pip install --no-cache-dir --require-hashes --only-binary=:all: -r /opt/build/requirements.lock \
     && python3 -m pip check
 # Constraints also cover wheel installs without enabling pip's hash mode for

@@ -40,7 +40,7 @@ jobs:
         push: never
         runCmd: |
           PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
-          python3 .devcontainer/check-wheel-compatibility.py py/*/dist/*.whl
+          python3 .devcontainer/scripts/check-wheel-compatibility.py py/*/dist/*.whl
 
     - name: Upload As Release Asset
       uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3

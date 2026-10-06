@@ -11,22 +11,31 @@ requirements. The manylinux base builds against glibc 2.28, preserving support f
 previously supported glibc 2.30+ systems. The wheels use `manylinux_2_28` tags
 so they can also be installed and tested inside the build image itself.
 Native runners build both x86_64 and aarch64; `make build` builds the host
-architecture. `.devcontainer/check-wheel-compatibility.py` checks every ELF in
+architecture. `.devcontainer/scripts/check-wheel-compatibility.py` checks every ELF in
 each wheel for the correct architecture and GLIBC symbol versions at most 2.28.
 Changing a filename alone does not make a binary compatible with an older libc.
+
+## Layout
+
+- `dependencies/`: Python and RPM pins, download checksums, and Azurite's npm lockfiles.
+- `scripts/`: image setup, native dependency builds, and CI validation scripts.
+- `cmake/`: existing CMake toolchain definitions.
+
+`Dockerfile` and `devcontainer.json` remain at the root. Build scripts and pins
+are copied into `/opt/build` inside the image.
 
 ## Pins
 
 | Dependency | Pin mechanism |
 | --- | --- |
 | OS, Python interpreters, GCC, CMake and base utilities | Architecture-specific image digests |
-| Additional Perl and ThreadSanitizer packages | Full RPM versions, including the install transaction's dependencies, in `rpm-packages.lock` |
-| Python build/test packages, cloud clients and CPU PyTorch | Direct versions in `requirements.in`; transitive versions and hashes in `requirements.lock` |
-| Node.js 24.21.0, Bazel 7.6.1, SeaweedFS 4.47, fake-gcs-server 1.52.2 | Versioned downloads and `downloads.sha256` |
+| Additional Perl and ThreadSanitizer packages | Full RPM versions, including the install transaction's dependencies, in `dependencies/rpm-packages.lock` |
+| Python build/test packages, cloud clients and CPU PyTorch | Direct versions in `dependencies/requirements.in`; transitive versions and hashes in `dependencies/requirements.lock` |
+| Node.js 24.21.0, Bazel 7.6.1, SeaweedFS 4.47, fake-gcs-server 1.52.2 | Versioned downloads and `dependencies/downloads.sha256` |
 | CUDA 12.8 driver headers | NVIDIA cudart 12.8.57 archive and published SHA-256; no CUDA runtime is copied |
-| Azurite 3.37.0 | `azurite/package.json` and complete `package-lock.json`; installed using `npm ci` |
-| OpenSSL 3.5.9 LTS, curl 8.22.0, zlib 1.3.2, libxml2 2.15.4, liburing 2.14, libaio 0.3.113 | Versioned downloads and `downloads.sha256` |
-| AWS C++ SDK 1.11.584 and Azure Storage Blobs C++ SDK 12.15.0 | Full git commit IDs and recursive submodule gitlinks in `build-aws.sh` and `build-azure.sh` |
+| Azurite 3.37.0 | `dependencies/azurite/package.json` and complete `package-lock.json`; installed using `npm ci` |
+| OpenSSL 3.5.9 LTS, curl 8.22.0, zlib 1.3.2, libxml2 2.15.4, liburing 2.14, libaio 0.3.113 | Versioned downloads and `dependencies/downloads.sha256` |
+| AWS C++ SDK 1.11.584 and Azure Storage Blobs C++ SDK 12.15.0 | Full git commit IDs and recursive submodule gitlinks in `scripts/build-aws.sh` and `scripts/build-azure.sh` |
 | Google Cloud C++ SDK 2.37.0 and Bazel dependencies | Existing versioned, checksummed archives in `cpp/third_party/gcp_repo.bzl`, `cpp/toolchain/deps.bzl`, and `cpp/rules.bzl`; GCP's transitive pins come from its pinned release |
 | GitHub Actions | Release commit SHAs in workflow files |
 
@@ -47,13 +56,13 @@ update rather than arbitrary transitive overrides.
 
 1. Choose supported versions and resolve image digests for both architectures.
    Update RPM pins against those images together; do not add floating OS installs.
-2. Change direct Python versions in `requirements.in`, then regenerate the lock:
+2. Change direct Python versions in `dependencies/requirements.in`, then regenerate the lock:
 
    ```sh
-   uv pip compile .devcontainer/requirements.in --python-version 3.12 \
+   uv pip compile .devcontainer/dependencies/requirements.in --python-version 3.12 \
      --python-platform x86_64-manylinux_2_28 --torch-backend cpu \
      --generate-hashes --no-annotate --emit-index-url \
-     -o .devcontainer/requirements.lock
+     -o .devcontainer/dependencies/requirements.lock
    ```
 
    Keep `--extra-index-url https://download.pytorch.org/whl/cpu` in the generated
@@ -62,7 +71,7 @@ update rather than arbitrary transitive overrides.
    architectures and all tested Python versions with `--require-hashes` and
    `--only-binary=:all:`. Do not change published package requirements to match
    development pins.
-3. Update `azurite/package.json`, then run `npm install --package-lock-only
+3. Update `dependencies/azurite/package.json`, then run `npm install --package-lock-only
    --ignore-scripts` in that directory. Commit both files.
 4. Update native tool/source versions and their checksums together. Use upstream
    release checksums when available and preserve CUDA's license with its headers.

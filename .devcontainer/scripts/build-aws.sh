@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck source=.devcontainer/native-common.sh
+# shellcheck source=.devcontainer/scripts/native-common.sh
 source /opt/build/native-common.sh
 
 # aws-sdk-cpp 1.11.584

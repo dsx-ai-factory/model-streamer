@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck source=.devcontainer/native-common.sh
+# shellcheck source=.devcontainer/scripts/native-common.sh
 source /opt/build/native-common.sh
 
 fetch https://github.com/axboe/liburing/archive/refs/tags/liburing-2.14.tar.gz

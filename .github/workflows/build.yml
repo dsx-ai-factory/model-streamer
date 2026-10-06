@@ -89,7 +89,7 @@ jobs:
       run: docker exec ci-build make ci-build-python
 
     - name: Check wheel compatibility
-      run: docker exec ci-build python3 .devcontainer/check-wheel-compatibility.py py/*/dist/*.whl
+      run: docker exec ci-build python3 .devcontainer/scripts/check-wheel-compatibility.py py/*/dist/*.whl
 
     - name: Test C++
       run: docker exec ci-build make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
@@ -98,7 +98,7 @@ jobs:
       if: inputs.component == 'streamer'
       run: |
         docker exec ci-build make ci-test-python
-        docker exec ci-build bash .devcontainer/test-python-versions.sh
+        docker exec ci-build bash .devcontainer/scripts/test-python-versions.sh
 
     - name: Collect C++ library
       run: |

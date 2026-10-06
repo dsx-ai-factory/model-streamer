@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck source=.devcontainer/native-common.sh
+# shellcheck source=.devcontainer/scripts/native-common.sh
 source /opt/build/native-common.sh
 
 fetch https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz
