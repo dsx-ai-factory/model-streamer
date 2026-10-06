@@ -1,2 +1,0 @@
-# Shared, fully pinned Linux build/test environment.
--r ../../.devcontainer/dependencies/requirements.lock

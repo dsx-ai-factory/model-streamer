@@ -16,7 +16,7 @@ FS_STRATEGY ?= sync_buffered
 .PHONY: install_dev_dep build mock real test test-unit test-unit-real test-unit-real-installed test-dist clean
 
 install_dev_dep:
-	python3 -m pip install --require-hashes --only-binary=:all: -r requirements.dev
+	python3 -m pip install --require-hashes --only-binary=:all: -r ../../.devcontainer/dependencies/requirements.lock
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}

@@ -24,6 +24,11 @@ Changing a filename alone does not make a binary compatible with an older libc.
 `Dockerfile` and `devcontainer.json` remain at the root. Build scripts and pins
 are copied into `/opt/build` inside the image.
 
+Docker, the package Makefiles, and Python-version CI tests all install
+`dependencies/requirements.lock` directly. Edit `dependencies/requirements.in`
+and regenerate that lock to update the shared Linux build/test environment.
+It includes CPU PyTorch; consumer dependencies remain in each package's `setup.py`.
+
 ## Pins
 
 | Dependency | Pin mechanism |
