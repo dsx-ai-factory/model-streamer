@@ -17,12 +17,6 @@
     // than one developer's container. The flag grants no capabilities: mount still fails without
     // CAP_SYS_ADMIN, which is why MountProbe is an injectable seam.
     "runArgs": ["--security-opt", "seccomp=unconfined"],
-    "features": {
-        "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
-            "packages": "less,ssh,vim"
-        },
-        "ghcr.io/devcontainers-community/features/bazel:1": {}
-    },
     "customizations": {
         "vscode": {
             "extensions": [

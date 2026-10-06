@@ -16,10 +16,7 @@ FS_STRATEGY ?= sync_buffered
 .PHONY: install_dev_dep build mock real test test-unit test-unit-real test-unit-real-installed test-dist clean
 
 install_dev_dep:
-	python3 -m pip download torch --index-url https://download.pytorch.org/whl/cpu --no-deps --dest ./dst && \
-	python3 -m pip install ./dst/torch-*.whl && \
-	python3 -m pip install -r requirements.dev && \
-	rm -rf ./dst
+	python3 -m pip install --require-hashes --only-binary=:all: -r requirements.dev
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}

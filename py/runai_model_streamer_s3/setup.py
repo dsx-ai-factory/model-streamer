@@ -22,6 +22,7 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-s3",
     version=VERSION,
+    python_requires=">=3.12",
     license_files=("LICENSE",),
     packages=find_packages(),
     install_requires=["boto3"],

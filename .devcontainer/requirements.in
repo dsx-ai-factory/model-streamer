@@ -1,0 +1,16 @@
+# Exact direct dependencies for Linux build/CI; public package ranges are separate.
+pip==26.2.1
+setuptools==80.9.0
+wheel==0.45.1
+numpy==2.5.3
+safetensors==0.8.0
+humanize==4.16.0
+pytest==9.1.1
+cpplint==2.0.2
+torch==2.14.1+cpu
+boto3==1.43.108
+azure-storage-blob==12.31.0
+azure-identity==1.26.0
+google-cloud-storage==3.16.0
+google-auth==2.60.0
+auditwheel==6.8.2

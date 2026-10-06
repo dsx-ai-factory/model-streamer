@@ -40,6 +40,22 @@ with SafetensorsStreamer() as streamer:
 
 Our repository is built using devcontainer ([Further reading](https://containers.dev/))
 
+The devcontainer uses digest-pinned PyPA `manylinux_2_28` images (AlmaLinux 8,
+GCC 14, Python 3.12.15). Python 3.12–3.14 are tested in CI; published packages
+require Python 3.12 or newer. Linux wheels retain the existing glibc 2.30 minimum
+and `manylinux_2_30` tags, including compatibility with Ubuntu 20.04 and 22.04
+when a supported Python interpreter is installed.
+
+Each container builds its native architecture: x86_64 on an x86_64 host and
+aarch64 on an ARM64 host. CI builds and tests both on native runners. `make build`
+builds all four packages for that architecture. To build the other architecture,
+use a matching host or a Docker container with the corresponding `--platform`;
+cross-compiling inside a single container is no longer supported.
+
+Build and test dependencies, including transitive Python and npm packages, are
+locked. Public package dependencies retain compatible ranges. See
+[dependency pins and updates](.devcontainer/README.md) for the update procedure.
+
 The following commands should run inside the dev container
 
 > [!NOTE]
@@ -68,5 +84,6 @@ pip3 install py/runai_model_streamer py/runai_model_streamer_s3
 ```
 
 > [!IMPORTANT]
-> In order to the CPP to run, you need to install libcurl4 and libssl1.1_1
-
+> Default builds statically link the cloud SDK dependencies. Builds using
+> `USE_SYSTEM_LIBS=1` require matching system curl, OpenSSL, zlib, and libxml2
+> libraries; their ABI requirements depend on the chosen build environment.

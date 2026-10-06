@@ -5,7 +5,7 @@ PACKAGE_VERSION ?= 0.0.0
 .PHONY: build test install_dev_dep clean
 
 install_dev_dep:
-	pip3 install azure-storage-blob azure-identity
+	python3 -m pip install --require-hashes --only-binary=:all: -r ../runai_model_streamer/requirements.dev
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}

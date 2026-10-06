@@ -13,8 +13,7 @@ build_aarch64:
 
 build: 
 	make -C py clean && \
-	make build_x86_64 && \
-	make build_aarch64
+	make build_$(shell uname -m)
 
 install: build
 	make -C py install

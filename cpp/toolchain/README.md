@@ -1,24 +1,11 @@
 # Toolchain
 
-This directory contains configuration for generating toolchain targets
-from a standard GCC/G++ toolchain.
+`configure_toolchain()` discovers the native GCC and binutils executables from
+`PATH` and asks GCC for its system include search paths. This supports the
+versioned GCC toolset in the pinned manylinux development images without
+assuming Ubuntu cross-compiler paths.
 
-The toolchain is installed at the repository specified by the `configure_toolchain()` rule.
-It instals toolchain configuration for `aarch64-linux-gnu` and `x86_64-linux-gnu`
-
-See .devcontainer/Dockerfile for toolchain Ubuntu package installation.
-
-## Using the toolchain
-
-Place the following in your `WORKSPACE` file:
-
-```
-load("//toolchain:configure.bzl", "configure_toolchain")
-configure_toolchain(name = "my_awesome_toolchain")
-```
-
-This will allow bazel to reference generated targets using the name of the repository:
-
-```
-bazel build --config=@my_awesome_toolchain//:aarch64 //mytarget
-```
+Each image provides one native target, `x86_64` or `aarch64`. CI uses native
+runners for both. Use `bazel build --config=x86_64 //...` on x86_64 or
+`bazel build --config=aarch64 //...` on ARM64. A foreign target must be built
+inside a matching container or on a matching host.
