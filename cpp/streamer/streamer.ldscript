@@ -17,11 +17,11 @@
 #   Our node. It needs a name because ld does not allow an anonymous tag next to a named one. Our
 #   symbols become runai_file_streamer_start@@RUNAI_FILE_STREAMER_1.0 instead of plain runai_file_streamer_start.
 #
-#   Keep RUNAI_FILE_STREAMER_1.0 as the public ABI name. Native programs linked against the library
-#   record runai_file_streamer_start@RUNAI_FILE_STREAMER_1.0 in their binaries. Renaming or removing
-#   the node breaks those programs, even if the function names remain unchanged.
+#   RUNAI_FILE_STREAMER is the agreed public ABI prefix. Finalize the versioning policy, including
+#   its relationship to Python package versions, before the first standalone release. Native programs
+#   record the full version node when linking; renaming or removing it later breaks those programs.
 #
-# The number is the ABI generation, not the release version. Do not raise it for a new release.
+# Keep the current 1.0 node unchanged in this CI change.
 #
 # Without version nodes, a program built against a newer streamer.h and run against an older
 # libstreamer.so binds any symbol with a matching name and then fails in unclear ways. The node
