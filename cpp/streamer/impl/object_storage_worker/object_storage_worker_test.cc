@@ -1,4 +1,6 @@
 #include "streamer/impl/object_storage_worker/object_storage_worker.h"
+#include "common/device/device.h"
+#include "device/mock/mock_device.h"
 
 #include <gtest/gtest.h>
 
@@ -21,6 +23,7 @@
 
 #include "utils/threadpool/threadpool.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/thread/thread.h"
 #include "utils/dylib/dylib.h"
 #include "utils/logging/logging.h"
@@ -88,7 +91,7 @@ struct Submission
 
     // build the workloads (one Assigner over the request, Batches per contiguous transfer) ready to push
     // to the pool
-    std::vector<Workload> build()
+    std::vector<Workload> build(common::Device device = common::Device::host())
     {
         Assigner assigner(request, config);
         std::vector<Workload> workloads(assigner.num_workloads());
@@ -102,7 +105,7 @@ struct Submission
             common::s3::S3ClientWrapper::Params params(uri, credentials, config->s3_block_bytesize, config->s3_concurrency);
 
             Batches batches(submission_id, file_idx, transfer.tasks, config, responder, paths[file_idx], params,
-                            transfer.range_sizes, transfer.first_range_index);
+                            transfer.range_sizes, transfer.first_range_index, device);
             for (size_t j = 0; j < batches.size(); ++j)
             {
                 workloads[batches[j].workload_index].add_batch(std::move(batches[j]));
@@ -132,6 +135,8 @@ struct Submission
     std::vector<std::set<int>> expected;
 };
 
+
+
 } // namespace
 
 // Fixture: owns the s3 mock handle, resets its knobs before each test, and releases the plugin's clients +
@@ -158,7 +163,7 @@ class ObjectStorageWorkerTest : public ::testing::Test
     // create a Config/Responder and a (num_files) submission; returns the workloads ready to dispatch. Stores
     // the config/responder/submission as members so the test can build a pool and wait on the responder.
     std::vector<Workload> build(unsigned num_files, unsigned s3_concurrency, unsigned ranges_per_file = 0,
-                                size_t s3_block_bytesize = 0)
+                                size_t s3_block_bytesize = 0, common::Device device = common::Device::host())
     {
         make_context(s3_concurrency);
         // Applied here, between the config and the cut: Batches divides the ranges using this value, so
@@ -168,7 +173,7 @@ class ObjectStorageWorkerTest : public ::testing::Test
             config->s3_block_bytesize = s3_block_bytesize;
         }
         submission = std::make_unique<Submission>(utils::random::number(), num_files, config, responder, ranges_per_file);
-        return submission->build();
+        return submission->build(device);
     }
 
     // Bigger than any file Submission generates (it tops out at 100000 bytes), so one range is one
@@ -183,13 +188,16 @@ class ObjectStorageWorkerTest : public ::testing::Test
         responder = std::make_shared<common::Responder>(0);
     }
 
-    static utils::ThreadPool<Workload> make_pool(unsigned size)
+    static utils::ThreadPool<Workload> make_pool(unsigned size,
+                                                std::shared_ptr<DeviceWriter> writer = nullptr,
+                                                std::shared_ptr<DeviceIssuer> issuer = nullptr)
     {
         return utils::ThreadPool<Workload>(
-            []() -> std::unique_ptr<utils::Worker<Workload>>
+            [writer, issuer]() -> std::unique_ptr<utils::Worker<Workload>>
             {
                 // the s3 mock client ignores credentials, so the provider returns an empty set
-                return std::make_unique<ObjectStorageWorker>([]() { return common::s3::Credentials{}; });
+                return std::make_unique<ObjectStorageWorker>([]() { return common::s3::Credentials{}; },
+                                                             writer, issuer);
             },
             size);
     }
@@ -246,6 +254,267 @@ class ObjectStorageWorkerTest : public ::testing::Test
 
 // All requests of a multi-file submission complete successfully through a pool of ObjectStorageWorkers,
 // with the drained-responder sentinel randomly enabled to prove the worker tolerates it.
+// THE step: an object storage read whose destination is a device lands in pinned host memory and is
+// copied from there, and its ranges are answered only once the copy has retired.
+TEST_F(ObjectStorageWorkerTest, Reads_A_Device_Submission_Through_Pinned_Buffers)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 4;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // One range is one chunk, because the block size is larger than any file the fixture generates.
+    auto workloads = build(Files, 2 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+
+    {
+        auto pool = make_pool(config->s3_concurrency, writer, issuer);
+        push_all(pool, workloads);
+
+        // Let the reads land and their copies pile up, holding every buffer. The chunks behind them
+        // have nowhere to read into and must be waiting, not failing.
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        backend->opened(0)->release_copies();
+
+        // INSIDE the pool's scope: its destructor stops the workers rather than waiting for what is
+        // queued, so a response popped after it would be a response the workers never sent.
+        for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+        {
+            const auto response = responder->pop(5000);
+            ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+            EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+        }
+    }
+
+    const auto device = backend->opened(0);
+    ASSERT_NE(device, nullptr) << "no device was ever opened, so nothing was staged";
+
+    // ONE COPY PER CHUNK, and a chunk is a span of whole ranges: every file here is smaller than the
+    // block size, so its four ranges pack into one read and therefore one copy. A range answered
+    // without a copy behind it would mean the plugin had written to the caller's device pointer -
+    // the segmentation fault this whole path exists to avoid.
+    EXPECT_EQ(device->copies.load(), Files) << "a chunk reached the device without a copy";
+    EXPECT_GT(device->host_allocs.load(), 0u) << "nothing was pinned, so nothing was staged";
+
+    // NOT a byte check: the s3 mock records reads and never writes into the destination, so no test
+    // here can tell correct bytes from zeroed ones - a gap this path inherits rather than adds.
+}
+
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - which is a slow link, not a failed read. Failing
+// the chunk there would turn a slow device into lost ranges.
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - a slow device, not a failed read. Failing the chunk
+// there would turn slowness into lost ranges.
+// A chunk that cannot have a staging buffer WAITS. The pool is the window plus a little, so it runs
+// dry exactly when the link falls behind storage - a slow device, not a failed read. Failing the chunk
+// there would turn slowness into lost ranges.
+//
+// The worker is driven DIRECTLY rather than through a ThreadPool: the pool's destructor decides when
+// its workers stop, and a teardown that lands mid-flight answers the ranges FinishedError - true, but
+// it says nothing about whether a chunk waited.
+// A backend with nothing in flight is not a backend that has finished.
+//
+// The plugin reports FinishedError whenever it has no ready event, and that is exactly what it reports
+// while THIS worker is the one holding things up: chunks parked for a staging buffer were never
+// submitted, so the plugin has nothing to say about them. Aborting there failed a whole submission for
+// being slower at copying than at reading.
+//
+// Deterministic where A_Chunk_Waits_For_A_Staging_Buffer caught it only 3 times in 40: waiting until
+// every buffer is out guarantees the plugin has nothing left, so the next turn takes the path.
+TEST_F(ObjectStorageWorkerTest, A_Drained_Backend_Does_Not_Abort_Parked_Chunks)
+{
+    constexpr unsigned Files = 6;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // Every buffer out and its copy held means every read the plugin was given has completed, so it has
+    // nothing ready and answers FinishedError from here on.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() < ObjectStorageWorker::CopyDepth; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    ASSERT_EQ(backend->opened(0)->copies.load(), ObjectStorageWorker::CopyDepth)
+        << "the pool never ran dry, so the plugin still has reads and this test proves nothing";
+
+    // Turns taken against a plugin that reports FinishedError every time. Chunks are parked behind the
+    // held copies, so none of them may be answered.
+    for (unsigned i = 0; i < 20; ++i)
+    {
+        worker.drain(stopped);
+    }
+
+    EXPECT_EQ(responder->pop(50).ret, common::ResponseCode::TimedOut)
+        << "a parked chunk was answered while the plugin was merely idle";
+
+    // And the work still completes once the link catches up.
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success)
+            << "range " << i << " was aborted by an idle plugin";
+    }
+}
+
+TEST_F(ObjectStorageWorkerTest, A_Chunk_Waits_For_A_Staging_Buffer)
+{
+    // The pool is the plugin's window plus CopyDepth, and this mock advertises no window - so the pool
+    // is CopyDepth buffers and every file past that has to wait for one.
+    constexpr unsigned Files = 6;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // Opened here so the mock device exists before the worker starts: holding its copies is what keeps
+    // the staging buffers out and drives the pool dry.
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // execute() submits; the plugin completes asynchronously and the worker harvests on its own turns.
+    // Give it those turns, until the first reads have landed and their copies are stuck holding the
+    // buffers.
+    // Generous: this runs alongside the rest of the suite, and a loaded machine can take a while to
+    // complete a read and give the worker a turn to harvest it.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // Copies are held, so the buffers never came back and the chunks behind them are waiting. Nothing
+    // is answered yet, and nothing has been failed.
+    EXPECT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so no buffer is held";
+    EXPECT_EQ(responder->pop(50).ret, common::ResponseCode::TimedOut)
+        << "a waiting chunk was answered - it was failed rather than parked";
+
+    // The link catches up: every buffer comes back, and the waiting chunks read.
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "a chunk waited for good";
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut) << "range " << i << " was never answered";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success)
+            << "range " << i << " was failed for want of a buffer rather than waiting for one";
+    }
+
+    const auto device = backend->opened(0);
+    EXPECT_EQ(device->copies.load(), Files) << "one chunk per file, one copy each";
+
+    // The whole point: six files went through a pool of two buffers.
+    EXPECT_LE(device->host_allocs.load(), ObjectStorageWorker::CopyDepth) << "the pool grew past its ceiling";
+}
+
+// A RETRIED chunk gives its staging buffer back before the backoff. That path does not go through the
+// completion accounting, so a buffer held there is lost for the life of the worker - and the pool is
+// small, so a couple of retries would leave every later chunk waiting for a buffer that no longer
+// exists. Holding it would also pin memory through a backoff that another chunk could be reading into.
+TEST_F(ObjectStorageWorkerTest, A_Retried_Chunk_Gives_Its_Buffer_Back)
+{
+    constexpr unsigned Files = 4;
+    constexpr unsigned RangesPerFile = 1;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    // Retries on, and the first reads fail retryably - so several chunks take a buffer, fail, and are
+    // scheduled again.
+    config->object_storage_retry_timeout = std::chrono::seconds(5);
+    set_read_failures(Files, common::ResponseCode::RetryableFileAccessError);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    for (unsigned i = 0; i < 4000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "a retried chunk never came back - its buffer was lost";
+
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut)
+            << "range " << i << " was never answered after its retry";
+        EXPECT_EQ(response.ret, common::ResponseCode::Success) << "range " << i;
+    }
+
+    // Every failed attempt returned its buffer, so the pool never had to grow past its ceiling even
+    // though twice as many attempts were made as there are chunks.
+    const auto device = backend->opened(0);
+    ASSERT_NE(device, nullptr);
+    EXPECT_LE(device->host_allocs.load(), ObjectStorageWorker::CopyDepth)
+        << "a retry took a second buffer without giving the first one back";
+}
+
 TEST_F(ObjectStorageWorkerTest, Happy_Path)
 {
     set_sentinel(utils::random::boolean());
@@ -313,7 +582,7 @@ TEST_F(ObjectStorageWorkerTest, Small_Ranges_Are_Packed_Into_One_Read)
         common::s3::S3ClientWrapper::Params params(uri, credentials, config->s3_block_bytesize, config->s3_concurrency);
 
         Batches batches(utils::random::number(), transfer.file_index, transfer.tasks, config, responder,
-                        path, params, transfer.range_sizes, transfer.first_range_index);
+                        path, params, transfer.range_sizes, transfer.first_range_index, common::Device::host());
         for (size_t j = 0; j < batches.size(); ++j)
         {
             workloads[batches[j].workload_index].add_batch(std::move(batches[j]));
@@ -645,6 +914,307 @@ TEST_F(ObjectStorageWorkerTest, Empty_Workload)
 
     // no client was ever created and nothing was read
     EXPECT_EQ(clients(), 0);
+}
+
+// An abort does not return while a copy is still in flight.
+//
+// abort_all fails every workload and drops them, but a copy already handed to the issuer is NOT
+// cancelled. It completes later on the waiter's thread and calls back into THIS worker, pushing onto a
+// member deque - so a worker torn down first is written through after it is gone. The copy is also
+// still writing into the caller's device memory, and a response promises that nothing will write to
+// that range again.
+//
+// Before the fix this returned at once, having set the in-flight count to zero.
+TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_A_Copy_In_Flight)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker, so it runs BEFORE ~worker: a failed ASSERT below would otherwise
+    // leave quiesce_copies waiting for a copy this test is still holding, and the test would time out
+    // rather than fail.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    // Turns until a read has landed and its copy is stuck in the issuer, holding its buffer.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so nothing is in flight";
+
+    // Abort on another thread, because it is supposed to block.
+    std::atomic<bool> returned{ false };
+    std::thread aborting([&]()
+        {
+            stopped = true;
+            worker.drain(stopped);
+            returned = true;
+        });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_FALSE(returned.load())
+        << "the abort returned with a copy still in flight: the worker may now be destroyed, and the"
+        << " copy's completion would call back into freed memory";
+
+    backend->opened(0)->release_copies();
+    aborting.join();
+
+    EXPECT_TRUE(returned.load());
+    EXPECT_TRUE(worker.idle()) << "the abort left work behind";
+}
+
+
+// An abort does not release a staging buffer while the backend is still reading into it.
+//
+// async_read is given buffer.data and the plugin fills it asynchronously. abort_all used to release
+// every staging buffer straight back to the pool, so the next chunk of this same worker could acquire
+// memory the plugin was still writing into - and at teardown the pool frees that pinned memory
+// outright. The reads are not cancelled, so the only safe order is to wait for them first.
+//
+// Before the fix this returned at once, having cleared the in-flight credit.
+TEST_F(ObjectStorageWorkerTest, An_Abort_Waits_For_Reads_Still_At_The_Backend)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    // The plugin takes its time, so a read is still outstanding when the abort lands. The mock spends
+    // about this long inside each obj_wait_for_completions.
+    constexpr unsigned HarvestRoundMs = 50;
+    set_response_time(HarvestRoundMs);
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u) << "this test drives one worker, so it wants one workload";
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+    ASSERT_GT(requests(), 0u) << "no read was submitted, so nothing is at the backend";
+
+    // Abort while the backend still holds reads. It must not return until they have reported, and the
+    // mock makes every harvest round cost real time - so an abort that waits cannot be instant.
+    stopped = true;
+
+    const auto start = std::chrono::steady_clock::now();
+    worker.drain(stopped);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_GE(elapsed, HarvestRoundMs / 2)
+        << "the abort returned in " << elapsed << " ms, without waiting for a harvest round: its reads"
+        << " were still at the backend and their staging buffers went back to the pool while the plugin"
+        << " was still writing into them";
+
+    EXPECT_TRUE(worker.idle()) << "the abort left reads outstanding";
+
+    set_response_time(0);
+}
+
+// A staging pool is not freed with the worker that made it.
+//
+// The plugin is given the pool's pinned memory and fills it asynchronously. A sent request cannot be
+// cancelled, and removing a client only parks it - the client's destructor, which is what waits for
+// the SDK, runs later. So the pool has to outlive the worker, and the streamer holds it until the
+// backend has been cleaned up.
+//
+// Measured here as "no host_free while the worker is destroyed", because freeing the slab is exactly
+// what would hand the plugin freed memory.
+TEST_F(ObjectStorageWorkerTest, A_Staging_Pool_Outlives_Its_Worker)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 2;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+    auto retainer = std::make_shared<StagingPoolRetainer>();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    {
+        ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer, retainer);
+        std::atomic<bool> stopped{ false };
+
+        worker.execute(std::move(workloads[0]), stopped);
+
+        for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+        {
+            worker.drain(stopped);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        ASSERT_GT(backend->opened(0)->host_allocs.load(), 0u) << "nothing was pinned, so nothing is retained";
+    }
+
+    const auto device = backend->opened(0);
+
+    // THE POINT. The worker is gone and its _pool member with it, but the retainer still holds the
+    // pool - so not one slab has been freed.
+    EXPECT_EQ(device->host_frees.load(), 0u)
+        << "a staging slab was freed with its worker: the plugin's client is only parked at that"
+        << " point, so a read still at the backend would be writing into freed pinned memory";
+
+    // And it is the retainer holding it: dropping that is what frees them.
+    retainer.reset();
+
+    EXPECT_EQ(device->host_frees.load(), device->host_allocs.load())
+        << "dropping the retainer did not free the slabs, so something else still holds the pool";
+}
+
+// A staging buffer whose read never reported is NOT given back to the pool.
+//
+// THE BUG THIS REPRODUCES: quiesce_reads() counted every event the plugin handed it, including the
+// FinishedError marker that azure and gcs append when their ready queue empties. A stopped responder
+// produces nothing but that marker, so the loop drove the in-flight credit to zero without a single
+// read landing, declared itself drained, and abort_all handed the buffers back. A later chunk could
+// then acquire memory the plugin was still writing into.
+//
+// Driven with the sentinel enabled, because that is the shape that returns Success WITH a marker
+// event - the case the old code miscounted. The worker keeps running afterwards, which is what makes
+// a recycled buffer reachable.
+TEST_F(ObjectStorageWorkerTest, A_Buffer_Whose_Read_Never_Reported_Is_Not_Reused)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 1;
+
+    set_sentinel(true);
+    set_response_time(60000);   // no read completes during this test
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+    auto retainer = std::make_shared<StagingPoolRetainer>();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer, retainer);
+    std::atomic<bool> stopped{ false };
+
+    worker.execute(std::move(workloads[0]), stopped);
+    ASSERT_GT(requests(), 0u) << "no read was submitted, so no buffer is held by one";
+
+    // The reads are now at the backend, holding their staging buffers. Stopping the client makes the
+    // responder answer with the marker and nothing else - exactly what teardown does, but with this
+    // worker still alive.
+    common::s3::S3ClientWrapper::stop();
+
+    // NOT the stopped flag: this is a mid-life abort, so the worker survives and keeps its pool.
+    worker.drain(stopped);
+
+    std::shared_ptr<StagingPool> pool;
+    ASSERT_TRUE(retainer->try_pop(pool)) << "no staging pool was ever built";
+    ASSERT_NE(pool, nullptr);
+
+    EXPECT_GT(pool->retired(), 0u)
+        << "a staging buffer went back to the pool although its read never reported: the plugin may"
+        << " still be writing into it, and the next chunk to acquire it would read torn bytes";
+
+    EXPECT_EQ(pool->retired(), pool->created())
+        << "every buffer this pool made was held by an unreported read, so none may be handed out again";
+
+    // AND THE CALLER IS TOLD. A retirement is never silent: the ranges whose buffers were taken out of
+    // circulation are failed in the same abort, so capacity is never lost behind the caller's back.
+    for (unsigned i = 0; i < Files * RangesPerFile; ++i)
+    {
+        const auto response = responder->pop(5000);
+        ASSERT_NE(response.ret, common::ResponseCode::TimedOut)
+            << "range " << i << " was never answered, so the retirement was silent";
+        // THE ABORT'S OWN CODE, not a device one: what failed here is the object backend, which stopped
+        // answering while its reads were outstanding. DeviceDriverError is what the two device paths
+        // report, because there the thing that may still be writing is a copy.
+        EXPECT_EQ(response.ret, common::ResponseCode::FinishedError)
+            << "range " << i << " was not failed with the code the abort carried";
+    }
+
+    set_response_time(0);
+}
+
+// idle() must stay FALSE while this worker still owes something. The pool reads it to decide a worker
+// has nothing left, so an idle() that lies lets teardown start under live work.
+//
+// THE SUBTLE CASE IS THE COPY. issue_copy gives the window slot back as soon as the read lands, so the
+// capacity queue reports idle while the copy is still in flight. Only has_deferred_work() keeps the
+// answer honest. A reader who assumes "queue idle means worker idle" would get this wrong.
+TEST_F(ObjectStorageWorkerTest, Idle_Is_False_While_Work_Is_Outstanding)
+{
+    constexpr unsigned Files = 2;
+    constexpr unsigned RangesPerFile = 1;
+
+    auto backend = std::make_shared<device::MockBackend>();
+    auto writer = std::make_shared<DeviceWriter>([backend](common::DeviceType) -> DeviceWriter::BackendFactory { return [backend]() { return backend; }; });
+    auto issuer = std::make_shared<DeviceIssuer>(writer);
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer->open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+    backend->opened(0)->hold_copies();
+
+    auto workloads = build(Files, 1 /* s3 concurrency */, RangesPerFile, SingleChunkBlockBytesize,
+                           common::Device::cuda(0));
+    ASSERT_EQ(workloads.size(), 1u);
+
+    ObjectStorageWorker worker([]() { return common::s3::Credentials{}; }, writer, issuer);
+
+    // Declared AFTER the worker so it runs BEFORE ~worker: a failed ASSERT below would otherwise leave
+    // quiesce_copies waiting for a copy this test is still holding.
+    utils::ScopeGuard release([backend]() { backend->opened(0)->release_copies(); });
+
+    std::atomic<bool> stopped{ false };
+
+    EXPECT_TRUE(worker.idle()) << "a worker with no window yet owes nothing";
+
+    worker.execute(std::move(workloads[0]), stopped);
+
+    EXPECT_FALSE(worker.idle()) << "reads are in flight, so this worker still owes responses";
+
+    // Turn until a copy is held. The read has landed by then and its window slot is back, so the
+    // capacity queue alone would say idle.
+    for (unsigned i = 0; i < 10000 && backend->opened(0)->copies.load() == 0; ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GT(backend->opened(0)->copies.load(), 0u) << "no copy was issued, so the point is untested";
+
+    EXPECT_FALSE(worker.idle())
+        << "a copy is still in flight: its range is unanswered and its completion will call back into"
+        << " this worker, so the pool must not treat it as finished";
+
+    backend->opened(0)->release_copies();
+
+    for (unsigned i = 0; i < 10000 && !worker.idle(); ++i)
+    {
+        worker.drain(stopped);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    EXPECT_TRUE(worker.idle()) << "everything completed, so the worker owes nothing";
 }
 
 }; // namespace runai::llm::streamer::impl

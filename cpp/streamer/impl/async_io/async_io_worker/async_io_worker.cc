@@ -19,6 +19,7 @@
 #include "posix_io/alignment/alignment.h"
 #include "common/exception/exception.h"
 #include "utils/fd/fd.h"
+#include "utils/env/env.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::impl
@@ -35,14 +36,31 @@ namespace
 // there is nothing here a measurement would resolve.
 constexpr unsigned WaitTimeoutMs = 50;
 
+// One pinning call per slab. The whole pool is depth x chunk - 512 MiB at depth 64 - and filling it
+// takes about 135 ms at the ~3.8 GB/s the driver registers at, which is the entire first-round
+// deficit measured on nscale (16 GiB round: 10.64 GB/s first against 11.82 steady).
+//
+// Small slabs mean more calls; large ones mean the first read waits longer for its first slab. Which
+// of the two dominates is measured rather than assumed - RUNAI_STREAMER_DEVICE_SLAB_BYTESIZE exists
+// so the sweep can be run without rebuilding.
+size_t device_slab_bytesize()
+{
+    static const size_t configured =
+        utils::getenv_positive<size_t>("RUNAI_STREAMER_DEVICE_SLAB_BYTESIZE", 16ul << 20);
+    return configured;
+}
+
 } // namespace
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
-                             EngineFactory factory, std::function<void()> on_engine_dead) :
+                             EngineFactory factory, std::function<void()> on_engine_dead,
+                             std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
+    _writer(std::move(writer)),
     _strategy(strategy),
     _block(block != 0 ? block : posix_io::MaxProbeBlock),
     _block_measured(block != 0),
     _node_wide_depth(node_wide_depth),
+    _register_buffers(register_buffers),
     _factory(std::move(factory)),
     _on_engine_dead(std::move(on_engine_dead))
 {
@@ -52,6 +70,10 @@ AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned
 
 AsyncIoWorker::~AsyncIoWorker()
 {
+    // Every issued copy reports exactly once, so this cannot hang. It MUST happen before anything
+    // else here: the completion lambda holds `this`, and the StreamWaiter's thread is still running.
+    drain_copies(true);
+
     // The pool drains before joining, so this should find nothing. Closing anyway: a descriptor leaked
     // per workload would exhaust the process over a long-lived streamer, and this is the only owner.
     for (auto & [id, wl] : _inflight)
@@ -86,6 +108,7 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     config.chunk_bytesize = _settings->chunk_bytesize();
 
     config.direct_block = _block;
+    config.register_buffers = _register_buffers;
 
     _engine = _factory(_strategy, config);
     if (_engine == nullptr)
@@ -116,6 +139,28 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
                                       : " (provisional - no file could be probed yet; a later"
                                         " submission that can measure will replace it)");
     }
+
+    // Beside the engine, because both are sized by the same number. The client allocates nothing
+    // until a device workload actually asks for a buffer, so a host-only mount pays 160 bytes for it.
+    //
+    // ONE BUFFER PER CHUNK, so buffer_bytesize is the chunk size: a read is one buffer and one copy,
+    // with nothing to split or join. The slab stays small and independent of the window - see
+    // DeviceWriterClient::Buffers for why a slab covering the window would stall the first read.
+    DeviceWriterClient::Buffers buffers;
+    buffers.buffer_bytesize = _settings->chunk_bytesize();
+    buffers.slab_bytesize = std::max(_settings->chunk_bytesize(), device_slab_bytesize());
+
+    // NOT the window. The window says how many reads may be in flight; the pool must also cover the
+    // chunks whose read has landed and whose copy has not, or a copy would cost a read its slot. The
+    // two were one number, which meant the only way to give the copy stage room was to read harder -
+    // and reading harder is measurably worse past a shallow depth.
+    //
+    // Zero is a meaningful setting here - the pool is then exactly the window, which is what this
+    // worker did before - so the floor is 0 rather than getenv_positive's usual 1.
+    _copy_depth = utils::getenv_positive<unsigned>("RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH",
+                                                   DefaultCopyDepth, 0u);
+
+    _device_out = std::make_unique<DeviceWriterClient>(_writer, buffers, _engine->depth() + _copy_depth);
 
     LOG(INFO) << "Async io worker ready: " << _strategy << ", " << *_settings;
 
@@ -659,6 +704,32 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
         return;
     }
 
+    // A device chunk reads into pinned host memory and is copied afterwards. Done before pending() is
+    // read, because pending() answers with the staging buffer once there is one.
+    if (!entry->staging.valid())
+    {
+        const auto & batch = wlit->second.workload.batches()[entry->batch_index];
+        if (!batch.device.is_host())
+        {
+            auto error = common::ResponseCode::Success;
+            switch (stage_into_device_buffer(id, batch, error))
+            {
+            case Staged::Yes:
+                break;
+
+            case Staged::NoBuffer:
+                // Keeps its window slot, so the base admits nothing in its place. resume_waiting()
+                // gives it another chance on every turn the worker takes.
+                _waiting.push_back(id);
+                return;
+
+            case Staged::Failed:
+                complete_chunk(id, error);
+                return;
+            }
+        }
+    }
+
     // pending(), not the chunk's own extent: after a short read this is the remainder, resumed where
     // the last pass stopped. On the first pass they are the same.
     //
@@ -698,7 +769,8 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
         _chunks.set_bounce(id, pass.scratch, pass.skip, pass.wanted);
     }
 
-    const auto ret = _engine->stage(id, file, pass.offset, pass.bytesize, pass.buffer);
+    const auto ret = _engine->stage(id, file, pass.offset, pass.bytesize, pass.buffer,
+                                    registration_for(entry->staging, pass));
     if (ret != common::ResponseCode::Success)
     {
         // Not staged, so no completion will arrive for it - this worker has to resolve it. Give the
@@ -746,6 +818,15 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
         abort_all(common::ResponseCode::FinishedError);
         return;
     }
+
+    // Copies that landed while this thread was elsewhere. Blocking only when no read is outstanding:
+    // there is then nothing else to wait for, and without it the pool would spin on has_deferred_work.
+    drain_copies(_issued == 0);
+
+    // EVERY TURN, not only after a copy reports. A buffer also comes back when a copy could not be
+    // issued at all and when a read failed - neither queues a completion - so tying this to
+    // drain_copies would leave a read parked with a free buffer in the pool and nothing to wake it.
+    resume_waiting();
 
     // Flush first: the previous pump may have left a backlog, and issuing it before waiting is what
     // stops it sitting a whole loop iteration longer than it must.
@@ -905,24 +986,195 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     }
 }
 
+posix_io::Registration AsyncIoWorker::registration_for(const StagingBuffer & staging,
+                                                      const DirectPass & pass) const
+{
+    // Asked here and not left to the engine, so a mount that does not register pays nothing: slab_at()
+    // takes the pool's lock, and producing a description only to have it discarded is a lock per read.
+    //
+    // A bounced pass reads into scratch, not into this buffer, so it has no region to name either.
+    if (!_register_buffers || !staging.valid() || pass.scratch != nullptr || _device_out == nullptr)
+    {
+        return posix_io::Registration();
+    }
+
+    const auto slab = _device_out->slab_at(staging.slab);
+    if (!slab.valid())
+    {
+        return posix_io::Registration();
+    }
+
+    posix_io::Registration registration;
+    registration.base = slab.base;
+    registration.bytesize = slab.bytesize;
+    registration.id = staging.slab;
+    return registration;
+}
+
+AsyncIoWorker::Staged AsyncIoWorker::stage_into_device_buffer(posix_io::RequestId id, const Batch & batch,
+                                                              common::ResponseCode & error)
+{
+    StagingBuffer buffer;
+    error = _device_out->take(batch.device, buffer);
+    if (error != common::ResponseCode::Success)
+    {
+        LOG(ERROR) << "No staging buffer for " << batch.device << ": " << error;
+        return Staged::Failed;
+    }
+
+    // Every buffer is out: the window's reads hold theirs, and the copy headroom is spent on chunks
+    // waiting for the link. Not an error - the read waits for a copy to retire.
+    if (!buffer.valid())
+    {
+        return Staged::NoBuffer;
+    }
+
+    _chunks.set_staging(id, buffer);
+    return Staged::Yes;
+}
+
+bool AsyncIoWorker::issue_copy(posix_io::RequestId id, const InflightChunk & entry, const Batch & batch)
+{
+    // chunk.bytesize, not what the last pass moved: every pass landed in this buffer, so the whole
+    // extent is here by the time a chunk completes.
+    const auto code = _device_out->write(
+        batch.device, entry.staging, entry.chunk.bytesize, entry.chunk.buffer,
+        [this, id](common::ResponseCode ret) { _copies.push(CopyDone{ id, ret }); });
+
+    if (code != common::ResponseCode::Success)
+    {
+        LOG(ERROR) << "Failed to enqueue a copy to " << batch.device << ": " << code;
+        return false;
+    }
+
+    ++_copies_issued;
+    return true;
+}
+
+void AsyncIoWorker::resume_waiting()
+{
+    // At most one pass over what is waiting now. stage_pending() parks a read again when the pool is
+    // still dry, pushing it to the BACK, so a count taken up front is what stops this looping on the
+    // same read forever.
+    for (size_t remaining = _waiting.size(); remaining > 0; --remaining)
+    {
+        const auto id = _waiting.front();
+        _waiting.pop_front();
+        stage_pending(id);
+    }
+}
+
+bool AsyncIoWorker::drain_copies(bool wait)
+{
+    bool any = false;
+    CopyDone done;
+
+    while (_copies_issued > 0)
+    {
+        if (!_copies.try_pop(done))
+        {
+            // Every issued copy reports exactly once, so a blocking wait here cannot hang. Only taken
+            // when there is nothing else to wait for - otherwise the engine's own wait does the
+            // sleeping and this returns with whatever had already landed.
+            if (!wait || !_copies.pop(done))
+            {
+                break;
+            }
+        }
+
+        --_copies_issued;
+        complete_copy(done.id, done.ret);
+        any = true;
+    }
+
+    return any;
+}
+
+void AsyncIoWorker::complete_copy(posix_io::RequestId id, common::ResponseCode ret)
+{
+    if (ret != common::ResponseCode::Success)
+    {
+        LOG(ERROR) << "Copy to device failed: " << ret;
+    }
+
+    // Straight to the accounting: the copy is the last step, and the buffer is already back in the
+    // pool - the waiter returns it before this is even queued. The window slot went back when the
+    // read landed.
+    account_chunk(id, ret, false /* slot already freed */);
+}
+
+unsigned AsyncIoWorker::staging_buffers() const
+{
+    return _device_out != nullptr ? _device_out->buffers() : 0;
+}
+
+unsigned AsyncIoWorker::waiting_for_a_buffer() const
+{
+    return static_cast<unsigned>(_waiting.size());
+}
+
+bool AsyncIoWorker::has_deferred_work() const
+{
+    return _copies_issued > 0 || !_waiting.empty();
+}
+
 void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode ret)
 {
     const auto * entry = _chunks.find(id);
     ASSERT(entry != nullptr) << "completing request " << id << " twice";
 
+    // A DEVICE chunk is not done when its read lands: the bytes are in pinned host memory. Issue the
+    // copy and let complete_copy() account it, so the caller is told only once the bytes are there.
+    if (ret == common::ResponseCode::Success && entry->staging.valid())
+    {
+        const auto wlit = _inflight.find(entry->workload_id);
+        if (wlit != _inflight.end())
+        {
+            const auto & batch = wlit->second.workload.batches()[entry->batch_index];
+            const bool issued = issue_copy(id, *entry, batch);
+
+            // Ours no longer on either path: a copy that was enqueued comes back through the waiter,
+            // and a write() that failed returned the buffer itself.
+            _chunks.set_staging(id, StagingBuffer{});
+
+            if (issued)
+            {
+                // The read is done with its slot: the bytes are in pinned host memory and the window
+                // means reads in flight. Holding it until the copy retired cost a read its place,
+                // which is the whole reason the pool is no longer sized by the window.
+                _queue->complete(1);
+                return;
+            }
+
+            ret = common::ResponseCode::DeviceTransferError;
+        }
+    }
+
+    account_chunk(id, ret);
+}
+
+void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode ret, bool free_slot)
+{
+    const auto * entry = _chunks.find(id);
+    ASSERT(entry != nullptr) << "accounting request " << id << " twice";
+
+    // Still ours only when no copy was issued for it - a failed read, or a workload that went away.
+    // A buffer lost here would shrink the pool for the life of the worker.
+    if (entry->staging.valid())
+    {
+        _device_out->release(entry->staging);
+    }
+
     const auto workload_id = entry->workload_id;
     const auto batch_index = entry->batch_index;
     const auto chunk = _chunks.release(id);
 
-    // Free the window slot - once per chunk, never on a re-stage.
-    //
-    // THIS RELEASE POINT MOVES when pinned staging buffers arrive (5.2.4). Reads land directly in the
-    // caller's destination today, so the read completing IS the chunk being done. Once a chunk lands
-    // in a staging buffer and is copied to the device, the buffer is held until the COPY retires -
-    // cuMemcpyHtoDAsync being asynchronous does not release it - and releasing here would hand the
-    // buffer to the next chunk while the DMA is still reading out of it. The window is then sized by
-    // the pinned pool rather than by the ring depth.
-    _queue->complete(1);
+    // Free the window slot - once per chunk, never on a re-stage, and never twice: a chunk whose copy
+    // was issued gave its slot back when the read landed.
+    if (free_slot)
+    {
+        _queue->complete(1);
+    }
 
     const auto wlit = _inflight.find(workload_id);
     if (wlit == _inflight.end())
@@ -1039,6 +1291,11 @@ void AsyncIoWorker::quiesce()
     // UNBOUNDED, terminating only on _issued reaching zero. A timeout here would re-open the exact
     // invariant this exists to protect. A wedged mount therefore hangs its own teardown - which is
     // what one engine per mount (5.2.3) is for: it hangs that engine, not every engine.
+    // A copy in flight is the same promise: cuMemcpyHtoDAsync is reading out of a staging buffer and
+    // writing into the caller's device memory. Reporting its range first hands a live write target to
+    // whoever gets that memory next.
+    drain_copies(true);
+
     if (_engine == nullptr || _issued == 0)
     {
         return;
@@ -1118,7 +1375,17 @@ void AsyncIoWorker::abort_all(common::ResponseCode code)
         _chunks.release_all_scratch([this](char * scratch) { _scratch->give(scratch); });
     }
 
+    if (_device_out != nullptr)
+    {
+        _chunks.release_all_staging([this](const StagingBuffer & buffer) { _device_out->release(buffer); });
+    }
+
     _chunks.clear();
+
+    // With them, or a parked read would name a record that no longer exists and resume_waiting()
+    // would assert on it. They are already answered: their chunks were finalized above.
+    _waiting.clear();
+
     account_inflight();
     _issued = 0;
 }

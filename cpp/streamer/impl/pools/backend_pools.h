@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <map>
+#include <utility>
 #include <optional>
 #include <vector>
 
@@ -55,14 +56,15 @@ class BackendPools
     // `device` is the mount this engine will serve. Passed so the caller can bind per-mount state to
     // the worker it builds - the streamer uses it to learn which mount to stop routing here when the
     // engine dies.
-    using AsyncWorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t device, size_t block, unsigned depth)>;
+    using AsyncWorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t device, size_t block, unsigned depth, bool register_buffers)>;
 
-    // filesystem_handler: the stateless synchronous handler for the filesystem pool.
+    // filesystem_factory: builds a FileSystemWorker per thread. Per worker rather than a stateless
+    // handler because a worker owns a DeviceWriterClient, which is not thread safe.
     // object_storage_factory: builds a per-worker ObjectStorageWorker for the object-storage pool (async,
     // each worker owns its in-flight window).
     // filesystem_async_factory builds the AsyncIoWorker; its pool is always one thread, so no size is
     // taken for it.
-    BackendPools(Handler filesystem_handler,
+    BackendPools(WorkerFactory filesystem_factory,
                  AsyncWorkerFactory filesystem_async_factory,
                  WorkerFactory object_storage_factory,
                  unsigned filesystem_size,
@@ -96,7 +98,7 @@ class BackendPools
     // that routes completions and counts free slots, so a mount cannot move while it still has reads
     // running. A stuck mount therefore keeps its engine forever. That is the separation working, not
     // a leak.
-    void push_async(dev_t device, size_t block, unsigned depth, Workload && workload);
+    void push_async(dev_t device, size_t block, unsigned depth, bool register_buffers, Workload && workload);
 
     // Lock object storage to a single plugin and create the ObjectStorage pool (once). The first
     // object-storage submission records the plugin and builds the pool; a later submission with a different
@@ -127,7 +129,7 @@ class BackendPools
     bool async_pool_used() const;
 
  private:
-    Handler _filesystem_handler;
+    WorkerFactory _filesystem_factory;
     AsyncWorkerFactory _filesystem_async_factory;
     WorkerFactory _object_storage_factory;
     unsigned _filesystem_size;
@@ -142,7 +144,11 @@ class BackendPools
     // containers below. Several threads can submit at the same time, so the first workload for a
     // mount can arrive on more than one thread at once.
     mutable std::mutex _async_mutex;
-    std::map<unsigned, std::vector<std::unique_ptr<utils::ThreadPool<Workload>>>> _async_pools;
+    // Keyed by the DEPTH AND the registration decision, because both are bound into an engine when it
+    // is built and neither can change afterwards. Depth alone would let an NFS mount and an ext4 mount
+    // share an engine at the default cap of one - and then whichever arrived first would decide
+    // registration for both, which is wrong for one of them whichever way it went.
+    std::map<std::pair<unsigned, bool>, std::vector<std::unique_ptr<utils::ThreadPool<Workload>>>> _async_pools;
 
     // Which engine each mount uses. Separate from _async_pools because above the cap several mounts
     // point at the same engine, and because a mount must keep the engine it was given.

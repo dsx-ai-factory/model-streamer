@@ -10,100 +10,12 @@
 #include <mutex>
 
 #include "utils/logging/logging.h"
+#include "utils/deque/deque.h"
 #include "utils/thread/thread.h"
 #include "utils/semaphore/semaphore.h"
 
 namespace runai::llm::streamer::utils
 {
-
-template <typename Message>
-struct Deque
-{
-    void push(Message && message)
-    {
-        {
-            const auto lock = std::unique_lock<std::mutex>(_mutex);
-
-            ASSERT(!_stopped) << "Pushing a message to an already stopped queue";
-
-            _deque.push_back(std::move(message));
-        }
-
-        _sem.post(); // notify about the new message
-    }
-
-    bool pop(/* out */ Message & message)
-    {
-        _sem.wait(); // wait for a message
-
-        const auto lock = std::unique_lock<std::mutex>(_mutex);
-
-        if (_stopped)
-        {
-            return false;
-        }
-
-        /* out */ message = std::move(_deque.front());
-        _deque.pop_front();
-
-        return true;
-    }
-
-    // Non-blocking pop: return false immediately when there is no message (or the deque is stopped),
-    // otherwise pop the front message and return true. Lets a worker check for new work without parking.
-    bool try_pop(/* out */ Message & message)
-    {
-        if (!_sem.try_wait())
-        {
-            return false; // no pending token -> empty and not woken by stop()
-        }
-
-        const auto lock = std::unique_lock<std::mutex>(_mutex);
-
-        if (_stopped)
-        {
-            _sem.post(); // return the stop token so a blocking pop() still observes the shutdown
-            return false;
-        }
-
-        /* out */ message = std::move(_deque.front());
-        _deque.pop_front();
-
-        return true;
-    }
-
-    // any unresolved messages in the deque will be dropped
-    void stop(unsigned times) // `times` is the number of times to increment the semaphore
-    {
-        {
-            const auto lock = std::unique_lock<std::mutex>(_mutex);
-
-            if (_deque.size() != 0)
-            {
-                LOG(DEBUG) << "Stopping a `Deque` with unresolved messages";
-            }
-            _stopped = true;
-        }
-
-        for (unsigned i = 0; i < times; ++i)
-        {
-            _sem.post();
-        }
-    }
-
-    unsigned size() const // get the current size of the deque
-    {
-        const auto lock = std::unique_lock<std::mutex>(_mutex);
-
-        return _deque.size();
-    }
-
- private:
-    Semaphore _sem = 0; // no messages are available
-    std::deque<Message> _deque;
-    bool _stopped = false;
-    mutable std::mutex _mutex; // guarding `_deque` and `_stopped`
-};
 
 // Worker - the per-worker contract for ThreadPool's per-worker mode (below). Intentionally minimal and
 // Chunk-agnostic so the pool can hold it as unique_ptr<Worker<Request>> without knowing anything about a
@@ -112,8 +24,8 @@ struct Deque
 //
 // CapacityWorker<Request, Chunk> (in capacity_worker.h) is the reusable implementation of this interface
 // for async backends: it owns a CapacityQueue and implements execute/drain/idle as the submit+drain
-// interleave pattern, leaving concrete workers just the backend hooks. Backends that don't need a window
-// (filesystem) don't use Worker at all - they use ThreadPool's stateless Handler constructor instead.
+// interleave pattern, leaving concrete workers just the backend hooks. A backend with no window - the
+// synchronous filesystem reader - implements Worker directly, with a no-op drain and idle() true.
 template <typename Request>
 struct Worker
 {
@@ -135,14 +47,14 @@ struct Worker
 // thread management, push() and the stop-and-join teardown; they differ only in what each thread runs:
 //
 //  * Stateless (Handler ctor): each thread pops one request and calls a shared handler - the classic
-//    thread pool. Used for synchronous work (filesystem reads; the s3/gcs plugins' own internal pools).
+//    thread pool. Used where a thread needs no state of its own.
 //
 //  * Per-worker (WorkerFactory ctor): each thread owns a Worker (built by the factory) and drives its own
 //    loop - pull the next request without blocking and hand it to the worker, else drain the worker's tail
 //    a batch at a time, else park on the blocking pop. This lets a worker interleave a newly arrived
-//    request with async work still in flight (see worker_routine). Used for object storage, where the
-//    workers are CapacityWorkers. The factory builds concrete workers (upcast to unique_ptr<Worker<Request>>),
-//    so the pool stays agnostic of the worker's queue/chunk types.
+//    request with async work still in flight (see worker_routine). Used by every streamer backend: the
+//    async ones to interleave, the synchronous one because its thread owns a DeviceWriterClient. The
+//    factory upcasts to unique_ptr<Worker<Request>>, so the pool stays agnostic of the worker's types.
 template <typename Request>
 struct ThreadPool
 {
