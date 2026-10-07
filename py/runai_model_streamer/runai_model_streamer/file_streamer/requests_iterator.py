@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import List, Tuple, Optional
 from collections import deque
+from functools import partial
 import bisect
 import enum
 import numpy as np
@@ -126,6 +127,28 @@ class FilesRequest:
 # streamer handle is available to ask with, and equals the host page size.
 DIRECT_IO_BLOCK = os.sysconf("SC_PAGESIZE")
 
+def _alloc_slot(slot_size: int) -> Slot:
+    """A fresh slot, with room for the pads a direct read needs.
+
+    THE PADS ARE THE POINT. A direct read needs its destination address, its file offset and its
+    length each to be a multiple of the block (cpp/posix_io/alignment). The file offset is the file's
+    to choose, so _place() moves the ADDRESS to match it - and this extra room is what it moves
+    within. Without it no range could be read directly and O_DIRECT would copy every byte instead of
+    about 0.1% of it.
+
+    The base is aligned too, but only as a convenience: _place() reaches a congruent address from any
+    base, as test_every_slot_base_is_block_aligned records.
+
+    A FREE FUNCTION taking the size, not a method. The pool keeps whatever allocator it is given, so a
+    bound method would make the pool reference the iterator that owns it - a cycle, which refcounting
+    cannot break. A replaced ring would then hold its buffers until the collector ran.
+    """
+    raw = np.empty(slot_size + DIRECT_IO_BLOCK, dtype=np.uint8)
+    shift = (-raw.ctypes.data) % DIRECT_IO_BLOCK
+    array = raw[shift: shift + slot_size]
+    return Slot(array, array.ctypes.data)
+
+
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
                  direct_block: int = DIRECT_IO_BLOCK, owned: bool = True) -> None:
@@ -153,24 +176,7 @@ class FilesRequestsIteratorWithBuffer:
         # SlotPool. ONE ALLOCATION PER SLOT, so a slot that has been given away can die on its own: a
         # view into a shared pool would keep the whole pool alive for as long as the caller holds any
         # one slot.
-        self._pool = SlotPool(num_buffers, self._alloc_slot, owned)
-
-    def _alloc_slot(self) -> Slot:
-        """A fresh slot, with room for the pads a direct read needs.
-
-        THE PADS ARE THE POINT. A direct read needs its destination address, its file offset and its
-        length each to be a multiple of the block (cpp/posix_io/alignment). The file offset is the
-        file's to choose, so _place() moves the ADDRESS to match it - and this extra room is what it
-        moves within. Without it no range could be read directly and O_DIRECT would copy every byte
-        instead of about 0.1% of it.
-
-        The base is aligned too, but only as a convenience: _place() reaches a congruent address from
-        any base, as test_every_slot_base_is_block_aligned records.
-        """
-        raw = np.empty(self._slot_size + DIRECT_IO_BLOCK, dtype=np.uint8)
-        shift = (-raw.ctypes.data) % DIRECT_IO_BLOCK
-        array = raw[shift: shift + self._slot_size]
-        return Slot(array, array.ctypes.data)
+        self._pool = SlotPool(num_buffers, partial(_alloc_slot, self._slot_size), owned)
 
     def _place(self, request: FilesRequest, base: int, aligned: bool) -> Optional[List[int]]:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.

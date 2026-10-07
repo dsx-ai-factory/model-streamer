@@ -1,6 +1,7 @@
 import logging
 import os
 import unittest
+import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunksIterator,
@@ -762,6 +763,23 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         )
         for slot in requests_iterator._pool._slots:
             self.assertEqual(len(slot.memory), requests_iterator._slot_size)
+
+    def test_a_dropped_ring_releases_its_buffers_without_the_collector(self):
+        """No reference cycle, so refcounting alone frees the ring.
+
+        The pool keeps the allocator it is given. A bound method would point back at the iterator, and
+        a cycle is invisible to refcounting - a replaced ring would hold its buffers until a gen2
+        collection, which for a long-lived iterator is a long way off. owned=False is the case that
+        matters: an owned pool has given its slots away by the end of a stream, an unowned one is
+        still holding all of them."""
+        requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_cap(
+            MemoryCapMode.limited, [FileChunks.contiguous(17, "a.txt", 10, [4, 4])], 8, owned=False
+        )
+        ref = weakref.ref(requests_iterator)
+
+        requests_iterator = None    # the only strong reference
+
+        self.assertIsNone(ref(), "the ring outlived its last reference, so something holds a cycle")
 
     def test_end_of_stream_does_not_consume_a_buffer(self):
         requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_cap(
