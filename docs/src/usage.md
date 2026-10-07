@@ -19,7 +19,7 @@ with SafetensorsStreamer() as streamer:
         tensor.to('cuda:0')
 ```
 
-> **Note:** To make the tensors available on the CPU memory, clone the yielded tensors before calling `streamer.get_tensors()`. Note that otherwise, tensors may be overwritten when using `RUNAI_STREAMER_MEMORY_LIMIT` or completely destroyed when closing the `SafetensorsStreamer` object.
+> **Note:** Each yielded tensor belongs to you and stays valid after the streamer closes, so it does not need to be cloned - see [Tensor ownership](#tensor-ownership-owned). That is the default. With `owned=False`, or against a streamer older than this guarantee, a retained tensor is overwritten once the buffer it sits in is reused.
 
 #### Streaming from multiple files
 
@@ -86,7 +86,9 @@ Two things are *not* controlled by this parameter:
 - **Alignment.** Every yielded tensor is aligned for its dtype whatever `owned` is set to, because a tensor at an address its dtype cannot use is unusable either way. Where that is not already true the streamer copies the tensor, so `owned=False` does not mean copy-free.
 - **How much memory the streamer uses.** See below.
 
-`owned` has no observable effect when the destination is a device. A tensor read to a device is given to the caller as a fresh allocation whatever the flag says, so it is always the caller's to keep; the flag then decides only whether the streamer recycles its own read buffers, which the caller cannot see. It is a host destination that `owned` is about.
+With a device destination and **without** distributed streaming, `owned` has no observable effect: the tensor is a fresh allocation whatever the flag says, so it is always the caller's to keep, and the flag decides only whether the streamer recycles its own read buffers, which the caller cannot see.
+
+Distributed streaming is different. There the tensor is a view into a staging buffer that the next broadcast overwrites, and `owned=True` is what turns it into a copy of its own. So on that path `owned=False` really does hand back borrowed memory.
 
 #### Distributed streaming
 
@@ -110,13 +112,12 @@ device = 'cuda:0'
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths, s3_credentials=None, device=device, is_distributed=True)
     for name, tensor in streamer.get_tensors():       
-       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is cuda:0
+       tensors[name] = tensor # already on cuda:0, and yours to keep
 ```
 
 ##### Requirements
 
-Distributed streaming allocates reusable staging buffers on each device, which hold the data of the yielded tensors
-Therefore, the yielded tensor might be overwritten at the next iteration. If tensors are used outside the iterator loop, clone and detach the yielded tensor to save a copy.
+Distributed streaming allocates reusable staging buffers on each device. Under the default `owned=True` each tensor is copied out of them before it is yielded, so it is yours to keep. With `owned=False` the yielded tensor is a view into a staging buffer and the next broadcast overwrites it, so it must be cloned to be used outside the loop.
  
 The memory requirements for the staging buffers is twice the size of the largest tensor in the files
 
@@ -419,7 +420,9 @@ The streamer allocates a buffer on the CPU Memory for storing the tensors before
 
 The streamer holds the same number of buffers either way, so read-ahead and backpressure do not change with `owned`. What changes is that a handed-over buffer is replaced rather than reused, and its memory lives until the caller releases it.
 
-**How much a retained tensor keeps alive depends on where it lands.** With a host destination the buffer is handed over whole, so holding one small tensor keeps its entire buffer alive - a 4 KB tensor can keep several GB resident if it is the only one retained from that buffer. With a device destination the caller is given a fresh allocation of that tensor alone, so it keeps nothing else; the streamer's own buffers are reused either way.
+The rest of this section is about tensors you are allowed to keep, which means `owned=True`. Under `owned=False` nothing may be retained on any path, so the question does not arise.
+
+**How much a retained tensor keeps alive depends on where it lands.** With a host destination the buffer is handed over whole, so holding one small tensor keeps its entire buffer alive - a 4 KB tensor can keep several GB resident if it is the only one retained from that buffer. With a device destination the caller is given a copy of that tensor alone, so it keeps nothing else; the streamer's own buffers are reused either way.
 
 A loader that copies each tensor into its parameters and drops it - the normal case - retains nothing and never meets this. A caller that keeps a few scattered host tensors should copy them.
 

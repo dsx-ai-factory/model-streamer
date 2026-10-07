@@ -280,8 +280,10 @@ class SafetensorsStreamer:
         Alignment is NOT under this flag. Every yielded tensor is aligned for its dtype either way,
         because a tensor at an address its dtype cannot use is unusable whoever owns it.
 
-        Nor is a DEVICE destination, which hands the caller a fresh allocation whatever the flag
-        says. The flag is about a host destination.
+        A DEVICE destination WITHOUT distributed streaming is not under it either: that path hands
+        the caller a fresh allocation whatever the flag says. Distributed streaming is the exception
+        - there the tensor is a view into a staging buffer the next broadcast overwrites, and owned
+        is what copies it out.
 
         RUNAI_STREAMER_MEMORY_LIMIT bounds what the STREAMER holds, not the process: under owned it
         does not cover buffers already handed over. What a retained tensor keeps alive differs by
