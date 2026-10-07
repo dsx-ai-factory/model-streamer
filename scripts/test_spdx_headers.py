@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Tests for spdx_headers.py. Run with: python3 scripts/test_spdx_headers.py"""
-# [explain] unittest is part of the Python standard library, so the tests need no install and no pytest.
+# unittest is in the Python standard library, so the tests need no install and no pytest.
 
 import os
 import subprocess
@@ -14,7 +14,7 @@ SCRIPT = os.path.join(SCRIPTS_DIR, "spdx_headers.py")
 sys.path.insert(0, SCRIPTS_DIR)
 import spdx_headers  # noqa: E402
 
-# [explain] The header as the script writes it, for use in test files.
+# The header as the script writes it, for use in test files.
 HASH_HEADER = "# %s\n# %s\n" % (spdx_headers.COPYRIGHT, spdx_headers.LICENSE)
 C_HEADER = "/*\n * %s\n * %s\n */\n" % (spdx_headers.COPYRIGHT, spdx_headers.LICENSE)
 
@@ -40,7 +40,7 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(spdx_headers.has_header(wrong_year))
 
     def test_has_header_must_be_near_the_top(self):
-        # [explain] A header that starts after WINDOW lines of code does not count.
+        # A header that starts after WINDOW lines of code does not count.
         late = "x = 1\n" * spdx_headers.WINDOW + HASH_HEADER
         self.assertFalse(spdx_headers.has_header(late))
 
@@ -110,6 +110,13 @@ class EndToEndTests(unittest.TestCase):
             self.add_file(name, "no header here\n")
         self.assertEqual(self.run_script(), (0, ""))
 
+    def test_file_in_a_folder_that_starts_with_a_dot_is_still_checked(self):
+        # Only the file name decides if a file is a dotfile, and the name "Dockerfile" has no leading dot.
+        self.add_file(".devcontainer/Dockerfile", "FROM ubuntu\n")
+        code, out = self.run_script()
+        self.assertEqual(code, 1)
+        self.assertIn(".devcontainer/Dockerfile", out)
+
     def test_unknown_file_type_is_an_error(self):
         self.add_file("src/a.weird", "text\n")
         code, out = self.run_script()
@@ -163,19 +170,19 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(f.read(), "#!/usr/bin/env python3\n" + HASH_HEADER + "\nprint('hi')\n")
 
     def test_relative_file_path_is_resolved_from_the_current_folder(self):
-        # [explain] Two files miss the header: sub/a.py and other.py.
+        # Two files miss the header: sub/a.py and other.py.
         self.add_file("sub/a.py", "import os\n")
         self.add_file("other.py", "import os\n")
-        # [explain] We stand inside the folder "sub" and name the file "a.py", which is relative to "sub".
+        # We stand inside the folder "sub" and name the file "a.py", which is relative to "sub".
         code, out = self.run_script("a.py", from_folder=os.path.join(self.repo, "sub"))
-        # [explain] Only a.py is checked. It is reported with its path from the repo root.
+        # Only a.py is checked. It is reported with its path from the repo root.
         self.assertEqual(code, 1)
         self.assertIn("sub/a.py", out)
         self.assertNotIn("other.py", out)
 
     def test_absolute_file_path_works_from_any_folder(self):
         absolute_path = self.add_file("sub/a.py", "import os\n")
-        # [explain] We stand inside "sub" and give the full path of the file.
+        # We stand inside "sub" and give the full path of the file.
         code, out = self.run_script(absolute_path, from_folder=os.path.join(self.repo, "sub"))
         self.assertEqual(code, 1)
         self.assertIn("sub/a.py", out)
