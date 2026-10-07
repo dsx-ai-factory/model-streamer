@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 load("//:rules.bzl", "runai_cc_test")
 
 # The tests that need a REAL CUDA driver. Both SKIP where there is none, so they are safe on CPU CI.

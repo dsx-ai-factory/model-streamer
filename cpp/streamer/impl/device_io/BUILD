@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Getting bytes onto a device, once they have been read into host memory.
 #
 # The sibling of async_io/, which moves them from storage into host memory. Splitting them this way

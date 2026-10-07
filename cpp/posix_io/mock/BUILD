@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 
 # TEST ONLY, and its own package so that no production glob can reach it - a mock in the shipped

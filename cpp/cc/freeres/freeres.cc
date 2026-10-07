@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // GCC >= 5.* introduced a new mechanisem called emergency pool, for allocating exception on a memory constrained system.
 // This pool is being used if malloc has failed, and has a size of ~72K (depending on the implementation).
 // This introduces a "memory-leak" by design, as this pool is never freed. [8]

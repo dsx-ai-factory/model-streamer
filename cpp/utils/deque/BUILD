@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 
 # A blocking FIFO on a mutex and a semaphore. Its own package because it has users that want a

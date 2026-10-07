@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
 #include "common/device/device.h"
 #include "device/mock/mock_device.h"

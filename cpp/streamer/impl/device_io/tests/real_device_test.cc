@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // The only tests in this repository that talk to a real driver.
 //
 // Everything else on the device path runs against MockDevice or against stubbed function pointers,

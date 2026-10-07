@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 RUN_TIMES := 10
 S3_TEST_API_PORT := 9000
 S3_TEST_BUCKET := test-bucket
