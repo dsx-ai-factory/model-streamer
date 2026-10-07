@@ -89,6 +89,22 @@ NVIDIA contributors and maintainers must follow the
 [NVIDIA IP review process](https://nv/ip_review_process) for ongoing changes
 and third-party contributions before accepting or distributing them.
 
+### Source File Headers
+
+Every source file needs this two-line NVIDIA SPDX header, written in the comment style of the file type:
+
+```text
+SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+```
+
+Documentation, configuration and data files (for example `.md`, `.yaml`, `.json`) do not need one.
+A pull request check fails when a file is missing the header. To add it, run
+`python3 scripts/spdx_headers.py --fix` from anywhere in the repository.
+
+To add the header automatically on every commit, install [pre-commit](https://pre-commit.com) and run
+`pre-commit install` once.
+
 ### Reporting Issues
 Open an issue with a clear description, steps to reproduce, and relevant environment details.
 
