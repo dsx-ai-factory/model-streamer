@@ -16,7 +16,7 @@ file_path = "/path/to/file.safetensors"
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
 > **Note:** To make the tensors available on the CPU memory, clone the yielded tensors before calling `streamer.get_tensors()`. Note that otherwise, tensors may be overwritten when using `RUNAI_STREAMER_MEMORY_LIMIT` or completely destroyed when closing the `SafetensorsStreamer` object.
@@ -33,7 +33,7 @@ file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
 > **Note:** You can not mix S3 path and file system paths on same `streamer.stream_files()` call.
@@ -48,7 +48,7 @@ from runai_model_streamer import SafetensorsStreamer
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path, tensor_names={"model.layers.0.weight", "model.layers.1.weight"})
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
 `tensor_names` is treated as a set - the order it is passed in does not matter, and any container type (list, set, tuple) is accepted. `None` (the default) loads every tensor, unchanged from previous versions. An empty container raises an error, since it is never a useful request.
@@ -106,11 +106,11 @@ from runai_model_streamer import SafetensorsStreamer
 file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
 
 tensors = {}
-device = 'CUDA:0'
+device = 'cuda:0'
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths, s3_credentials=None, device=device, is_distributed=True)
     for name, tensor in streamer.get_tensors():       
-       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is CUDA:0
+       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is cuda:0
 ```
 
 ##### Requirements
