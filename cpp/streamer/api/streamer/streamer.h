@@ -63,9 +63,10 @@ int runai_file_streamer_set_credentials(
 // submission, and any different value after that is rejected too - by then an engine has been built
 // for the resolved answer. Create a new streamer to use a different strategy.
 //
-// Optional. Without it the streamer reads RUNAI_STREAMER_FS_STRATEGY, defaulting to the synchronous
-// reader. Object-storage reads are unaffected: the strategy names a filesystem engine, and a
-// submission that reads object storage never consults it.
+// Optional. Without it the streamer reads RUNAI_STREAMER_FS_STRATEGY, which itself defaults to
+// "io_uring_direct,libaio_direct,sync_buffered" - the direct readers first, falling back to the
+// synchronous one on a host that cannot serve them. Object-storage reads are unaffected: the
+// strategy names a filesystem engine, and a submission that reads object storage never consults it.
 int runai_file_streamer_set_fs_strategy(
     void * streamer,
     const char * candidates

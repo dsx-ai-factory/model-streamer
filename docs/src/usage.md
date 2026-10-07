@@ -57,6 +57,37 @@ A name that does not exist in the checkpoint raises an error. A corrupted file i
 
 When streaming from multiple files, a requested name that exists in more than one file also raises an error - which file it should come from would be ambiguous. This only applies when `tensor_names` is used; loading a whole checkpoint with a name duplicated across files (`tensor_names=None`) is unaffected.
 
+#### Tensor ownership (owned)
+
+Every tensor the streamer yields belongs to the caller. It stays valid for as long as the caller holds it, and the streamer never writes to that memory again:
+
+```python
+from runai_model_streamer import SafetensorsStreamer
+
+with SafetensorsStreamer() as streamer:
+    streamer.stream_files(file_paths)
+    kept = {name: tensor for name, tensor in streamer.get_tensors()}
+
+# still valid here - the streamer has finished and written to nothing the caller holds
+```
+
+This is the default (`owned=True`), so a caller does not need to copy a tensor in order to keep it. Loaders that currently clone every tensor defensively can drop that clone.
+
+Pass `owned=False` to get the previous behaviour, where a yielded tensor is a view into a buffer the streamer reuses:
+
+```python
+streamer.stream_files(file_paths, owned=False)
+```
+
+Under `owned=False` each tensor must be consumed before the iteration advances; anything retained past that point may be overwritten without warning. There is no error and no warning when this happens - the tensors simply hold the wrong bytes. It exists so that a caller depending on the old semantics has a way back, not as a mode to choose.
+
+Two things are *not* controlled by this parameter:
+
+- **Alignment.** Every yielded tensor is aligned for its dtype whatever `owned` is set to, because a tensor at an address its dtype cannot use is unusable either way. Where that is not already true the streamer copies the tensor, so `owned=False` does not mean copy-free.
+- **How much memory the streamer uses.** See below.
+
+`owned` has no observable effect when the destination is a device. A tensor read to a device is given to the caller as a fresh allocation whatever the flag says, so it is always the caller's to keep; the flag then decides only whether the streamer recycles its own read buffers, which the caller cannot see. It is a host destination that `owned` is about.
+
 #### Distributed streaming
 
 ##### Use case and motivation
@@ -377,6 +408,22 @@ For the streamer internal logs pass the environment variables `RUNAI_STREAMER_LO
 ### CPU Memory Capping
 
 The streamer allocates a buffer on the CPU Memory for storing the tensors before moving them to the GPU Memory. Control the size of the allocated buffer by using the environment variable `RUNAI_STREAMER_MEMORY_LIMIT`.
+
+`RUNAI_STREAMER_MEMORY_LIMIT` bounds **what the streamer holds**, which is not the same as total process memory once tensors are owned:
+
+| | what the limit bounds | peak host memory |
+|---|---|---|
+| `owned=False` | the buffers, which are reused for the whole stream | the limit |
+| `owned=True` (default) | the buffers not yet handed to the caller | the limit, plus whatever the caller still holds |
+| any device destination | the read buffers, always reused | the limit |
+
+The streamer holds the same number of buffers either way, so read-ahead and backpressure do not change with `owned`. What changes is that a handed-over buffer is replaced rather than reused, and its memory lives until the caller releases it.
+
+**How much a retained tensor keeps alive depends on where it lands.** With a host destination the buffer is handed over whole, so holding one small tensor keeps its entire buffer alive - a 4 KB tensor can keep several GB resident if it is the only one retained from that buffer. With a device destination the caller is given a fresh allocation of that tensor alone, so it keeps nothing else; the streamer's own buffers are reused either way.
+
+A loader that copies each tensor into its parameters and drops it - the normal case - retains nothing and never meets this. A caller that keeps a few scattered host tensors should copy them.
+
+Note this usually *lowers* peak memory rather than raising it, because the caller no longer needs its own copy of the checkpoint.
 
 #### Unlimited CPU Memory
 

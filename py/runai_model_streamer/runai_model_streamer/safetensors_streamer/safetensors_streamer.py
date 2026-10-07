@@ -264,6 +264,29 @@ class SafetensorsStreamer:
             tensor_names: Optional[Collection[str]] = None,
             owned: bool = True,
         ) -> None:
+        """Stream the tensors of one or more safetensors files.
+
+        owned=True (the default)
+            Every yielded tensor belongs to the caller. It stays valid for as long as the caller
+            holds it and the streamer never writes to that memory again, so a caller does not need
+            to copy a tensor in order to keep one.
+
+        owned=False
+            A yielded tensor is a view into a buffer the streamer reuses, and must be consumed
+            before the iteration advances. Retaining one past that point reads whatever was written
+            next - silently, with no error. Kept so a caller that depends on the old semantics has a
+            way back.
+
+        Alignment is NOT under this flag. Every yielded tensor is aligned for its dtype either way,
+        because a tensor at an address its dtype cannot use is unusable whoever owns it.
+
+        Nor is a DEVICE destination, which hands the caller a fresh allocation whatever the flag
+        says. The flag is about a host destination.
+
+        RUNAI_STREAMER_MEMORY_LIMIT bounds what the STREAMER holds, not the process: under owned it
+        does not cover buffers already handed over. What a retained tensor keeps alive differs by
+        destination - see docs/src/usage.md.
+        """
         # None = no filter (today's behavior). str satisfies Collection[str] structurally, so
         # reject it - otherwise `in` below silently becomes substring matching.
         if isinstance(tensor_names, str):

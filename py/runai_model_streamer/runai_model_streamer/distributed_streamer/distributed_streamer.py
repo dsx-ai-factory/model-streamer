@@ -168,7 +168,7 @@ class DistributedStreamer:
             )
             built_ring = True
         else:
-            self.distributed_streamer.stream_files(file_stream_requests, credentials, device, self.params)
+            self.distributed_streamer.stream_files(file_stream_requests, credentials, device, self.params, owned=owned)
             # A rank whose share of the partition is empty returns before building anything, leaving the
             # iterator from the safetensors metadata read in place. Reporting THAT as the model ring is
             # worse than reporting nothing: `1 x 8 Bytes` against the model's byte total reads exactly
@@ -311,6 +311,7 @@ class _distributedStreamer:
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.num_processes_on_node = 1
         self.max_chunk = 0
+        self.owned = True
 
     def __enter__(self) -> _distributedStreamer:
         return self
@@ -386,10 +387,12 @@ class _distributedStreamer:
             file_stream_requests: List[FileChunks],
             credentials: Optional[S3Credentials],
             device: str,
-            params : _distributedStreamerParams
+            params : _distributedStreamerParams,
+            owned: bool,
     ) -> None:
 
         self.device = torch.device(device)
+        self.owned = owned
         self.my_global_rank = params.my_global_rank
         self.groups_by_ranks = params.groups_by_ranks
         self.broadcast_timeout = params.broadcast_timeout
@@ -546,14 +549,23 @@ class _distributedStreamer:
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Prefilled buffer with {chunk_count_in_batch} chunks and total size {humanize.naturalsize(current_data_size)}")
 
                 # --- Broadcast ---
-                yield from self.broadcast(
+                #
+                # Owned here rather than at broadcast()'s two yields, so there is no second site to
+                # miss - a missed one is a tensor that looks right and is overwritten next round.
+                #
+                # No event is needed, and the clone adds no ordering requirement that was not already
+                # there. data_buffer is next written by prefill()'s copy_ on this same stream;
+                # received_buffer is next written by dist.broadcast on NCCL's, which torch orders
+                # against this one - a dependency master already relies on for borrowed views.
+                for file_id, chunk_index, buffer in self.broadcast(
                     chunks_to_read,
                     batch_metadata_tensor,
                     received_metadata_tensor,
                     data_buffer,
                     received_buffer,
                     chunk_count_in_batch,
-                    current_data_size)
+                    current_data_size):
+                    yield file_id, chunk_index, self.own(buffer) if self.owned else buffer
                
         except RuntimeError as e:
             # Check if the error is a timeout
@@ -567,6 +579,22 @@ class _distributedStreamer:
             self.is_error = True
             logger.exception(f"[RunAI Streamer][Distributed] rank {self.original_group_rank} error: {e}")
             raise e
+
+    @staticmethod
+    def own(buffer: torch.Tensor) -> torch.Tensor:
+        """A private copy of buffer.
+
+        A PLAIN CLONE, and the simplicity is the point. An earlier version over-allocated and sliced
+        to an aligned address, to carry RUNAI_STREAMER_CUDA_ALIGNMENT across the copy. The tensor it
+        returned starts part way into a larger storage, and vLLM died with an illegal address in its
+        first forward pass as soon as it stopped cloning our tensors for us.
+
+        RUNAI_STREAMER_CUDA_ALIGNMENT is not lost, because it was never a promise about this tensor:
+        it describes where tensors sit INSIDE the staging buffers, so that one rank's offsets are
+        usable on every other, and that layout is unchanged. What a caller needs is alignment for the
+        dtype, which SafetensorsStreamer checks on every tensor whatever path produced it.
+        """
+        return buffer.clone()
 
     def prefill(self,
                 chunk_gen: Iterator,

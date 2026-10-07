@@ -77,18 +77,24 @@ class TestDistributedStreamer(unittest.TestCase):
         for req in requests:
             with open(req.path, "rb") as f:
                 original_data_map[req.id] = f.read()
-        reconstructed_data_map = {req.id: [None] * len(req.sizes) for req in requests}
         env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
-        with patch.dict(os.environ, env_vars):
-            with DistributedStreamer() as streamer:
-                streamer.stream_files(requests, None, "cpu", True)
-                for req_id, chunk_idx, data_tensor in streamer.get_chunks():
-                    reconstructed_data_map[req_id][chunk_idx] = data_tensor.cpu().numpy().tobytes()
-            for req_id, chunks in reconstructed_data_map.items():
-                reconstructed_bytes = b"".join(chunks)
-                self.assertEqual(original_data_map[req.id], reconstructed_bytes)
-            if self.rank == 0:
-                print(f"\n✅ Success test verified on all {self.world_size} ranks.")
+
+        # BOTH modes. Owning changes what a tensor IS - a clone of its own rather than a view into
+        # the staging buffer - so the bytes have to be checked under each, not only under the default.
+        for owned in (True, False):
+            with self.subTest(owned=owned):
+                reconstructed_data_map = {req.id: [None] * len(req.sizes) for req in requests}
+                with patch.dict(os.environ, env_vars):
+                    with DistributedStreamer() as streamer:
+                        streamer.stream_files(requests, None, "cpu", True, owned=owned)
+                        for req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                            # read here, inside the loop: under owned=False this is the only point
+                            # at which the view is guaranteed to hold its own bytes
+                            reconstructed_data_map[req_id][chunk_idx] = data_tensor.cpu().numpy().tobytes()
+                for req_id, chunks in reconstructed_data_map.items():
+                    self.assertEqual(original_data_map[req_id], b"".join(chunks))
+        if self.rank == 0:
+            print(f"\n✅ Success test verified on all {self.world_size} ranks.")
 
     def test_1_success_deep_ring_buffer(self):
         # Pins the ring exactly, rather than letting it fall out of whatever the fixture happens to be:
@@ -220,9 +226,13 @@ class TestDistributedStreamer(unittest.TestCase):
             "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(alignment * 20),
             RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR: str(alignment),
         }
+        # owned=False ON PURPOSE. This alignment describes where tensors sit INSIDE the staging
+        # buffers, so that the offsets one rank broadcasts are usable on every other. An owned tensor
+        # is a clone with a storage of its own, where that layout does not apply - and forcing the
+        # alignment onto it, by slicing an over-allocated buffer, made vLLM fault on a real GPU.
         with patch.dict(os.environ, env_vars):
             with DistributedStreamer() as streamer:
-                streamer.stream_files(requests, None, "cpu", True)
+                streamer.stream_files(requests, None, "cpu", True, owned=False)
 
                 for _req_id, _chunk_idx, data_tensor in streamer.get_chunks():
                     ptr = data_tensor.data_ptr()
@@ -233,6 +243,73 @@ class TestDistributedStreamer(unittest.TestCase):
 
         if self.rank == 0:
             print(f"\n✅ Alignment test verified on all {self.world_size} ranks.")
+
+    def test_1_owned_tensors_survive_later_rounds(self):
+        # THE GUARANTEE ITSELF. BUFFER_MIN_BYTESIZE=0 sizes the staging buffer to a single chunk, so
+        # every round overwrites the whole of it - a borrowed view would come back holding the bytes
+        # of the last round rather than its own.
+        if self.world_size < 2:
+            self.skipTest("Ownership test requires at least 2 processes.")
+
+        chunk = 260
+        num_chunks = 12
+        file_specs = [{"size": chunk * num_chunks, "chunks": [chunk] * num_chunks}]
+        requests = self._prepare_file_requests(file_specs)
+
+        original = {}
+        for req in requests:
+            with open(req.path, "rb") as f:
+                original[req.id] = f.read()
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars):
+            with DistributedStreamer() as streamer:
+                streamer.stream_files(requests, None, "cpu", True)
+                # HELD, not read: converting to bytes inside the loop is what a borrowed view survives
+                held = {(req_id, idx): tensor
+                        for req_id, idx, tensor in streamer.get_chunks()}
+
+        self.assertEqual(len(held), num_chunks)
+        for (req_id, idx), tensor in held.items():
+            self.assertEqual(
+                tensor.cpu().numpy().tobytes(),
+                original[req_id][idx * chunk: (idx + 1) * chunk],
+                f"Rank {self.rank}: chunk {idx} of file {req_id} changed after the stream ended",
+            )
+        if self.rank == 0:
+            print(f"\n✅ Owned tensors verified on all {self.world_size} ranks.")
+
+    def test_1_owned_tensors_have_independent_storage(self):
+        # Per TENSOR, not per buffer. Borrowed, every tensor is a view into one of the two staging
+        # buffers, so a whole stream shows at most two storages. Owned, each has its own - otherwise a
+        # caller holding one small tensor would pin the buffer it came from.
+        if self.world_size < 2:
+            self.skipTest("Ownership test requires at least 2 processes.")
+
+        chunk = 260
+        num_chunks = 8
+        file_specs = [{"size": chunk * num_chunks, "chunks": [chunk] * num_chunks}]
+        requests = self._prepare_file_requests(file_specs)
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+
+        def collect(owned):
+            with patch.dict(os.environ, env_vars):
+                with DistributedStreamer() as streamer:
+                    streamer.stream_files(requests, None, "cpu", True, owned=owned)
+                    # the TENSORS are kept, not their addresses: a freed storage lets the allocator
+                    # hand the same address back, which would make distinctness look like reuse
+                    return [tensor for _, _, tensor in streamer.get_chunks()]
+
+        borrowed = collect(False)
+        self.assertLessEqual(
+            len({tensor.untyped_storage().data_ptr() for tensor in borrowed}), 2,
+            "borrowed tensors must alias the staging buffers",
+        )
+
+        owned = collect(True)
+        addresses = [tensor.untyped_storage().data_ptr() for tensor in owned]
+        self.assertEqual(len(set(addresses)), len(addresses),
+                         "an owned tensor must not share storage with another")
 
     def test_1_auto_mode_no_distributed_with_gloo(self):
         """RUNAI_STREAMER_DIST=auto should disable distributed streaming for gloo backend."""
