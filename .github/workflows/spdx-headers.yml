@@ -1,0 +1,28 @@
+name: SPDX headers
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check SPDX headers
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    # The script uses only the Python standard library, so nothing needs to be installed.
+    - name: Test the header script
+      run: python3 scripts/test_spdx_headers.py
+
+    - name: Check that every source file has the NVIDIA SPDX header
+      run: python3 scripts/spdx_headers.py
