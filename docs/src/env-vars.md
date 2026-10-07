@@ -47,9 +47,9 @@ Controls how many file system reads are in flight at once.
 A positive integer, optionally followed by per-filesystem-type overrides:
 
 ```
-RUNAI_STREAMER_FS_QUEUE_DEPTH=512                          # every mount
-RUNAI_STREAMER_FS_QUEUE_DEPTH="512,nfs=64"                 # 64 on NFS, 512 elsewhere
-RUNAI_STREAMER_FS_QUEUE_DEPTH="512,nfs=64,virtiofs=256"    # and 256 on virtiofs
+RUNAI_STREAMER_FS_QUEUE_DEPTH=64                           # every mount
+RUNAI_STREAMER_FS_QUEUE_DEPTH="64,nfs=32"                  # 32 on NFS, 64 elsewhere
+RUNAI_STREAMER_FS_QUEUE_DEPTH="64,nfs=32,virtiofs=128"     # and 128 on virtiofs
 ```
 
 The leading value is the default and is mandatory.
@@ -68,7 +68,7 @@ findmnt -no FSTYPE /path/to/model
 
 #### Default value
 
-512 for the asynchronous readers
+64 for the asynchronous readers
 
 16 for `sync_buffered`
 
