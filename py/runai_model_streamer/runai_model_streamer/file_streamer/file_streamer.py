@@ -181,7 +181,9 @@ class FileStreamer:
         if not homogeneous_paths([file_stream_request.path for file_stream_request in file_stream_requests]):
             raise RunaiStreamerInvalidInputException("Cannot stream files from multiple source types in parallel")
 
-        self.device_str = device
+        # None means the host; see DistributedStreamer.stream_files. Normalised here too because
+        # this entry point is public in its own right.
+        self.device_str = device or "cpu"
 
         for file_stream_request in file_stream_requests:
             # first object-storage path resolves + applies the credentials to the streamer, once

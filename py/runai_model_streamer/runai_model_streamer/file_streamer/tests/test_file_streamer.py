@@ -113,6 +113,29 @@ class TestRingConcurrency(unittest.TestCase):
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_none_device_is_the_host_and_still_owns(self):
+        """device=None has always meant the host: it reaches tensor.to(None), which returns the tensor
+        unchanged, so the caller is handed a view into a ring buffer.
+
+        It is tested because None does NOT equal "cpu", and the comparisons against "cpu" decide where
+        a tensor lands and whether its buffer is handed over. Left alone, `owned=True` with
+        `device=None` recycled the buffers under tensors the caller had been promised."""
+        path, expected = self.write_ranges("none_device.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, device=None, owned=True)
+            self.assertEqual(fs.device_str, "cpu")
+            self.assertTrue(fs.requests_iterator._pool._owned)
+            held = {index: buffer for _, index, buffer in fs.get_chunks()}
+
+        self.assertEqual(
+            {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
+            expected,
+        )
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
     def test_ring_recycles_buffers_across_many_requests(self):
         # a ring of 2 serving 10 ranges: buffers must be released and refilled 5 times over, and a range
         # must never be read out of a buffer that a later request has already overwritten

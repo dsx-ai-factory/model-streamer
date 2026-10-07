@@ -150,6 +150,12 @@ class DistributedStreamer:
             owned: bool = True,
     ) -> None:
 
+        # None has always meant the host - it reaches tensor.to(None), which returns the tensor
+        # unchanged. Normalised HERE so it never reaches a comparison against "cpu": those decide
+        # whether a buffer is handed over and whether this host can broadcast, and None silently
+        # answered no to both.
+        device = device or "cpu"
+
         # Cleared before dispatch, so a call that builds no ring - or raises before it does - reports
         # nothing rather than whatever the previous call left behind.
         self._ring_info = None
