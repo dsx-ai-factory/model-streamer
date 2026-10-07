@@ -47,7 +47,7 @@ def get_safetensors_dtype_map() -> dict:
         "F8_E4M3": ["float8_e4m3fn", "float8_e4m3fnuz"],
         "F8_E5M2": ["float8_e5m2", "float8_e5m2fnuz"],
         "F8_E8M0": ["float8_e8m0fnu", "float8_e8m0fnuz"],
-        "F4":      ["float4_e2m1fn_x2"],  # Not yet in PyTorch (as of 2.5.1)
+        "F4":      ["float4_e2m1fn_x2"],  # Two logical values per storage element
     }
 
     for st_type, torch_aliases in _EXPERIMENTAL_ALIASES.items():
@@ -208,7 +208,7 @@ class SafetensorMetadata:
     def _validate_shape_consistency(self):
         # 1. Calculate total number of elements
         num_elements = 1
-        for dim in self.shape:
+        for dim in self.get_torch_shape():
             num_elements *= dim
         
         # 2. Identify the actual bytes reserved in the file
@@ -228,6 +228,15 @@ class SafetensorMetadata:
 
     def get_bytesize(self) -> int:
         return self.offsets.get_diff()
+
+    def get_torch_shape(self) -> List[int]:
+        # Safetensors records logical F4 values; PyTorch packs two into each
+        # float4_e2m1fn_x2 element along the last dimension.
+        if self.dtype == "F4":
+            if not self.shape or self.shape[-1] % 2:
+                raise ValueError(f"F4 tensor '{self.name}' requires an even last dimension")
+            return [*self.shape[:-1], self.shape[-1] // 2]
+        return self.shape
 
     def get_item_count(self) -> int:
         count = 1
@@ -266,9 +275,9 @@ def create_torch_tensor(
     buffer: Any, tensor_metadata: SafetensorMetadata
 ) -> torch.Tensor:
     if tensor_metadata.get_item_count() == 0:
-        return torch.empty(tensor_metadata.shape, dtype=tensor_metadata.get_torch_dtype())
+        return torch.empty(tensor_metadata.get_torch_shape(), dtype=tensor_metadata.get_torch_dtype())
 
     tensor = buffer.view(tensor_metadata.get_torch_dtype())
     
     # Reshape the tensor to its final, correct shape.
-    return tensor.view(tensor_metadata.shape)
+    return tensor.view(tensor_metadata.get_torch_shape())

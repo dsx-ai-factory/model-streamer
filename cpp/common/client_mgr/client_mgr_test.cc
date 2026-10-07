@@ -3,7 +3,10 @@
 
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <set>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include "common/backend_api/object_storage/object_storage.h"
@@ -15,47 +18,45 @@
 namespace runai::llm::streamer::common
 {
 
-bool strequals(const char *a, const char *b) {
-    if (a == nullptr && b == nullptr) {
-        return true;
-    }
-    if (a == nullptr || b == nullptr) {
-        return false;
-    }
-    return strcmp(a, b) == 0;
+std::optional<std::string> copy_string(const char* value)
+{
+    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
 }
 
 struct Helper : IClient
 {
     Helper(const common::backend_api::ObjectClientConfig_t & config) :
-        config(config),
+        endpoint_url(copy_string(config.endpoint_url)),
         counter(++global_counter),
         id(utils::random::number<size_t>())
     {
+        // ClientMgr retains clients after the caller's config, parameter vector,
+        // and strings have gone out of scope. The test client must own its copy.
+        for (size_t i = 0; i < config.num_initial_params; ++i)
+        {
+            initial_params.emplace_back(copy_string(config.initial_params[i].key),
+                                        copy_string(config.initial_params[i].value));
+        }
     }
 
     bool verify_credentials(const common::backend_api::ObjectClientConfig_t& other) const {
-        if (!strequals(config.endpoint_url, other.endpoint_url)) {
+        if (endpoint_url != copy_string(other.endpoint_url) ||
+            initial_params.size() != other.num_initial_params) {
             return false;
         }
-        if (config.num_initial_params != other.num_initial_params) {
-            return false;
-        }
-        for (size_t i = 0; i < config.num_initial_params; ++i) {
-            if (!strequals(config.initial_params[i].key, other.initial_params[i].key)) {
-                return false;
-            }
-            if (!strequals(config.initial_params[i].value, other.initial_params[i].value)) {
+        for (size_t i = 0; i < initial_params.size(); ++i) {
+            if (initial_params[i].first != copy_string(other.initial_params[i].key) ||
+                initial_params[i].second != copy_string(other.initial_params[i].value)) {
                 return false;
             }
         }
         return true;
     }
 
-    const common::backend_api::ObjectClientConfig_t & config;
+    const std::optional<std::string> endpoint_url;
+    std::vector<std::pair<std::optional<std::string>, std::optional<std::string>>> initial_params;
     static size_t global_counter;
     const size_t counter;
-
     const size_t id;
 };
 
@@ -187,7 +188,7 @@ TEST_F(ClientMgrTest, Credentials_Changed)
         std::vector<common::backend_api::ObjectConfigParam_t> initial_params;
         const auto new_config = new_params.to_config(initial_params);
         bool changed = !helper->verify_credentials(new_config);
-        Helper * helper = ClientMgrHelper::pop(new_config);
+        helper = ClientMgrHelper::pop(new_config);
 
         EXPECT_TRUE(helper->verify_credentials(new_config));
 
