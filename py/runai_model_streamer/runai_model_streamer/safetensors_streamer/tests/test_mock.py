@@ -78,6 +78,25 @@ class TestSafetensorsStreamerMock(unittest.TestCase):
             self.assertTrue(res)
 
     @patch(__name__ + '.SafetensorsStreamer')
+    def test_safetensors_streamer_S3_MOCK_with_tensor_names(self, mock_streamer_class):
+        """The mock shim must forward tensor_names to the real streamer, not drop it."""
+        fake_s3_path = f"s3://my-fake-bucket/{self.file_dir}/{self.file_name}"
+
+        patcher = StreamerPatcher(local_bucket_path=self.local_dir)
+        mock_streamer_class.side_effect = patcher.create_mock_streamer
+
+        with safe_open(self.local_file_path, framework="pt", device="cpu") as f:
+            one_name = next(iter(f.keys()))
+
+        our = {}
+        with SafetensorsStreamer() as run_sf:
+            run_sf.stream_file(fake_s3_path, None, "cpu", tensor_names={one_name})
+            for name, tensor in run_sf.get_tensors():
+                our[name] = tensor.clone()
+
+        self.assertEqual(set(our.keys()), {one_name})
+
+    @patch(__name__ + '.SafetensorsStreamer')
     def test_safetensors_streamer_GS_MOCK(self, mock_streamer_class):
         """
         Mocked test: Verifies streaming from a FAKE GS path

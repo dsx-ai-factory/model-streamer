@@ -15,12 +15,15 @@
 #include "streamer/impl/reader/reader.h"
 #include "streamer/impl/file/file.h"
 #include "streamer/impl/s3/s3.h"
+#include "utils/scope_guard/scope_guard.h"
+#include "utils/semaphore/semaphore.h"
 
 namespace runai::llm::streamer::impl
 {
 
-Batch::Batch(SubmissionId submission_id, unsigned workload_index, unsigned file_index, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const Tasks && tasks, std::shared_ptr<common::Responder> responder, std::shared_ptr<const Config> config, size_t chunk_bytesize) :
+Batch::Batch(SubmissionId submission_id, unsigned workload_index, unsigned file_index, const std::string & path, const common::s3::S3ClientWrapper::Params & params, const Tasks && tasks, std::shared_ptr<common::Responder> responder, std::shared_ptr<const Config> config, size_t chunk_bytesize, common::Device device) :
     submission_id(submission_id),
+    device(device),
     workload_index(workload_index),
     file_index(file_index),
     path(path),
@@ -32,7 +35,7 @@ Batch::Batch(SubmissionId submission_id, unsigned workload_index, unsigned file_
     config(config)
 {
     LOG(DEBUG) << "Batch " << path << " range " << range << " ; " << this->tasks.size() << " tasks in "
-               << chunks.size() << " chunks";
+               << chunks.size() << " chunks to " << device;
 }
 
 size_t Batch::total_bytes() const
@@ -45,7 +48,7 @@ size_t Batch::end_offset() const
     return range.end;
 }
 
-void Batch::execute(std::atomic<bool> & stopped)
+void Batch::execute(std::atomic<bool> & stopped, const DeviceStaging * staging)
 {
     LOG(DEBUG) << "Start reading from file " << path;
 
@@ -55,7 +58,22 @@ void Batch::execute(std::atomic<bool> & stopped)
         ASSERT(!is_object_storage()) << "Unsupported reader mode for object storage backends";
 
         _reader = std::make_unique<File>(path, *config);
-        read(*config, stopped);
+
+        if (device.is_host())
+        {
+            read(*config, stopped);
+        }
+        else if (staging != nullptr && staging->valid())
+        {
+            read_to_device(*staging, stopped);
+        }
+        else
+        {
+            // The caller routed a device batch to a reader that cannot stage it. pread into device
+            // memory is a segmentation fault, not an error, so this refuses rather than tries.
+            LOG(ERROR) << "No staging for a batch destined for " << device;
+            throw common::Exception(common::ResponseCode::UnsupportedDeviceType);
+        }
     }
     catch(const common::Exception & e)
     {
@@ -151,6 +169,136 @@ void Batch::read(const Config & config, std::atomic<bool> & stopped)
     }
 
     LOG(DEBUG) << "Finished reading " << i << "/" << num_chunks << " chunks from file " << path << (stopped ? " - terminated" : " successfully");
+
+    if (stopped)
+    {
+        throw common::Exception(common::ResponseCode::FinishedError);
+    }
+}
+
+void Batch::read_to_device(const DeviceStaging & staging, std::atomic<bool> & stopped)
+{
+    if (tasks.empty())
+    {
+        LOG(DEBUG) << "Empty batch";
+        return;
+    }
+
+    // FROM THE POOL, not from the config. A read must never be larger than the buffer it lands in,
+    // and two values kept in step by hand is how that stops being true - it overflowed the buffer the
+    // first time they disagreed.
+    const size_t block = staging.pool->buffer_bytesize();
+
+    // As in read(): a batch covers one ContiguousTransfer, so the whole range lands in one contiguous
+    // destination starting at the first task's. That destination is DEVICE memory here, so nothing
+    // below may write to it - only the copy does.
+    char * const destination = tasks[0].destination();
+
+    _reader->seek(range.start);
+
+    // Written by the issuer's completions, read by this thread. `landed` counts copies that have
+    // retired, IN ORDER: one stream per device is FIFO and this thread submits in file order, so the
+    // n-th completion is the n-th block.
+    std::atomic<unsigned> landed{ 0 };
+    std::atomic<int> failure{ static_cast<int>(common::ResponseCode::Success) };
+    utils::Semaphore retired(0);
+    unsigned submitted = 0;
+
+    size_t offset = range.start;
+
+    {
+        // Every completion holds a reference to the three above, so this thread may not leave the
+        // block until they have all fired - including when a read throws. The guard is what makes
+        // that true on every path, and its scope is what puts the wait before the final answer.
+        utils::ScopeGuard drain([&]()
+            {
+                for (unsigned i = 0; i < submitted; ++i)
+                {
+                    retired.wait();
+                }
+            });
+
+        while (offset < range.end && !stopped)
+        {
+            // Blocking, deliberately: this thread has nothing else to do, and a full pool IS the
+            // backpressure that stops it reading faster than the device can absorb.
+            StagingBuffer buffer;
+            const auto code = staging.pool->acquire(buffer);
+            if (code != common::ResponseCode::Success)
+            {
+                throw common::Exception(code);
+            }
+
+            if (!buffer.valid())
+            {
+                // The pool was stopped, which only happens on teardown. The rest of the range will
+                // never be read, so it must not be answered as read - the same mistake as counting a
+                // failed copy. FinishedError is what the stopped path below reports.
+                throw common::Exception(common::ResponseCode::FinishedError);
+            }
+
+            const size_t bytesize = std::min(block, range.end - offset);
+
+            // Until the issuer has it, this buffer is ours to give back: a read that throws leaves
+            // nobody else to do it, and the pool is three deep - the third failed batch would leave
+            // the fourth waiting for a buffer forever. From submit() on, the issuer returns it on
+            // every path, so the guard is cancelled rather than released twice.
+            utils::ScopeGuard give_back([&]() { staging.pool->release(buffer); });
+
+            _reader->read(bytesize, buffer.data);
+
+            staging.issuer->submit(device, staging.pool, buffer, bytesize,
+                                   destination + (offset - range.start),
+                                   [&landed, &failure, &retired](common::ResponseCode ret)
+                                   {
+                                       if (ret != common::ResponseCode::Success)
+                                       {
+                                           int expected = static_cast<int>(common::ResponseCode::Success);
+                                           failure.compare_exchange_strong(expected, static_cast<int>(ret));
+                                       }
+                                       else if (failure.load() == static_cast<int>(common::ResponseCode::Success))
+                                       {
+                                           // ONLY for a copy that landed, and only while none before it
+                                           // failed. This counter is what the reader answers ranges
+                                           // from, so counting a failed copy would report bytes that
+                                           // never reached the device as successfully read.
+                                           //
+                                           // Checking `failure` is enough because completions arrive in
+                                           // order: an earlier failure has already been recorded.
+                                           landed.fetch_add(1, std::memory_order_release);
+                                       }
+
+                                       retired.post();
+                                   });
+
+            give_back.cancel();
+            ++submitted;
+            offset += bytesize;
+
+            // Answer what has already reached the device, without waiting. Called only from this thread,
+            // so _unfinished needs no lock - the completions touch none of the batch.
+            // The clamp is load-bearing, not defensive: every landed block is a full `block` except
+            // possibly the last, so once that one lands the sum overshoots range.end - and answering
+            // the whole range is exactly right at that point.
+            finished_until(std::min(range.start + static_cast<size_t>(landed.load(std::memory_order_acquire)) * block,
+                                    range.end));
+        }
+    }   // every copy has retired here, so nothing is still writing to the destination
+
+    const auto worst = static_cast<common::ResponseCode>(failure.load());
+    if (worst != common::ResponseCode::Success)
+    {
+        throw common::Exception(worst);
+    }
+
+    if (!stopped)
+    {
+        // Also answers a range of size zero, which reads nothing and still owes a response.
+        finished_until(range.end, common::ResponseCode::Success);
+    }
+
+    LOG(DEBUG) << "Finished " << submitted << " blocks to " << device << " from file " << path
+               << (stopped ? " - terminated" : " successfully");
 
     if (stopped)
     {

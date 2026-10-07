@@ -65,6 +65,44 @@ TEST(FsAsyncRouter, Queue_Depth_Is_Resolved_Per_Mount)
     EXPECT_EQ(groups.depths[1], 512u) << "the ext4 mount takes the default";
 }
 
+// Registered buffers are decided per mount, like the depth, and from the same file system type.
+//
+// The policy itself lives in Config with its own tests; what this checks is that the router ASKS and
+// carries the answer per group - without it an NFS mount would read through registered buffers, which
+// costs there rather than paying.
+TEST(FsAsyncRouter, Registered_Buffers_Are_Decided_Per_Mount)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string & directory)
+    {
+        const bool is_nfs = directory == "/nfs";
+        return posix_io::MountCapability{ is_nfs ? makedev(8, 1) : makedev(8, 2), false,
+                                          is_nfs ? "nfs4" : "ext4" };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st", "/local/b.st" }), FsQueueDepth(512),
+                                      [](const std::string & fs_type) { return fs_type != "nfs4"; });
+
+    ASSERT_EQ(groups.registers.size(), 2u) << "one answer per group, like the depth";
+    EXPECT_FALSE(groups.registers[0]) << "the nfs4 mount was denied";
+    EXPECT_TRUE(groups.registers[1]) << "the ext4 mount was allowed";
+}
+
+// No policy means register. A caller that does not care gets what it had before the deny list existed.
+TEST(FsAsyncRouter, Without_A_Policy_Every_Mount_Registers)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string &)
+    {
+        return posix_io::MountCapability{ makedev(8, 1), false, "nfs4" };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st" }), FsQueueDepth(512));
+
+    ASSERT_EQ(groups.registers.size(), 1u);
+    EXPECT_TRUE(groups.registers[0]);
+}
+
 // Directories on one mount share a group, so they share an engine.
 TEST(FsAsyncRouter, One_Group_Per_Mount_Not_Per_Directory)
 {

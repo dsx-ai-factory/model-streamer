@@ -88,6 +88,15 @@ class CapacityQueue
         _inflight = 0;
     }
 
+    // Drop every PENDING item and leave the in-flight credit alone. For an abort that must wait for
+    // what the backend already holds: a pending item never reached the backend, so no pointer of ours
+    // escaped with it, while an in-flight one may still be written into. Only a real completion may
+    // release that credit, which is what makes idle() honest enough to wait on.
+    void abort_pending()
+    {
+        _pending.clear();
+    }
+
     // no items left to submit (some may still be in flight)
     bool empty() const
     {

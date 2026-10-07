@@ -13,6 +13,7 @@
 #include "utils/threadpool/threadpool.h"
 #include "utils/fdlimit/fdlimit.h"
 
+#include "common/device/device.h"
 #include "common/responder/responder.h"
 #include "common/s3_credentials/s3_credentials.h"
 #include "streamer/impl/config/config/config.h"
@@ -21,6 +22,8 @@
 #include "streamer/impl/batches/batches.h"
 #include "streamer/impl/request/request.h"
 #include "streamer/impl/submissions/submissions_mgr.h"
+#include "streamer/impl/device_io/device_issuer/device_issuer.h"
+#include "streamer/impl/device_io/device_writer/device_writer.h"
 #include "streamer/impl/pools/backend_pools.h"
 #include "posix_io/mount_capabilities/mount_capabilities.h"
 #include "streamer/impl/async_io/async_io_stats/async_io_stats.h"
@@ -63,8 +66,11 @@ struct Streamer
     // in the file, contiguous in memory, or ordered.
     // Exactly one response is issued per range, including for a zero-sized range (which is completed
     // immediately without reaching storage). A file with no ranges contributes no responses.
+    // `device` is where every destination of this submission lives - one device per submission, so a
+    // load spanning several GPUs submits once per GPU.
     common::ResponseCode async_request(
       std::vector<FileRanges> & request,
+      common::Device device,
       SubmissionId * out_submission_id = nullptr);
 
     // Consume the next ready sub-range response over the persistent responder. Blocks up to timeout_ms
@@ -180,6 +186,22 @@ struct Streamer
     // Declared BEFORE _pools, and that order is load-bearing: the async pool's factory is built from
     // worker_factory() while _pools is constructed.
     FsAsyncRouter _router;
+
+    // The copy path onto a device, shared by every worker of this streamer - one stream per device
+    // however many workers copy to it. Costs nothing until a submission actually names a device, so
+    // it is created unconditionally. Also BEFORE _pools, for the same reason as _router.
+    std::shared_ptr<DeviceWriter> _device_writer;
+
+    // One thread issuing every copy for the SYNCHRONOUS reader, shared by its threads. The async
+    // workers do not use it: each of those is a single thread and issues its own copies. Costs
+    // nothing until a device workload reaches the synchronous pool. Also BEFORE _pools.
+    std::shared_ptr<DeviceIssuer> _device_issuer;
+
+    // Staging pools kept alive past the workers that made them. Declared BEFORE _s3 and _pools, so it
+    // is destroyed AFTER both: the workers go first, then the clients - whose destructors wait for the
+    // SDK - and only then is the pinned memory freed. Removing a client merely parks it, so without
+    // this the slabs would be freed while a plugin could still be writing into them.
+    std::shared_ptr<StagingPoolRetainer> _retained_pools = std::make_shared<StagingPoolRetainer>();
 
     AsyncIoStats _stats;
 

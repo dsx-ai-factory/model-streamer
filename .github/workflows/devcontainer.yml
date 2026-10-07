@@ -1,0 +1,77 @@
+name: Build devcontainer
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: Push to GHCR; otherwise export the image as a workflow artifact.
+        type: boolean
+        default: false
+    outputs:
+      image:
+        description: Fully qualified image tag to run.
+        value: ${{ jobs.build.outputs.image }}
+      artifact:
+        description: Image artifact name when publish is false.
+        value: ${{ jobs.build.outputs.artifact }}
+
+jobs:
+  build:
+    name: Build devcontainer image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      artifact: ${{ steps.image.outputs.artifact }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    - name: Select image tag
+      id: image
+      shell: bash
+      env:
+        PUBLISH: ${{ inputs.publish }}
+      run: |
+        repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+        image_name="ghcr.io/${repository}/devcontainer"
+        tag=latest
+        artifact=
+        if [[ "$PUBLISH" != true ]]; then
+          tag="pr-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          artifact="devcontainer-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+        fi
+        printf 'name=%s\ntag=%s\nimage=%s:%s\nartifact=%s\n' \
+          "$image_name" "$tag" "$image_name" "$tag" "$artifact" >> "$GITHUB_OUTPUT"
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build devcontainer
+      uses: devcontainers/ci@v0.3
+      with:
+        imageName: ${{ steps.image.outputs.name }}
+        imageTag: ${{ steps.image.outputs.tag }}
+        cacheFrom: ${{ steps.image.outputs.name }}:latest
+        push: ${{ inputs.publish && 'always' || 'never' }}
+
+    - name: Export devcontainer image
+      if: ${{ !inputs.publish }}
+      env:
+        CI_IMAGE: ${{ steps.image.outputs.image }}
+      run: docker save --output "$RUNNER_TEMP/devcontainer.tar" "$CI_IMAGE"
+
+    - name: Upload devcontainer image
+      if: ${{ !inputs.publish }}
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ steps.image.outputs.artifact }}
+        path: ${{ runner.temp }}/devcontainer.tar
+        if-no-files-found: error
+        compression-level: 1
+        retention-days: 1

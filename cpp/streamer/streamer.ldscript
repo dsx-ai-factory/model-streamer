@@ -17,13 +17,9 @@
 #   Our node. It needs a name because ld does not allow an anonymous tag next to a named one. Our
 #   symbols become runai_file_streamer_start@@RUNAI_FILE_STREAMER_1.0 instead of plain runai_file_streamer_start.
 #
-#   Nothing depends on the name today: we load the library with dlopen, Python uses ctypes.CDLL, and
-#   dlsym ignores symbol versions. This changes when we ship streamer.h and libstreamer.so for other
-#   programs to link against. Such a program records runai_file_streamer_start@RUNAI_FILE_STREAMER_1.0 in its own
-#   binary, and the name becomes a contract - rename or remove it and those programs stop loading.
-#   The name is still free to change until the first tarball goes out.
-#
-# The number is the ABI generation, not the release version. Do not raise it for a new release.
+#   RUNAI_FILE_STREAMER is the agreed public ABI prefix. Finalize the versioning policy, including
+#   its relationship to Python package versions, before the first standalone release. Native programs
+#   record the full version node when linking; renaming or removing it later breaks those programs.
 #
 # Without version nodes, a program built against a newer streamer.h and run against an older
 # libstreamer.so binds any symbol with a matching name and then fails in unclear ways. The node

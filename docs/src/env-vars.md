@@ -130,7 +130,7 @@ Overrides url endpoint for reading from S3 compatible object store
 
 > [!NOTE]
 > 
-> Mandatory for S3 compatible e.g. gcs, minio
+> Mandatory for S3 compatible e.g. gcs, seaweedfs
 > 
 > Optional if reading from AWS S3
 

@@ -27,7 +27,7 @@
 //
 // aws:   <streamer app> s3://bucket/path
 // gcs:   AWS_ENDPOINT_URL="https://storage.googleapis.com" RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=false AWS_EC2_METADATA_DISABLED=true <streamer app> s3://bucket/path
-// minio: AWS_ENDPOINT_URL="http://localhost:9000" RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_EC2_METADATA_DISABLED=true AWS_ACCESS_KEY_ID="minio" AWS_SECRET_ACCESS_KEY="miniostorage" <streamer app> s3://bucket/path
+// seaweedfs: AWS_ENDPOINT_URL="http://localhost:9000" RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_EC2_METADATA_DISABLED=true AWS_ACCESS_KEY_ID="testkey" AWS_SECRET_ACCESS_KEY="testsecret" <streamer app> s3://bucket/path
 
 namespace runai::llm::streamer::impl::s3
 {

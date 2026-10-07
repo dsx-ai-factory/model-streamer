@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "common/device/device.h"
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
 #include "common/s3_credentials/s3_credentials.h"
@@ -33,8 +34,22 @@ int submit_request(impl::Streamer * s,
                    size_t * range_offsets, size_t * range_sizes, void ** range_dsts,
                    RunaiFileStreamerDevice device)
 {
-    // Rejected before anything is committed, so a submission this build cannot serve owes no responses.
-    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU)
+    // Both checks come before anything is committed, so a submission this build cannot serve owes no
+    // responses. Malformed first: an ordinal that was never valid is the caller's mistake whatever
+    // this build supports, and the impl-side Device is unsigned, so nothing below could represent it.
+    if (device.type == RUNAI_FILE_STREAMER_DEVICE_CUDA && device.id < 0)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidDevice);
+    }
+
+    // A type this build has never heard of. CUDA is served now, so this is no longer "anything that is
+    // not the host" - it is a value outside the enum, which nothing below could route.
+    //
+    // Whether a CUDA destination can actually be READ is decided later, per range: there may be no
+    // driver, no such device, or no memory to pin. Those are reported through the responses, because
+    // by then the submission has been accepted and every range owes an answer.
+    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU &&
+        device.type != RUNAI_FILE_STREAMER_DEVICE_CUDA)
     {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
     }
@@ -76,7 +91,11 @@ int submit_request(impl::Streamer * s,
         base += n;
     }
 
-    return static_cast<int>(s->async_request(request, out_submission_id));
+    common::Device destination;
+    destination.type = static_cast<common::DeviceType>(device.type);
+    destination.id = static_cast<unsigned>(device.id);
+
+    return static_cast<int>(s->async_request(request, destination, out_submission_id));
 }
 
 } // namespace

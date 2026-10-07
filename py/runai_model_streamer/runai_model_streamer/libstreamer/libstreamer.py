@@ -94,8 +94,9 @@ def runai_request(
 
     paths carries one entry per file, however many ranges that file has. The three range arrays are flat,
     indexed identically, and grouped by file in the order of paths: file f's ranges occupy
-    [sum(num_ranges[:f]), sum(num_ranges[:f+1])). Destinations must not overlap - that is the caller's
-    responsibility and is not verified.
+    [sum(num_ranges[:f]), sum(num_ranges[:f+1])). Destinations must not overlap - not within this
+    submission, and not with the destination of any range of another submission still in flight, since
+    submissions run concurrently. That is the caller's responsibility and is not verified.
 
     range_dsts holds ABSOLUTE integer addresses - one complete pointer per range, not offsets from a
     base, and in no required order. Deliberately not memoryviews:
@@ -104,7 +105,20 @@ def runai_request(
       - destinations need not share a buffer, which is the same generality the range API exists for.
       - it avoids one memoryview -> address conversion per range on the submit path (~n per submission).
     The cost is that raw addresses keep nothing alive: THE CALLER MUST KEEP THE UNDERLYING BUFFERS ALIVE
-    for the lifetime of the submission, until its last response has been consumed."""
+    UNTIL runai_end() RETURNS - not merely until the submission's last response has been consumed.
+
+    An object storage read is handed the destination address and the backend fills it asynchronously. A
+    request already sent cannot be cancelled, and the client that owns it is destroyed by runai_end();
+    that destructor is what waits for the backend SDK. Dropping a buffer earlier can leave the backend
+    writing into memory that is gone.
+
+    Reusing a destination after a FAILED range depends on which failure it was:
+      - a storage error (file access, truncated file) came from a completion, so the backend has
+        finished with that memory. Reuse it at once - this is the ordinary recoverable case;
+      - UnknownError may mean the streamer stopped waiting while the read was still outstanding. Do not
+        reuse that destination. It costs nothing: UnknownError already means abort the whole load;
+      - DeviceDriverError, for a device destination, may mean a copy is still landing in it;
+      - FinishedError is teardown, which the rule above already covers."""
     # Validate the shape here, at the FFI boundary: this is the last point at which a mismatch is a Python
     # error rather than undefined behaviour. The C side takes the range count as sum(num_ranges) and indexes
     # all three flat arrays up to it, while the arrays below are sized from len(range_sizes) - so a

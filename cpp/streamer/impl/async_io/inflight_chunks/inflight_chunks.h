@@ -6,6 +6,7 @@
 
 #include "posix_io/io_engine/io_engine.h"
 #include "streamer/impl/chunk_splitter/chunk_splitter.h"
+#include "streamer/impl/device_io/staging_pool/staging_pool.h"
 
 namespace runai::llm::streamer::impl
 {
@@ -48,6 +49,12 @@ struct InflightChunk
     char * scratch = nullptr;
     size_t scratch_skip = 0;    // where the wanted bytes start inside the scratch buffer
     size_t scratch_wanted = 0;  // how many of them this pass yields
+
+    // Set for a chunk whose destination is a DEVICE: the read lands here, and a copy moves it to
+    // chunk.buffer afterwards. Invalid for a host chunk, which reads straight into chunk.buffer.
+    //
+    // Taken at submit rather than at enqueue, so a chunk waiting in the queue holds no pinned memory.
+    StagingBuffer staging;
 };
 
 // What a completion meant for the chunk it belongs to.
@@ -96,7 +103,13 @@ class InflightChunks
 
     // What still has to be read for `id`: where to resume, how much is left, and where it goes. Only
     // meaningful after a Partial.
+    //
+    // `buffer` is the STAGING buffer when the chunk has one, so every pass - including a bounced one -
+    // lands in the same place and the copy afterwards has one contiguous source.
     Chunk pending(posix_io::RequestId id) const;
+
+    // Give `id` the staging buffer its passes read into.
+    void set_staging(posix_io::RequestId id, const StagingBuffer & buffer);
 
     // Remove `id` and return the chunk it was reading, so the caller can account its tasks.
     Chunk release(posix_io::RequestId id);
@@ -119,6 +132,10 @@ class InflightChunks
     // Hand back every scratch buffer still held, then forget them. For teardown: clear() drops the
     // chunks, so without this the buffers would be lost and the pool empty for good.
     void release_all_scratch(const std::function<void(char *)> & give);
+
+    // The same, for staging buffers taken but never copied from. Only chunks whose copy was never
+    // issued still hold one - an issued copy returns its buffer through the StreamWaiter.
+    void release_all_staging(const std::function<void(const StagingBuffer &)> & give);
 
     void clear();
 

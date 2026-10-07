@@ -38,6 +38,25 @@ with SafetensorsStreamer() as streamer:
 
 > **Note:** You can not mix S3 path and file system paths on same `streamer.stream_files()` call.
 
+#### Loading a subset of tensors (tensor_names)
+
+To load only specific tensors instead of the whole checkpoint, pass `tensor_names` to `stream_file()` / `stream_files()`:
+
+```python
+from runai_model_streamer import SafetensorsStreamer
+
+with SafetensorsStreamer() as streamer:
+    streamer.stream_file(file_path, tensor_names={"model.layers.0.weight", "model.layers.1.weight"})
+    for name, tensor in streamer.get_tensors():
+        tensor.to('CUDA:0')
+```
+
+`tensor_names` is treated as a set - the order it is passed in does not matter, and any container type (list, set, tuple) is accepted. `None` (the default) loads every tensor, unchanged from previous versions. An empty container raises an error, since it is never a useful request.
+
+A name that does not exist in the checkpoint raises an error. A corrupted file is rejected even if the corrupted tensor is excluded by the filter - validation runs against the whole file regardless of what is requested.
+
+When streaming from multiple files, a requested name that exists in more than one file also raises an error - which file it should come from would be ambiguous. This only applies when `tensor_names` is used; loading a whole checkpoint with a name duplicated across files (`tensor_names=None`) is unaffected.
+
 #### Distributed streaming
 
 ##### Use case and motivation
@@ -94,6 +113,12 @@ For example, with 2 nodes and 16 processes (8 processes on each node), each proc
 The mode should be selected according to the communication speed between the nodes.
 By default, distributed streaming is done in local mode.
 To enable global mode, set `RUNAI_STREAMER_DIST_GLOBAL=1`.
+
+##### tensor_names must be identical on every rank
+
+When using `tensor_names` (see [Loading a subset of tensors](#loading-a-subset-of-tensors-tensor_names)) with `is_distributed=True`, every rank must be given the exact same set of names - distributed streaming assumes every rank is reading the same selection from the checkpoint.
+
+> **Warning:** This is not checked or enforced. If ranks are given different `tensor_names`, the most likely outcome is a **hang**, not a clean error: ranks end up needing a different number of broadcast rounds, so a rank that finishes early leaves the others waiting on a collective operation that will never complete, until it times out (`RUNAI_STREAMER_DIST_TIMEOUT`, default 600 seconds). Compute `tensor_names` identically on every rank (e.g. derive it from the same source, such as a shard index) - do not rely on this being caught for you.
 
 #### Streaming from S3
 
