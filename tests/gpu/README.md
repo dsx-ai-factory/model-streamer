@@ -18,7 +18,7 @@ PyTorch 2.4.1 with CUDA 12.4 is pinned for the Dockerfile's Python 3.8 runtime.
 Do not run the CPU `make install` or `make test` targets in this environment:
 they explicitly install CPU-only PyTorch.
 
-Run inside `.devcontainer/devcontainer.gpu.json` on a Linux host with two GPUs:
+Run inside `.devcontainer/gpu/devcontainer.json` on a Linux host with two GPUs:
 
 ```bash
 bash tests/gpu/run.sh

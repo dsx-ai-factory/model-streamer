@@ -43,7 +43,7 @@ jobs:
       - name: Build and test with two GPUs
         uses: devcontainers/ci@v0.3
         with:
-          configFile: .devcontainer/devcontainer.gpu.json
+          configFile: .devcontainer/gpu/devcontainer.json
           imageName: ghcr.io/${{ github.repository }}/devcontainer
           push: never
           runCmd: bash tests/gpu/run.sh
