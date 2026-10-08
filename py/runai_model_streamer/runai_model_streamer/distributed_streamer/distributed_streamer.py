@@ -564,11 +564,6 @@ class _distributedStreamer:
                 # there. data_buffer is next written by prefill()'s copy_ on this same stream;
                 # received_buffer is next written by dist.broadcast on NCCL's, which torch orders
                 # against this one - a dependency master already relies on for borrowed views.
-                #
-                # "This stream" is whichever is current when each op runs - torch reads it, we never
-                # do. A consumer switching streams between iterations would leave the next prefill
-                # copy_ and the previous clone on different streams with nothing ordering them. None
-                # switches: neither vllm nor sglang does while loading weights.
                 for file_id, chunk_index, buffer in self.broadcast(
                     chunks_to_read,
                     batch_metadata_tensor,

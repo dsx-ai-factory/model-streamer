@@ -250,8 +250,15 @@ class SafetensorsStreamer:
             tensor_names: Optional[Collection[str]] = None,
             owned: bool = True,
         ) -> None:
+        # By keyword, so that adding a parameter to stream_files cannot silently shift these into the
+        # wrong slots. is_distributed and owned are both bools, so a shift would still run.
         return self.stream_files(
-            [path], s3_credentials, device, is_distributed, tensor_names, owned
+            [path],
+            s3_credentials=s3_credentials,
+            device=device,
+            is_distributed=is_distributed,
+            tensor_names=tensor_names,
+            owned=owned,
         )
 
 
