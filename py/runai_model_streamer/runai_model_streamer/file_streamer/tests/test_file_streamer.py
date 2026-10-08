@@ -279,6 +279,33 @@ class TestRingConcurrency(unittest.TestCase):
                 results[range_index] = buffer.numpy().tobytes().decode("utf-8")
             self.assertEqual(results, expected)
 
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_consumer_that_gives_up_leaves_the_streamer_usable(self):
+        """The sibling test closes the generator; this one lets a consumer raise, which is what
+        safetensors_pytorch does, and then uses the streamer again.
+
+        Reuse is the part that matters: a drain that only zeroed the counters would pass the
+        assertions below and still hand the next stream a ring the C layer is writing into."""
+        path, expected = self.write_ranges("abandoned.bin", 12)
+        chunks = [FileChunks.contiguous(0, path, 0, [self.RANGE_SIZE] * 12)]
+
+        with FileStreamer() as streamer:
+            streamer.stream_files(chunks)
+            with self.assertRaises(RuntimeError):
+                for _ in streamer.get_chunks():
+                    raise RuntimeError("consumer gave up")
+
+            self.assertEqual(streamer.outstanding, 0, "submissions were left in flight")
+            self.assertEqual(streamer.live_requests, {})
+
+            # The assertions above are bookkeeping; this is the behaviour they stand for.
+            streamer.stream_files(chunks)
+            again = {i: b.numpy().tobytes().decode("utf-8")
+                     for _, i, b in streamer.get_chunks()}
+
+        self.assertEqual(again, expected)
+
 
 class TestBindings(unittest.TestCase):
     def setUp(self):

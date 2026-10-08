@@ -84,17 +84,22 @@ class TestOwnedFollowsTheDestination(unittest.TestCase):
 
         Asserted on the ring, which needs no GPU: stream_files builds it, and nothing reaches CUDA
         until the first .to() in get_chunks."""
-        path, _ = self.write_ranges(6)
-        chunks = [FileChunks.contiguous(17, path, 0, [RANGE_SIZE] * 6)]
+        for owned in (True, False):
+            with self.subTest(owned=owned):
+                path, _ = self.write_ranges(6)
+                chunks = [FileChunks.contiguous(17, path, 0, [RANGE_SIZE] * 6)]
 
-        with DistributedStreamer() as streamer:
-            streamer.stream_files(chunks, None, device="cuda", is_distributed=False, owned=True)
-            inner = streamer.file_streamer
+                with DistributedStreamer() as streamer:
+                    streamer.stream_files(chunks, None, device="cuda", is_distributed=False,
+                                          owned=owned)
+                    inner = streamer.file_streamer
 
-            self.assertEqual(inner.device_str, "cuda")
-            self.assertFalse(inner.requests_iterator._pool._owned)
+                    self.assertEqual(inner.device_str, "cuda")
+                    self.assertFalse(inner.requests_iterator._pool._owned)
 
-            inner.drain_live_submissions()
+                    # Nothing consumed the submission - get_chunks would need a GPU - and the C layer
+                    # must not be left holding destinations.
+                    inner.drain_live_submissions()
 
 
 if __name__ == "__main__":
