@@ -35,7 +35,7 @@ defaults:
 jobs:
   build:
     name: Build component
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     env:
       PACKAGE_VERSION: ${{ inputs.package_version }}
       CI_IMAGE: ${{ inputs.devcontainer_image }}
@@ -43,13 +43,13 @@ jobs:
       COMPONENT: ${{ inputs.component }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         persist-credentials: false
 
     - name: Log in to GitHub Container Registry
       if: inputs.devcontainer_artifact == ''
-      uses: docker/login-action@v3
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -57,7 +57,7 @@ jobs:
 
     - name: Download PR devcontainer
       if: inputs.devcontainer_artifact != ''
-      uses: actions/download-artifact@v7
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
       with:
         name: ${{ inputs.devcontainer_artifact }}
         path: ${{ runner.temp }}/devcontainer
@@ -88,13 +88,17 @@ jobs:
     - name: Build Python package
       run: docker exec ci-build make ci-build-python
 
+    - name: Check wheel compatibility
+      run: docker exec ci-build python3 .devcontainer/scripts/check-wheel-compatibility.py py/*/dist/*.whl
+
     - name: Test C++
-      if: inputs.arch == 'x86_64'
       run: docker exec ci-build make ci-test-cpp BAZEL_TEST_FLAGS=--test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1
 
     - name: Test Python
-      if: inputs.arch == 'x86_64' && inputs.component == 'streamer'
-      run: docker exec ci-build make ci-test-python
+      if: inputs.component == 'streamer'
+      run: |
+        docker exec ci-build make ci-test-python
+        docker exec ci-build bash .devcontainer/scripts/test-python-versions.sh
 
     - name: Collect C++ library
       run: |
@@ -112,14 +116,14 @@ jobs:
       run: docker stop ci-build
 
     - name: Upload C++ library
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: cpp-${{ inputs.component }}-${{ inputs.arch }}
         path: ${{ runner.temp }}/cpp-artifact/
         if-no-files-found: error
 
     - name: Upload architecture packages
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: packages-${{ inputs.component }}-${{ inputs.arch }}
         # Keep package/dist paths inside each artifact for the existing install targets.

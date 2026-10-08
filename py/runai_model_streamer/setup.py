@@ -40,6 +40,7 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer",
     version=VERSION,
+    python_requires=">=3.12",
     license_files=("LICENSE",),
     packages=find_packages(),
     package_data={"runai_model_streamer": [LIB]},

@@ -1,0 +1,14 @@
+gcc-toolset-14-libtsan-devel-0:14.2.1-11.el8_10
+libtsan2-0:14.2.1-11.el8_10
+perl-ExtUtils-MM-Utils-1:7.34-1.el8
+perl-IPC-Cmd-2:1.02-1.el8
+perl-Locale-Maketext-0:1.28-396.el8
+perl-Locale-Maketext-Simple-1:0.21-423.el8_10.1
+perl-Module-CoreList-1:5.20181130-1.el8
+perl-Module-Load-1:0.32-395.el8
+perl-Module-Load-Conditional-0:0.68-395.el8
+perl-Module-Metadata-0:1.000033-395.el8
+perl-Params-Check-1:0.38-395.el8
+perl-Time-HiRes-4:1.9758-2.el8
+perl-Time-Piece-0:1.31-423.el8_10.1
+perl-version-6:0.99.24-1.el8

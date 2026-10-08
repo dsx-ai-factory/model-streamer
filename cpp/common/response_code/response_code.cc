@@ -28,7 +28,7 @@ constexpr std::array<const char *, static_cast<size_t>(ResponseCode::__Max)> __m
     "File access error",
     "End of file reached",
     "S3 not supported",
-    "GLIBC version should be at least 2.29",
+    "GLIBC version should be at least 2.28",
     "Increase process fd limit or decrease the concurrency level. Recommended value for the streamer alone is the concurrency multiplied by 64, in addition to your application fd usage",
     "Invalid request parameters",
     "Empty request parameters",

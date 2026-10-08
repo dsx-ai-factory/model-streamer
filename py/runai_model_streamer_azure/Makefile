@@ -1,11 +1,11 @@
 ARCH := $(shell uname -m)
-PLATFORM := manylinux_2_30_${ARCH}
+PLATFORM := manylinux_2_28_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 .PHONY: build test install_dev_dep clean
 
 install_dev_dep:
-	pip3 install azure-storage-blob azure-identity
+	python3 -m pip install --require-hashes --only-binary=:all: -r ../../.devcontainer/dependencies/requirements.lock
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}
@@ -19,4 +19,3 @@ clean:
 install:
 	pip3 uninstall -y runai_model_streamer_azure && \
 	pip3 install dist/runai_model_streamer_azure-${PACKAGE_VERSION}-py3-none-${PLATFORM}.whl
-

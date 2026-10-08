@@ -38,6 +38,7 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-gcs",
     version=VERSION,
+    python_requires=">=3.12",
     license_files=("LICENSE",),
     packages=find_packages(),
     install_requires=["google-cloud-storage", "google-auth"],

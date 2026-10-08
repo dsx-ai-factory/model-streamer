@@ -1,5 +1,5 @@
 ARCH := $(shell uname -m)
-PLATFORM := manylinux_2_30_${ARCH}
+PLATFORM := manylinux_2_28_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 STREAMER_MOCK_LIB = ../../cpp/bazel-bin/mock/libstreamer-mock.so
@@ -16,10 +16,7 @@ FS_STRATEGY ?= sync_buffered
 .PHONY: install_dev_dep build mock real test test-unit test-unit-real test-unit-real-installed test-dist clean
 
 install_dev_dep:
-	python3 -m pip download torch --index-url https://download.pytorch.org/whl/cpu --no-deps --dest ./dst && \
-	python3 -m pip install ./dst/torch-*.whl && \
-	python3 -m pip install -r requirements.dev && \
-	rm -rf ./dst
+	python3 -m pip install --require-hashes --only-binary=:all: -r ../../.devcontainer/dependencies/requirements.lock
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}

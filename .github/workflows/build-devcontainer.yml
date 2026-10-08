@@ -17,6 +17,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
     uses: ./.github/workflows/devcontainer.yml
     with:
       publish: true
+      arch: ${{ matrix.arch }}

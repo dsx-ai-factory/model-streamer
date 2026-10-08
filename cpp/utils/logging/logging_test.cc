@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <stdio.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <string>
@@ -161,7 +162,8 @@ TEST(Prefix, TID)
         LOG(ERROR) << random::string();
     }
 
-    EXPECT_TRUE(log.find(std::to_string(::gettid())) != std::string::npos);
+    // The manylinux build baseline predates glibc's gettid() wrapper.
+    EXPECT_TRUE(log.find(std::to_string(::syscall(SYS_gettid))) != std::string::npos);
 }
 
 TEST(LOG, Sanity)

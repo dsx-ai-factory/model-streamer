@@ -3,7 +3,6 @@
 load("@rules_cc//cc:cc_toolchain_config_lib.bzl", "tool_path")  # buildifier: disable=deprecated-function
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain")
-load(":rules.bzl", "get_target_triplet", "runai_crosstool_tools")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load(
     "@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl",
@@ -11,31 +10,6 @@ load(
     "flag_group",
     "flag_set",
 )
-
-def _builtin_include_directories(target_triplet, gcc_version):
-    return [
-        "/usr/include/c++/%s" % gcc_version,
-        "/usr/include/%s/c++/%s" % (target_triplet, gcc_version),
-        "/usr/include/c++/%s/backward" % gcc_version,
-        "/usr/lib/gcc/%s/%s/include" % (target_triplet, gcc_version),
-        "/usr/local/include",
-        "/usr/lib/gcc/%s/%s/include-fixed" % (target_triplet, gcc_version),
-    ]
-
-
-def _cross_include_directories(target_triplet, gcc_version):
-    return [
-        "/usr/lib/gcc-cross/%s/%s/include" % (target_triplet, gcc_version),
-        "/usr/%s/include" % target_triplet,
-    ]
-
-
-def _get_include_directories(target_triplet, gcc_version, use_cross):
-    return (_cross_include_directories(target_triplet, gcc_version) if use_cross else _builtin_include_directories(target_triplet, gcc_version)) + [
-        "/usr/include/%s" % target_triplet,
-        "/usr/include",
-    ]
-
 
 def _toolchain_identifier(name):
     return "%s-toolchain" % name
@@ -139,8 +113,7 @@ features = [
 
 
 def _impl(ctx):
-    target_triplet = get_target_triplet(ctx.attr.os, ctx.attr.arch)
-    tool_paths = [tool_path(name = k, path = v) for k, v in runai_crosstool_tools(target_triplet).items()]
+    tool_paths = [tool_path(name = k, path = v) for k, v in ctx.attr.tools.items()]
 
     # Documented at
     # https://docs.bazel.build/versions/main/skylark/lib/cc_common.html#create_cc_toolchain_config_info.
@@ -158,7 +131,7 @@ def _impl(ctx):
         abi_version = "unknown",
         abi_libc_version = "unknown",
         tool_paths = tool_paths,
-        cxx_builtin_include_directories = _get_include_directories(target_triplet, ctx.attr.gcc_version, ctx.attr.use_cross),
+        cxx_builtin_include_directories = ctx.attr.builtin_includes,
         features = features
     )
 
@@ -168,41 +141,25 @@ _toolchain_config = rule(
     # You can alternatively define attributes here that make it possible to
     # instantiate different cc_toolchain_config targets with different behavior.
     attrs = {
-        "os": attr.string(
-            mandatory = True,
-            doc = "The operating system (eg: linux-gnu)",
-        ),
+        "tools": attr.string_dict(mandatory = True),
+        "builtin_includes": attr.string_list(mandatory = True),
         "arch": attr.string(
             mandatory = True,
             doc = "The architecture (eg: x86_64 / aarch64)",
-        ),
-        "gcc_version": attr.string(
-            mandatory = True,
-            doc = "GCC major version to use (eg: 9)",
-        ),
-        "use_cross": attr.bool(
-            mandatory = False,
-            default = False,
-            doc = "Uses crosstool include paths if True",
         ),
     },
     provides = [CcToolchainConfigInfo],
 )
 
 
-def define_toolchain(name, os, host_arch, arch, gcc_version):
-    """"define_toolchain creates rules for a cc_toolchain.
-
-    This expects toolchain tools to exist at a canonical path.
-     * Tools are expected to in /usr/bin/<target_triplet>-<tool-name>
-     * Include paths are expected to be at canonical locations
+def define_toolchain(name, arch, tools, builtin_includes):
+    """Define a native Linux GCC toolchain discovered from the build environment.
 
     Args:
-      name: The name of the toolchain
-      os: The operating system target for this toolchain
-      host_arch: The host architecture for this toolchain
-      arch: The target architecture for this toochain
-      gcc_version: The GCC version of this toolchain
+      name: Repository-local toolchain name.
+      arch: Native host and target architecture.
+      tools: Absolute paths to compiler and binutils executables.
+      builtin_includes: GCC's resolved system include search paths.
     """
 
     native.platform(
@@ -214,7 +171,7 @@ def define_toolchain(name, os, host_arch, arch, gcc_version):
     )
 
     toolchain_config_name = "%s_toolchain_config" % name
-    _toolchain_config(name = toolchain_config_name, os = os, arch = arch, gcc_version = gcc_version, use_cross = host_arch != arch)
+    _toolchain_config(name = toolchain_config_name, arch = arch, tools = tools, builtin_includes = builtin_includes)
 
     empty_target_name = "%s_empty" % name
     empty_target_label = ":%s" % empty_target_name
@@ -237,7 +194,7 @@ def define_toolchain(name, os, host_arch, arch, gcc_version):
         name = "%s_linux_toolchain" % name,
         exec_compatible_with = [
             "@platforms//os:linux",
-            "@platforms//cpu:%s" % host_arch,
+            "@platforms//cpu:%s" % arch,
         ],
         target_compatible_with = [
             "@platforms//os:linux",

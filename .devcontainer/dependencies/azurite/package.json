@@ -1,0 +1,8 @@
+{
+  "name": "model-streamer-test-services",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "azurite": "3.37.0"
+  }
+}

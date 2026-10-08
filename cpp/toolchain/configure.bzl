@@ -1,41 +1,47 @@
 """Configures the C++ toolchain."""
 
-load("//toolchain:rules.bzl", "get_target_triplet", "runai_crosstool_tools")
-
-# This should map to the devcontainer Dockerfile
-# We install gcc-x86-64-linux-gnu and gcc-aarch64-linux-gnu toolchains
-ARCHITECTURES = ["x86_64", "aarch64"]
-OS = "linux-gnu"
-
-def _get_gcc_version(repository_ctx, arch):
-    gcc_tool = runai_crosstool_tools(get_target_triplet(OS, arch))["gcc"]
-    return repository_ctx.execute([gcc_tool, "-dumpversion"]).stdout.strip()
-
-def _get_host_arch(repository_ctx):
-    return repository_ctx.execute(["/usr/bin/uname", "-m"]).stdout.strip()
-
 def _cc_autoconf_toolchain_impl(repository_ctx):
-    define_statements = []
-    for arch in ARCHITECTURES:
-        gcc_version = _get_gcc_version(repository_ctx, arch)
-        host_arch = _get_host_arch(repository_ctx)
-        toolchain_name = arch
-        define_statements.append('define_toolchain(name = "%s", os = "%s", host_arch = "%s", arch = "%s", gcc_version = "%s")' % (toolchain_name, OS, host_arch, arch, gcc_version))
+    # manylinux supplies a native GCC toolset in PATH. Discover its real paths
+    # and include directories instead of assuming Ubuntu's cross-toolchain layout.
+    arch = repository_ctx.execute(["uname", "-m"]).stdout.strip()
+    if arch not in ["x86_64", "aarch64"]:
+        fail("Unsupported native build architecture: " + arch)
+    tools = {}
+    for tool in ["ld", "gcc", "g++", "ar", "cpp", "gcov", "nm", "objdump", "strip"]:
+        path = repository_ctx.which(tool)
+        if path == None:
+            fail("Missing native build tool: " + tool)
+        tools[tool] = str(path)
+    result = repository_ctx.execute([tools["gcc"], "-E", "-x", "c++", "/dev/null", "-v"])
+    if result.return_code != 0:
+        fail(result.stderr)
+    includes = []
+    in_search = False
+    for line in result.stderr.splitlines():
+        if line == "#include <...> search starts here:":
+            in_search = True
+        elif line == "End of search list.":
+            in_search = False
+        elif in_search:
+            includes.append(str(repository_ctx.path(line.strip()).realpath))
+    if not includes:
+        fail("Could not discover GCC system includes")
+    statement = "define_toolchain(name = %r, arch = %r, tools = %r, builtin_includes = %r)" % (arch, arch, tools, includes)
 
     repository_ctx.template(
         "BUILD",
         repository_ctx.path(Label("//toolchain/template:BUILD.tpl")),
         {
-            "%{DEFINE_STATEMENTS}": "\n".join(define_statements),
+            "%{DEFINE_STATEMENTS}": statement,
         },
     )
     repository_ctx.file("toolchain.bzl", repository_ctx.read(Label("//toolchain/template:toolchain.bzl")))
-    repository_ctx.file("rules.bzl", repository_ctx.read(Label("//toolchain:rules.bzl")))
 
 _cc_autoconf_toolchain = repository_rule(
     implementation = _cc_autoconf_toolchain_impl,
     # Indicates that the repository inspects the system for configuration purpose
     configure = True,
+    environ = ["PATH"],
 )
 
 def configure_toolchain(name):
