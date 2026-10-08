@@ -73,8 +73,7 @@ TEST(AsyncIoSettings, Negative_Process_Group_Is_Refused)
 // A depth of zero admits nothing, so a small node-wide value over many processes must floor at one
 // rather than silently disabling the engine.
 // The division can round to zero, and a depth of 1 or 2 is a serial reader paying for the whole
-// asynchronous apparatus. Floored rather than left to degenerate - InstantTensor floors the same
-// formula at the same value.
+// asynchronous apparatus. Floored rather than left to degenerate.
 TEST(AsyncIoSettings, Depth_Is_Floored)
 {
     utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 64UL);

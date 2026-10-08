@@ -368,11 +368,7 @@ TEST_F(DeviceWriterTest, The_Pool_Outlives_A_Reader_That_Drops_It)
 
 // A stream is a raw handle with no owner of its own, so nothing but Target's destructor will ever
 // free it.
-//
-// InstantTensor gets this one right - destroy_threads() joins its executors and then destroys both
-// streams - and misses the events instead: cudaEventDestroy is not even in its binding table, so
-// every open leaks io_depth of them. Different resource, same shape, and the same reason it hides:
-// a one-shot loader exits before it matters, and so does a benchmark.
+
 TEST_F(DeviceWriterTest, Every_Stream_Is_Destroyed)
 {
     auto mock = std::make_shared<device::MockBackend>();

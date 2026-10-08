@@ -194,7 +194,7 @@ common::ResponseCode CudaDevice::event_create(EventHandle & event)
     CUevent created = nullptr;
     // BLOCKING_SYNC is what makes a waiting thread free. Without it the driver spins: measured on an
     // H200 and a B200, waiting on a 29 ms copy costs 100% of a core by default and 1% with this flag,
-    // at the same wall time. InstantTensor does not set it, so its wait thread burns a core per chunk.
+    // at the same wall time.
     //
     // DISABLE_TIMING because nothing here reads a duration, and untimed events are cheaper.
     const unsigned int flags = CU_EVENT_DISABLE_TIMING | CU_EVENT_BLOCKING_SYNC;

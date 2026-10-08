@@ -44,8 +44,7 @@ struct StagingBuffer
 // 3.94 for 64 MiB.
 //
 // Buffers are ANONYMOUS. Nothing ties buffer i to chunk i, so reads completing out of order need no
-// handling here - any free buffer serves any read. Keying a buffer to a chunk id, as
-// InstantTensor's `chunk_id % io_depth` does, would make the oldest chunk the one whose buffer is
+// handling here - any free buffer serves any read. Keying a buffer to a chunk id would make the oldest chunk the one whose buffer is
 // reused and block buffers that are already free.
 //
 // ONE CONSUMER, SEVERAL PRODUCERS is the shape every user has: a worker or a reading thread takes
