@@ -140,8 +140,9 @@ def _alloc_slot(slot_size: int) -> Slot:
     within. Without it no range could be read directly and O_DIRECT would copy every byte instead of
     about 0.1% of it.
 
-    The base is aligned too, but only as a convenience: _place() reaches a congruent address from any
-    base, as test_every_slot_base_is_block_aligned records.
+    The base is aligned too, but only as a convenience: _place() works in absolute addresses, so it
+    reaches a congruent address from any base. That is why this uses the page size while the pads use
+    the probed block - the two may differ, and only the pads have to match it.
 
     A FREE FUNCTION taking the size, not a method. The pool keeps whatever allocator it is given, so a
     bound method would make the pool reference the iterator that owns it - a cycle, which refcounting

@@ -753,6 +753,30 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         for slot in requests_iterator._pool._slots:
             self.assertEqual(slot.address % DIRECT_IO_BLOCK, 0)
 
+    def test_place_reaches_congruence_from_an_unaligned_base(self):
+        """Why the slot base may use the page size while the pads use the probed block.
+
+        _place() pads absolute addresses, not offsets within the slot, so it arrives at a congruent
+        address wherever the slot happens to start. The sibling test above records that bases ARE
+        aligned; this one records that they do not have to be."""
+        offsets = [3, 1003, 2003]
+        iterator = FilesRequestsIteratorWithBuffer(
+            buffer_size=4 * 1024 * 1024,
+            num_buffers=1,
+            files_chunks=[FileChunks(0, "a.bin", offsets, [1000, 1000, 1000])],
+        )
+        request = iterator.next_request()   # only to get a request; its own layout is not used here
+
+        # _place computes addresses without touching memory, so any integer serves as a base. Both of
+        # these are taken against the block _place actually pads to, so neither can come out aligned.
+        block = iterator.direct_block
+        for base in (block + 1, 3 * block + 517):
+            dsts = iterator._place(request, base, aligned=True)
+            self.assertIsNotNone(dsts, f"no layout found from base {base}")
+            for dst, offset in zip(dsts, offsets):
+                self.assertEqual(dst % block, offset % block,
+                                 f"address {dst} is not congruent to offset {offset}")
+
     def test_every_slot_is_a_whole_slot(self):
         # The over-allocation has to cover the base shift AND the slot itself. A short slot would be
         # found only by a read that happened to land in it.
