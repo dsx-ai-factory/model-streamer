@@ -19,7 +19,11 @@ RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_MEMORY_LIMIT"
 DEFAULT_MEMORY_LIMIT_STRING = "40000000000" # 40 GB (to be set to unlimited for distributed streaming)
 
 RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
-DEFAULT_RING_BUFFERS = 4
+
+# The depth also sets the buffer size, which under owned=True is how much a retained tensor keeps
+# alive: a tensor is a view into its buffer, so holding one holds all of it. Deep and small beats
+# shallow and large for that, and costs no throughput. See design_ring_depth.md.
+DEFAULT_RING_BUFFERS = 18
 
 RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME = "RUNAI_STREAMER_MAX_PADS_PER_BUFFER"
 DEFAULT_MAX_PADS_PER_BUFFER = 1024
