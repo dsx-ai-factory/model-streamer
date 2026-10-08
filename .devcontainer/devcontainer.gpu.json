@@ -1,11 +1,6 @@
 {
     "name": "RunAI Model Streamer GPU tests",
-    "build": {
-        "dockerfile": "Dockerfile"
-    },
-    "features": {
-        "ghcr.io/devcontainers-community/features/bazel:1": {}
-    },
+    "image": "ghcr.io/dsx-ai-factory/model-streamer/devcontainer:latest",
     "runArgs": [
         "--gpus", "all",
         "--shm-size=2g",

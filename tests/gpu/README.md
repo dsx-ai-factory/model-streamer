@@ -16,7 +16,8 @@ documents this process. It can be automated with
 which must be installed and enabled through `.github/copy-pr-bot.yaml` on the
 default branch. Adding that configuration only to a PR does not enable the bot.
 
-The GPU devcontainer reuses the build Dockerfile and enables GPU passthrough,
+The GPU devcontainer reuses the prebuilt `devcontainer` image from GHCR (built on
+master by `build-devcontainer.yml`) and enables GPU passthrough,
 2 GiB of shared memory for NCCL, and the existing io_uring seccomp setting.
 PyTorch 2.4.1 with CUDA 12.4 is pinned for the Dockerfile's Python 3.8 runtime.
 Do not run the CPU `make install` or `make test` targets in this environment:

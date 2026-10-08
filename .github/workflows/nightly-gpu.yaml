@@ -48,8 +48,7 @@ jobs:
         uses: devcontainers/ci@v0.3
         with:
           configFile: .devcontainer/devcontainer.gpu.json
-          imageName: ghcr.io/dsx-ai-factory/runai-model-streamer/devcontainer-gpu
-          cacheFrom: ghcr.io/run-ai/runai-model-streamer/devcontainer
+          imageName: ghcr.io/${{ github.repository }}/devcontainer
           push: never
           runCmd: bash tests/gpu/run.sh
 
