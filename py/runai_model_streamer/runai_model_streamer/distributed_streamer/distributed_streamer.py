@@ -11,6 +11,8 @@ from runai_model_streamer.file_streamer import (
     FileChunks,
 )
 
+from runai_model_streamer.file_streamer.file_streamer import host_or_device
+
 from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
@@ -150,11 +152,10 @@ class DistributedStreamer:
             owned: bool = True,
     ) -> None:
 
-        # None has always meant the host - it reaches tensor.to(None), which returns the tensor
-        # unchanged. Normalised HERE so it never reaches a comparison against "cpu": those decide
-        # whether a buffer is handed over and whether this host can broadcast, and None silently
-        # answered no to both.
-        device = device or "cpu"
+        # Normalised HERE so no spelling of the host reaches a comparison against "cpu": those decide
+        # whether a buffer is handed over and whether this host can broadcast, and None or
+        # torch.device("cpu") silently answered no to both.
+        device = host_or_device(device)
 
         # Cleared before dispatch, so a call that builds no ring - or raises before it does - reports
         # nothing rather than whatever the previous call left behind.

@@ -1,4 +1,4 @@
-from typing import Dict, List, Iterator, Optional, Tuple
+from typing import Dict, List, Iterator, Optional, Tuple, Union
 from runai_model_streamer.libstreamer.libstreamer import (
     runai_probe_direct_block_size,
     SUCCESS_ERROR_CODE,
@@ -35,6 +35,25 @@ s3_credentials_module = get_s3_credentials_module()
 
 class RunaiStreamerInvalidInputException(Exception):
     pass
+
+def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
+    """The device as a string. Every spelling of the host becomes "cpu".
+
+    Two decisions read this: whether the ring hands its buffer over, and whether get_chunks copies.
+    They have to agree. Comparing the string makes them disagree for torch.device("cpu"), which is
+    not equal to "cpu" but which .to() returns unchanged - so the buffer would be recycled under the
+    caller and never copied. Only the host needs settling - a device destination copies either way,
+    so its spelling is passed on as the caller wrote it rather than rewritten.
+
+    Raises RunaiStreamerInvalidInputException for a device torch does not know. It used to travel as
+    far as the first .to(), which is after a whole submission has been read."""
+    if device is None:
+        return "cpu"
+    try:
+        resolved = torch.device(device)
+    except (RuntimeError, TypeError) as error:
+        raise RunaiStreamerInvalidInputException(f"Unusable device {device!r}: {error}") from error
+    return "cpu" if resolved.type == "cpu" else str(device)
 
 def homogeneous_paths(paths: List[str]) -> bool:
     if not paths:
@@ -181,9 +200,8 @@ class FileStreamer:
         if not homogeneous_paths([file_stream_request.path for file_stream_request in file_stream_requests]):
             raise RunaiStreamerInvalidInputException("Cannot stream files from multiple source types in parallel")
 
-        # None means the host; see DistributedStreamer.stream_files. Normalised here too because
-        # this entry point is public in its own right.
-        self.device_str = device or "cpu"
+        # Normalised here too because this entry point is public in its own right.
+        self.device_str = host_or_device(device)
 
         for file_stream_request in file_stream_requests:
             # first object-storage path resolves + applies the credentials to the streamer, once

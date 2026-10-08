@@ -122,7 +122,7 @@ Controls how the CPU Memory buffer to which tensors are read from the file is be
 
 #### Default value
 
-`-1` for distributed streaming and 40 GB otherwise
+40 GB. Under distributed streaming this is a node total, divided between the ranks on that node.
 
 ### RUNAI_STREAMER_RING_BUFFERS
 
