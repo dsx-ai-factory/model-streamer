@@ -1,10 +1,6 @@
 name: Nightly GPU tests
 
 on:
-  # NVIDIA runners only accept PR code after a trusted upstream push.
-  push:
-    branches:
-      - 'pull-request/[0-9]+'
   schedule:
     - cron: '17 0 * * *'
   workflow_dispatch:
