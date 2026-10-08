@@ -21,7 +21,7 @@ namespace
 {
 
 // Known cache provider package/library names for auto-discovery
-constexpr const char* CACHE_PROVIDER_PACKAGE = "py_tachyon_client";
+constexpr const char* CACHE_PROVIDER_PACKAGE = "dacs_client";
 constexpr const char* CACHE_PROVIDER_LIB = "libStorageDirect.so";
 
 /**
