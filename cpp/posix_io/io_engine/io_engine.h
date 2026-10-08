@@ -35,8 +35,7 @@ struct FileRef
 };
 
 // Host memory a caller offers for REGISTRATION with the kernel, so reads into it need no per-read page
-// mapping. What it is worth differs by file system, and is a CPU saving rather than a bandwidth one -
-// see design_io_uring_registration.md.
+// mapping. What it is worth differs by file system, and is a CPU saving rather than a bandwidth one.
 //
 // `id` names this region on every read into it. THE SAME id MUST ALWAYS MEAN THE SAME MEMORY: an engine
 // registers the region once under that number and trusts the number afterwards. A staging pool's slab
@@ -156,7 +155,7 @@ struct AsyncIoConfig
     //
     // Per mount, because it is worth different amounts on different file systems, and on some it is a
     // LOSS: where the data arrives over the network there is no device DMA into our pages for
-    // registration to streamline, so it only adds bookkeeping. See design_io_uring_registration.md.
+    // registration to streamline, so it only adds bookkeeping.
     //
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
@@ -239,10 +238,10 @@ class IoEngine
 
     // NO CANCELLATION, deliberately - there is no cancel_all() here.
     //
-    // A response promises that nothing will write to that range's destination again
-    // (design_object_storage_quiesce.md). An issued read has that destination inside the kernel, so
-    // abandoning it and reporting the range hands a live write target to whoever gets the buffer
-    // next - and under the Python ring that is the next submission.
+    // A response promises that nothing will write to that range's destination again. An issued read
+    // has that destination inside the kernel, so abandoning it and reporting the range hands a live
+    // write target to whoever gets the buffer next - and under the Python ring that is the next
+    // submission.
     //
     // So teardown is quiesce-then-report: abort what was never issued, WAIT for what was, report
     // last. The caller does that; it needs nothing from the engine, which is why cancellation buys

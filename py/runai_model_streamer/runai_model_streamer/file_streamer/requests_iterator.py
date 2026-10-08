@@ -22,7 +22,7 @@ RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
 
 # The depth also sets the buffer size, which under owned=True is how much a retained tensor keeps
 # alive: a tensor is a view into its buffer, so holding one holds all of it. Deep and small beats
-# shallow and large for that, and costs no throughput. See design_ring_depth.md.
+# shallow and large for that, and costs no throughput.
 DEFAULT_RING_BUFFERS = 18
 
 RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME = "RUNAI_STREAMER_MAX_PADS_PER_BUFFER"

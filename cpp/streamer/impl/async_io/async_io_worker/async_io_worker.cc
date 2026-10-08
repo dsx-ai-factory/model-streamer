@@ -885,9 +885,8 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
 
         // Decremented HERE, before any path that might drop this completion. quiesce() waits on
         // _issued reaching zero, so a completion that is dropped without decrementing would leave
-        // the count permanently high and hang teardown - the trap
-        // design_object_storage_quiesce.md names, where the fix produces the very hang it exists to
-        // prevent. Every completion counts, whether or not it can be routed.
+        // the count permanently high and hang teardown - the fix producing the very hang it exists
+        // to prevent. Every completion counts, whether or not it can be routed.
         ASSERT(_issued > 0) << "more completions than were issued";
         account_inflight();
         --_issued;
@@ -1282,11 +1281,11 @@ void AsyncIoWorker::quiesce()
 {
     // Wait until the kernel holds none of our destinations.
     //
-    // A response promises that nothing will write to that range again
-    // (design_object_storage_quiesce.md). An ISSUED read has its destination inside the kernel, so
-    // reporting its range before the completion arrives hands a live write target to whoever gets
-    // the buffer next - under the Python ring, the next submission. Reads that were only staged, or
-    // still queued, never reached the kernel and need no wait.
+    // A response promises that nothing will write to that range again. An ISSUED read has its
+    // destination inside the kernel, so reporting its range before the completion arrives hands a
+    // live write target to whoever gets the buffer next - under the Python ring, the next
+    // submission. Reads that were only staged, or still queued, never reached the kernel and need
+    // no wait.
     //
     // UNBOUNDED, terminating only on _issued reaching zero. A timeout here would re-open the exact
     // invariant this exists to protect. A wedged mount therefore hangs its own teardown - which is

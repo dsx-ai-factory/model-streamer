@@ -325,8 +325,6 @@ def partition_by_spans(
 
     Whole tensors only, so the broadcast between ranks is unaffected: a tensor is identified by its
     original file and index, and cuts fall between tensors.
-
-    See design_partition_spans.md for why, and plan_partition_spans.md for the measurements.
     """
     if n <= 0:
         raise ValueError("Number of partitions (n) must be a positive integer.")

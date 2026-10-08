@@ -187,10 +187,10 @@ class FileStreamer:
         #      the NEW ring's buffer list: a different buffer, plausible looking bytes, and no error.
         #
         # Submission ids are unique and the responder demuxes by them, so attribution is not what
-        # breaks - lifetime and ownership are. To lift this restriction and allow overlapping streams
-        # (see design_multiple_requests.md): keep live_requests and outstanding across calls, hang the
-        # owning iterator off the FilesRequest instead of off self, release buffers to that owner, and
-        # let each iterator live until its last submission drains. Then delete this check.
+        # breaks - lifetime and ownership are. To lift this restriction and allow overlapping
+        # streams: keep live_requests and outstanding across calls, hang the owning iterator off the
+        # FilesRequest instead of off self, release buffers to that owner, and let each iterator live
+        # until its last submission drains. Then delete this check.
         if self.outstanding > 0:
             raise ValueError(
                 f"cannot start a new stream while {self.outstanding} response(s) are outstanding from "

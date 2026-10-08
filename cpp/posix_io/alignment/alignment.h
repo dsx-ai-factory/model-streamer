@@ -37,7 +37,7 @@ size_t block_size(const Limits & limits);
 // Over-aligning cannot fail, and here it is close to free. The streamer places its own destination
 // buffers (see the note on is_congruent below), so congruence is arranged rather than hoped for, and
 // the cost is bounded by the head and tail blocks of each chunk - under 2% of an 8 MB chunk at this
-// size. See design_measured_alignment.md.
+// size.
 //
 // Read by two places that must agree:
 //
@@ -117,7 +117,7 @@ size_t direct_block_override();
 // last blocks need care.
 //
 // For an address and a file offset chosen without thought, this holds about once in `block` tries.
-// That is why the streamer places its own buffers on purpose - see o_direct_alignment.md section 7.
+// That is why the streamer places its own buffers on purpose.
 bool is_congruent(size_t file_offset, const void * buffer, size_t block);
 
 // A direct read that covers [offset, offset + bytesize), with everything aligned.

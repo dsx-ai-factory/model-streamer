@@ -82,7 +82,7 @@ struct Config
     //
     // NFS is denied by default because registration COSTS there rather than paying: its data arrives
     // over the network through the client stack, so there is no device DMA into our pages to
-    // streamline and registration only adds bookkeeping. See design_io_uring_registration.md.
+    // streamline and registration only adds bookkeeping.
     static constexpr const char * default_fs_no_register_buffers = "nfs";
 
     // RUNAI_STREAMER_FS_REGISTER_BUFFERS: the master switch, on by default.
@@ -93,7 +93,7 @@ struct Config
     //
     // Default ON because it cannot cost correctness: every failure path falls back to an ordinary read.
     // What it is WORTH is a CPU saving rather than a bandwidth one, so a throughput benchmark will not
-    // show it - see design_io_uring_registration.md before measuring.
+    // show it.
     static constexpr bool default_fs_register_buffers = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather

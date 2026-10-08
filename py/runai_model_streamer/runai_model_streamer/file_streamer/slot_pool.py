@@ -12,7 +12,7 @@ class Slot:
 
     The address is PASSED IN rather than derived on demand. It is asked for once per RANGE, and
     numpy builds a fresh ctypes object on every `.ctypes` access, which is an order of magnitude
-    dearer than an attribute - measured, see issue_owned_tensors.md.
+    dearer than reading an attribute.
     """
 
     __slots__ = ("memory", "address")
