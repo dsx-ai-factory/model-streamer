@@ -33,7 +33,7 @@ file_path = "model.safetensors"
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path)
     for name, tensor in streamer.get_tensors():
-        gpu_tensor = tensor.to('CUDA:0')
+        gpu_tensor = tensor.to('cuda:0')
 ```
 
 ## Development

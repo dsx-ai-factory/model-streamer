@@ -270,8 +270,8 @@ if __name__ == "__main__":
 class TestPartitionBySpans(unittest.TestCase):
     """Each rank gets one contiguous span of the model, cut at tensor boundaries.
 
-    What these check is correctness at the edges. The value of the policy - fewer runs, same balance -
-    is measured in plan_partition_spans.md against models far larger than a unit test can build.
+    What these check is correctness at the edges. Showing the value of the policy - fewer runs, same
+    balance - needs models far larger than a unit test can build.
     """
 
     def _files(self, count: int, per_file: int, size: int = 100) -> List[FileChunks]:

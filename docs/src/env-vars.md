@@ -47,9 +47,9 @@ Controls how many file system reads are in flight at once.
 A positive integer, optionally followed by per-filesystem-type overrides:
 
 ```
-RUNAI_STREAMER_FS_QUEUE_DEPTH=512                          # every mount
-RUNAI_STREAMER_FS_QUEUE_DEPTH="512,nfs=64"                 # 64 on NFS, 512 elsewhere
-RUNAI_STREAMER_FS_QUEUE_DEPTH="512,nfs=64,virtiofs=256"    # and 256 on virtiofs
+RUNAI_STREAMER_FS_QUEUE_DEPTH=64                           # every mount
+RUNAI_STREAMER_FS_QUEUE_DEPTH="64,nfs=32"                  # 32 on NFS, 64 elsewhere
+RUNAI_STREAMER_FS_QUEUE_DEPTH="64,nfs=32,virtiofs=128"     # and 128 on virtiofs
 ```
 
 The leading value is the default and is mandatory.
@@ -68,7 +68,7 @@ findmnt -no FSTYPE /path/to/model
 
 #### Default value
 
-512 for the asynchronous readers
+64 for the asynchronous readers
 
 16 for `sync_buffered`
 
@@ -122,7 +122,28 @@ Controls how the CPU Memory buffer to which tensors are read from the file is be
 
 #### Default value
 
-`-1` for distributed streaming and 40 GB otherwise
+40 GB. Under distributed streaming this is a node total, divided between the ranks on that node.
+
+### RUNAI_STREAMER_RING_BUFFERS
+
+How many buffers `RUNAI_STREAMER_MEMORY_LIMIT` is divided into.
+
+Each buffer is the limit divided by this number, but never smaller than the largest single tensor,
+because a tensor cannot span two buffers. A model with large tensors therefore gets fewer buffers
+than asked for.
+
+The buffer size matters beyond read-ahead. Under the default `owned=True` a yielded tensor is a view
+into its buffer and the whole buffer is handed to the caller, so holding one tensor keeps its whole
+buffer alive - see [Tensor ownership](usage.md#tensor-ownership-owned). More, smaller buffers lower
+peak memory for a caller that retains tensors.
+
+#### Values accepted
+
+Positive integer value
+
+#### Default value
+
+`18`
 
 ### AWS_ENDPOINT_URL
 

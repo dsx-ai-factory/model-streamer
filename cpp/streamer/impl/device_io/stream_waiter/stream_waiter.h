@@ -86,7 +86,7 @@ class StreamWaiter
     bool _bind_failure_logged = false;
 
     // The thread, the queue and the drain-before-stop are all in here. Concurrency belongs in a
-    // tested primitive rather than in this class - see general_directions.md.
+    // tested primitive rather than in this class.
     utils::DrainingWorker<Entry> _worker;
 };
 

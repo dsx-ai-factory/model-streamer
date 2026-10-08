@@ -149,9 +149,7 @@ class TestS3UnsignedPublicBucket(unittest.TestCase):
             with SafetensorsStreamer() as streamer:
                 streamer.stream_file(f"s3://{self.PUBLIC_BUCKET}/model.safetensors", None, "cpu")
                 for name, tensor in streamer.get_tensors():
-                    # clone: the yielded tensor is a VIEW into a ring buffer that is recycled
-                    # once the generator advances, so a comparison after the loop must own it
-                    our[name] = tensor.clone()
+                    our[name] = tensor
 
         their = {}
         with safe_open(self.file_path, framework="pt", device="cpu") as f:

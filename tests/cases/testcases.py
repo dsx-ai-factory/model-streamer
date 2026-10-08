@@ -92,9 +92,7 @@ got = {}
 with SafetensorsStreamer() as run_sf:
     run_sf.stream_file(url, None, "cpu")
     for name, tensor in run_sf.get_tensors():
-        # clone: the yielded tensor is a VIEW into a ring buffer that is recycled once the
-        # generator advances, so anything compared after the loop must own its data
-        got[name] = tensor.clone()
+        got[name] = tensor
 
 expected = {}
 with safe_open(expected_file, framework="pt", device="cpu") as f:
@@ -126,9 +124,7 @@ def compatibility_test_cases(backend_class, scheme, bucket_name):
             with SafetensorsStreamer() as run_sf:
                 run_sf.stream_file(f"{self.scheme}://{self.bucket_name}/model.safetensors", None, "cpu")
                 for name, tensor in run_sf.get_tensors():
-                    # clone: the yielded tensor is a VIEW into a ring buffer that is recycled
-                    # once the generator advances, so a comparison after the loop must own it
-                    our[name] = tensor.clone()
+                    our[name] = tensor
 
             their = {}
             with safe_open(file_path, framework="pt", device="cpu") as f:
@@ -378,9 +374,7 @@ def compatibility_test_cases(backend_class, scheme, bucket_name):
             with SafetensorsStreamer() as run_sf:
                 run_sf.stream_file(url, None, "cpu")
                 for name, tensor in run_sf.get_tensors():
-                    # clone: the yielded tensor is a VIEW into a ring buffer that is recycled
-                    # once the generator advances, so a comparison after the loop must own it
-                    our[name] = tensor.clone()
+                    our[name] = tensor
 
             their = {}
             with safe_open(file_path, framework="pt", device="cpu") as f:

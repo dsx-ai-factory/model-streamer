@@ -1,13 +1,14 @@
 from __future__ import annotations
 from typing import List, Tuple, Optional
 from collections import deque
+from functools import partial
 import bisect
 import enum
 import numpy as np
 import os
-import re
 import humanize
 
+from runai_model_streamer.file_streamer.slot_pool import Slot, SlotPool
 from runai_model_streamer.libstreamer.libstreamer import runai_probe_direct_block_size
 
 import logging
@@ -15,16 +16,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_MEMORY_LIMIT"
-DEFAULT_MEMORY_LIMIT_STRING = "40000000000" # 40 GB (to be set to unlimited for distributed streaming)
+DEFAULT_MEMORY_LIMIT_STRING = "40000000000" # 40 GB
 
 RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
-DEFAULT_RING_BUFFERS = 4
+
+# The depth also sets the buffer size, which under owned=True is how much a retained tensor keeps
+# alive: a tensor is a view into its buffer, so holding one holds all of it. Deep and small beats
+# shallow and large for that, and costs no throughput.
+DEFAULT_RING_BUFFERS = 18
 
 RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME = "RUNAI_STREAMER_MAX_PADS_PER_BUFFER"
 DEFAULT_MAX_PADS_PER_BUFFER = 1024
-
-RUNAI_STREAMER_HUGE_PAGES_ENV_VAR_NAME = "RUNAI_STREAMER_HUGE_PAGES"
-DEFAULT_HUGE_PAGES = 0
 
 class RunaiStreamerMemoryLimitException(Exception):
     pass
@@ -129,200 +131,28 @@ class FilesRequest:
 # streamer handle is available to ask with, and equals the host page size.
 DIRECT_IO_BLOCK = os.sysconf("SC_PAGESIZE")
 
-# The size of a transparent huge page on x86_64 and on aarch64 with 4 KiB pages.
-#
-# The pool base is moved to a multiple of this, and then advised with MADV_HUGEPAGE, so the whole
-# pool sits on 2 MiB pages instead of 4 KiB ones.
-#
-# The reason is O_DIRECT, not the copying. Every direct read pins its destination pages before the
-# DMA - about 2,048 pages per 8 MiB read, and at 10 GiB/s that is roughly 2.6M pins per second, on
-# the one async worker thread. On 2 MiB pages the same read pins 4. Buffered reads pay none of this,
-# so it is a cost that O_DIRECT adds rather than one it removes.
-#
-# Doing it here rather than leaving it to the allocator, because the allocator is not ours. glibc may
-# already align a large allocation to a huge page and advise it - measured on one host, a plain
-# np.empty comes back with the `hg` flag set and fully huge-page backed - but that depends on the
-# glibc version and a tunable, neither of which we control on a customer's node.
-#
-# A 2 MiB base is also a multiple of DIRECT_IO_BLOCK, so it replaces the old 4096 shift rather than
-# adding to it.
-#
-# OFF unless RUNAI_STREAMER_HUGE_PAGES=1. See _huge_pages_enabled() for the measurements on both
-# sides and for why the default is off despite the gain.
-#
-# THIS SIZE IS FOR THE POOL BASE ONLY. Padding between ranges stays at DIRECT_IO_BLOCK, and must: if
-# congruence had to hold modulo 2 MiB, one pad could cost 2 MiB and the 1024-pad budget would want
-# 2 GB per buffer instead of 4 MB.
-#
-# It does not, because the two sizes answer different questions. O_DIRECT alignment comes from the
-# STORAGE DEVICE - its logical block, 512 or 4096. A huge page is a property of the MEMORY MAPPING.
-# The kernel does not tie them together. Measured on a huge-page-backed pool: a direct read into an
-# address one block into a huge page succeeds, as does three blocks in, as does the last block; only a
-# non-block-aligned address fails, with EINVAL.
-#
-# And it costs nothing to sit inside a huge page rather than at its start - io_submit for 64 reads of
-# 2 MiB took 1.14-1.42 ms with destinations one block in, against 1.27-1.45 ms with them 2 MiB
-# aligned. Pinning still walks one compound page either way.
-HUGE_PAGE = 2 * 1024 * 1024
+def _alloc_slot(slot_size: int) -> Slot:
+    """A fresh slot, with room for the pads a direct read needs.
 
-# How many pads one buffer may hold before we give up and pack tightly. See _max_pads_per_buffer().
+    The extra room is what _place() moves an address within to match its file offset. Without it no
+    range could be read directly.
 
+    The base is aligned only as a convenience - _place() works in absolute addresses, so it reaches a
+    congruent address from any base. That is why the page size serves here while the pads use the
+    probed block.
 
-def _huge_pages_enabled() -> bool:
-    """Whether to place the pool on huge pages. OFF by default - opt in with RUNAI_STREAMER_HUGE_PAGES=1.
-
-    Off by default despite a large measured gain, because the risk is on a machine we have not tested
-    and the gain is on one we have.
-
-    MEASURED GAIN. Time inside io_submit for 64 direct reads of 2 MiB, on an unfragmented host:
-
-        first pass   50 ms plain   ->  27 ms advised
-        every pass   8-10 ms       ->  1.0-1.6 ms
-
-    The second row is the one that counts. Faulting happens once, because the ring is reused for the
-    whole stream, but PINNING happens on every direct read - O_DIRECT pins each destination page
-    before the DMA. At 4 KiB that is 512 pages per 2 MiB read; at 2 MiB it is one. So this is a 7-8x
-    cut in io_submit time on every pass, and io_submit runs on the single async worker, where blocking
-    also stops completions being reaped.
-
-    THE RISK, and why the default is still off. With the node's THP defrag set to `madvise` - which is
-    common, and is what this host uses - advising a region opts it into DIRECT COMPACTION at fault
-    time. On a node whose memory is fragmented the kernel may compact before it can hand out a huge
-    page, and that wait lands inside the same io_submit. compact_stall in /proc/vmstat stayed at zero
-    throughout our runs, so the bad case is unmeasured rather than absent.
-
-    The two are asymmetric: compaction can only slow the FIRST touch of the pool, while the pinning
-    gain applies to every read after it. That is an argument for turning this on once a fragmented
-    node has been measured, not for turning it on blind.
-
-    hugetlbfs would remove the risk entirely - pre-reserved pages are never compacted or swapped - but
-    it needs node pre-allocation and a pod hugepages-2Mi request, which is a cluster decision rather
-    than a code one (design_async_io.md 5.10).
-
-    Anything other than "1" leaves it off, so a typo is safe rather than surprising."""
-    return os.getenv(RUNAI_STREAMER_HUGE_PAGES_ENV_VAR_NAME, str(DEFAULT_HUGE_PAGES)).strip() == "1"
-
-
-def _pool_alignment() -> int:
-    """What the pool base is moved to: a huge page when huge pages are on, a block when they are off.
-
-    Never smaller than DIRECT_IO_BLOCK either way, because congruent placement depends on it - a
-    misaligned base would silently stop direct reads from working at all."""
-    return HUGE_PAGE if _huge_pages_enabled() else DIRECT_IO_BLOCK
-
-
-def _request_huge_pages(array: np.ndarray) -> None:
-    """Ask the kernel to back `array` with huge pages, and say so if it did not.
-
-    Advisory in every sense. madvise cannot fail in a way that matters here - if it is refused, or
-    the kernel cannot find contiguous memory, the pool works exactly as before on 4 KiB pages and
-    reads are a little slower. So every error is logged and swallowed.
-
-    Whether it WORKED is not checked here. THP is decided when a page is first written, never when
-    it is advised, so a check at this point reads zero for an untouched pool whatever the kernel is
-    about to do. _report_huge_pages_once() asks later, when the memory has been written."""
-    try:
-        import ctypes
-
-        MADV_HUGEPAGE = 14
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-
-        # Only the part that is fully inside a huge page boundary at both ends. madvise takes a
-        # page-aligned start, and a partial huge page at either end cannot be backed by one anyway.
-        base = array.ctypes.data
-        start = _align_up(base, HUGE_PAGE)
-        end = (base + array.nbytes) // HUGE_PAGE * HUGE_PAGE
-        if end <= start:
-            return
-
-        if libc.madvise(ctypes.c_void_p(start), ctypes.c_size_t(end - start), MADV_HUGEPAGE) != 0:
-            logger.debug(
-                "[RunAI Streamer] madvise(MADV_HUGEPAGE) was refused (errno %d); the ring buffer "
-                "stays on 4 KiB pages", ctypes.get_errno()
-            )
-    except Exception as exception:  # noqa: BLE001 - never let a hint break a load
-        logger.debug("[RunAI Streamer] Could not request huge pages: %s", exception)
-
-
-# A smaps entry header: "7f0e1c000000-7f0e1c021000 rw-p 00000000 00:00 0 [heap]".
-#
-# Anchored on the hex range, because that is the only part every header has and no other line in the
-# file starts with. Anything else - a field count, a "-" test - can be true of a pathname.
-_SMAPS_HEADER = re.compile(r"^([0-9a-f]+)-([0-9a-f]+) ")
-
-
-def _mapping_memory(address: int, length: int) -> Optional[Tuple[int, int]]:
-    """(resident bytes, huge-page bytes) for the mappings covering [address, address + length).
-
-    EVERY overlapping mapping, not the one holding the first byte. A pool is one allocation but not
-    always one VMA: madvise() on a sub-range SPLITS the mapping, and this module madvises the
-    huge-page-aligned interior of its own pool - so after one such call the arena carries splits, and a
-    later allocation inside it is covered by several VMAs.
-
-    Measured: a 16 MiB pool laid out as a 128 KiB VMA followed by an 18 MiB one. Reading only the first
-    reported 131072 bytes resident for a pool that was fully written, which put it below the one-huge-
-    page floor the caller uses to decide there is something to judge - so the huge-page report went
-    quiet for good, with nothing to show for it.
-
-    A VMA may reach beyond the range, and its Rss then counts memory that is not ours. That is accepted:
-    the numbers answer "has anything been written" and "is any of it huge-page backed", and neither is
-    made wrong by a neighbour inside the same arena.
-
-    Reads the mapping's own smaps entry rather than the machine-wide counter in /proc/meminfo, which
-    everything else on the node also moves.
-
-    Both numbers are needed, not just the huge-page one. Pages are only backed once they are written,
-    so a pool nobody has written to reports zero huge pages and is perfectly healthy. Rss says how
-    much has been written, which is what makes the other number mean anything.
-
-    Linux only, and /proc may not be mounted, so the caller treats None as "no answer" rather than as
-    a failure."""
-    end = address + length
-
-    try:
-        current = False
-        found = False
-        resident = 0
-        backed = 0
-
-        with open("/proc/self/smaps") as smaps:
-            for line in smaps:
-                header = _SMAPS_HEADER.match(line)
-
-                # A HEADER, matched on the hex range itself rather than by counting fields. The field
-                # count was a heuristic, and a header line that did not match it would leave `current`
-                # pointing at the previous mapping - reporting an unrelated mapping's numbers with no
-                # sign that anything went wrong.
-                if header is not None:
-                    low = int(header.group(1), 16)
-                    high = int(header.group(2), 16)
-                    current = low < end and high > address
-                    found = found or current
-                    continue
-
-                if not current:
-                    continue
-
-                # Accumulated across every overlapping mapping, and never returned early: the last one
-                # is only known when the file ends.
-                if line.startswith("Rss:"):
-                    resident += int(line.split()[1]) * 1024
-                elif line.startswith("AnonHugePages:"):
-                    backed += int(line.split()[1]) * 1024
-
-        return (resident, backed) if found else None
-    except OSError:
-        return None
-
-
-def _align_up(address: int, block: int) -> int:
-    """The next multiple of `block` at or after `address`."""
-    return (address + block - 1) // block * block
+    A free function, not a method: the pool keeps the allocator it is given, and a bound method would
+    make it reference the iterator that owns it - a cycle refcounting cannot break.
+    """
+    raw = np.empty(slot_size + DIRECT_IO_BLOCK, dtype=np.uint8)
+    shift = (-raw.ctypes.data) % DIRECT_IO_BLOCK
+    array = raw[shift: shift + slot_size]
+    return Slot(array, array.ctypes.data)
 
 
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
-                 direct_block: int = DIRECT_IO_BLOCK) -> None:
+                 direct_block: int = DIRECT_IO_BLOCK, owned: bool = True) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
@@ -341,43 +171,11 @@ class FilesRequestsIteratorWithBuffer:
             f"= {humanize.naturalsize(buffer_size * num_buffers, binary=True)} for files: "
             f"{[file_chunks.path for file_chunks in files_chunks]}"
         )
-        # ONE allocation sliced into num_buffers views. The pool is fixed at construction and never
-        # grows, so a single contiguous region is simpler for the OS to manage than N separate ones.
-        #
-        # THE BASE IS ALIGNED TO A BLOCK, and each slot carries a little extra room. Both are for
-        # direct reads:
-        #
-        #   A direct read needs the destination address and the file offset to leave the same
-        #   remainder when divided by the block - not merely for the address to be aligned. The file
-        #   offset comes from the file's own layout and cannot be chosen, so the ADDRESS has to be
-        #   moved to match it. That is what the extra room is for: the packing loop below skips a few
-        #   bytes before a range so the two line up.
-        #
-        #   Without this, no part of a region can be read directly, and O_DIRECT would copy every byte
-        #   instead of about 0.1% of it.
-        #
-        # np.empty gives about 16 or 32 bytes of alignment, so the base is moved forward by hand.
-        #
-        # Moved to a HUGE_PAGE boundary when huge pages are on, and to a DIRECT_IO_BLOCK one when they
-        # are off. 2 MiB is a multiple of 4096, so the direct-read rule holds either way - see
-        # HUGE_PAGE for what the larger alignment buys and _huge_pages_enabled() for the switch.
-        alignment = _pool_alignment()
         self._slot_size = buffer_size + self.direct_block * _max_pads_per_buffer()
-        self._raw = np.empty(self._slot_size * num_buffers + alignment, dtype=np.uint8)
-        shift = (-self._raw.ctypes.data) % alignment
-        self.pool = self._raw[shift: shift + self._slot_size * num_buffers]
-        self.buffers = [self.pool[i * self._slot_size: (i + 1) * self._slot_size] for i in range(num_buffers)]
-        # Destinations are absolute addresses (that is the C contract), and this class packs them
-        # itself, so it can recover a range's slice by subtracting its buffer's base. That is local
-        # knowledge of its own allocation, not an assumption the range API makes.
-        self.buffer_addresses = [buffer.ctypes.data for buffer in self.buffers]
-        self._free_buffers = deque(range(num_buffers))
 
-        # Marked as already reported when huge pages are off, so release() has nothing to do and the
-        # switch really means "behave as before" rather than "do the work and stay quiet".
-        self._huge_pages_reported = not _huge_pages_enabled()
-        if not self._huge_pages_reported:
-            _request_huge_pages(self.pool)
+        # One allocation per slot, so a slot that has been given away can die on its own. A view into
+        # a shared pool would keep the whole pool alive while the caller held any one slot.
+        self._pool = SlotPool(num_buffers, partial(_alloc_slot, self._slot_size), owned)
 
     def _place(self, request: FilesRequest, base: int, aligned: bool) -> Optional[List[int]]:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.
@@ -405,67 +203,15 @@ class FilesRequestsIteratorWithBuffer:
         return dsts
 
     def has_free_buffer(self) -> bool:
-        return len(self._free_buffers) > 0
+        return self._pool.has_free()
 
     def release(self, request: FilesRequest) -> None:
-        """Return a drained request's buffer to the pool. The caller must not touch any view handed
-        out for that request afterwards - the next request will overwrite it."""
+        """Hand a drained request's slot back to the pool, which decides whether it survives."""
         if request.buffer_index is None:
             raise ValueError("request has no buffer to release (released twice?)")
-        self._report_huge_pages_once(request.buffer_index)
-        self._free_buffers.append(request.buffer_index)
+
+        self._pool.release(request.buffer_index)
         request.buffer_index = None
-
-    def _report_huge_pages_once(self, buffer_index: int) -> None:
-        """Say whether the pool really got huge pages. Runs once, on the first buffer returned.
-
-        Timed here, and not next to the madvise, because THP is decided when a page is first written
-        - never when it is advised. Checking at allocation always reads zero, since nothing has been
-        touched yet. A buffer coming back is the first moment the memory has really been written.
-
-        THP is best effort. Under memory fragmentation the kernel quietly gives 4 KiB pages instead,
-        the O_DIRECT pinning cost returns, and there is no error anywhere. This is the only way to
-        see it."""
-        if self._huge_pages_reported:
-            return
-
-        measured = _mapping_memory(self.buffer_addresses[buffer_index], self._slot_size)
-        if measured is None:
-            self._huge_pages_reported = True    # /proc is not readable here; it never will be
-            return
-
-        resident, backed = measured
-
-        # Nothing written yet, so there is nothing to judge - a request of only zero-sized ranges
-        # reads no bytes at all, and its buffer comes back untouched. Leave the flag alone and ask
-        # again on the next release, when there may be something to see.
-        if resident < HUGE_PAGE:
-            return
-
-        self._huge_pages_reported = True
-
-        # Only "none at all" is worth a warning.
-        #
-        # A share would be the more useful number and it cannot be computed. AnonHugePages counts the
-        # whole mapping, while only the pages written so far are backed by anything - and at this
-        # point that is roughly one buffer of however many. Comparing against the pool size reports a
-        # tiny fraction on every healthy load, which is a warning nobody would read twice.
-        #
-        # Zero is unambiguous: we asked, pages were written, and none of them came back as huge. That
-        # is the fragmentation case, and the O_DIRECT pinning cost is back.
-        if backed == 0:
-            logger.warning(
-                "[RunAI Streamer] The ring buffer got no huge pages, out of %s. Direct reads pin "
-                "every destination page, so this costs read throughput. It usually means the node's "
-                "memory is fragmented.",
-                humanize.naturalsize(self.pool.nbytes, binary=True),
-            )
-        else:
-            logger.debug(
-                "[RunAI Streamer] Ring buffer huge pages so far: %s of a %s pool",
-                humanize.naturalsize(backed, binary=True),
-                humanize.naturalsize(self.pool.nbytes, binary=True),
-            )
 
     def get_global_file_and_range(
         self, request: FilesRequest, local_file_index: int, local_range_index: int
@@ -473,14 +219,14 @@ class FilesRequestsIteratorWithBuffer:
         file_id, global_range_index = self.files_requests_iterator.get_global_file_and_range(
             request, local_file_index, local_range_index
         )
-        buffer = self.buffers[request.buffer_index]
+        slot = self._pool.slot(request.buffer_index)
         start = (request.range_dsts[request.flat_index(local_file_index, local_range_index)]
-                 - self.buffer_addresses[request.buffer_index])
+                 - slot.address)
         size = request.files[local_file_index].sizes[local_range_index]
-        return file_id, global_range_index, buffer[start: start + size]
+        return file_id, global_range_index, slot.memory[start: start + size]
 
     def next_request(self) -> Optional[FilesRequest]:
-        if not self._free_buffers:
+        if not self._pool.has_free():
             raise RuntimeError("no free ring buffer - release a drained request before building another")
 
         request = self.files_requests_iterator.next_request()
@@ -488,7 +234,7 @@ class FilesRequestsIteratorWithBuffer:
             return None
 
         # Take the buffer only once there is a request to put in it, so end of stream does not consume one.
-        request.buffer_index = self._free_buffers.popleft()
+        request.buffer_index = self._pool.take()
 
         # Place this request's ranges in its buffer, one absolute address per range. Each range carries
         # its own destination, so placement is free - it is just a running cursor.
@@ -497,7 +243,7 @@ class FilesRequestsIteratorWithBuffer:
         # remainder when divided by the block. That is what lets the reader use a direct read. Skipping
         # a few bytes is all it takes, and once the first range of a file lines up, the ranges after it
         # follow by themselves as long as they are laid out one after another in the file.
-        base = self.buffer_addresses[request.buffer_index]
+        base = self._pool.slot(request.buffer_index).address
         dsts = self._place(request, base, aligned=True)
 
         if dsts is None:
@@ -516,15 +262,19 @@ class FilesRequestsIteratorWithBuffer:
         files_chunks: List[FileChunks],
         user_memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
+        owned: bool = True,
     ) -> FilesRequestsIteratorWithBuffer:
         buffer_size, num_buffers = _ring_sizing(memory_mode, files_chunks, user_memory_limit)
-        return FilesRequestsIteratorWithBuffer(buffer_size, num_buffers, files_chunks, direct_block)
+        return FilesRequestsIteratorWithBuffer(
+            buffer_size, num_buffers, files_chunks, direct_block, owned
+        )
 
     @staticmethod
     def with_memory_mode(
         files_chunks: List[FileChunks],
         memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
+        owned: bool = True,
     ) -> FilesRequestsIteratorWithBuffer:
         """memory_limit, when given, overrides the environment.
 
@@ -534,7 +284,7 @@ class FilesRequestsIteratorWithBuffer:
             configured = os.getenv(RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME)
             memory_limit = int(configured if configured is not None else DEFAULT_MEMORY_LIMIT_STRING)
         return FilesRequestsIteratorWithBuffer.with_memory_cap(
-            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block
+            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block, owned
         )
 
 class FilesRequestsIterator:

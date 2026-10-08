@@ -16,10 +16,10 @@ file_path = "/path/to/file.safetensors"
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
-> **Note:** To make the tensors available on the CPU memory, clone the yielded tensors before calling `streamer.get_tensors()`. Note that otherwise, tensors may be overwritten when using `RUNAI_STREAMER_MEMORY_LIMIT` or completely destroyed when closing the `SafetensorsStreamer` object.
+> **Note:** Each yielded tensor belongs to you and stays valid after the streamer closes, so it does not need to be cloned - see [Tensor ownership](#tensor-ownership-owned). That is the default. With `owned=False`, or against a streamer older than this guarantee, a retained tensor is overwritten once the buffer it sits in is reused.
 
 #### Streaming from multiple files
 
@@ -33,7 +33,7 @@ file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths)
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
 > **Note:** You can not mix S3 path and file system paths on same `streamer.stream_files()` call.
@@ -48,7 +48,7 @@ from runai_model_streamer import SafetensorsStreamer
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path, tensor_names={"model.layers.0.weight", "model.layers.1.weight"})
     for name, tensor in streamer.get_tensors():
-        tensor.to('CUDA:0')
+        tensor.to('cuda:0')
 ```
 
 `tensor_names` is treated as a set - the order it is passed in does not matter, and any container type (list, set, tuple) is accepted. `None` (the default) loads every tensor, unchanged from previous versions. An empty container raises an error, since it is never a useful request.
@@ -56,6 +56,39 @@ with SafetensorsStreamer() as streamer:
 A name that does not exist in the checkpoint raises an error. A corrupted file is rejected even if the corrupted tensor is excluded by the filter - validation runs against the whole file regardless of what is requested.
 
 When streaming from multiple files, a requested name that exists in more than one file also raises an error - which file it should come from would be ambiguous. This only applies when `tensor_names` is used; loading a whole checkpoint with a name duplicated across files (`tensor_names=None`) is unaffected.
+
+#### Tensor ownership (owned)
+
+Every tensor the streamer yields belongs to the caller. It stays valid for as long as the caller holds it, and the streamer never writes to that memory again:
+
+```python
+from runai_model_streamer import SafetensorsStreamer
+
+with SafetensorsStreamer() as streamer:
+    streamer.stream_files(file_paths)
+    kept = {name: tensor for name, tensor in streamer.get_tensors()}
+
+# still valid here - the streamer has finished and written to nothing the caller holds
+```
+
+This is the default (`owned=True`), so a caller does not need to copy a tensor in order to keep it. Loaders that currently clone every tensor defensively can drop that clone.
+
+Pass `owned=False` to get the previous behaviour, where a yielded tensor is a view into a buffer the streamer reuses:
+
+```python
+streamer.stream_files(file_paths, owned=False)
+```
+
+Under `owned=False` each tensor must be consumed before the iteration advances; anything retained past that point may be overwritten without warning. There is no error and no warning when this happens - the tensors simply hold the wrong bytes. It exists so that a caller depending on the old semantics has a way back, not as a mode to choose.
+
+Two things are *not* controlled by this parameter:
+
+- **Alignment.** Every yielded tensor is aligned for its dtype whatever `owned` is set to, because a tensor at an address its dtype cannot use is unusable either way. Where that is not already true the streamer copies the tensor, so `owned=False` does not mean copy-free.
+- **How much memory the streamer uses.** See below.
+
+With a device destination and **without** distributed streaming, `owned` has no effect at all: the tensor is a fresh allocation whatever the flag says, so it is always the caller's to keep, and the streamer's own read buffers are reused either way.
+
+Distributed streaming is different. There the tensor is a view into a staging buffer that the next broadcast overwrites, and `owned=True` is what turns it into a copy of its own. So on that path `owned=False` really does hand back borrowed memory.
 
 #### Distributed streaming
 
@@ -75,17 +108,16 @@ from runai_model_streamer import SafetensorsStreamer
 file_paths = ["/path/to/file-1.safetensors", "/path/to/file-2.safetensors"]
 
 tensors = {}
-device = 'CUDA:0'
+device = 'cuda:0'
 with SafetensorsStreamer() as streamer:
     streamer.stream_files(file_paths, s3_credentials=None, device=device, is_distributed=True)
     for name, tensor in streamer.get_tensors():       
-       tensors[name] = tensor.clone().detach() # returning tensors on the specified device, which is CUDA:0
+       tensors[name] = tensor # already on cuda:0, and yours to keep
 ```
 
 ##### Requirements
 
-Distributed streaming allocates reusable staging buffers on each device, which hold the data of the yielded tensors
-Therefore, the yielded tensor might be overwritten at the next iteration. If tensors are used outside the iterator loop, clone and detach the yielded tensor to save a copy.
+Distributed streaming allocates reusable staging buffers on each device. Under the default `owned=True` each tensor is copied out of them before it is yielded, so it is yours to keep. With `owned=False` the yielded tensor is a view into a staging buffer and the next broadcast overwrites it, so it must be cloned to be used outside the loop.
  
 The memory requirements for the staging buffers is twice the size of the largest tensor in the files
 
@@ -378,11 +410,31 @@ For the streamer internal logs pass the environment variables `RUNAI_STREAMER_LO
 
 The streamer allocates a buffer on the CPU Memory for storing the tensors before moving them to the GPU Memory. Control the size of the allocated buffer by using the environment variable `RUNAI_STREAMER_MEMORY_LIMIT`.
 
+`RUNAI_STREAMER_MEMORY_LIMIT` bounds **what the streamer holds**, which is not the same as total process memory once tensors are owned:
+
+| | what the limit bounds | peak host memory |
+|---|---|---|
+| `owned=False` | the buffers, which are reused for the whole stream | the limit |
+| `owned=True` (default) | the buffers not yet handed to the caller | the limit, plus whatever the caller still holds |
+| any device destination | the read buffers, always reused | the limit |
+
+The streamer holds the same number of buffers either way, so read-ahead and backpressure do not change with `owned`. What changes is that a handed-over buffer is replaced rather than reused, and its memory lives until the caller releases it.
+
+The rest of this section is about tensors you are allowed to keep. Under `owned=False` a host buffer or a distributed staging buffer must be consumed before the iteration advances; a device destination without distributed streaming stays yours either way, because there the tensor is a fresh allocation whatever the flag says.
+
+**How much a retained tensor keeps alive depends on where it lands.** With a host destination the buffer is handed over whole, so holding one small tensor keeps its entire buffer alive - a 4 KB tensor can keep several GB resident if it is the only one retained from that buffer. With a device destination the caller is given a copy of that tensor alone, so it keeps nothing else; the streamer's own buffers are reused either way.
+
+A loader that copies each tensor into its parameters and drops it - the normal case - retains nothing and never meets this. A caller that keeps a few scattered host tensors should copy them.
+
+Note this usually *lowers* peak memory rather than raising it, because the caller no longer needs its own copy of the checkpoint.
+
 #### Unlimited CPU Memory
 
 `RUNAI_STREAMER_MEMORY_LIMIT=-1`
 
-The default value. The size of the allocated CPU Memory buffer is equal to the size of the safetensor file (without the file header) and there is no memory reuse between multiple `get_tensors()` requests. Use this option for maximum performance and fastest model streaming times.
+The size of the allocated CPU Memory buffer is equal to the size of the safetensor file (without the file header) and there is no memory reuse between multiple `get_tensors()` requests. Use this option for maximum performance and fastest model streaming times.
+
+This is not the default. The default is 40 GB, the `LIMITED` mode below.
 
 #### Min
 

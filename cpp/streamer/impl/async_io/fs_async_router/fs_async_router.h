@@ -61,7 +61,7 @@ class FsAsyncRouter
         std::vector<unsigned> depths;
 
         // Whether each group's reads may use registered buffers. Per mount, because it pays on some
-        // file systems and costs on others - see design_io_uring_registration.md.
+        // file systems and costs on others.
         std::vector<bool> registers;
     };
 

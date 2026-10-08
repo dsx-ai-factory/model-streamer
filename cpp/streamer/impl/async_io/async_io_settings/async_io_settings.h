@@ -40,11 +40,6 @@ class AsyncIoSettings
     // The ceiling is a SAFETY bound, not a target. What saturates a device is bytes in flight, not
     // requests: at the default 8 MiB chunk even 32 requests is ~268 MB outstanding, past bandwidth x
     // latency for any storage we run on. 1024 is roughly 34x that, and twice the largest depth
-    // InstantTensor can produce - so it can only ever catch a mis-set variable, never limit
-    // throughput.
-    //
-    // Both match InstantTensor's max(512 // world_size, 3), which is our formula and our default
-    // arrived at independently, with 3 as its floor.
     static constexpr unsigned MinDepth = 3;
     static constexpr unsigned MaxDepth = 1024;
 

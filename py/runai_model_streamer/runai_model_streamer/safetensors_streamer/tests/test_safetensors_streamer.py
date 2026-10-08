@@ -6,9 +6,16 @@ import json
 import tempfile
 import shutil
 import humanize
+from unittest.mock import patch
 from safetensors import safe_open
+from safetensors.torch import save_file
 from runai_model_streamer.safetensors_streamer.safetensors_streamer import (
     SafetensorsStreamer,
+)
+from runai_model_streamer.file_streamer.requests_iterator import (
+    RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
+    RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME,
 )
 from runai_model_streamer.safetensors_streamer import safetensors_pytorch
 
@@ -159,9 +166,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
         with SafetensorsStreamer() as run_sf:
             run_sf.stream_file(file_path, None, "cpu")
             for name, tensor in run_sf.get_tensors():
-                # clone: the yielded tensor is a VIEW into a ring buffer that is recycled once
-                # the generator advances, so anything compared after the loop must own its data
-                our[name] = tensor.clone()
+                our[name] = tensor
 
         their = {}
         with safe_open(file_path, framework="pt", device="cpu") as f:
@@ -458,9 +463,7 @@ class TestSafetensorsStreamer(unittest.TestCase):
             streamer.stream_file(path, None, "cpu")
             tensors = {}
             for name, tensor in streamer.get_tensors():
-                # clone: the yielded tensor is a VIEW into a ring buffer that is recycled once
-                # the generator advances, so anything compared after the loop must own its data
-                tensors[name] = tensor.clone()
+                tensors[name] = tensor
             
             self.assertIn("First", tensors)
             self.assertIn("Second", tensors)
@@ -652,6 +655,73 @@ class TestSafetensorsStreamer(unittest.TestCase):
         with SafetensorsStreamer() as streamer:
             with self.assertRaisesRegex(ValueError, "truncated"):
                 streamer.stream_file(path, None, "cpu", tensor_names={"A"})
+
+
+class TestOwnedTensorsEndToEnd(unittest.TestCase):
+    """Keeping every tensor of a real file, through the whole stack, while the ring recycles.
+
+    Nothing here copies what it keeps, so a buffer taken back by the pool shows up as wrong values
+    rather than as a passing test."""
+
+    TENSORS = 8
+    ELEMENTS = 256                      # 1 KiB each, so one tensor fills one buffer below
+
+    # Two buffers of one tensor each against eight tensors, so the ring recycles four times. The pad
+    # budget has to go or a slot is 512 KiB whatever the limit says, and a reused slot would write
+    # each tensor at a fresh offset inside it, overwriting nothing.
+    TIGHT_RING = {
+        RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: str(2 * 1024),
+        RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2",
+        RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME: "0",
+    }
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def write_model(self):
+        """A file whose every tensor holds different, position-sensitive values."""
+        expected = {
+            f"w{i}": torch.arange(self.ELEMENTS, dtype=torch.float32) + i * 10000
+            for i in range(self.TENSORS)
+        }
+        path = os.path.join(self.test_dir, "model.safetensors")
+        save_file(expected, path)
+        return path, expected
+
+    @patch.dict(os.environ, TIGHT_RING)
+    def test_every_tensor_is_still_correct_after_the_stream_ends(self):
+        path, expected = self.write_model()
+
+        kept = {}
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path])
+            for name, tensor in streamer.get_tensors():
+                kept[name] = tensor          # no clone: this is what owned promises
+
+        self.assertEqual(sorted(kept), sorted(expected))
+        for name, tensor in kept.items():
+            self.assertTrue(torch.equal(tensor, expected[name]), f"{name} holds the wrong values")
+
+    @patch.dict(os.environ, TIGHT_RING)
+    def test_without_owning_the_same_memory_serves_several_tensors(self):
+        """The negative control, asserted on storage rather than on bytes.
+
+        Under owned=False the ring reuses its two buffers for all eight tensors, so the addresses
+        must collide. Checking the VALUES instead would depend on when each overwrite landed."""
+        path, _ = self.write_model()
+
+        kept = []
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_files([path], owned=False)
+            for _name, tensor in streamer.get_tensors():
+                kept.append(tensor)
+
+        self.assertEqual(len(kept), self.TENSORS)
+        self.assertLess(len({t.data_ptr() for t in kept}), self.TENSORS,
+                        "every tensor had its own memory, so the ring did not recycle")
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ namespace runai::llm::streamer::impl
 //     RUNAI_STREAMER_CHUNK_BYTESIZE     -> fs_sync_read_block_bytesize (2 MiB, also the minimum) AND
 //                                          s3_block_bytesize (8 MiB, minimum 5 MiB).
 //     RUNAI_STREAMER_FS_CHUNK_BYTESIZE  -> fs_async_chunk_bytesize (8 MiB). File system only.
-//     RUNAI_STREAMER_FS_QUEUE_DEPTH     -> fs_async_queue_depth per mount (512) AND concurrency as the
+//     RUNAI_STREAMER_FS_QUEUE_DEPTH     -> fs_async_queue_depth per mount (64) AND concurrency as the
 //                                          synchronous pool's threads (16). NODE-WIDE for the mounts,
 //                                          divided per process by AsyncIoSettings.
 //     RUNAI_STREAMER_FS_STRATEGY        -> fs_strategy_candidates. An ordered preference list; the
@@ -70,7 +70,7 @@ struct Config
     static constexpr size_t default_fs_async_chunk_bytesize = 8 * 1024 * 1024;
 
     // Node-wide, so it means the same thing at TP=1 and TP=8.
-    static constexpr unsigned default_fs_async_queue_depth = 512;
+    static constexpr unsigned default_fs_async_queue_depth = 64;
 
     // RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS: file system types whose reads must NOT use registered
     // buffers, comma separated, prefix matched so `nfs` covers `nfs4`. Empty registers everywhere.
@@ -82,7 +82,7 @@ struct Config
     //
     // NFS is denied by default because registration COSTS there rather than paying: its data arrives
     // over the network through the client stack, so there is no device DMA into our pages to
-    // streamline and registration only adds bookkeeping. See design_io_uring_registration.md.
+    // streamline and registration only adds bookkeeping.
     static constexpr const char * default_fs_no_register_buffers = "nfs";
 
     // RUNAI_STREAMER_FS_REGISTER_BUFFERS: the master switch, on by default.
@@ -93,7 +93,7 @@ struct Config
     //
     // Default ON because it cannot cost correctness: every failure path falls back to an ordinary read.
     // What it is WORTH is a CPU saving rather than a bandwidth one, so a throughput benchmark will not
-    // show it - see design_io_uring_registration.md before measuring.
+    // show it.
     static constexpr bool default_fs_register_buffers = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather

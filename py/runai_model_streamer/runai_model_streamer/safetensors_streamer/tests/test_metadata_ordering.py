@@ -58,9 +58,7 @@ class TestMetadataOrdering(unittest.TestCase):
 
         with SafetensorsStreamer() as streamer:
             streamer.stream_file(path)
-            # clone: the yielded tensor is a VIEW into a ring buffer that is recycled once the
-            # generator advances, so anything compared after the loop must own its data
-            tensors = {name: tensor.clone() for name, tensor in streamer.get_tensors()}
+            tensors = dict(streamer.get_tensors())
 
         self.assertEqual(sorted(tensors), ["empty", "first", "second"])
         self.assertEqual(tuple(tensors["empty"].shape), (0, 3))

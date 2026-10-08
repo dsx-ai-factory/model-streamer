@@ -61,6 +61,100 @@ class TestRingConcurrency(unittest.TestCase):
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_owned_tensors_survive_a_later_unowned_stream(self):
+        """Ownership is per stream, so the two modes must not reach each other.
+
+        A ring is built per stream_files and carries that call's mode, and the previous ring is
+        dropped - its memory living on only for whatever the caller still holds. So tensors kept from
+        an owned stream cannot be written to by a later stream that recycles its own buffers.
+        """
+        path, expected = self.write_ranges("owned_then_not.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, owned=True)
+            self.assertTrue(fs.requests_iterator._pool._owned)
+            held = {index: buffer for _, index, buffer in fs.get_chunks()}
+
+            # A second stream, recycling its buffers, over the same ranges. If the two rings could
+            # reach each other this is what would overwrite what the caller is holding.
+            fs.stream_files(chunks, owned=False)
+            self.assertFalse(fs.requests_iterator._pool._owned)
+            for _, _, buffer in fs.get_chunks():
+                buffer.numpy()[:] = 0xFF
+
+        self.assertEqual(
+            {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
+            expected,
+        )
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_an_unowned_stream_can_be_followed_by_an_owned_one(self):
+        # The other order. Nothing carries over between the two rings, so the second call owns its
+        # buffers whatever the first one did.
+        path, expected = self.write_ranges("not_then_owned.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, owned=False)
+            borrowed = {index: buffer.numpy().tobytes().decode("utf-8")
+                        for _, index, buffer in fs.get_chunks()}
+            self.assertEqual(borrowed, expected)
+
+            fs.stream_files(chunks, owned=True)
+            self.assertTrue(fs.requests_iterator._pool._owned)
+            held = {index: buffer for _, index, buffer in fs.get_chunks()}
+
+        self.assertEqual(
+            {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
+            expected,
+        )
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_device_destination_keeps_the_ring_even_when_asked_to_own(self):
+        """FileStreamer is exported, so it is reached without the routing layer above it.
+
+        Checked on the ring, which needs no GPU: nothing reaches CUDA until the first .to()."""
+        path, _ = self.write_ranges("device_ring.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, device="cuda:0", owned=True)
+
+            self.assertEqual(fs.device_str, "cuda:0")
+            self.assertFalse(fs.requests_iterator._pool._owned)
+
+            # Nothing consumed the submission - get_chunks would need a GPU - and the C layer must
+            # not be left holding destinations.
+            fs.drain_live_submissions()
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_none_device_is_the_host_and_still_owns(self):
+        """device=None has always meant the host: it reaches tensor.to(None), which returns the tensor
+        unchanged, so the caller is handed a view into a ring buffer.
+
+        It is tested because None does NOT equal "cpu", and the comparisons against "cpu" decide where
+        a tensor lands and whether its buffer is handed over. Left alone, `owned=True` with
+        `device=None` recycled the buffers under tensors the caller had been promised."""
+        path, expected = self.write_ranges("none_device.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, device=None, owned=True)
+            self.assertEqual(fs.device_str, "cpu")
+            self.assertTrue(fs.requests_iterator._pool._owned)
+            held = {index: buffer for _, index, buffer in fs.get_chunks()}
+
+        self.assertEqual(
+            {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
+            expected,
+        )
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
     def test_ring_recycles_buffers_across_many_requests(self):
         # a ring of 2 serving 10 ranges: buffers must be released and refilled 5 times over, and a range
         # must never be read out of a buffer that a later request has already overwritten
@@ -203,6 +297,33 @@ class TestRingConcurrency(unittest.TestCase):
             for _file_id, range_index, buffer in fs.get_chunks():
                 results[range_index] = buffer.numpy().tobytes().decode("utf-8")
             self.assertEqual(results, expected)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_consumer_that_gives_up_leaves_the_streamer_usable(self):
+        """The sibling test closes the generator; this one lets a consumer raise, which is what
+        safetensors_pytorch does, and then uses the streamer again.
+
+        Reuse is the part that matters: a drain that only zeroed the counters would pass the
+        assertions below and still hand the next stream a ring the C layer is writing into."""
+        path, expected = self.write_ranges("abandoned.bin", 12)
+        chunks = [FileChunks.contiguous(0, path, 0, [self.RANGE_SIZE] * 12)]
+
+        with FileStreamer() as streamer:
+            streamer.stream_files(chunks)
+            with self.assertRaises(RuntimeError):
+                for _ in streamer.get_chunks():
+                    raise RuntimeError("consumer gave up")
+
+            self.assertEqual(streamer.outstanding, 0, "submissions were left in flight")
+            self.assertEqual(streamer.live_requests, {})
+
+            # The assertions above are bookkeeping; this is the behaviour they stand for.
+            streamer.stream_files(chunks)
+            again = {i: b.numpy().tobytes().decode("utf-8")
+                     for _, i, b in streamer.get_chunks()}
+
+        self.assertEqual(again, expected)
 
 
 class TestBindings(unittest.TestCase):
@@ -369,8 +490,9 @@ class TestObjectStorageSkipsTheProbe(unittest.TestCase):
     def test_object_storage_uses_the_default_block_and_does_not_probe(self):
         seen = {}
 
-        def capture(requests, memory_limit, direct_block):
+        def capture(requests, memory_limit, direct_block, owned):
             seen["direct_block"] = direct_block
+            seen["owned"] = owned
             raise _Stop()
 
         with FileStreamer() as fs:
@@ -384,6 +506,9 @@ class TestObjectStorageSkipsTheProbe(unittest.TestCase):
                     fs.stream_files([FileChunks.contiguous(17, "s3://bucket/model.safetensors", 0, [8])])
 
         self.assertEqual(seen["direct_block"], DIRECT_IO_BLOCK)
+        # The contract reaches the ring by default: nothing between here and the caller has to
+        # ask for owned tensors.
+        self.assertTrue(seen["owned"])
         probe.assert_not_called()
 
 

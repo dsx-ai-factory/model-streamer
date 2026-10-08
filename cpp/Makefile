@@ -54,8 +54,7 @@ BAZEL_TEST_FLAGS ?=
 # RUNAI_STREAMER_LOG_TO_STDERR defaults to false and RUNAI_STREAMER_LOG_FILE is unset (logging.cc),
 # so every LOG(ERROR) is discarded. Setting either one here does not work - logging_test asserts the
 # behaviour of both when UNSET, and both are read once in a static initialiser, so that test cannot
-# override them per-case. Making library logs visible needs a per-target setting or a test-side sink;
-# see test_directions.md.
+# override them per-case. Making library logs visible needs a per-target setting or a test-side sink.
 BAZEL_TEST_LOGGING := --test_output=errors
 
 test:

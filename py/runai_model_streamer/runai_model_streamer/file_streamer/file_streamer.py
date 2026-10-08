@@ -1,4 +1,4 @@
-from typing import Dict, List, Iterator, Optional, Tuple
+from typing import Dict, List, Iterator, Optional, Tuple, Union
 from runai_model_streamer.libstreamer.libstreamer import (
     runai_probe_direct_block_size,
     SUCCESS_ERROR_CODE,
@@ -35,6 +35,25 @@ s3_credentials_module = get_s3_credentials_module()
 
 class RunaiStreamerInvalidInputException(Exception):
     pass
+
+def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
+    """The device as a string. Every spelling of the host becomes "cpu".
+
+    Two decisions read this: whether the ring hands its buffer over, and whether get_chunks copies.
+    They have to agree. Comparing the string makes them disagree for torch.device("cpu"), which is
+    not equal to "cpu" but which .to() returns unchanged - so the buffer would be recycled under the
+    caller and never copied. Only the host needs settling - a device destination copies either way,
+    so its spelling is passed on as the caller wrote it rather than rewritten.
+
+    Raises RunaiStreamerInvalidInputException for a device torch does not know. It used to travel as
+    far as the first .to(), which is after a whole submission has been read."""
+    if device is None:
+        return "cpu"
+    try:
+        resolved = torch.device(device)
+    except (RuntimeError, TypeError) as error:
+        raise RunaiStreamerInvalidInputException(f"Unusable device {device!r}: {error}") from error
+    return "cpu" if resolved.type == "cpu" else str(device)
 
 def homogeneous_paths(paths: List[str]) -> bool:
     if not paths:
@@ -154,6 +173,7 @@ class FileStreamer:
             credentials: Optional[S3Credentials] = None,
             device: Optional[str] = "cpu",
             memory_limit: Optional[int] = None,
+            owned: bool = True,
 ) -> None:
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
@@ -167,10 +187,10 @@ class FileStreamer:
         #      the NEW ring's buffer list: a different buffer, plausible looking bytes, and no error.
         #
         # Submission ids are unique and the responder demuxes by them, so attribution is not what
-        # breaks - lifetime and ownership are. To lift this restriction and allow overlapping streams
-        # (see design_multiple_requests.md): keep live_requests and outstanding across calls, hang the
-        # owning iterator off the FilesRequest instead of off self, release buffers to that owner, and
-        # let each iterator live until its last submission drains. Then delete this check.
+        # breaks - lifetime and ownership are. To lift this restriction and allow overlapping
+        # streams: keep live_requests and outstanding across calls, hang the owning iterator off the
+        # FilesRequest instead of off self, release buffers to that owner, and let each iterator live
+        # until its last submission drains. Then delete this check.
         if self.outstanding > 0:
             raise ValueError(
                 f"cannot start a new stream while {self.outstanding} response(s) are outstanding from "
@@ -180,7 +200,8 @@ class FileStreamer:
         if not homogeneous_paths([file_stream_request.path for file_stream_request in file_stream_requests]):
             raise RunaiStreamerInvalidInputException("Cannot stream files from multiple source types in parallel")
 
-        self.device_str = device
+        # Normalised here too because this entry point is public in its own right.
+        self.device_str = host_or_device(device)
 
         for file_stream_request in file_stream_requests:
             # first object-storage path resolves + applies the credentials to the streamer, once
@@ -202,8 +223,11 @@ class FileStreamer:
         direct_block = (DIRECT_IO_BLOCK if object_storage or not paths
                         else runai_probe_direct_block_size(self.streamer, paths))
 
+        # Only a host destination hands its slots over. For any other, get_chunks yields
+        # tensor.to(device) and the caller never sees the slot, so handing it over would throw away
+        # a buffer per submission and fault a fresh one in, for nothing.
         self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
-            file_stream_requests, memory_limit, direct_block
+            file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
         )
         self.live_requests = {}
         self.outstanding = 0
