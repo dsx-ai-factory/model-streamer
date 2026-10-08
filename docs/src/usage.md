@@ -432,7 +432,9 @@ Note this usually *lowers* peak memory rather than raising it, because the calle
 
 `RUNAI_STREAMER_MEMORY_LIMIT=-1`
 
-The default value. The size of the allocated CPU Memory buffer is equal to the size of the safetensor file (without the file header) and there is no memory reuse between multiple `get_tensors()` requests. Use this option for maximum performance and fastest model streaming times.
+The size of the allocated CPU Memory buffer is equal to the size of the safetensor file (without the file header) and there is no memory reuse between multiple `get_tensors()` requests. Use this option for maximum performance and fastest model streaming times.
+
+This is not the default. The default is 40 GB, the `LIMITED` mode below.
 
 #### Min
 
