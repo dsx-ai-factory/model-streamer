@@ -29,8 +29,8 @@ TIGHT_RING = {
 }
 
 
-class TestEveryHostSpellingTakesTheHostPath(unittest.TestCase):
-    """Every spelling of the host has to take the host path, and only "cpu" equals "cpu".
+class TestOwnedFollowsTheDestination(unittest.TestCase):
+    """Only a host destination hands its buffers over, and only "cpu" equals "cpu".
 
     This class covers the entry point where that matters. stream_files decides whether the ring is
     handed over from `owned and device == "cpu"`, so a host written any other way turned `owned=True`
@@ -76,6 +76,25 @@ class TestEveryHostSpellingTakesTheHostPath(unittest.TestCase):
                     {i: b.numpy().tobytes().decode("utf-8") for i, b in held.items()},
                     expected,
                 )
+
+    @patch.dict(os.environ, TIGHT_RING)
+    def test_a_device_destination_keeps_the_ring(self):
+        """The other half of the mapping. A device destination yields tensor.to(device), a fresh
+        allocation the caller already owns, so the ring stays ours to reuse however owned is set.
+
+        Asserted on the ring, which needs no GPU: stream_files builds it, and nothing reaches CUDA
+        until the first .to() in get_chunks."""
+        path, _ = self.write_ranges(6)
+        chunks = [FileChunks.contiguous(17, path, 0, [RANGE_SIZE] * 6)]
+
+        with DistributedStreamer() as streamer:
+            streamer.stream_files(chunks, None, device="cuda", is_distributed=False, owned=True)
+            inner = streamer.file_streamer
+
+            self.assertEqual(inner.device_str, "cuda")
+            self.assertFalse(inner.requests_iterator._pool._owned)
+
+            inner.drain_live_submissions()
 
 
 if __name__ == "__main__":
