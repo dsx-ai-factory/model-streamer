@@ -1,6 +1,7 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 def runai_cc_test_dependencies():
+    # attribution: not shipped (tests only)
     http_archive(
         name = "com_google_googletest",
         urls = [

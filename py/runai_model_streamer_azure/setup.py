@@ -38,7 +38,7 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-azure",
     version=VERSION,
-    license_files=("LICENSE",),
+    license_files=("LICENSE", "../../cpp/NOTICE"),
     packages=find_packages(),
     install_requires=["azure-storage-blob", "azure-identity"],
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],

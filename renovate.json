@@ -1,0 +1,15 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "github>run-ai/runai-actions//renovate/presets/cpp-common",
+    "github>run-ai/runai-actions//renovate/presets/notice",
+    "github>run-ai/runai-actions//renovate/presets/copyright"
+  ],
+  "includePaths": [
+    "cpp/**",
+    ".devcontainer/**",
+    "py/**",
+    ".github/**"
+  ]
+}

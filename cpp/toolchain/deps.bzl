@@ -12,6 +12,7 @@ def load_toolchain_deps():
         url = "https://github.com/protocolbuffers/protobuf/releases/download/v27.0/protobuf-27.0.tar.gz",
     )
 
+    # attribution: not shipped (Bazel rules, nothing linked)
     http_archive(
         name = "rules_cc",
         urls = ["https://github.com/bazelbuild/rules_cc/releases/download/0.1.1/rules_cc-0.1.1.tar.gz"],
