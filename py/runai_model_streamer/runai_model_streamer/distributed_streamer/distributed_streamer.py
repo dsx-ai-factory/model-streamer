@@ -167,11 +167,10 @@ class DistributedStreamer:
         self.set_is_distributed(is_distributed, device)
 
         if not self.is_distributed:
-            # Ownership is delivered where the caller's tensor lives. With a device destination the
-            # FileStreamer yields tensor.to(device), a fresh allocation the caller already owns, so the
-            # ring stays ours to reuse. Only a host destination hands its slots over.
+            # Passed on as asked. Whether a device destination lets the ring be handed over is the
+            # FileStreamer's to decide, because that is where the tensor is copied to the device.
             self.file_streamer.stream_files(
-                file_stream_requests, credentials, device, owned=owned and device == "cpu"
+                file_stream_requests, credentials, device, owned=owned
             )
             built_ring = True
         else:

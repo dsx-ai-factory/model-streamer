@@ -223,8 +223,11 @@ class FileStreamer:
         direct_block = (DIRECT_IO_BLOCK if object_storage or not paths
                         else runai_probe_direct_block_size(self.streamer, paths))
 
+        # Only a host destination hands its slots over. For any other, get_chunks yields
+        # tensor.to(device) and the caller never sees the slot, so handing it over would throw away
+        # a buffer per submission and fault a fresh one in, for nothing.
         self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
-            file_stream_requests, memory_limit, direct_block, owned
+            file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
         )
         self.live_requests = {}
         self.outstanding = 0

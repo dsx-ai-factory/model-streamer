@@ -113,6 +113,25 @@ class TestRingConcurrency(unittest.TestCase):
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
+    def test_a_device_destination_keeps_the_ring_even_when_asked_to_own(self):
+        """FileStreamer is exported, so it is reached without the routing layer above it.
+
+        Checked on the ring, which needs no GPU: nothing reaches CUDA until the first .to()."""
+        path, _ = self.write_ranges("device_ring.txt", 6)
+        chunks = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 6)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks, device="cuda:0", owned=True)
+
+            self.assertEqual(fs.device_str, "cuda:0")
+            self.assertFalse(fs.requests_iterator._pool._owned)
+
+            # Nothing consumed the submission - get_chunks would need a GPU - and the C layer must
+            # not be left holding destinations.
+            fs.drain_live_submissions()
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
     def test_a_none_device_is_the_host_and_still_owns(self):
         """device=None has always meant the host: it reaches tensor.to(None), which returns the tensor
         unchanged, so the caller is handed a view into a ring buffer.

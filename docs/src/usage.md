@@ -86,7 +86,7 @@ Two things are *not* controlled by this parameter:
 - **Alignment.** Every yielded tensor is aligned for its dtype whatever `owned` is set to, because a tensor at an address its dtype cannot use is unusable either way. Where that is not already true the streamer copies the tensor, so `owned=False` does not mean copy-free.
 - **How much memory the streamer uses.** See below.
 
-With a device destination and **without** distributed streaming, `owned` has no observable effect: the tensor is a fresh allocation whatever the flag says, so it is always the caller's to keep, and the flag decides only whether the streamer recycles its own read buffers, which the caller cannot see.
+With a device destination and **without** distributed streaming, `owned` has no effect at all: the tensor is a fresh allocation whatever the flag says, so it is always the caller's to keep, and the streamer's own read buffers are reused either way.
 
 Distributed streaming is different. There the tensor is a view into a staging buffer that the next broadcast overwrites, and `owned=True` is what turns it into a copy of its own. So on that path `owned=False` really does hand back borrowed memory.
 
