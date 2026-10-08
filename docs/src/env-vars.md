@@ -124,6 +124,27 @@ Controls how the CPU Memory buffer to which tensors are read from the file is be
 
 `-1` for distributed streaming and 40 GB otherwise
 
+### RUNAI_STREAMER_RING_BUFFERS
+
+How many buffers `RUNAI_STREAMER_MEMORY_LIMIT` is divided into.
+
+Each buffer is the limit divided by this number, but never smaller than the largest single tensor,
+because a tensor cannot span two buffers. A model with large tensors therefore gets fewer buffers
+than asked for.
+
+The buffer size matters beyond read-ahead. Under the default `owned=True` a yielded tensor is a view
+into its buffer and the whole buffer is handed to the caller, so holding one tensor keeps its whole
+buffer alive - see [Tensor ownership](usage.md#tensor-ownership-owned). More, smaller buffers lower
+peak memory for a caller that retains tensors.
+
+#### Values accepted
+
+Positive integer value
+
+#### Default value
+
+`18`
+
 ### AWS_ENDPOINT_URL
 
 Overrides url endpoint for reading from S3 compatible object store
