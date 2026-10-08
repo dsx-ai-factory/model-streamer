@@ -420,7 +420,7 @@ The streamer allocates a buffer on the CPU Memory for storing the tensors before
 
 The streamer holds the same number of buffers either way, so read-ahead and backpressure do not change with `owned`. What changes is that a handed-over buffer is replaced rather than reused, and its memory lives until the caller releases it.
 
-The rest of this section is about tensors you are allowed to keep, which means `owned=True`. Under `owned=False` nothing may be retained on any path, so the question does not arise.
+The rest of this section is about tensors you are allowed to keep. Under `owned=False` a host buffer or a distributed staging buffer must be consumed before the iteration advances; a device destination without distributed streaming stays yours either way, because there the tensor is a fresh allocation whatever the flag says.
 
 **How much a retained tensor keeps alive depends on where it lands.** With a host destination the buffer is handed over whole, so holding one small tensor keeps its entire buffer alive - a 4 KB tensor can keep several GB resident if it is the only one retained from that buffer. With a device destination the caller is given a copy of that tensor alone, so it keeps nothing else; the streamer's own buffers are reused either way.
 
