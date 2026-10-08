@@ -134,19 +134,15 @@ DIRECT_IO_BLOCK = os.sysconf("SC_PAGESIZE")
 def _alloc_slot(slot_size: int) -> Slot:
     """A fresh slot, with room for the pads a direct read needs.
 
-    THE PADS ARE THE POINT. A direct read needs its destination address, its file offset and its
-    length each to be a multiple of the block (cpp/posix_io/alignment). The file offset is the file's
-    to choose, so _place() moves the ADDRESS to match it - and this extra room is what it moves
-    within. Without it no range could be read directly and O_DIRECT would copy every byte instead of
-    about 0.1% of it.
+    The extra room is what _place() moves an address within to match its file offset. Without it no
+    range could be read directly.
 
-    The base is aligned too, but only as a convenience: _place() works in absolute addresses, so it
-    reaches a congruent address from any base. That is why this uses the page size while the pads use
-    the probed block - the two may differ, and only the pads have to match it.
+    The base is aligned only as a convenience - _place() works in absolute addresses, so it reaches a
+    congruent address from any base. That is why the page size serves here while the pads use the
+    probed block.
 
-    A FREE FUNCTION taking the size, not a method. The pool keeps whatever allocator it is given, so a
-    bound method would make the pool reference the iterator that owns it - a cycle, which refcounting
-    cannot break. A replaced ring would then hold its buffers until the collector ran.
+    A free function, not a method: the pool keeps the allocator it is given, and a bound method would
+    make it reference the iterator that owns it - a cycle refcounting cannot break.
     """
     raw = np.empty(slot_size + DIRECT_IO_BLOCK, dtype=np.uint8)
     shift = (-raw.ctypes.data) % DIRECT_IO_BLOCK
@@ -177,10 +173,8 @@ class FilesRequestsIteratorWithBuffer:
         )
         self._slot_size = buffer_size + self.direct_block * _max_pads_per_buffer()
 
-        # `owned` is WHO OWNS A YIELDED TENSOR'S MEMORY, and the pool is where that is decided - see
-        # SlotPool. ONE ALLOCATION PER SLOT, so a slot that has been given away can die on its own: a
-        # view into a shared pool would keep the whole pool alive for as long as the caller holds any
-        # one slot.
+        # One allocation per slot, so a slot that has been given away can die on its own. A view into
+        # a shared pool would keep the whole pool alive while the caller held any one slot.
         self._pool = SlotPool(num_buffers, partial(_alloc_slot, self._slot_size), owned)
 
     def _place(self, request: FilesRequest, base: int, aligned: bool) -> Optional[List[int]]:

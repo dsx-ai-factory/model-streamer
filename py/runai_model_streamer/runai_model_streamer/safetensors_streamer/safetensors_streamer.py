@@ -273,28 +273,14 @@ class SafetensorsStreamer:
         ) -> None:
         """Stream the tensors of one or more safetensors files.
 
-        owned=True (the default)
-            Every yielded tensor belongs to the caller. It stays valid for as long as the caller
-            holds it and the streamer never writes to that memory again, so a caller does not need
-            to copy a tensor in order to keep one.
+        owned=True, the default, gives every yielded tensor to the caller: it stays valid for as
+        long as the caller holds it, so there is no need to copy one in order to keep it.
 
-        owned=False
-            A yielded tensor is a view into a buffer the streamer reuses, and must be consumed
-            before the iteration advances. Retaining one past that point reads whatever was written
-            next - silently, with no error. Kept so a caller that depends on the old semantics has a
-            way back.
+        owned=False yields views into buffers the streamer reuses, so each must be consumed before
+        the iteration advances. Retaining one then reads whatever was written next, silently.
 
-        Alignment is NOT under this flag. Every yielded tensor is aligned for its dtype either way,
-        because a tensor at an address its dtype cannot use is unusable whoever owns it.
-
-        A DEVICE destination WITHOUT distributed streaming is not under it either: that path hands
-        the caller a fresh allocation whatever the flag says. Distributed streaming is the exception
-        - there the tensor is a view into a staging buffer the next broadcast overwrites, and owned
-        is what copies it out.
-
-        RUNAI_STREAMER_MEMORY_LIMIT bounds what the STREAMER holds, not the process: under owned it
-        does not cover buffers already handed over. What a retained tensor keeps alive differs by
-        destination - see docs/src/usage.md.
+        Alignment is not under this flag, and nor is a device destination without distributed
+        streaming - see docs/src/usage.md.
         """
         # None = no filter (today's behavior). str satisfies Collection[str] structurally, so
         # reject it - otherwise `in` below silently becomes substring matching.
