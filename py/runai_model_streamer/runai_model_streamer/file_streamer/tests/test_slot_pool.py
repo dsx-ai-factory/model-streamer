@@ -121,6 +121,20 @@ class TestSlotPool(unittest.TestCase):
             pool.release(index)
             self.assertEqual(len(pool), 2)
 
+    def test_releasing_a_free_slot_is_rejected(self):
+        # Both policies, because the guard has to sit before the owned branch to cover either.
+        for owned in (True, False):
+            with self.subTest(owned=owned):
+                pool = SlotPool(2, CountingAllocator(), owned=owned)
+                index = pool.take()
+                pool.release(index)
+
+                with self.assertRaises(ValueError):
+                    pool.release(index)
+
+                # The rejection did not cost the depth it was protecting.
+                self.assertEqual(len(pool._free), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -65,7 +65,16 @@ class SlotPool:
         """Give a drained slot back.
 
         Under `owned` dropping our reference here is what lets the slot die once the caller drops its
-        last view, and what makes it impossible for us to write to it again."""
+        last view, and what makes it impossible for us to write to it again.
+
+        A second release is rejected rather than appended: handing the same index out twice would
+        put one slot under two live requests, and the C layer would write both into it."""
+        if index in self._free:
+            raise ValueError(
+                f"ring slot {index} is already free - releasing it twice would hand the same "
+                f"memory to two callers"
+            )
+
         if self._owned:
             self._slots[index] = None
         self._free.append(index)
