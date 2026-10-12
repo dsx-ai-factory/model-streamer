@@ -1,73 +1,92 @@
-name: RunAI Model Streamer Library - Resease
+name: RunAI Model Streamer Library - Release
 
 on:
   release:
     types:
       - created
 
+permissions:
+  contents: read
+  packages: read
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  build-and-push:
-    name: Build & Push
+  devcontainer:
+    name: Prepare release devcontainer
+    uses: ./.github/workflows/devcontainer.yml
+    with:
+      publish: false
+
+  build:
+    name: Build (${{ matrix.component }}, ${{ matrix.arch }})
+    needs: devcontainer
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        component: [streamer, s3, gcs, azure]
+    uses: ./.github/workflows/build.yml
+    with:
+      arch: ${{ matrix.arch }}
+      component: ${{ matrix.component }}
+      package_version: ${{ github.event.release.tag_name }}
+      devcontainer_image: ${{ needs.devcontainer.outputs.image }}
+      devcontainer_artifact: ${{ needs.devcontainer.outputs.artifact }}
+
+  publish:
+    name: Publish release packages
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v5
+    - name: Download Python wheels
+      uses: actions/download-artifact@v7
       with:
-        persist-credentials: false
+        pattern: packages-*
+        path: py
+        merge-multiple: true
 
-    - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v3
+    - name: Download C++ libraries
+      uses: actions/download-artifact@v7
       with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+        pattern: cpp-*
+        path: cpp-artifacts
 
-    - name: Set PACKAGE_VERSION
-      run: echo "PACKAGE_VERSION=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
+    - name: Prepare release assets
+      run: |
+        shopt -s nullglob
+        wheels=(py/*/dist/*.whl)
+        if [[ "${#wheels[@]}" -ne 8 ]]; then
+          echo "::error::Expected eight wheels, found ${#wheels[@]}"
+          exit 1
+        fi
+        mkdir -p dist release-assets
+        cp "${wheels[@]}" dist/
+        for component in streamer s3 gcs azure; do
+          for arch in x86_64 aarch64; do
+            artifact="cpp-artifacts/cpp-${component}-${arch}"
+            test -f "$artifact/lib/libstreamer${component#streamer}.so"
+            test -f "$artifact/include/streamer/streamer.h"
+            test -f "$artifact/LICENSE"
+            tar -czf "release-assets/cpp-${component}-${arch}.tar.gz" -C "$artifact" .
+          done
+        done
 
-    - name: Build package
-      uses: devcontainers/ci@v0.3
-      with:
-        imageName: ghcr.io/${{ github.repository }}/devcontainer
-        cacheFrom: ghcr.io/${{ github.repository }}/devcontainer
-        push: never
-        runCmd: |
-          PACKAGE_VERSION=${{ env.PACKAGE_VERSION }} make build
-
-    - name: Upload As Release Asset
-      uses: softprops/action-gh-release@v1
-      with:
-        files: py/*/dist/*.whl
+    - name: Upload GitHub release assets
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
+      run: gh release upload "$RELEASE_TAG" dist/*.whl release-assets/*.tar.gz --clobber
 
-    - name: Publish streamer package distributions to PyPI
+    - name: Publish Python packages to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer/dist/
+        packages-dir: dist/
         print-hash: true
-
-    - name: Publish s3 streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_s3/dist/
-        print-hash: true
-
-    - name: Publish GCS streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_gcs/dist/
-        print-hash: true
-
-    - name: Publish Azure streamer package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        packages-dir: py/runai_model_streamer_azure/dist/
-        print-hash: true
+        skip-existing: true
