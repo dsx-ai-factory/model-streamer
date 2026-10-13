@@ -1,0 +1,9 @@
+{
+    "name": "RunAI Model Streamer GPU tests",
+    "image": "ghcr.io/dsx-ai-factory/model-streamer/devcontainer:latest",
+    "runArgs": [
+        "--gpus", "all",
+        "--shm-size=2g",
+        "--security-opt", "seccomp=unconfined"
+    ]
+}
