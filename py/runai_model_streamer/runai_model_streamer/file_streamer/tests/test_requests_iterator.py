@@ -19,6 +19,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     _max_pads_per_buffer,
     _ring_sizing,
 )
+from runai_model_streamer.file_streamer.yield_order import YieldOrder
 
 
 class TestRingSizing(unittest.TestCase):
@@ -830,3 +831,66 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         # the zero sized range consumes no buffer, so the range after it starts where it did
         _, _, view = requests_iterator.get_global_file_and_range(request, 0, 2)
         self.assertEqual(len(view), 3)
+
+
+class TestSubmissionsAreIssuedInOrdinalOrder(unittest.TestCase):
+    """YieldOrder parks early responses and hands them over in ordinal order. That cannot stall only
+    because a submission is never issued before an earlier ordinal, so whatever a parked view waits
+    for is already in flight. These tests record that property on the iterators themselves.
+
+    The ordinal is computed by YieldOrder, so the test follows the mapping the parking uses."""
+
+    # Ids disagree with the list order, an empty file sits in the middle, and a limit of 8 splits
+    # files across several requests while the largest range (7) still fits.
+    RANGE_COUNTS = [[3, 3, 3, 3, 3], [4], [], [2, 2, 2], [7, 1, 1, 1, 1, 1, 1]]
+    LIMIT = 8
+
+    def files(self):
+        return [FileChunks.contiguous(100 - position, f"{position}.bin", 0, list(sizes))
+                for position, sizes in enumerate(self.RANGE_COUNTS)]
+
+    def total_ranges(self):
+        return sum(len(sizes) for sizes in self.RANGE_COUNTS)
+
+    def ordinals_of(self, order, request):
+        return [order.ordinal(file_chunks.id, request.global_range_index(file_index, range_index))
+                for file_index, file_chunks in enumerate(request.files)
+                for range_index in range(len(file_chunks.sizes))]
+
+    def test_the_plain_iterator_issues_every_ordinal_once_in_order(self):
+        files = self.files()
+        order = YieldOrder(files)
+        iterator = FilesRequestsIterator(self.LIMIT, files)
+
+        issued = []
+        requests = 0
+        while True:
+            request = iterator.next_request()
+            if request is None:
+                break
+            issued += self.ordinals_of(order, request)
+            requests += 1
+
+        self.assertGreater(requests, 1, "one request would not test the order across submissions")
+        self.assertEqual(issued, list(range(self.total_ranges())))
+
+    def test_the_ring_issues_every_ordinal_once_in_order_while_slots_are_recycled(self):
+        files = self.files()
+        order = YieldOrder(files)
+        ring = FilesRequestsIteratorWithBuffer(self.LIMIT, 2, files)
+
+        issued = []
+        live = []
+        requests = 0
+        while True:
+            if not ring.has_free_buffer():
+                ring.release(live.pop(0))      # oldest first, as a stream that consumes in order does
+            request = ring.next_request()
+            if request is None:
+                break
+            issued += self.ordinals_of(order, request)
+            live.append(request)
+            requests += 1
+
+        self.assertGreater(requests, 2, "the ring has two slots, so recycling needs more requests")
+        self.assertEqual(issued, list(range(self.total_ranges())))
