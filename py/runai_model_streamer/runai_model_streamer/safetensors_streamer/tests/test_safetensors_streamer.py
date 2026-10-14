@@ -724,5 +724,36 @@ class TestOwnedTensorsEndToEnd(unittest.TestCase):
                         "every tensor had its own memory, so the ring did not recycle")
 
 
+class TestDistributedPathOrder(unittest.TestCase):
+    """Every rank turns the path list's ORDER into FileChunks ids and the ranks exchange tensors by
+    that id, so two ranks enumerating a directory differently would put different files behind one
+    id. Callers reach the streamer from glob, which does not sort."""
+
+    SHUFFLED = ["/m/model-00003.safetensors",
+                "/m/model-00001.safetensors",
+                "/m/model-00002.safetensors"]
+
+    def paths_as_seen(self, **stream_kwargs):
+        """The path list stream_files actually works from, captured before anything reads a file."""
+        seen = []
+
+        def capture(_streamer, paths, _credentials):
+            seen.extend(paths)
+            raise RuntimeError("stop here - the order is all this test needs")
+
+        with patch.object(safetensors_pytorch, "prepare_request", side_effect=capture):
+            with SafetensorsStreamer() as streamer:
+                with self.assertRaises(RuntimeError):
+                    streamer.stream_files(list(self.SHUFFLED), **stream_kwargs)
+        return seen
+
+    def test_distributed_streaming_sorts_the_paths(self):
+        self.assertEqual(self.paths_as_seen(is_distributed=True), sorted(self.SHUFFLED))
+
+    def test_a_single_process_keeps_the_order_it_was_given(self):
+        # No rank has to agree with anything here, so the caller's order is left alone.
+        self.assertEqual(self.paths_as_seen(is_distributed=False), self.SHUFFLED)
+
+
 if __name__ == "__main__":
     unittest.main()
