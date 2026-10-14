@@ -14,7 +14,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
+    RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME,
 )
+from runai_model_streamer.file_streamer.yield_order import UnorderedYield, YieldOrder
 
 
 class TestRingConcurrency(unittest.TestCase):
@@ -113,6 +115,46 @@ class TestRingConcurrency(unittest.TestCase):
             {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
             expected,
         )
+
+    # Four ranges per slot and two slots, so the mock's round robin interleaves two submissions. A
+    # slot holding ONE range would make the interleave indistinguishable from order, and the test
+    # would pass with the reordering removed.
+    INTERLEAVING_RING = {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                         RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2",
+                         RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME: "0"}
+
+    def stream_order(self, name):
+        """(range indexes in the order they were yielded, the ordering object that was used).
+
+        The bytes are checked here as well, because an order is only worth asserting if the data
+        behind it is right."""
+        path, expected = self.write_ranges(name, 16)
+        with FileStreamer() as fs:
+            fs.stream_files([FileChunks.contiguous(0, path, 0, [self.RANGE_SIZE] * 16)])
+            got = [(index, buffer.numpy().tobytes().decode("utf-8"))
+                   for _, index, buffer in fs.get_chunks()]
+            order = fs.yield_order
+        self.assertEqual({index: text for index, text in got}, expected,
+                         "the bytes must be right whatever the order")
+        return [index for index, _ in got], order
+
+    @patch.dict(os.environ, INTERLEAVING_RING)
+    def test_ranges_are_yielded_in_file_order_by_default(self):
+        indexes, order = self.stream_order("ordered.bin")
+        # Without this the test would also pass with ordering switched off against a reader that
+        # happens to complete in order, which sync_buffered does.
+        self.assertIsInstance(order, YieldOrder)
+        self.assertEqual(indexes, list(range(16)))
+
+    @patch.dict(os.environ, dict(INTERLEAVING_RING, RUNAI_STREAMER_ORDERED_YIELD="0"))
+    def test_the_flag_turns_ordering_off(self):
+        """Deliberately NOT asserting that the result comes out unsorted. Whether responses
+        interleave belongs to the reader - sync_buffered completes in order - so that assertion
+        fails on a correct build. test_yield_order.py drives known arrival orders instead."""
+        indexes, order = self.stream_order("unordered.bin")
+        self.assertIsInstance(order, UnorderedYield)
+        self.assertEqual(sorted(indexes), list(range(16)),
+                         "every range is yielded exactly once, ordered or not")
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})

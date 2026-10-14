@@ -13,6 +13,7 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_response_str,
     runai_list_files,
 )
+from runai_model_streamer.file_streamer.yield_order import yield_order_for
 from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
     FilesRequestsIteratorWithBuffer,
@@ -232,7 +233,16 @@ class FileStreamer:
         self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
             file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
         )
+        # Built from the request list, which is where the file order is defined.
+        self.yield_order = yield_order_for(file_stream_requests)
+
         self.live_requests = {}
+        # Ranges of each live submission not yet HANDED OVER, which is not the same as not yet
+        # received once responses are reordered. See the release in get_chunks.
+        self.ranges_not_yielded = {}
+        # Submissions the library has reported complete. Only to check our own counting - see the
+        # release in get_chunks.
+        self.reported_done = set()
         self.outstanding = 0
 
         self._submit_while_buffers_free()
@@ -272,6 +282,7 @@ class FileStreamer:
                 request.range_dsts,
             )
             self.live_requests[submission_id] = request
+            self.ranges_not_yielded[submission_id] = request.num_ranges
             self.outstanding += request.num_ranges
 
     # This function iterates over the ready ranges of every live submission, in whatever order the C++
@@ -288,7 +299,10 @@ class FileStreamer:
                 response = runai_response(self.streamer)
                 if response is None:
                     return    # teardown: no further responses are coming
-                ret, submission_id, file_relative_index, range_relative_index, submission_done = response
+                # Not the release trigger any more: under reordering a submission's last response
+                # can arrive before its earlier ranges have been handed over. Kept as a check on the
+                # counting below, because the library sets it exactly once per submission.
+                ret, submission_id, file_relative_index, range_relative_index, done = response
                 self.outstanding -= 1
 
                 # Demux: the response names its own submission, and that submission names the request
@@ -298,6 +312,9 @@ class FileStreamer:
                 request = self.live_requests.get(submission_id)
                 if request is None:
                     raise ValueError(f"response for unknown submission {submission_id}")
+
+                if done:
+                    self.reported_done.add(submission_id)
 
                 # any per-sub-range error fails the whole stream (fail-fast); the finally below then
                 # drains every live submission, not just this one
@@ -314,24 +331,45 @@ class FileStreamer:
                 # the data type of the original range_buffer, as created by the requests_iterator, is preserved (uint8)
                 tensor = torch.from_numpy(range_buffer).view(1, -1)
 
-                # currently file streamer is always reading a cpu buffer
-                # so we don't need to move the tensor to the device
-                # for future GDS/CUDA support we will need to move the tensor to the device (cpu or different device)
-                if self.device_str == "cpu":
-                    yield file_id, range_index, tensor
-                else:
-                    device_tensor = tensor.to(self.device_str)
-                    yield file_id, range_index, device_tensor
+                # Park it, or take back the run it completes. Nothing is handed over for a response
+                # that arrived early, so a response and a yield stop being one to one.
+                #
+                # The move to the device happens below, at the yield. A parked view costs nothing;
+                # a parked device tensor would be a copy.
+                #
+                # Parking cannot stall the stream only because submissions are ISSUED in ordinal
+                # order - next_request takes files in list order - so whatever the parked views are
+                # waiting for is already in flight. Issue them out of that order and parked views
+                # could hold every slot while the range they wait for has not been submitted.
+                ready = self.yield_order.arrived(
+                    file_id, range_index, (submission_id, request, file_id, range_index, tensor)
+                )
 
-                # Resumed past the yield, so the consumer is done with this tensor. If it was the
-                # submission's last response, every view into its buffer has now been consumed - which
-                # makes this the exact instant the buffer can be recycled. Refilling here is also what
-                # provides backpressure: no new I/O is issued until a buffer actually comes free, so the
-                # ring self throttles to consumer speed.
-                if submission_done:
-                    del self.live_requests[submission_id]
-                    self.requests_iterator.release(request)
-                    self._submit_while_buffers_free()
+                for ready_id, ready_request, ready_file, ready_index, ready_tensor in ready:
+                    if self.device_str != "cpu":
+                        ready_tensor = ready_tensor.to(self.device_str)
+                    yield ready_file, ready_index, ready_tensor
+
+                    # Resumed past the yield, so the consumer is done with this tensor. The buffer may
+                    # be recycled once its LAST RANGE HAS BEEN HANDED OVER - not when its last response
+                    # arrived, which under reordering is earlier and would recycle a slot that parked
+                    # views still point into. Refilling here is also what provides backpressure: no new
+                    # I/O is issued until a buffer actually comes free.
+                    self.ranges_not_yielded[ready_id] -= 1
+                    if self.ranges_not_yielded[ready_id] == 0:
+                        # Our arithmetic against the library's own count. They can only disagree if
+                        # this side is wrong, and the symptom would otherwise be a stuck generator:
+                        # a slot never released, so no submission ever retires.
+                        if ready_id not in self.reported_done:
+                            raise ValueError(
+                                f"submission {ready_id} ran out of ranges before the library "
+                                f"reported it complete"
+                            )
+                        self.reported_done.discard(ready_id)
+                        del self.ranges_not_yielded[ready_id]
+                        del self.live_requests[ready_id]
+                        self.requests_iterator.release(ready_request)
+                        self._submit_while_buffers_free()
         finally:
             self.drain_live_submissions()
 
@@ -358,4 +396,6 @@ class FileStreamer:
         # this object - a FileStreamer re-entered after a generator outlived its context is bricked.
         self.outstanding = 0
         self.live_requests = {}
+        self.ranges_not_yielded = {}
+        self.reported_done = set()
 

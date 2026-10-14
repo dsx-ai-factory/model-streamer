@@ -296,6 +296,17 @@ class SafetensorsStreamer:
         if tensor_names is not None:
             tensor_names = frozenset(tensor_names)
 
+        if is_distributed:
+            # Every rank turns this list's ORDER into FileChunks ids, and the ranks then exchange
+            # tensors by that id without ever comparing their lists. Two ranks that enumerated the
+            # directory differently would hold different files behind one id, and the weights would
+            # be wrong with nothing raised. Callers reach here from glob, which does not sort.
+            #
+            # Not under the ordering flag: the ranks have to agree whether or not the yield is
+            # ordered. A single process reading for itself needs no agreement, so its order is left
+            # exactly as the caller gave it.
+            paths = sorted(paths)
+
         self.files_to_tensors_metadata = {}
         self.total_size = 0
         self.device_str = device
