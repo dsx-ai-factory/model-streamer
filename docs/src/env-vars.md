@@ -145,6 +145,25 @@ Positive integer value
 
 `18`
 
+### RUNAI_STREAMER_ORDERED_YIELD
+
+Whether tensors are handed back in file order - by the order of the files given to the streamer, and
+by offset within each file - rather than in the order their reads completed.
+
+On by default. Turning it off yields each tensor as soon as its read finishes.
+
+> [!NOTE]
+> This applies to a single process reading for itself (tensor parallel size 1). It does not yet
+> affect the order under distributed streaming.
+
+#### Values accepted
+
+`0 - OFF`, or any other integer - ON
+
+#### Default value
+
+`1` (ordered)
+
 ### AWS_ENDPOINT_URL
 
 Overrides url endpoint for reading from S3 compatible object store
