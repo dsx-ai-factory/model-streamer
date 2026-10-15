@@ -7,11 +7,11 @@ def runai_cc_test_dependencies():
     http_archive(
         name = "com_google_googletest",
         urls = [
-            "https://mirror.bazel.build/github.com/google/googletest/archive/9816b96a6ddc0430671693df90192bbee57108b6.zip",
-            "https://github.com/google/googletest/archive/9816b96a6ddc0430671693df90192bbee57108b6.zip",
+            "https://github.com/google/googletest/archive/v1.16.0.tar.gz",
         ],
-        sha256 = "9cbca84c4256bed17df2c8f4d00c912c19d247c11c9ba6647cd6dd5b5c996b8d",
-        strip_prefix = "googletest-9816b96a6ddc0430671693df90192bbee57108b6",
+        # Preserve the version previously provided by Google's workspace0.bzl.
+        sha256 = "78c676fc63881529bf97bf9d45948d905a66833fbfa5318ea2cd7478cb98f399",
+        strip_prefix = "googletest-1.16.0",
     )
 
 def _runai_cc_binary(rule, linkopts=[], rpath_origin=False, **kwargs):

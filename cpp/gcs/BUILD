@@ -4,6 +4,8 @@
 load("//:rules.bzl", "runai_portable_so")
 
 runai_portable_so(
+    # Keep SDK header paths inside Bazel's external repository for dependency checks.
+    copts = ["-fno-canonical-system-headers"],
     name = "libstreamergcs.so",
     srcs = [
         "gcs.h",

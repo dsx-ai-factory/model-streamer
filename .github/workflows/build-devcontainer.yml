@@ -8,6 +8,11 @@ on:
       - 'release/*'
     paths:
       - '.devcontainer/**'
+      - 'cpp/.bazelversion'
+      - 'cpp/.bazelrc'
+      - 'cpp/toolchain/**'
+      - 'cpp/third_party/gcp_repo.bzl'
+      - 'cpp/third_party/BUILD'
       - '.github/workflows/devcontainer.yml'
       - '.github/workflows/build-devcontainer.yml'
   workflow_dispatch:

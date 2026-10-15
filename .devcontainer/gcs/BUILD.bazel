@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load("//third_party:gcp_repo.bzl", "GCP_SOURCE_CHECKSUMS")
+load(":export.bzl", "export_sdk")
+
+export_sdk(
+    name = "sdk",
+    source_checksums = GCP_SOURCE_CHECKSUMS,
+    deps = [
+        "@google_cloud_cpp//:storage",
+        "@google_cloud_cpp//:storage_grpc",
+    ],
+)

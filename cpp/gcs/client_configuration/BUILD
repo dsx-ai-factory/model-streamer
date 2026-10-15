@@ -4,6 +4,8 @@
 load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 
 runai_cc_auto_library(
+    # Keep SDK header paths inside Bazel's external repository for dependency checks.
+    copts = ["-fno-canonical-system-headers"],
     name = "client_configuration",
     deps = [
         "@google_cloud_cpp//:storage",
@@ -17,6 +19,8 @@ runai_cc_auto_library(
 )
 
 runai_cc_test(
+    # Keep SDK header paths inside Bazel's external repository for dependency checks.
+    copts = ["-fno-canonical-system-headers"],
     name = "client_configuration_test",
     srcs = ["client_configuration_test.cc"],
     deps = [

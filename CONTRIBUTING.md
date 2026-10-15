@@ -183,7 +183,9 @@ Each pull request should meet the following requirements:
 
 ## Pull Request CI Environment
 
-The setup job checks whether `.devcontainer/**` changed. If it did, a single
+The setup job checks whether `.devcontainer/**` or the GCS SDK build inputs
+(Bazel configuration, toolchains, and pinned dependency definitions) changed.
+If they did, a single
 preparation job builds the checked-out devcontainer using the reusable
 `devcontainer.yml` workflow and the published image as a build cache. With
 `publish: false`, it saves the image as a temporary Actions artifact, retained for
@@ -206,6 +208,17 @@ The **Build and Push DevContainer** workflow calls the same reusable workflow
 with `publish: true` on master. It pushes the image to GHCR instead of uploading
 an image artifact. PRs never push images to GHCR. The final required check fails
 if preparation of a changed image fails; unchanged-image PRs still run all jobs.
+
+### Prebuilt GCS dependencies
+
+Like AWS and Azure, Google Cloud C++ is compiled when the devcontainer is built.
+A separate builder stage uses the existing Bazel dependency pins and toolchains
+to build `storage` and `storage_grpc` for x86_64 and aarch64. Only static libraries
+and headers are installed in `/opt/gcs-sdk`; the final image excludes the SDK
+sources, code generators, and compilation cache. Normal GCS builds compile our
+adapter and link the installed SDK. Rebuild the devcontainer after changing SDK
+versions, toolchains, or compiler flags. See [.devcontainer/gcs/README.md](.devcontainer/gcs/README.md)
+for the export process and validation commands.
 
 ### Parallel PR checks
 

@@ -3,7 +3,7 @@
 
 FROM nvidia/cuda:12.8.0-devel-ubuntu20.04@sha256:cd0f8e1c41628ff2513e9f7c42dd9bd8740fe87fd6615b9c4a6f392995a589c0 AS cuda-headers
 
-FROM ubuntu:20.04
+FROM ubuntu:20.04 AS base
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 \
@@ -175,8 +175,8 @@ RUN curl -fsSL -o zlib-1.3.1.tar.gz https://github.com/madler/zlib/releases/down
     cd - && \
     rm -rf zlib-1.3.1 zlib-1.3.1.tar.gz
 
-ADD aarch64-linux-gnu.cmake /opt/toolchains/aarch64-linux-gnu.cmake
-ADD x86_64-linux-gnu.cmake /opt/toolchains/x86_64-linux-gnu.cmake
+COPY .devcontainer/aarch64-linux-gnu.cmake /opt/toolchains/aarch64-linux-gnu.cmake
+COPY .devcontainer/x86_64-linux-gnu.cmake /opt/toolchains/x86_64-linux-gnu.cmake
 RUN git clone --recurse-submodules --depth 1 --branch "1.11.584" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp && \
     cd /opt/aws-sdk-cpp && \
     
@@ -323,12 +323,37 @@ RUN NATIVE_ARCH=$(uname -m | sed 's/x86_64/x86_64/;s/aarch64/aarch64/') && \
         ln -sf /opt/${NATIVE_ARCH}-azure/lib/* /usr/local/lib/; \
     fi
 
+# Build the Google SDK with the same pinned dependencies and toolchains used by
+# the application. Only installed archives/headers enter the final image; source,
+# host code generators and Bazel's output/cache stay in this builder stage.
+FROM base AS gcs-builder
+COPY cpp/.bazelversion cpp/.bazelrc /build/gcs/
+RUN BAZEL_VERSION=$(cat /build/gcs/.bazelversion) && \
+    case "$(uname -m)" in \
+        x86_64) BAZEL_SHA256=ac6249d1192aea9feaf49dfee2ab50c38cee2454b00cf29bbec985a11795c025 ;; \
+        aarch64) BAZEL_SHA256=2d86d36db0c9af15747ff02a80e6db11a45d68f868ea8f62f489505c474f0099 ;; \
+        *) exit 1 ;; \
+    esac && \
+    curl -fsSL -o /usr/local/bin/bazel \
+        "https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-$(uname -m | sed 's/aarch64/arm64/')" && \
+    echo "${BAZEL_SHA256}  /usr/local/bin/bazel" | sha256sum -c - && \
+    chmod +x /usr/local/bin/bazel
+COPY cpp/toolchain /build/gcs/toolchain/
+COPY cpp/third_party/gcp_repo.bzl cpp/third_party/BUILD /build/gcs/third_party/
+COPY .devcontainer/gcs/WORKSPACE .devcontainer/gcs/BUILD.bazel \
+    .devcontainer/gcs/export.bzl .devcontainer/gcs/install.py \
+    .devcontainer/gcs/build.sh /build/gcs/
+RUN --mount=type=cache,target=/root/.cache/bazel,sharing=locked bash /build/gcs/build.sh
+
+FROM base AS devcontainer
+COPY --from=gcs-builder /opt/gcs-sdk /opt/gcs-sdk
+
 # liburing and libaio come LAST on purpose, after the three cloud SDKs.
 #
 # Docker invalidates every layer below the one that changed. These two are small, build in seconds,
 # and move faster than anything above them - liburing alone had eight releases while we sat on one
-# version. Placed higher, each bump would rebuild the AWS and Azure SDKs, which are the slowest steps
-# in this file and have no dependency on either library.
+# version. Placed higher, each bump would rebuild the cloud SDKs, which are the slowest steps in this
+# file and have no dependency on either library.
 #
 # liburing, for the io_uring engine. Static only: it is linked into libstreamer.so, which exports an
 # explicit allowlist via streamer.ldscript, so these symbols stay hidden.
