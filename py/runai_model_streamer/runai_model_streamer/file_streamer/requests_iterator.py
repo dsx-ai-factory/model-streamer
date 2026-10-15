@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Tuple, Optional
+from typing import Callable, List, NamedTuple, Tuple, Optional
 from collections import deque
 from functools import partial
 import bisect
@@ -24,6 +24,14 @@ RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
 # alive: a tensor is a view into its buffer, so holding one holds all of it. Deep and small beats
 # shallow and large for that, and costs no throughput.
 DEFAULT_RING_BUFFERS = 18
+
+RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_MEMORY_LIMIT"
+DEFAULT_DEVICE_MEMORY_LIMIT = 4 * (1 << 30)   # 4 GiB
+
+# Of what the device has FREE, not of what it has. The ring is transient and the caller is about to
+# fill the rest with the model it is loading.
+RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_MEMORY_FRACTION"
+DEFAULT_DEVICE_MEMORY_FRACTION = 0.5
 
 RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME = "RUNAI_STREAMER_MAX_PADS_PER_BUFFER"
 DEFAULT_MAX_PADS_PER_BUFFER = 1024
@@ -150,9 +158,31 @@ def _alloc_slot(slot_size: int) -> Slot:
     return Slot(array, array.ctypes.data)
 
 
+
+class SlotMemory(NamedTuple):
+    """What a ring's slots are made of, and what that implies.
+
+    ONE OBJECT, for the reason Slot gives one level down: the facts are paired once here and cannot
+    drift. A host allocator marked direct_io=False would quietly stop direct reads - destinations
+    would simply stop being congruent - and a device allocator marked direct_io=True would reserve
+    pad room nothing can ever use."""
+
+    # Called with the slot size in bytes.
+    alloc: Callable[[int], Slot]
+    # Whether a direct read can land on these slots. Pads and congruent placement both exist for
+    # that, so one fact drives both: device slots are filled by a copy out of host staging.
+    direct_io: bool
+    # What the ring's debug line calls this memory.
+    label: str
+
+
+HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU")
+
+
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
-                 direct_block: int = DIRECT_IO_BLOCK, owned: bool = True) -> None:
+                 direct_block: int = DIRECT_IO_BLOCK, owned: bool = True,
+                 slots: SlotMemory = HOST_SLOTS) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
@@ -167,15 +197,22 @@ class FilesRequestsIteratorWithBuffer:
         # load, with the rank - via DistributedStreamer.ring_info(). Keep this line: it is per file list,
         # so it is still the way to see an individual request's ring when debugging.
         logger.debug(
-            f"[RunAI Streamer] CPU ring: {num_buffers} x {humanize.naturalsize(buffer_size, binary=True)} "
+            f"[RunAI Streamer] {slots.label} ring: {num_buffers} x {humanize.naturalsize(buffer_size, binary=True)} "
             f"= {humanize.naturalsize(buffer_size * num_buffers, binary=True)} for files: "
             f"{[file_chunks.path for file_chunks in files_chunks]}"
         )
-        self._slot_size = buffer_size + self.direct_block * _max_pads_per_buffer()
+        self._slot_memory = slots
+        # Pads make a destination congruent with its file offset so a direct read can land on it, so
+        # only a ring that can be read into directly reserves room for them.
+        self._slot_size = buffer_size + (self.direct_block * _max_pads_per_buffer() if slots.direct_io else 0)
 
         # One allocation per slot, so a slot that has been given away can die on its own. A view into
         # a shared pool would keep the whole pool alive while the caller held any one slot.
-        self._pool = SlotPool(num_buffers, partial(_alloc_slot, self._slot_size), owned)
+        #
+        # What a slot is MADE OF belongs to the path using the ring - host memory here, device memory
+        # when the caller streams straight to a GPU - while how many there are and where each range
+        # lands belongs to this class either way.
+        self._pool = SlotPool(num_buffers, partial(slots.alloc, self._slot_size), owned)
 
     def _place(self, request: FilesRequest, base: int, aligned: bool) -> Optional[List[int]]:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.
@@ -244,13 +281,27 @@ class FilesRequestsIteratorWithBuffer:
         # a few bytes is all it takes, and once the first range of a file lines up, the ranges after it
         # follow by themselves as long as they are laid out one after another in the file.
         base = self._pool.slot(request.buffer_index).address
-        dsts = self._place(request, base, aligned=True)
+        aligned = self._slot_memory.direct_io
+        dsts = self._place(request, base, aligned=aligned)
 
-        if dsts is None:
+        if dsts is None and aligned:
             # Too many pads for the room reserved. Pack tightly instead: correct, and read buffered.
             # This is better than making every buffer big enough for the worst case, which would only
             # ever be reached by a request whose ranges jump around inside the file.
+            #
+            # Guarded on `aligned`: a tight layout that did not fit cannot be retried into fitting,
+            # and repeating the same call would hand the caller None instead of saying so.
             dsts = self._place(request, base, aligned=False)
+
+        if dsts is None:
+            # Back to the pool first: the ring would otherwise be one buffer poorer for good, and the
+            # message below invites a retry.
+            self.release(request)
+            raise RunaiStreamerMemoryLimitException(
+                f"{request.num_ranges} ranges do not fit a {self._slot_size} byte slot. "
+                f"next_request packs to the buffer size, so this means the ring was built from a "
+                f"different size than the one being packed against."
+            )
 
         request.range_dsts = dsts
 
@@ -264,6 +315,9 @@ class FilesRequestsIteratorWithBuffer:
         direct_block: int = DIRECT_IO_BLOCK,
         owned: bool = True,
     ) -> FilesRequestsIteratorWithBuffer:
+        """The HOST ring. A device ring is sized by device_ring_sizing(), which answers a different
+        question - how much the device can spare, and whether it can spare enough at all - so it
+        builds the iterator directly rather than borrowing this host-shaped limit."""
         buffer_size, num_buffers = _ring_sizing(memory_mode, files_chunks, user_memory_limit)
         return FilesRequestsIteratorWithBuffer(
             buffer_size, num_buffers, files_chunks, direct_block, owned
@@ -569,6 +623,59 @@ def _max_pads_per_buffer() -> int:
 def _ring_buffers() -> int:
     # clamped at 1 so a hostile 0 cannot produce a ring with no buffers
     return max(1, int(os.getenv(RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME, DEFAULT_RING_BUFFERS)))
+
+
+def _numeric_env(name: str, default, parse):
+    """Parse an environment variable, naming it when it does not parse.
+
+    The bare int()/float() error says only what it could not read, not which setting carried it."""
+    raw = os.getenv(name, default)
+    try:
+        return parse(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {raw!r}") from None
+
+
+def _device_memory_limit() -> int:
+    value = _numeric_env(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, DEFAULT_DEVICE_MEMORY_LIMIT, int)
+    if value <= 0:
+        raise ValueError(
+            f"{RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} must be a positive number of bytes, "
+            f"got {value}. The host limit's -1 and 0 modes have no device meaning."
+        )
+    return value
+
+
+def _device_memory_fraction() -> float:
+    value = _numeric_env(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, DEFAULT_DEVICE_MEMORY_FRACTION, float)
+    if not 0 < value <= 1:
+        raise ValueError(
+            f"{RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME} must be greater than 0 and at most 1, "
+            f"got {value}"
+        )
+    return value
+
+
+def device_ring_sizing(free_bytes: int, files_chunks: List[FileChunks]) -> Optional[Tuple[int, int]]:
+    """(buffer_size, num_buffers) for a ring in DEVICE memory, or None to use the host ring instead.
+
+    The budget is the configured limit, capped at a fraction of what the device has free. The limit
+    keeps the ring from growing just because a device is empty; the fraction keeps it from taking
+    memory the caller needs for the model it is loading.
+
+    None rather than an exception: a device with no room for a ring is not an error, it is the host
+    path. The budget must cover two of the largest range, below which nothing can overlap - a single
+    buffer is only refilled once it has been handed over. That is a floor on the BUDGET, not on the
+    depth: a stream smaller than the budget is still spanned entirely, so one whose ranges all fit at
+    once gets fewer buffers, and a single-range stream gets one. Nothing is lost there - with one
+    range there is nothing to overlap, and the device ring still avoids the copy the host path makes.
+
+    free_bytes is a parameter rather than a query, so the arithmetic is testable without a device."""
+    budget = min(_device_memory_limit(), int(free_bytes * _device_memory_fraction()))
+    largest = _largest_range(files_chunks)
+    if budget <= 0 or budget < 2 * largest:
+        return None
+    return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
 
 
 def _get_memory_mode(memory_limit: int) -> MemoryCapMode:

@@ -4,6 +4,11 @@ import shutil
 import os
 import mmap
 import ctypes
+from unittest.mock import patch
+from runai_model_streamer.libstreamer import (
+    RUNAI_FILE_STREAMER_DEVICE_CPU,
+    RUNAI_FILE_STREAMER_DEVICE_CUDA,
+)
 from runai_model_streamer.libstreamer.libstreamer import (
     FILE_ACCESS_ERROR_CODE,
     SUCCESS_ERROR_CODE,
@@ -394,6 +399,40 @@ class TestBindings(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
+
+
+class TestRequestDevice(unittest.TestCase):
+    """The device travels to the C call by value. Checked at the boundary, with the library stubbed,
+    so it needs no CUDA: what matters is which (type, id) the struct carries."""
+
+    def device_of(self, **kwargs):
+        with patch("runai_model_streamer.libstreamer.libstreamer.dll") as lib:
+            lib.fn_runai_request.return_value = SUCCESS_ERROR_CODE
+            runai_request(None, ["a.bin"], [1], [0], [4], [4096], **kwargs)
+            device = lib.fn_runai_request.call_args.args[-1]
+        return device.type, device.id
+
+    def test_the_host_is_the_default(self):
+        self.assertEqual(self.device_of(), (RUNAI_FILE_STREAMER_DEVICE_CPU, 0))
+
+    def test_a_device_type_the_library_does_not_serve_is_refused(self):
+        """ctypes narrows c_int silently, so 2**32 would arrive as 0 - the host - instead of being
+        refused. Every other value here is range-checked for the same reason."""
+        for bad in (2 ** 32, 7, -1):
+            with self.assertRaises(ValueError) as raised:
+                self.device_of(device_type=bad)
+            self.assertIn("device_type", str(raised.exception))
+
+    def test_a_device_id_that_does_not_fit_is_refused(self):
+        with self.assertRaises(ValueError) as raised:
+            self.device_of(device_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, device_id=2 ** 31)
+        self.assertIn("device_id", str(raised.exception))
+
+    def test_a_cuda_ordinal_is_passed_through(self):
+        self.assertEqual(
+            self.device_of(device_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, device_id=3),
+            (RUNAI_FILE_STREAMER_DEVICE_CUDA, 3),
+        )
 
 
 if __name__ == "__main__":
