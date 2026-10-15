@@ -19,7 +19,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     FilesRequestsIteratorWithBuffer,
     FilesRequest,
     FileChunks,
+    SlotMemory,
 )
+from runai_model_streamer.file_streamer.slot_pool import Slot
 
 from runai_model_streamer.s3_utils.s3_utils import (
     S3Credentials,
@@ -30,6 +32,7 @@ from runai_model_streamer.s3_utils.s3_utils import (
 )
 
 import torch
+from functools import partial
 
 import logging
 
@@ -39,6 +42,35 @@ s3_credentials_module = get_s3_credentials_module()
 
 class RunaiStreamerInvalidInputException(Exception):
     pass
+
+# Enough for every dtype a safetensors file can carry - the widest element is 8 bytes. Torch's
+# caching allocator is expected to hand back 512-byte blocks already, but slicing to an aligned start
+# does not rely on that.
+DEVICE_SLOT_ALIGNMENT = 512
+
+
+def alloc_device_slot(slot_size: int, device: str) -> Slot:
+    """One ring slot in DEVICE memory, for a caller streaming straight to a GPU.
+
+    Over-allocated and sliced to an aligned start, so every range placed from the base keeps whatever
+    alignment its own offset gives it.
+
+    Here rather than beside the host allocator because this is the layer that knows the device, and
+    the ring takes the allocator as a parameter for exactly that reason."""
+    raw = torch.empty(slot_size + DEVICE_SLOT_ALIGNMENT, dtype=torch.uint8, device=device)
+    shift = (-raw.data_ptr()) % DEVICE_SLOT_ALIGNMENT
+    buffer = raw[shift: shift + slot_size]
+    # From the BASE, not from the view: torch answers 0 for a zero-element tensor's data_ptr(), and a
+    # ring of no ranges is a real case (an empty shard, or stream_files([])). numpy returns the true
+    # pointer there, so taking it from the view would hand the library a null only on this path.
+    return Slot(buffer, raw.data_ptr() + shift)
+
+
+def device_slots(device: str) -> SlotMemory:
+    """A ring made of device memory. direct_io=False because nothing reads straight into a GPU: the
+    library fills these by copying out of its own host staging."""
+    return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False, label="GPU")
+
 
 def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
     """The device as a string. Every spelling of the host becomes "cpu".
