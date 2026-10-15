@@ -115,6 +115,31 @@ with SafetensorsStreamer() as streamer:
        tensors[name] = tensor # already on cuda:0, and yours to keep
 ```
 
+To restrict streaming to a subset of the default process group, pass an
+existing process group to the streamer constructor. Only members of that group
+need to create and use the streamer:
+
+```python
+import torch.distributed as dist
+from runai_model_streamer import SafetensorsStreamer
+
+streaming_group = dist.new_group(ranks=[8, 9, 10, 11, 12, 13, 14, 15])
+
+with SafetensorsStreamer(process_group=streaming_group) as streamer:
+    streamer.stream_files(
+        file_paths,
+        s3_credentials=None,
+        device="cuda:0",
+        is_distributed=True,
+    )
+    for name, tensor in streamer.get_tensors():
+        tensors[name] = tensor.clone().detach()
+```
+
+The provided process group defines the exact set of streaming participants and
+takes precedence over the local/global mode environment variables. The caller
+retains ownership of the group; closing the streamer does not destroy it.
+
 ##### Requirements
 
 Distributed streaming allocates reusable staging buffers on each device. Under the default `owned=True` each tensor is copied out of them before it is yielded, so it is yours to keep. With `owned=False` the yielded tensor is a view into a staging buffer and the next broadcast overwrites it, so it must be cloned to be used outside the loop.

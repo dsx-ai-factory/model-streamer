@@ -140,6 +140,76 @@ class TestDistributedStreamer(unittest.TestCase):
             if self.rank == 0:
                 print(f"\n✅ Deep ring buffer test verified on all {self.world_size} ranks.")
 
+    def test_1_success_with_borrowed_process_group(self):
+        if self.world_size < 2:
+            self.skipTest("This test requires at least 2 processes.")
+
+        requests = self._prepare_file_requests(
+            [{"size": 1024, "chunks": [256, 256, 256, 256]}]
+        )
+        process_group = dist.new_group(ranks=list(range(self.world_size)))
+        with open(requests[0].path, "rb") as file:
+            original_data = file.read()
+        chunks = [None] * len(requests[0].chunks)
+
+        env_vars = {
+            "RUNAI_STREAMER_DIST": "1",
+            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
+        }
+        with patch.dict(os.environ, env_vars):
+            with patch.object(
+                dist,
+                "destroy_process_group",
+                wraps=dist.destroy_process_group,
+            ) as destroy_process_group:
+                with DistributedStreamer(process_group=process_group) as streamer:
+                    streamer.stream_files(requests, None, "cpu", True)
+                    for _req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                        chunks[chunk_idx] = data_tensor.cpu().numpy().tobytes()
+
+                destroy_process_group.assert_not_called()
+
+        self.assertEqual(original_data, b"".join(chunks))
+        dist.barrier(group=process_group)
+        dist.destroy_process_group(process_group)
+
+    def test_1_success_with_subset_process_group(self):
+        if self.world_size < 3:
+            self.skipTest("This test requires at least 3 processes.")
+
+        requests = self._prepare_file_requests(
+            [{"size": 1024, "chunks": [256, 256, 256, 256]}]
+        )
+        process_group = dist.new_group(ranks=[1, 2])
+
+        if self.rank == 0:
+            return
+
+        with open(requests[0].path, "rb") as file:
+            original_data = file.read()
+        chunks = [None] * len(requests[0].chunks)
+
+        env_vars = {
+            "RUNAI_STREAMER_DIST": "1",
+            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
+        }
+        with patch.dict(os.environ, env_vars):
+            with patch.object(
+                dist,
+                "destroy_process_group",
+                wraps=dist.destroy_process_group,
+            ) as destroy_process_group:
+                with DistributedStreamer(process_group=process_group) as streamer:
+                    streamer.stream_files(requests, None, "cpu", True)
+                    for _req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                        chunks[chunk_idx] = data_tensor.cpu().numpy().tobytes()
+
+                destroy_process_group.assert_not_called()
+
+        self.assertEqual(original_data, b"".join(chunks))
+        dist.barrier(group=process_group)
+        dist.destroy_process_group(process_group)
+
     def test_1_success_empty_file_list(self):
         requests = []
         env_vars = {"RUNAI_STREAMER_DIST": "1"}

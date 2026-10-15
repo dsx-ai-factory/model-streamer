@@ -181,12 +181,12 @@ class StreamerPatcher:
     # === Shim for SafetensorsStreamer ===
        
     def create_mock_streamer(self, *args, **kwargs):
-        return self.MockSafetensorsStreamer(self)
+        return self.MockSafetensorsStreamer(self, *args, **kwargs)
 
     class MockSafetensorsStreamer:
-        def __init__(self, patcher: StreamerPatcher):
+        def __init__(self, patcher: StreamerPatcher, *args, **kwargs):
             self.patcher = patcher
-            self.original_streamer = OriginalSafetensorsStreamer()
+            self.original_streamer = OriginalSafetensorsStreamer(*args, **kwargs)
             self.files_to_tensors_metadata = {}
 
         def __enter__(self) -> "MockSafetensorsStreamer":

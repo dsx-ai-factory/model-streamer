@@ -202,8 +202,8 @@ class ObjectStorageModel:
 
 
 class SafetensorsStreamer:
-    def __init__(self) -> None:
-        self.file_streamer = DistributedStreamer()
+    def __init__(self, process_group: Optional[torch.distributed.ProcessGroup] = None) -> None:
+        self.file_streamer = DistributedStreamer(process_group=process_group)
         self.files_to_tensors_metadata = {}
         self.total_size = 0
         self.device_str = None
