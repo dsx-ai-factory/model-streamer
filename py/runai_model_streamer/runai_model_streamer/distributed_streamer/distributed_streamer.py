@@ -53,6 +53,50 @@ def get_dist_buffer_alignment() -> int:
     return value
 
 
+MAX_CHUNKS_PER_BATCH = 256
+DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
+
+
+def dist_buffer_bytesize(max_chunk: int) -> int:
+    """One staging buffer: the minimum, or the largest chunk if that is bigger."""
+    minimum = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE)))  # environment variable used for testing
+    return max(minimum, max_chunk)
+
+
+def is_global_distribution() -> bool:
+    """Whether the ranks distribute across the whole job, rather than within each node."""
+    return int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
+
+
+def allocate_dist_staging(max_chunk: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Every device allocation the broadcast loop makes: two staging buffers and two metadata tensors.
+
+    Each staging buffer is over-allocated by the alignment and sliced to the first aligned address, so
+    an offset that is a multiple of the alignment lands aligned in BOTH buffers - which is what a
+    receiving rank relies on to read a sender's layout.
+
+    dist_device_bytes_required() measures THIS function, and a test allocates from it and compares, so
+    the free-memory check cannot disagree with the allocation about how many buffers there are."""
+    buffer_bytesize = dist_buffer_bytesize(max_chunk)
+    alignment = get_dist_buffer_alignment()
+
+    def staging() -> torch.Tensor:
+        raw = torch.empty(buffer_bytesize + alignment, dtype=torch.uint8, device=device)
+        return raw if alignment <= 1 else raw[(-raw.data_ptr()) % alignment:]
+
+    def metadata() -> torch.Tensor:
+        return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
+
+    return staging(), staging(), metadata(), metadata()
+
+
+def dist_device_bytes_required(max_chunk: int) -> int:
+    """What allocate_dist_staging() takes on the device."""
+    staging = dist_buffer_bytesize(max_chunk) + get_dist_buffer_alignment()
+    metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
+    return 2 * staging + 2 * metadata
+
+
 def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
     """Return the smallest offset >= current_offset such that (base_ptr + offset) % alignment == 0."""
     if alignment <= 1:
@@ -90,11 +134,31 @@ class DistributedStreamer:
             return 1
         return dist.get_world_size()
 
-    def get_cuda_free_memory(self) -> int:
+    def get_cuda_free_memory(self, device: str) -> int:
         if not torch.cuda.is_available():
             return 0
-        free_memory, total_memory = torch.cuda.mem_get_info()
+        free_memory, total_memory = torch.cuda.mem_get_info(device)
         return free_memory
+
+    def get_min_cuda_free_memory(self, device: str) -> int:
+        """The smallest free memory among the ranks of the distribution group: every rank under
+        RUNAI_STREAMER_DIST_GLOBAL, otherwise the ranks on this node.
+
+        The group is created here, by every rank, before anyone decides. That is what lets a node fall
+        back while another distributes: creating a group is the only collective that needs every rank
+        of the job, and everything after it runs inside the group. Every rank must call this, whatever
+        its own free memory is."""
+        group = self.distributed_streamer.create_group(self.params)
+
+        # The first collective on a group creates its NCCL communicator, which takes device memory.
+        # Done first, with the operation the stream uses, so the free memory read below is what is
+        # left for the staging buffers.
+        warmup = torch.zeros(1, dtype=torch.uint8, device=device)
+        dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
+
+        free_memory = torch.tensor([self.get_cuda_free_memory(device)], dtype=torch.int64, device=device)
+        dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
+        return int(free_memory.item())
 
     def set_is_distributed(self, is_distributed: bool, device: str) -> None:
         # check if distributed streaming should be used
@@ -138,10 +202,14 @@ class DistributedStreamer:
 
         # check if there is enough free memory on the device
         if self.is_distributed and torch.cuda.is_available() and dist.get_backend() == "nccl":
-            free_memory = self.get_cuda_free_memory()
-            if free_memory < 2 * self.params.max_chunk:
-                logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
+            free_memory = self.get_min_cuda_free_memory(device)
+            required = dist_device_bytes_required(self.params.max_chunk)
+            if free_memory < required:
+                logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")
                 self.is_distributed = False
+                # Created only to ask the question. Released now, so this rank does not hold a NCCL
+                # communicator it will not use, and has no group left to barrier on at exit.
+                self.distributed_streamer.release_group()
 
     def stream_files(
             self,
@@ -330,18 +398,14 @@ class _distributedStreamer:
                     torch.distributed.barrier(group=self.distribution_group)
             finally:
                 # ALWAYS destroy the group.
-                torch.distributed.destroy_process_group(group=self.distribution_group)
-                del self.distribution_group
-                self.distribution_group = None
+                self.release_group()
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
         if self.distribution_group:
             return self.distribution_group
 
-        is_global_group = int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
-
-        if is_global_group:
+        if is_global_distribution():
             # create global group
             world_size = dist.get_world_size()
 
@@ -384,6 +448,21 @@ class _distributedStreamer:
 
         return my_local_group
 
+    def create_group(self, params: _distributedStreamerParams) -> dist.ProcessGroup:
+        """The distribution group, created on first use and kept. Creating it needs every rank of the
+        job, so every rank must call this together."""
+        self.my_global_rank = params.my_global_rank
+        self.groups_by_ranks = params.groups_by_ranks
+        self.broadcast_timeout = params.broadcast_timeout
+        self.distribution_group = self.create_distribution_group()
+        return self.distribution_group
+
+    def release_group(self) -> None:
+        """Destroy the distribution group, if there is one. Local to this rank: no barrier."""
+        if self.distribution_group:
+            torch.distributed.destroy_process_group(group=self.distribution_group)
+            self.distribution_group = None
+
     def set_rank(self) -> None:
         self.rank = dist.get_rank(group=self.distribution_group)
         self.original_group_rank = dist.get_rank()
@@ -399,16 +478,13 @@ class _distributedStreamer:
 
         self.device = torch.device(device)
         self.owned = owned
-        self.my_global_rank = params.my_global_rank
-        self.groups_by_ranks = params.groups_by_ranks
-        self.broadcast_timeout = params.broadcast_timeout
         self.max_chunk = params.max_chunk
         # the ranks sharing this host: the divisor for the node-total memory limit (see rank_memory_limit)
         self.num_processes_on_node = params.num_processes_on_node
 
         # create distribution group for configuring timeout and possibly broadcast locally in each node 
         # The group must be created before partitioning the tensors, in case the group will be local
-        self.distribution_group = self.create_distribution_group()
+        self.create_group(params)
         self.group_size = dist.get_world_size(group=self.distribution_group)
 
         # set rank in the new distribution group
@@ -509,23 +585,13 @@ class _distributedStreamer:
         if not self.file_streamer:
             raise ValueError("Streamer not initialized")
         
-        MAX_CHUNKS_PER_BATCH = 256
-        DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
-        BUFFER_MIN_BYTESIZE = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE))) # environment variable used for testing
-        BUFFER_BYTESIZE = max(BUFFER_MIN_BYTESIZE, self.max_chunk)
+        BUFFER_BYTESIZE = dist_buffer_bytesize(self.max_chunk)
         alignment = get_dist_buffer_alignment()
 
-        # Over-allocate by alignment so we can slice to the first aligned address within each buffer.
-        # This guarantees data_buffer.data_ptr() % alignment == 0 and
-        # received_buffer.data_ptr() % alignment == 0, so any offset that is a multiple of
-        # alignment is also aligned in both buffers — required for alignment to hold on receiving ranks.
-        data_buffer_raw = torch.empty(BUFFER_BYTESIZE + alignment, dtype=torch.uint8, device=self.device)
-        received_buffer_raw = torch.empty(BUFFER_BYTESIZE + alignment, dtype=torch.uint8, device=self.device)
-        data_buffer = data_buffer_raw if alignment <= 1 else data_buffer_raw[(-data_buffer_raw.data_ptr()) % alignment:]
-        received_buffer = received_buffer_raw if alignment <= 1 else received_buffer_raw[(-received_buffer_raw.data_ptr()) % alignment:]
-
-        batch_metadata_tensor = torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=self.device)
-        received_metadata_tensor = torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=self.device)
+        # Allocated THERE, not here, so the free-memory check in set_is_distributed measures the same
+        # four allocations this loop makes.
+        (data_buffer, received_buffer,
+         batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(self.max_chunk, self.device)
         
         ready_chunks_iterator = self.file_streamer.get_chunks()
         
