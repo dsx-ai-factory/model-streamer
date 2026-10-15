@@ -18,6 +18,10 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
     _max_pads_per_buffer,
     _ring_sizing,
+    device_ring_sizing,
+    DEFAULT_DEVICE_MEMORY_LIMIT,
+    RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
 )
 from runai_model_streamer.file_streamer.yield_order import YieldOrder
 
@@ -894,3 +898,92 @@ class TestSubmissionsAreIssuedInOrdinalOrder(unittest.TestCase):
 
         self.assertGreater(requests, 2, "the ring has two slots, so recycling needs more requests")
         self.assertEqual(issued, list(range(self.total_ranges())))
+
+
+GiB = 1 << 30
+
+
+class TestDeviceRingSizing(unittest.TestCase):
+    """The budget for a ring in device memory: the configured limit, capped at a fraction of free.
+
+    free_bytes is a parameter, so none of this needs a GPU."""
+
+    def files(self, *sizes_per_file):
+        return [FileChunks.contiguous(i, f"{i}.bin", 0, list(sizes))
+                for i, sizes in enumerate(sizes_per_file)]
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_limit_binds_when_the_device_is_mostly_free(self):
+        # 100 GiB free would allow 50, but the default limit is 4 GiB.
+        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, DEFAULT_DEVICE_MEMORY_LIMIT)
+        self.assertGreaterEqual(buffer_size, GiB)      # never below the largest range
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_fraction_binds_when_little_is_free(self):
+        # 4 GiB free -> 2 GiB budget, which is below the 4 GiB limit.
+        buffer_size, num_buffers = device_ring_sizing(4 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, 2 * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_below_two_largest_ranges_it_falls_back(self):
+        # 3 GiB free -> 1.5 GiB budget, under the 2 GiB floor for a 1 GiB range.
+        self.assertIsNone(device_ring_sizing(3 * GiB, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_exactly_two_largest_ranges_is_enough(self):
+        sizing = device_ring_sizing(4 * GiB, self.files([GiB] * 8))
+        self.assertIsNotNone(sizing)
+        self.assertEqual(sizing[1], 2, "the floor is two buffers, so nothing deeper fits here")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_device_with_nothing_free_falls_back(self):
+        self.assertIsNone(device_ring_sizing(0, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: str(2 * GiB)}, clear=True)
+    def test_the_limit_is_configurable(self):
+        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, 2 * GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "1.0"}, clear=True)
+    def test_the_fraction_is_configurable(self):
+        # The whole 3 GiB is now usable, so the 2 GiB floor is met where 0.5 would have refused.
+        self.assertIsNotNone(device_ring_sizing(3 * GiB, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "1.5"}, clear=True)
+    def test_a_fraction_above_one_is_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: "-1"}, clear=True)
+    def test_the_hosts_unlimited_mode_is_rejected_rather_than_guessed(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: "4.5"}, clear=True)
+    def test_a_limit_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "half"}, clear=True)
+    def test_a_fraction_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_stream_smaller_than_the_budget_gets_fewer_buffers(self):
+        """The floor is on the BUDGET, not the depth. One range has nothing to overlap with, so one
+        buffer is the whole ring - and that still beats the host path, which would copy."""
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB]))[1], 1)
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 2))[1], 2)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_only_the_requested_ranges_decide_the_floor(self):
+        """A caller that asks for small tensors is not charged for a huge one it did not request -
+        SafetensorsStreamer filters before building FileChunks, so the giant range is simply absent."""
+        self.assertIsNone(device_ring_sizing(8 * GiB, self.files([90 * GiB, GiB])))
+        self.assertIsNotNone(device_ring_sizing(8 * GiB, self.files([GiB])))
