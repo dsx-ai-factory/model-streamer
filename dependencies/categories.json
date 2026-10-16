@@ -1,0 +1,76 @@
+{
+ "_comment": "Judgment calls the files themselves cannot tell. `default` applies to any name not listed. Where the declaring file already says (setup.py install_requires = run, requirements.dev = test), this file is not used.",
+ "apt": {
+  "default": ["build"],
+  "python3": ["build", "test"],
+  "python3-pip": ["build", "test"],
+  "nodejs": ["test"]
+ },
+ "apt_commands": {
+  "_comment": "apt commands the Dockerfile does not contain, because a script runs them, matched by a part of the command line. The nodesource setup script installs these only so that nodejs, which the tests need, can be installed.",
+  "apt-transport-https ca-certificates curl gnupg": ["test"]
+ },
+ "pip": {
+  "default": ["build"],
+  "boto3": ["test"],
+  "pytest": ["test"],
+  "cpplint": ["test"]
+ },
+ "npm": {
+  "default": ["test"]
+ },
+ "download": {
+  "default": ["build"],
+  "seaweedfs": ["test"],
+  "fake-gcs-server": ["test"],
+  "nodesource-setup": ["test"]
+ },
+ "ship": {
+  "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the matching entries in third_party_notices/components.json. `collect.py check` fails when a key matches nothing or a component id is not covered.",
+  "docker-image:nvidia/cuda": ["nvidia-cuda-headers"],
+  "apt:libstdc++-9-dev": ["gcc-runtime"],
+  "apt:libgcc-9-dev": ["gcc-runtime"],
+  "apt:libc6-dev": ["glibc-nonshared"],
+  "apt:libstdc++-9-dev-arm64-cross": ["gcc-runtime"],
+  "apt:libgcc-9-dev-arm64-cross": ["gcc-runtime"],
+  "apt:libc6-dev-arm64-cross": ["glibc-nonshared"],
+  "url:liburing": ["liburing"],
+  "url:libaio": ["libaio"],
+  "url:openssl": ["openssl"],
+  "url:curl": ["curl"],
+  "url:zlib": ["zlib"],
+  "url:libxml2": ["libxml2"],
+  "git:aws-sdk-cpp": ["aws-sdk-cpp"],
+  "git:aws-crt-cpp": ["aws-crt-cpp"],
+  "git:aws-c-auth": ["aws-c-auth"],
+  "git:aws-c-cal": ["aws-c-cal"],
+  "git:aws-c-common": ["aws-c-common"],
+  "git:aws-c-compression": ["aws-c-compression"],
+  "git:aws-c-event-stream": ["aws-c-event-stream"],
+  "git:aws-c-http": ["aws-c-http"],
+  "git:aws-c-io": ["aws-c-io"],
+  "git:aws-c-mqtt": ["aws-c-mqtt"],
+  "git:aws-c-s3": ["aws-c-s3"],
+  "git:aws-c-sdkutils": ["aws-c-sdkutils"],
+  "git:aws-checksums": ["aws-checksums"],
+  "git:s2n": ["s2n-tls"],
+  "git:azure-sdk-for-cpp": ["azure-sdk-for-cpp"],
+  "bazel:google_cloud_cpp": ["google-cloud-cpp"],
+  "bazel:com_github_grpc_grpc": ["grpc", "grpc-address-sorting"],
+  "bazel:com_google_absl": ["abseil-cpp"],
+  "bazel:com_google_protobuf": ["protobuf", "utf8-range"],
+  "bazel:boringssl": ["boringssl", "boringssl-fiat"],
+  "bazel:com_github_curl_curl": ["curl-7.69.1"],
+  "bazel:com_github_cares_cares": ["c-ares"],
+  "bazel:com_googlesource_code_re2": ["re2"],
+  "bazel:zlib": ["zlib-grpc"],
+  "bazel:envoy_api": ["envoy-api"],
+  "bazel:com_github_cncf_xds": ["cncf-xds"],
+  "bazel:com_envoyproxy_protoc_gen_validate": ["protoc-gen-validate"],
+  "bazel:opencensus_proto": ["opencensus-proto"],
+  "bazel:com_google_googleapis": ["googleapis"],
+  "bazel:com_github_google_crc32c": ["crc32c"],
+  "bazel:io_opentelemetry_cpp": ["opentelemetry-cpp"],
+  "bazel:com_github_nlohmann_json": ["nlohmann-json"]
+ }
+}
