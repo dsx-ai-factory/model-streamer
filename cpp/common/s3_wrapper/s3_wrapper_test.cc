@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <limits>
 
 #include "utils/dylib/dylib.h"
 #include "utils/random/random.h"
@@ -194,6 +195,19 @@ TEST(Params, The_Reader_Count_Survives_The_Credentialless_Constructor)
     const S3ClientWrapper::Params params(std::make_shared<StorageUri>("s3://bucket/path"), 8 * 1024 * 1024, 4);
 
     EXPECT_EQ(params.to_config(initial_params).concurrent_readers, 4u);
+}
+
+TEST(Params, Azure_Receives_The_Total_Concurrent_Clients)
+{
+    utils::temp::UnsetEnv unset(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    std::vector<common::backend_api::ObjectConfigParam_t> initial_params;
+    const S3ClientWrapper::Params params(std::make_shared<StorageUri>("az://account/container/path"),
+                                         Credentials(), 8 * 1024 * 1024, 8, 4);
+    EXPECT_EQ(params.to_config(initial_params).concurrent_readers, 32);
+    const S3ClientWrapper::Params large(params.uri, Credentials(), params.chunk_bytesize, 8, 1U << 30);
+    EXPECT_EQ(large.to_config(initial_params).concurrent_readers, std::numeric_limits<unsigned>::max());
+    utils::temp::Env override(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 2UL);
+    EXPECT_EQ(params.to_config(initial_params).concurrent_readers, 8);
 }
 
 }; // namespace runai::llm::streamer::common::s3

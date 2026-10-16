@@ -60,6 +60,13 @@ TEST_F(AzureConcurrency, Threads_Follow_The_Reader_Count)
     }
 }
 
+TEST_F(AzureConcurrency, Large_Process_Group_Does_Not_Overflow_The_Divisor)
+{
+    const unsigned floor = std::thread::hardware_concurrency() == 0 ? 8U : 1U;
+    utils::temp::Env override(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 1UL << 30);
+    EXPECT_EQ(ClientConfiguration(4).max_concurrency, floor);
+}
+
 // The property the divisor exists for: N clients with nprocs*2/N threads each is the same total
 // whatever N is.
 //

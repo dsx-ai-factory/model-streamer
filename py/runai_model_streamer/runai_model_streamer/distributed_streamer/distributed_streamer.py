@@ -66,6 +66,7 @@ def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
 
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
+_DEFAULT_PROCESS_GROUP = object()
 
 class DistributedStreamer:
     def __init__(self) -> None:
@@ -76,7 +77,7 @@ class DistributedStreamer:
         self._ring_info: Optional[Tuple[int, int, int]] = None
 
     def __enter__(self) -> DistributedStreamer:
-        self.file_streamer.__enter__()
+        self.params = _distributedStreamerParams()
         self.distributed_streamer.__enter__()
         return self
 
@@ -87,11 +88,24 @@ class DistributedStreamer:
             # Ensure the second __exit__ is always called
             self.file_streamer.__exit__(exc_type, exc_value, traceback)
         return
+
+    def set_process_group(self, process_group: object = _DEFAULT_PROCESS_GROUP) -> None:
+        """Select the readers for this handle before its first request. None is a single reader."""
+        selected = self.params.process_group
+        if process_group is _DEFAULT_PROCESS_GROUP:
+            if selected is not _DEFAULT_PROCESS_GROUP:
+                return
+            process_group = dist.group.WORLD if dist.is_initialized() else None
+        if selected is not _DEFAULT_PROCESS_GROUP and process_group is not selected:
+            raise ValueError("process_group cannot change on an open streamer handle")
+        if process_group is not None and dist.get_rank(group=process_group) < 0:
+            raise ValueError("The current rank must belong to process_group")
+        self.params.process_group = process_group
     
     def get_group_size(self) -> int:
-        if not dist.is_initialized():
+        if self.params.process_group is _DEFAULT_PROCESS_GROUP or self.params.process_group is None:
             return 1
-        return dist.get_world_size()
+        return dist.get_world_size(group=self.params.process_group)
 
     def get_cuda_free_memory(self) -> int:
         if not torch.cuda.is_available():
@@ -128,7 +142,7 @@ class DistributedStreamer:
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
         if self.is_distributed:
-            backend_name = dist.get_backend()
+            backend_name = dist.get_backend(group=self.params.process_group)
             if backend_name == "nccl" and device == "cpu":
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for CPU device - fallback to non distributed streaming", backend_name)
                 self.is_distributed = False
@@ -140,7 +154,7 @@ class DistributedStreamer:
                 self.is_distributed = False
 
         # check if there is enough free memory on the device
-        if self.is_distributed and torch.cuda.is_available() and dist.get_backend() == "nccl":
+        if self.is_distributed and torch.cuda.is_available() and dist.get_backend(group=self.params.process_group) == "nccl":
             free_memory = self.get_cuda_free_memory()
             if free_memory < 2 * self.params.max_chunk:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
@@ -153,6 +167,7 @@ class DistributedStreamer:
             device: str,
             is_distributed: bool,
             owned: bool = True,
+            process_group: object = _DEFAULT_PROCESS_GROUP,
     ) -> None:
 
         # Normalised HERE so no spelling of the host reaches a comparison against "cpu": those decide
@@ -164,7 +179,10 @@ class DistributedStreamer:
         # nothing rather than whatever the previous call left behind.
         self._ring_info = None
 
+        self.set_process_group(process_group)
         self.params.set_params(file_stream_requests)
+        if self.file_streamer.streamer is None:
+            self.file_streamer.start(process_group_size=self.params.num_processes_on_node)
 
         # check if distributed streaming can be used
         self.set_is_distributed(is_distributed, device)
@@ -229,12 +247,8 @@ class _distributedStreamerParams:
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.max_chunk = 0
+        self.process_group = _DEFAULT_PROCESS_GROUP
  
-    def get_group_size(self) -> int:
-        if not dist.is_initialized():
-            return 1
-        return dist.get_world_size()
-
     def get_broadcast_timeout(self) -> timedelta:
         timeout_val = os.environ.get("RUNAI_STREAMER_DIST_TIMEOUT")
         if timeout_val:
@@ -246,33 +260,36 @@ class _distributedStreamerParams:
         """
         Returns the number of processes on the node, global rank and the list of ranks on each node
 
-        This function performs all_gather_object on the global group which cause nccl to allocate  device memory which otherwise may never be allocated by the user application
-        To avoid this issue, we create a another global subgroup just for discovering the local ranks and then destroy that subgroup after the ranks are discovered.
+        Use a temporary group with the selected readers so discovery's NCCL allocations
+        can be released without destroying the caller's group.
         """
-        if not dist.is_initialized():
-            return 1, 0, [[0]]
+        my_global_rank = dist.get_rank() if dist.is_initialized() else 0
+        if self.process_group is None:
+            return 1, my_global_rank, [[my_global_rank]]
 
-        world_size = dist.get_world_size()
+        world_size = dist.get_world_size(group=self.process_group)
 
         if world_size == 1:
-            return 1, 0, [[0]]
+            return 1, my_global_rank, [[my_global_rank]]
 
-        my_global_rank = dist.get_rank()
-
-        # 1. Discover all peers on all nodes (this is a global collective)
-        # create global group just for discovering the local ranks
-        sandbox_global_group = dist.new_group(ranks=list(range(world_size)), timeout=self.broadcast_timeout)
+        discovery_group = dist.new_group(
+            ranks=dist.get_process_group_ranks(self.process_group),
+            backend=dist.get_backend(group=self.process_group),
+            timeout=self.broadcast_timeout,
+            use_local_synchronization=self.process_group is not dist.group.WORLD,
+        )
         all_hostnames = [None] * world_size
-        dist.all_gather_object(all_hostnames, socket.gethostname(), group=sandbox_global_group)
-        dist.destroy_process_group(group=sandbox_global_group)
-        del sandbox_global_group
+        try:
+            dist.all_gather_object(all_hostnames, (my_global_rank, socket.gethostname()), group=discovery_group)
+        finally:
+            dist.destroy_process_group(group=discovery_group)
  
         # 2. Create a list of rank lists, one for each unique host.
         # e.g., [[0,1,2,3,4,5,6,7], [8,9,10,11,12,13,14,15]]
-        unique_hostnames = sorted(list(set(all_hostnames)))
+        unique_hostnames = sorted({hostname for _, hostname in all_hostnames})
         groups_by_ranks = []
         for hostname in unique_hostnames:
-            ranks_on_host = [r for r, h in enumerate(all_hostnames) if h == hostname]
+            ranks_on_host = [r for r, h in all_hostnames if h == hostname]
             groups_by_ranks.append(ranks_on_host)
 
         my_group_size = 1
@@ -294,12 +311,8 @@ class _distributedStreamerParams:
         max_chunks_per_file = (fc.max_chunk_size() for fc in file_stream_requests if fc.sizes)
         self.max_chunk = max(max_chunks_per_file, default=0)
 
-        # set the value of RUNAI_STREAMER_PROCESS_GROUP_SIZE to be the number of processes in the distribution group (or 1 if process group is not initialized)
-        # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()
-        if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") is None:
-            os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = str(self.num_processes_on_node)
 
 class _distributedStreamer:
     def __init__(self, file_streamer : FileStreamer) -> None:
@@ -321,6 +334,7 @@ class _distributedStreamer:
         self.num_processes_on_node = 1
         self.max_chunk = 0
         self.owned = True
+        self.process_group: Optional[dist.ProcessGroup] = None
 
     def __enter__(self) -> _distributedStreamer:
         return self
@@ -332,15 +346,22 @@ class _distributedStreamer:
                 if exc_type is None:
                     torch.distributed.barrier(group=self.distribution_group)
             finally:
-                # ALWAYS destroy the group.
                 torch.distributed.destroy_process_group(group=self.distribution_group)
-                del self.distribution_group
                 self.distribution_group = None
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
         if self.distribution_group:
             return self.distribution_group
+
+        if self.process_group is not dist.group.WORLD:
+            self.local_group_global_ranks = dist.get_process_group_ranks(self.process_group)
+            return dist.new_group(
+                ranks=self.local_group_global_ranks,
+                backend=dist.get_backend(group=self.process_group),
+                timeout=self.broadcast_timeout,
+                use_local_synchronization=True,
+            )
 
         is_global_group = int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
 
@@ -406,6 +427,7 @@ class _distributedStreamer:
         self.groups_by_ranks = params.groups_by_ranks
         self.broadcast_timeout = params.broadcast_timeout
         self.max_chunk = params.max_chunk
+        self.process_group = params.process_group
         # the ranks sharing this host: the divisor for the node-total memory limit (see rank_memory_limit)
         self.num_processes_on_node = params.num_processes_on_node
 

@@ -32,8 +32,8 @@ class LibstreamerDLLWrapper:
     def __init__(self, library_path):
         self.lib = ctypes.CDLL(library_path)
 
-        self.fn_runai_start = self.lib.runai_file_streamer_start
-        self.fn_runai_start.argtypes = [ctypes.POINTER(t_streamer)]
+        self.fn_runai_start = self.lib.runai_file_streamer_start_with_process_group_size
+        self.fn_runai_start.argtypes = [ctypes.POINTER(t_streamer), ctypes.c_uint]
         self.fn_runai_start.restype = ctypes.c_int
 
         self.fn_runai_end = self.lib.runai_file_streamer_end

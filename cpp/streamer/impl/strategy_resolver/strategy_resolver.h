@@ -28,7 +28,7 @@ namespace runai::llm::streamer::impl
 // something else has no way to find out.
 //
 // Availability comes from the PROBES - IoUringProbe and LibaioProbe - and never from building an
-// engine. An engine needs a depth, which needs RUNAI_STREAMER_PROCESS_GROUP_SIZE, and it belongs to
+// engine. An engine needs a depth based on the handle's reader count, and it belongs to
 // the worker; a probe needs nothing.
 //
 // Thread safe - several submitters can race on the first request.

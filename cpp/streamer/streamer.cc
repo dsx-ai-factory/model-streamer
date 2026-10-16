@@ -117,11 +117,22 @@ using namespace runai::llm::streamer;
 
 int runai_file_streamer_start(void ** streamer)
 {
+    return runai_file_streamer_start_with_process_group_size(streamer, 1);
+}
+
+int runai_file_streamer_start_with_process_group_size(void ** streamer, unsigned process_group_size)
+{
+    if (streamer == nullptr || process_group_size == 0)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+
     // verify configuration
     std::unique_ptr<impl::Config> config;
     try
     {
         config = std::make_unique<impl::Config>();
+        config->process_group_size = process_group_size;
     }
     catch(...)
     {

@@ -39,6 +39,18 @@ int main(void)
     check(rc == RUNAI_FILE_STREAMER_RESPONSE_SUCCESS, "start returns Success");
     check(streamer != NULL, "start sets the handle");
 
+    runai_file_streamer_end(streamer);
+    streamer = NULL;
+
+    rc = runai_file_streamer_start_with_process_group_size(&streamer, 0);
+    check(rc == RUNAI_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR, "zero reader count is rejected");
+    check(streamer == NULL, "invalid count creates no handle");
+    rc = runai_file_streamer_start_with_process_group_size(NULL, 8);
+    check(rc == RUNAI_FILE_STREAMER_RESPONSE_INVALID_PARAMETER_ERROR, "null output is rejected");
+    rc = runai_file_streamer_start_with_process_group_size(&streamer, 8);
+    check(rc == RUNAI_FILE_STREAMER_RESPONSE_SUCCESS, "start accepts the reader count");
+    check(streamer != NULL, "start with reader count sets the handle");
+
     const char * message = runai_file_streamer_response_str(RUNAI_FILE_STREAMER_RESPONSE_SUCCESS);
     check(message != NULL && strlen(message) > 0, "response_str returns a message");
 

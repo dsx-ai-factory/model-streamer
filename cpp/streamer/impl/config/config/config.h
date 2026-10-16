@@ -142,6 +142,9 @@ struct Config
     // does it.
     FsQueueDepth fs_async_queue_depth;
 
+    // Readers on this node for this handle; the environment remains a user override.
+    unsigned process_group_size = 1;
+
     // The types from RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS, lowercased, in the order written.
     std::vector<std::string> fs_no_register_buffers;
 

@@ -104,8 +104,7 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
         throw common::Exception(common::ResponseCode::EmptyRequestError);
     }
 
-    // Resolved HERE, not at construction: depth is divided by RUNAI_STREAMER_PROCESS_GROUP_SIZE, and
-    // the window size the base wants IS the engine's depth. One moment, one place.
+    // Resolve the handle's reader count and any user override together with the engine's depth.
     _settings.emplace(*first.batches().front().config, _node_wide_depth);
 
     posix_io::AsyncIoConfig config;

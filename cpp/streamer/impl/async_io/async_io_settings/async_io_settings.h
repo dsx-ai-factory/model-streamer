@@ -15,10 +15,8 @@ namespace runai::llm::streamer::impl
 
 // What this process will actually use, as opposed to what the operator asked for.
 //
-// CONSTRUCT ON THE FIRST WORKLOAD, never at streamer construction. Depth is divided by
-// RUNAI_STREAMER_PROCESS_GROUP_SIZE, which the Python layer does not write until stream_files() -
-// long after runai_file_streamer_start() has returned. Building this early reads the unset default of 1, skips the
-// division, and says nothing: the device then sees eight times the intended depth at TP=8.
+// Construct on the first workload, which supplies the handle's configuration. Depth is divided
+// by its local reader count, with RUNAI_STREAMER_PROCESS_GROUP_SIZE as a user override.
 //
 // Every value is clamped against its real ceiling here and logged when clamped. A configured number
 // that quietly never materialises is worse than one that is rejected.
@@ -54,9 +52,7 @@ class AsyncIoSettings
     // and than the one a sweep measured.
     size_t chunk_bytesize() const;
 
-    // Streamer processes on this node, from RUNAI_STREAMER_PROCESS_GROUP_SIZE. 1 when unset, which is
-    // both the single-process case and the "Python has not written it yet" case - the second is a bug
-    // and the reason this object is built late.
+    // Readers on this node, from the handle's configuration or the explicit environment override.
     unsigned process_group_size() const;
 
  private:

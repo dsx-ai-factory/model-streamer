@@ -129,6 +129,27 @@ The nccl backend with nvlink between devices is most suitable for distributed st
 
 ##### Control
 
+`stream_file()` and `stream_files()` accept `process_group` to identify the processes
+reading together, independently of `is_distributed`. Omission uses the default Torch
+group when initialized. Pass `process_group=None` when only one process reads, even
+if Torch distributed is initialized. This skips discovery collectives and keeps the
+actual global rank for reporting.
+
+The group also applies to metadata reads, so filesystem queue sizing is resolved
+before the first header request. The selected group determines the reader count on each
+node. A handle keeps the same group until closed; use separate handles for ordinary
+weights and single-reader tables. The count is passed when creating each native handle without
+changing the environment. `RUNAI_STREAMER_PROCESS_GROUP_SIZE`, if explicitly set,
+remains a user override for native filesystem queue sizing and Azure client concurrency.
+
+A supplied non-default group defines the members and backend for temporary discovery
+and weight-exchange groups. Only its members participate in creating these groups.
+The streamer destroys the temporary groups so their NCCL allocations can be released;
+the supplied group remains owned by the caller. `RUNAI_STREAMER_DIST_TIMEOUT` applies
+to the temporary groups. The global/local mode settings below retain their existing
+behavior for the default group. Ranks shared by overlapping groups must create,
+consume, and close streams in a consistent order.
+
 Distributed streaming is enabled by default when streaming from object storage to CUDA devices.
 It is possible to disable distributed streaming by setting `RUNAI_STREAMER_DIST=0`
 

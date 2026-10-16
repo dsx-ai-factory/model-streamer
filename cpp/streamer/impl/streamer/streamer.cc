@@ -738,7 +738,7 @@ std::vector<std::pair<std::string, size_t>> Streamer::list_files(
 
         // listing builds a client, so read the streamer's credentials here (a client-creation point)
         common::s3::S3ClientWrapper::Params params(uri, credentials(), _config->s3_block_bytesize,
-                                                  _config->s3_concurrency);
+                                                  _config->s3_concurrency, _config->process_group_size);
         common::s3::S3ClientWrapper wrapper(params);
 
         common::backend_api::ObjectFileEntry_t * entries = nullptr;

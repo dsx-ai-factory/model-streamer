@@ -92,12 +92,16 @@ class FileStreamer:
         self.outstanding = 0          # responses still owed across ALL live submissions
 
     def __enter__(self) -> "FileStreamer":
-        self.streamer = runai_start()
+        self.start()
+        return self
+
+    def start(self, process_group_size: int = 1) -> None:
+        """Open the native handle with its fixed local reader count."""
+        self.streamer = runai_start(process_group_size=process_group_size)
         self.device_str = None
         self.s3_session = None
         self.s3_credentials = None
         self._credentialed_streamer = None
-        return self
 
     def __exit__(self, exc_type: any, exc_value: any, traceback: any) -> None:
         # Overall throughput is logged by SafetensorsStreamer (the user-facing session), not here: one session

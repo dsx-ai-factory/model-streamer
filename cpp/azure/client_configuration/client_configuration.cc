@@ -71,7 +71,7 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
     LOG(SPAM) << "Streamer worker concurrency: " << worker_concurrency;
     unsigned process_group_size = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
     LOG(SPAM) << "Process group size: " << process_group_size;
-    max_concurrency = std::max(default_max_concurrency, nprocs * 2 / (worker_concurrency * process_group_size));
+    max_concurrency = std::max(default_max_concurrency, nprocs * 2 / worker_concurrency / process_group_size);
     LOG(DEBUG) << "Azure Blob Storage per-client concurrency is set to: " << max_concurrency;
 
     // Note: Using Azure SDK defaults for timeouts and retries

@@ -71,7 +71,7 @@ struct S3ClientWrapper
          // concurrent_readers has no default: the streamer resolves it once, in Config, and every
          // caller states it. A plugin must never have to decide it.
          Params(std::shared_ptr<StorageUri> uri, const Credentials & credentials, size_t chunk_bytesize,
-                unsigned concurrent_readers);
+                unsigned concurrent_readers, unsigned process_group_size = 1);
 
          Params(std::shared_ptr<StorageUri> uri, size_t chunk_bytesize, unsigned concurrent_readers) :
              Params(uri, Credentials(), chunk_bytesize, concurrent_readers)
@@ -88,6 +88,7 @@ struct S3ClientWrapper
          const common::backend_api::ObjectClientConfig_t to_config(std::vector<common::backend_api::ObjectConfigParam_t> & initial_params) const;
 
        private:
+         unsigned _process_group_size = 1;
          std::string _endpoint;
       };
 

@@ -5,11 +5,18 @@ import os
 import shutil
 import tempfile
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from safetensors.torch import save_file
 
 from runai_model_streamer.distributed_streamer.distributed_streamer import DistributedStreamer
+from runai_model_streamer.file_streamer.file_streamer import runai_request
+from runai_model_streamer.libstreamer.libstreamer import runai_start
+from runai_model_streamer import SafetensorsStreamer
 from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
@@ -30,6 +37,72 @@ TIGHT_RING = {
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2",
     RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME: "0",
 }
+
+
+def _check_group_read(path, rank, count, **kwargs):
+    previous_override = os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE")
+    with patch("runai_model_streamer.file_streamer.file_streamer.runai_request", wraps=runai_request) as submit, \
+            patch("runai_model_streamer.file_streamer.file_streamer.runai_start", wraps=runai_start) as start:
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_file(path, device="cpu", **kwargs)
+            weights = dict(streamer.get_tensors())
+            ring = streamer.file_streamer.ring_info()
+            if ring is not None:
+                assert ring[0] == rank
+    torch.testing.assert_close(weights["weight"], torch.arange(6))
+    start.assert_called_once_with(process_group_size=count)
+    assert submit.call_count >= 2
+    assert len({call.args[0].value for call in submit.call_args_list}) == 1
+    assert os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") == previous_override
+
+
+def _read_with_groups(rank, rendezvous, path):
+    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=8,
+                            timeout=timedelta(seconds=90))
+    try:
+        os.environ.pop("RUNAI_STREAMER_PROCESS_GROUP_SIZE", None)
+
+        # Eight independent readers size metadata for eight, with a single-reader handle still open.
+        with SafetensorsStreamer() as single:
+            single.stream_file(path, device="cpu", process_group=None)
+            torch.testing.assert_close(dict(single.get_tensors())["weight"], torch.arange(6))
+            _check_group_read(path, rank, 8)
+        assert "RUNAI_STREAMER_PROCESS_GROUP_SIZE" not in os.environ
+        dist.barrier()
+
+        if rank == 7:
+            with patch.object(dist, "new_group", side_effect=AssertionError("Unexpected discovery")), \
+                    patch.object(dist, "all_gather_object", side_effect=AssertionError("Unexpected discovery")):
+                _check_group_read(path, rank, 1, process_group=None)
+        dist.barrier()
+
+        # Non-contiguous global ranks catch discovery outside the supplied group and rank remapping.
+        members = [1, 3, 5, 7]
+        group = dist.new_group(ranks=members)
+        if rank in members:
+            with patch.object(dist, "all_gather_object", wraps=dist.all_gather_object) as discover, \
+                    patch.object(dist, "broadcast", wraps=dist.broadcast) as broadcast, \
+                    patch.object(dist, "destroy_process_group", wraps=dist.destroy_process_group) as destroy:
+                _check_group_read(path, rank, 4, process_group=group, is_distributed=True)
+            discovery_group = discover.call_args.kwargs["group"]
+            distribution_group = broadcast.call_args.kwargs["group"]
+            assert discovery_group is not group
+            assert distribution_group is not group
+            assert {call.kwargs["group"] for call in destroy.call_args_list} == {
+                discovery_group, distribution_group,
+            }
+            dist.barrier(group=group)
+            dist.destroy_process_group(group=group)
+        dist.barrier()
+
+        _check_group_read(path, rank, 8, is_distributed=True)
+        dist.barrier()
+
+        with patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "4"}):
+            _check_group_read(path, rank, 8)
+        dist.barrier()
+    finally:
+        dist.destroy_process_group()
 
 
 class TestOwnedFollowsTheDestination(unittest.TestCase):
@@ -56,6 +129,15 @@ class TestOwnedFollowsTheDestination(unittest.TestCase):
         with open(path, "w") as handle:
             handle.write("".join(expected[i] for i in range(count)))
         return path, expected
+
+    @patch.dict(os.environ, {"RUNAI_STREAMER_DIST_TIMEOUT": "15", "RUNAI_STREAMER_DIST": "1",
+                             "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "4096"})
+    def test_reader_counts_are_per_handle_and_preserve_user_overrides(self):
+        """Reader groups size metadata, exclude idle peers, and preserve distributed payloads."""
+        path = os.path.join(self.temp_dir, "reader_groups.safetensors")
+        save_file({"weight": torch.arange(6)}, path)
+        rendezvous = "file://" + os.path.join(self.temp_dir, "reader_group_rendezvous")
+        mp.spawn(_read_with_groups, args=(rendezvous, path), nprocs=8, join=True)
 
     @patch.dict(os.environ, TIGHT_RING)
     def test_every_host_spelling_hands_the_ring_over(self):

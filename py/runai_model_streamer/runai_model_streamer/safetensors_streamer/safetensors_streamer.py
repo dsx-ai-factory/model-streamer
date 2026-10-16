@@ -16,7 +16,10 @@ from typing import List
 
 from runai_model_streamer.file_streamer import FileChunks
 
-from runai_model_streamer.distributed_streamer import DistributedStreamer
+from runai_model_streamer.distributed_streamer.distributed_streamer import (
+    DistributedStreamer,
+    _DEFAULT_PROCESS_GROUP,
+)
 
 import runai_model_streamer.safetensors_streamer.safetensors_pytorch as safetensors_pytorch
 
@@ -252,6 +255,7 @@ class SafetensorsStreamer:
             is_distributed: bool = False,
             tensor_names: Optional[Collection[str]] = None,
             owned: bool = True,
+            process_group: object = _DEFAULT_PROCESS_GROUP,
         ) -> None:
         # By keyword, so that adding a parameter to stream_files cannot silently shift these into the
         # wrong slots. is_distributed and owned are both bools, so a shift would still run.
@@ -262,6 +266,7 @@ class SafetensorsStreamer:
             is_distributed=is_distributed,
             tensor_names=tensor_names,
             owned=owned,
+            process_group=process_group,
         )
 
 
@@ -273,6 +278,7 @@ class SafetensorsStreamer:
             is_distributed: bool = False,
             tensor_names: Optional[Collection[str]] = None,
             owned: bool = True,
+            process_group: object = _DEFAULT_PROCESS_GROUP,
         ) -> None:
         """Stream the tensors of one or more safetensors files.
 
@@ -284,6 +290,10 @@ class SafetensorsStreamer:
 
         Alignment is not under this flag, and nor is a device destination without distributed
         streaming - see docs/src/usage.md.
+
+        process_group identifies the readers, including metadata reads. Omission uses the
+        default Torch group; explicit None performs no discovery collectives. The group is
+        fixed for the handle, independently of is_distributed.
         """
         # None = no filter (today's behavior). str satisfies Collection[str] structurally, so
         # reject it - otherwise `in` below silently becomes substring matching.
@@ -307,6 +317,7 @@ class SafetensorsStreamer:
         # metadata reads (the first submissions), so the measurement spans first submission -> last response.
         self.start_time = timer()
 
+        self.file_streamer.set_process_group(process_group)
         # metadata is created on cpu and each process reads it individually
         safetensors_metadatas = safetensors_pytorch.prepare_request(self.file_streamer, paths, s3_credentials)
 

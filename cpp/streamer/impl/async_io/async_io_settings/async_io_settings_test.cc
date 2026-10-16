@@ -56,7 +56,9 @@ TEST(AsyncIoSettings, Depth_Is_Divided_By_The_Process_Group)
 {
     utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
 
-    const auto settings = settings_for(8 << 20, 512);
+    auto config = config_with(8 << 20);
+    config.process_group_size = 4; // The explicit override takes precedence over the handle.
+    const AsyncIoSettings settings(config, 512);
 
     EXPECT_EQ(settings.process_group_size(), 8);
     EXPECT_EQ(settings.depth(), 64) << "the device sees 8 x this, which is the configured 512";
@@ -131,9 +133,7 @@ TEST(AsyncIoSettings, Chunk_Below_The_Ceiling_Is_Untouched)
     EXPECT_EQ(settings.chunk_bytesize(), 4u << 20);
 }
 
-// The ordering trap this class exists for. Python writes PROCESS_GROUP_SIZE inside stream_files(),
-// long after runai_file_streamer_start() built the Config - so a settings object built with the Config would read
-// the unset default of 1 and skip the division entirely.
+// A user override set after handle creation is still resolved at the first workload.
 TEST(AsyncIoSettings, Reads_The_Group_Size_When_Constructed_Not_When_Config_Was)
 {
     std::unique_ptr<Config> config;
@@ -142,7 +142,7 @@ TEST(AsyncIoSettings, Reads_The_Group_Size_When_Constructed_Not_When_Config_Was)
         config = std::make_unique<Config>(config_with(8 << 20));
     }
 
-    // ... later, on the first workload, once the Python layer has published it.
+    // ... later, on the first workload, after the user sets an override.
     utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 4UL);
     const AsyncIoSettings settings(*config, 512);
 

@@ -1803,6 +1803,45 @@ TEST(Async, ADeadEngineDropsItsMountToTheSynchronousReader)
 // whatever the host says, so without one the factory returns nullptr and this fails. Skipping is
 // silent, so RUNAI_STREAMER_REQUIRE_IO_URING - which CI passes - turns the skip into a failure rather
 // than hiding a broken CI host.
+TEST(Async, OverlappingHandlesUseTheirOwnReaderCounts)
+{
+    utils::temp::UnsetEnv unset(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), std::string("io_uring_buffered"));
+    utils::temp::Env depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), 64UL);
+    utils::temp::Env chunk(std::string("RUNAI_STREAMER_FS_CHUNK_BYTESIZE"), 4096UL);
+    utils::temp::File file(utils::random::buffer(4096));
+    std::vector<char> dst(4096);
+    std::atomic<unsigned> single_depth{0}, distributed_depth{0};
+
+    auto environment_for = [](std::atomic<unsigned> & recorded)
+    {
+        Streamer::Environment environment;
+        environment.availability = [](posix_io::Strategy) { return common::ResponseCode::Success; };
+        environment.direct = [](dev_t, const std::string &) { return posix_io::DirectSupport::No; };
+        environment.engine = [&recorded](posix_io::Strategy, const posix_io::AsyncIoConfig & config)
+            -> std::unique_ptr<posix_io::IoEngine>
+        {
+            recorded = config.depth;
+            auto engine = std::make_unique<posix_io::MockIoEngine>(config.depth);
+            engine->set_auto_complete_on_wait(config.depth);
+            return engine;
+        };
+        return environment;
+    };
+
+    Streamer single(Config(), environment_for(single_depth));
+    ASSERT_EQ(single.sync_read(file.path, 0, dst.size(), dst.data()), common::ResponseCode::Success);
+
+    Config distributed_config;
+    distributed_config.process_group_size = 8;
+    Streamer distributed(distributed_config, environment_for(distributed_depth));
+    ASSERT_EQ(distributed.sync_read(file.path, 0, dst.size(), dst.data()), common::ResponseCode::Success);
+
+    EXPECT_EQ(single_depth.load(), 64);
+    EXPECT_EQ(distributed_depth.load(), 8);
+    EXPECT_EQ(std::getenv("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), nullptr);
+}
+
 TEST(Async, QueueDepthIsResolvedPerMount)
 {
     const auto ring = posix_io::IoUringProbe::instance().capability();

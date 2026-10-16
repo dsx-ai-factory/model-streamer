@@ -132,7 +132,8 @@ std::size_t ObjectStorageWorker::capacity(const Workload & first)
             // one client, so that client must be sized for all of it. Dropped for GCS and Azure, which
             // reach the same capacity with one client per worker.
             common::s3::S3ClientWrapper::Params client_params(batch.object_storage_params.uri, credentials,
-                                                              _chunk_bytesize, _config->s3_concurrency);
+                                                              _chunk_bytesize, _config->s3_concurrency,
+                                                              _config->process_group_size);
             auto client = std::make_shared<common::s3::S3ClientWrapper>(client_params);
             _reader = std::make_shared<S3>(client, *_config);
         }

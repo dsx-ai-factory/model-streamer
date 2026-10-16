@@ -217,6 +217,15 @@ extern "C" int runai_file_streamer_set_fs_strategy(
     return 0;
 }
 
+extern "C" int runai_file_streamer_start_with_process_group_size(void ** streamer, unsigned process_group_size)
+{
+    if (streamer == nullptr || process_group_size == 0)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+    return runai_file_streamer_start(streamer);
+}
+
 extern "C" int runai_file_streamer_request(
     void * streamer,
     RunaiFileStreamerSubmissionId * out_submission_id,
