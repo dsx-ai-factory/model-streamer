@@ -1,0 +1,72 @@
+name: Nightly GPU tests
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Seed of the synthetic models (default is the run id).
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: nightly-gpu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gpu-tests:
+    runs-on:
+      group: nv-gpu-amd64-t4-2gpu
+      labels: linux-amd64-gpu-t4-latest-2
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check runner GPUs
+        run: nvidia-smi
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js for Dev Containers CLI
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Generate synthetic models, stream them to two GPUs and compare
+        uses: devcontainers/ci@v0.3
+        with:
+          configFile: .devcontainer/gpu/devcontainer.json
+          imageName: ghcr.io/${{ github.repository }}/devcontainer
+          push: never
+          env: |
+            GPU_SEED=${{ inputs.seed || github.run_id }}
+          runCmd: bash tests/gpu/setup_and_run.sh
+
+      - name: Show where the time went
+        if: always()
+        run: |
+          if [ -f test-results/gpu/timing-summary.txt ]; then
+            { echo '### Where the time went'; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload GPU test logs and timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results
+          path: test-results/gpu/
+          if-no-files-found: warn
+          retention-days: 14
