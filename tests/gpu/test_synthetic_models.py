@@ -84,13 +84,15 @@ class Fixtures:
 
 
 def memory_limit(manifest, distributed):
-    """About a sixteenth of the model, so the host ring is reused many times - but never below the largest
-    range the streamer reads times the ranks sharing the limit, because a range must fit in one buffer and a
-    distributed rank only gets its share (times 1.5 so there is room for a second buffer). The largest range
-    is a tensor, or a file's header: the streamer reads each header as one range, and model B's is 10 MB."""
+    """About a sixteenth of the model, so the host ring is reused many times - but never below twice the
+    largest range the streamer reads, times the ranks sharing the limit. A range must fit in one buffer and a
+    distributed rank only gets its share of the limit; twice the largest range leaves room for at least two
+    buffers, so a buffer can be read while the previous one is consumed. (Where the whole model is smaller
+    than two largest ranges, as in model C, the ring still has one buffer.) The largest range is a tensor, or
+    a file's header: the streamer reads each header as one range, and model B's is 10 MB."""
     ranks = WORLD if distributed else 1
     largest = max([manifest["largest_tensor_bytes"]] + [f["header_len"] for f in manifest["files"]])
-    floor = int(1.5 * largest) * ranks
+    floor = 2 * largest * ranks
     return max(manifest["total_data_bytes"] // 16, floor, MIB)
 
 
