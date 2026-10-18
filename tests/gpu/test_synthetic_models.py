@@ -255,6 +255,13 @@ def selected_rows(strategy):
     return rows
 
 
+def write_results(results_dir, strategy, rank, timer, outcomes):
+    name = strategy.replace(",", "+") or "default"
+    dump_jsonl(timer.records, os.path.join(results_dir, "timing-%s-rank%d.jsonl" % (name, rank)))
+    with open(os.path.join(results_dir, "rows-%s-rank%d.json" % (name, rank)), "w") as handle:
+        json.dump(outcomes, handle, indent=1)
+
+
 def main():
     if int(os.environ.get("WORLD_SIZE", "0")) != WORLD:
         raise RuntimeError("Launch with torchrun --nproc_per_node=%d" % WORLD)
@@ -309,6 +316,9 @@ def main():
             for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)
             release_gpu_memory()
+            # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
+            # would otherwise take the results of the rows that already ran with it.
+            write_results(results_dir, strategy, rank, timer, outcomes)
             if not ok:
                 failed = True
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and
@@ -319,11 +329,7 @@ def main():
                           flush=True)
                     break
     finally:
-        dump_jsonl(timer.records, os.path.join(results_dir, "timing-%s-rank%d.jsonl" % (
-            strategy.replace(",", "+") or "default", rank)))
-        with open(os.path.join(results_dir, "rows-%s-rank%d.json" % (
-                strategy.replace(",", "+") or "default", rank)), "w") as handle:
-            json.dump(outcomes, handle, indent=1)
+        write_results(results_dir, strategy, rank, timer, outcomes)
         if rank == 0:
             print(report(timer.records, top=15), flush=True)
         if dist.is_initialized():
