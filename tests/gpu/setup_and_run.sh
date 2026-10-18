@@ -82,7 +82,10 @@ phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py
 echo "== generate synthetic models, in the background while libstreamer builds"
 rm -rf "$FIXTURES"
 mkdir -p "$FIXTURES"
-python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" > "$RESULTS/generate.log" 2>&1 &
+# Its lines reach the live log marked [gen] and are kept in generate.log. A process substitution, not a
+# pipeline, so that `wait` reports the generator's own exit status.
+python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" \
+    > >(sed -u 's/^/[gen] /' | tee "$RESULTS/generate.log") 2>&1 &
 GENERATOR_PID=$!
 
 build_libstreamer() {
@@ -99,11 +102,9 @@ phase build_libstreamer build_libstreamer
 
 wait_for_generator() {
     if ! wait "$GENERATOR_PID"; then
-        cat "$RESULTS/generate.log"
-        echo "fixture generation failed"
+        echo "fixture generation failed (its output is above, marked [gen])"
         return 1
     fi
-    cat "$RESULTS/generate.log"
 }
 phase wait_for_generator wait_for_generator
 
