@@ -52,8 +52,9 @@ python3 -m unittest tests/gpu/test_gen_models.py
 
 Each row of `ROWS` is one load: a model, distributed or not, a partition policy, `owned`, a destination
 (`cuda` or `cpu` then `.to()`) and a memory limit. `tight` sets `RUNAI_STREAMER_MEMORY_LIMIT` to about a
-sixteenth of the model (never below the largest tensor times the ranks sharing the limit), so the host buffers
-are reused many times; with the default limit a small model fits in the ring once and no buffer is ever reused.
+sixteenth of the model (never below twice the largest range, a tensor or a file header, times the ranks sharing
+the limit), so the host buffers are reused many times; with the default limit a small model fits in the ring
+once and no buffer is ever reused.
 
 After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
 the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until
@@ -61,8 +62,13 @@ the stream ends and check them all then, which tests the ownership guarantee. Ro
 tensor when it is yielded. A row that asks for distributed streaming fails if the streamer silently fell back
 to non-distributed.
 
-Missing GPUs or NCCL fail the job; nothing skips. The run stops at the first failing row, since the collectives
-of a failed distributed row may be out of step.
+Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
+run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
+be out of step. The results of each row are written as soon as it ends.
+
+The script raises the open files limit to the hard limit before the test, because model D has 5,000 files and
+the streamer keeps a file open until its submission ends
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)).
 
 ## Timing
 

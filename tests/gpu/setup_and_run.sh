@@ -116,8 +116,8 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export RUNAI_STREAMER_LOG_TO_STDERR=1
 
 # Model D has 5,000 files, and the container starts with a soft limit of 1024 open files. The streamer keeps a
-# file open until its whole submission ends (see the issue linked in the README), so the soft limit is raised
-# to the hard limit for the test.
+# file open until its whole submission ends (https://github.com/dsx-ai-factory/model-streamer/issues/261), so
+# the soft limit is raised to the hard limit for the test. Remove this once that is fixed.
 echo "open files limit before: soft $(ulimit -Sn), hard $(ulimit -Hn)"
 ulimit -Sn "$(ulimit -Hn)" || echo "could not raise the open files limit"
 echo "open files limit now: soft $(ulimit -Sn)"
