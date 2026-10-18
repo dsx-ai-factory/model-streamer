@@ -31,7 +31,7 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
+from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 
 from runai_model_streamer import SafetensorsStreamer  # noqa: E402
 from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype  # noqa: E402
@@ -180,6 +180,8 @@ class RowRun:
                 streamer.stream_files(self.paths, device=destination, is_distributed=bool(row.dist),
                                       owned=row.owned)
             try:
+                if self.timer.announce:
+                    stamp("START %s.load" % tag)
                 if streamer.file_streamer.is_distributed != bool(row.dist):
                     self.error("the streamer silently ran %s, the row asked for %s" % (
                         "distributed" if streamer.file_streamer.is_distributed else "not distributed",
@@ -202,19 +204,28 @@ class RowRun:
                         held[name] = tensor
                     else:
                         # A borrowed tensor is only good until the iteration advances.
-                        with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size()):
+                        with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size(),
+                                              announce=False):
                             self.check(name, tensor)
                 start = time.perf_counter()
                 torch.cuda.synchronize(self.device)
                 load_seconds += time.perf_counter() - start
+                if self.timer.announce:
+                    stamp("END   %s.load  %.1fs" % (tag, load_seconds))
             finally:
                 with self.timer.phase("%s.teardown" % tag):
                     streamer.__exit__(None, None, None)
         self.timer.records.append({"phase": "%s.load" % tag, "seconds": load_seconds,
                                    "bytes": self.manifest["total_data_bytes"]})
+        if self.timer.announce and held:
+            stamp("START %s.verify (%d tensors)" % (tag, len(held)))
+        verify_start = time.perf_counter()
         for name, tensor in held.items():
-            with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size()):
+            with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size(),
+                                  announce=False):
                 self.check(name, tensor)
+        if self.timer.announce and held:
+            stamp("END   %s.verify  %.1fs" % (tag, time.perf_counter() - verify_start))
         missing = set(self.expected) - self.seen
         if missing:
             self.error("%d tensor(s) never arrived, for example %r" % (len(missing), sorted(missing)[0]))
@@ -251,7 +262,7 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS))
 
-    timer = PhaseTimer()
+    timer = PhaseTimer(announce=(rank == 0))
     with timer.phase("init.nccl"):
         dist.init_process_group("nccl", timeout=timedelta(seconds=DIST_TIMEOUT_SECONDS))
     with timer.phase("init.manifests"):
@@ -264,6 +275,10 @@ def main():
         for row in rows:
             dist.barrier()
             run = RowRun(row, fixtures, device, timer)
+            if rank == 0:
+                stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
+                    row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
+                    row.owned, row.device, row.limit, strategy))
             started = time.perf_counter()
             try:
                 run.run()

@@ -20,15 +20,26 @@ exec > >(tee "$RESULTS/run.log") 2>&1
 SETUP_TIMING="$RESULTS/timing-setup.jsonl"
 : > "$SETUP_TIMING"
 
-# phase NAME COMMAND...: run a command and record its wall time.
+# record NAME START END: append the wall time of a phase to the timing file and print it.
+record() {
+    local secs
+    secs=$(awk -v s="$2" -v e="$3" 'BEGIN { printf "%.2f", e - s }')
+    printf '{"phase": "%s", "seconds": %s}\n' "$1" "$secs" >> "$SETUP_TIMING"
+    echo "[$(date +%T)] END   $1  ${secs}s"
+}
+
+# phase NAME COMMAND...: run a command, print START and END lines, and record its wall time.
 phase() {
     local name=$1; shift
-    local start end
+    local start rc=0
+    echo "[$(date +%T)] START $name"
     start=$(date +%s.%N)
-    "$@"
-    end=$(date +%s.%N)
-    python3 -c "import json,sys; print(json.dumps({'phase': sys.argv[1], 'seconds': float(sys.argv[3]) - float(sys.argv[2])}))" \
-        "$name" "$start" "$end" >> "$SETUP_TIMING"
+    "$@" || rc=$?
+    record "$name" "$start" "$(date +%s.%N)"
+    if [ "$rc" -ne 0 ]; then
+        echo "[$(date +%T)] FAILED $name (exit $rc)"
+    fi
+    return "$rc"
 }
 
 echo "== environment"
@@ -110,6 +121,7 @@ for strategy in \
     io_uring_direct,sync_buffered \
     io_uring_buffered,sync_buffered
 do
+    echo "[$(date +%T)] START run.$strategy"
     echo "== streaming with filesystem strategy: $strategy"
     start=$(date +%s.%N)
     if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
@@ -117,10 +129,9 @@ do
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
+        echo "[$(date +%T)] FAILED run.$strategy"
     fi
-    end=$(date +%s.%N)
-    python3 -c "import json,sys; print(json.dumps({'phase': 'run.' + sys.argv[1], 'seconds': float(sys.argv[3]) - float(sys.argv[2])}))" \
-        "$strategy" "$start" "$end" >> "$SETUP_TIMING"
+    record "run.$strategy" "$start" "$(date +%s.%N)"
 done
 
 # The manifests list every tensor of every model; keep them with the results to debug a failure.

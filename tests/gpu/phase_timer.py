@@ -12,19 +12,35 @@ import time
 from contextlib import contextmanager
 
 
-class PhaseTimer:
-    """Collects one record per timed phase. Records are plain dicts so they can cross processes."""
+def stamp(message):
+    """One line of the live log, with the time of day, so a run in progress can be followed and a phase that
+    started but never ended stands out."""
+    print("[%s] %s" % (time.strftime("%H:%M:%S"), message), flush=True)
 
-    def __init__(self):
+
+class PhaseTimer:
+    """Collects one record per timed phase. Records are plain dicts so they can cross processes.
+
+    With announce=True every phase also prints a START and an END line. Pass announce=False to a phase that
+    runs thousands of times, and give the timer announce=False in the ranks that should stay quiet."""
+
+    def __init__(self, announce=True):
         self.records = []
+        self.announce = announce
 
     @contextmanager
-    def phase(self, name, nbytes=None, **tags):
+    def phase(self, name, nbytes=None, announce=True, **tags):
+        announce = announce and self.announce
+        if announce:
+            stamp("START %s" % name)
         start = time.perf_counter()
         try:
             yield
         finally:
-            record = {"phase": name, "seconds": time.perf_counter() - start}
+            seconds = time.perf_counter() - start
+            if announce:
+                stamp("END   %s  %.1fs" % (name, seconds))
+            record = {"phase": name, "seconds": seconds}
             if nbytes is not None:
                 record["bytes"] = int(nbytes)
             record.update(tags)
