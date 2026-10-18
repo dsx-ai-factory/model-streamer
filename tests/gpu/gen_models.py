@@ -15,8 +15,12 @@ padding (and so the alignment of every tensor start), header-only files, zero-si
 
 Every byte is a function of (seed, model, tensor key), drawn from numpy's PCG64 bit generator. numpy
 guarantees that the raw stream of a bit generator never changes, unlike the Generator methods built on it,
-so a seed reproduces a model exactly. Each tensor has its own stream, so one tensor can be regenerated
-alone.
+so the bytes of a tensor depend only on its seed, model and key.
+
+The layout (shapes, sizes, names, shard split) is drawn with Generator methods, which numpy may change between
+versions. So a seed reproduces a model exactly only under the same numpy version. Each manifest records
+numpy_version and generator_version; to rebuild an old model, install that numpy and run the generator with
+the same seed. Each tensor has its own stream, so one tensor can be regenerated alone.
 
 Alongside each model goes a manifest (<out>/<model>.manifest.json): for every tensor its name, dtype, shape,
 position in the file and the CRC32 of its bytes, computed while the data is generated. The test compares what
@@ -436,7 +440,7 @@ def generate_model(args):
         os.sync()
         drop_page_cache([os.path.join(directory, f["path"]) for f in manifest_files])
     manifest = {
-        "generator_version": GENERATOR_VERSION, "seed": seed, "model": model, "scale": scale,
+        "generator_version": GENERATOR_VERSION, "numpy_version": np.__version__, "seed": seed, "model": model, "scale": scale,
         "num_files": len(manifest_files),
         "num_tensors": sum(len(f["tensors"]) for f in manifest_files),
         "total_data_bytes": data_bytes,
@@ -556,8 +560,8 @@ def check_coverage(manifests):
 def run_generate(args):
     models = list(args.models)
     jobs = [(m, args.out, args.seed, args.scale, args.files, not args.no_verify) for m in models]
-    print("generating models %s, seed %d, scale %g, in %s" % (args.models, args.seed, args.scale, args.out),
-          flush=True)
+    print("generating models %s, seed %d, scale %g, numpy %s, generator version %d, in %s" % (
+        args.models, args.seed, args.scale, np.__version__, GENERATOR_VERSION, args.out), flush=True)
     records = []
     with ProcessPoolExecutor(max_workers=len(jobs)) as pool:
         for model, model_records in pool.map(generate_model, jobs):

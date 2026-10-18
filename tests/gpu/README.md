@@ -32,8 +32,10 @@ passthrough, 2 GiB of `/dev/shm` for NCCL and the existing io_uring seccomp sett
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
 seed. The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed
-reproduces the models exactly. Each model has a manifest (`<model>.manifest.json`): per tensor the name, dtype,
-shape, file position and CRC32 of the bytes, computed while the data was generated.
+reproduces the models exactly under the same numpy version (the manifests record it; to rebuild an old model,
+install that numpy and run the generator with the same seed). Each model has a manifest (`<model>.manifest.json`): per tensor the name, dtype,
+shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are uploaded with the results
+(`manifests/`), so a failing tensor can be looked up without regenerating anything.
 
 The generator checks its own output before anything is streamed (headers, offsets, CRC32 read back from disk,
 a few tensors regenerated from the seed, and coverage of all dtypes/ranks/edge sizes), so a failure in the

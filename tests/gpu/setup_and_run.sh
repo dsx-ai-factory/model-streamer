@@ -123,6 +123,10 @@ do
         "$strategy" "$start" "$end" >> "$SETUP_TIMING"
 done
 
+# The manifests list every tensor of every model; keep them with the results to debug a failure.
+mkdir -p "$RESULTS/manifests"
+for m in A B C D; do gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true; done
+
 echo "== where the time went"
 python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl | tee "$RESULTS/timing-summary.txt"
 
