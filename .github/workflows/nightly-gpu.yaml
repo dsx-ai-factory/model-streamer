@@ -1,9 +1,12 @@
 name: Nightly GPU tests
 
 on:
-  # TEMPORARY: lets a pull request run this workflow from its branch before the file exists on the default
-  # branch, where workflow_dispatch cannot see it yet. Remove before merging.
-  pull_request:
+  # TEMPORARY: runs this workflow on a push to its development branch, before the file exists on the default
+  # branch, where workflow_dispatch cannot see it yet. (A pull_request trigger does not work: the NVIDIA
+  # runners refuse pull_request events.) Remove before merging.
+  push:
+    branches:
+      - real-gpu-tests
     paths:
       - '.github/workflows/nightly-gpu.yaml'
       - 'tests/gpu/**'
