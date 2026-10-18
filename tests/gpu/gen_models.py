@@ -429,8 +429,7 @@ def generate_model(args):
     with timer.phase("%s.plan" % model):
         plan = make_plan(model, seed, scale, files)
     manifest_files = []
-    data_bytes = 0
-    with timer.phase("%s.generate+write" % model) as _:
+    with timer.phase("%s.generate+write" % model):
         for shard in plan:
             entry = write_shard(os.path.join(directory, shard.filename), shard, seed, model)
             manifest_files.append(entry)

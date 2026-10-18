@@ -34,10 +34,6 @@ class PhaseTimer:
         self.records.extend(records)
 
 
-def _group_key(record):
-    return record["phase"]
-
-
 def report(records, top=None):
     """A table of phases, the slowest first, with each phase's share of the summed time.
 
@@ -45,7 +41,7 @@ def report(records, top=None):
     summed time and not of the wall time."""
     groups = {}
     for record in records:
-        entry = groups.setdefault(_group_key(record), {"seconds": 0.0, "count": 0, "bytes": 0})
+        entry = groups.setdefault(record["phase"], {"seconds": 0.0, "count": 0, "bytes": 0})
         entry["seconds"] += record["seconds"]
         entry["count"] += 1
         entry["bytes"] += record.get("bytes", 0)
