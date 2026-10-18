@@ -13,6 +13,8 @@ from runai_model_streamer.file_streamer import (
 
 from runai_model_streamer.file_streamer.file_streamer import host_or_device
 
+from runai_model_streamer.file_streamer.device_support import device_support
+
 from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
@@ -134,13 +136,13 @@ class DistributedStreamer:
             return 1
         return dist.get_world_size()
 
-    def get_cuda_free_memory(self, device: str) -> int:
-        if not torch.cuda.is_available():
-            return 0
-        free_memory, total_memory = torch.cuda.mem_get_info(device)
-        return free_memory
+    def get_device_free_memory(self, device: str) -> int:
+        """Free bytes on this rank's device, read through the one table that knows per-vendor calls.
+        0 when the vendor is unknown here or has no usable device, which fails the check below."""
+        support = device_support(device)
+        return support.free_memory(device) if support else 0
 
-    def get_min_cuda_free_memory(self, device: str) -> int:
+    def get_min_device_free_memory(self, device: str) -> int:
         """The smallest free memory among the ranks of the distribution group: every rank under
         RUNAI_STREAMER_DIST_GLOBAL, otherwise the ranks on this node.
 
@@ -156,7 +158,7 @@ class DistributedStreamer:
         warmup = torch.zeros(1, dtype=torch.uint8, device=device)
         dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
 
-        free_memory = torch.tensor([self.get_cuda_free_memory(device)], dtype=torch.int64, device=device)
+        free_memory = torch.tensor([self.get_device_free_memory(device)], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
         return int(free_memory.item())
 
@@ -201,8 +203,10 @@ class DistributedStreamer:
                 self.is_distributed = False
 
         # check if there is enough free memory on the device
-        if self.is_distributed and torch.cuda.is_available() and dist.get_backend() == "nccl":
-            free_memory = self.get_min_cuda_free_memory(device)
+        # device_support, not a vendor name: the check is about reading free memory on the target, and
+        # a vendor absent from that table is one we cannot read - so there is nothing to check.
+        if self.is_distributed and device_support(device) and dist.get_backend() == "nccl":
+            free_memory = self.get_min_device_free_memory(device)
             required = dist_device_bytes_required(self.params.max_chunk)
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")

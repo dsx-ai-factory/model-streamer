@@ -1,4 +1,4 @@
-from typing import Dict, List, Iterator, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Iterator, Optional, Tuple, Union
 from runai_model_streamer.libstreamer.libstreamer import (
     runai_probe_direct_block_size,
     SUCCESS_ERROR_CODE,
@@ -63,11 +63,14 @@ def alloc_device_slot(slot_size: int, device: str) -> Slot:
     return Slot(buffer, raw.data_ptr() + shift)
 
 
-def device_slots(device: str) -> SlotMemory:
-    """A ring made of device memory. direct_io=False because nothing reads straight into a GPU: the
-    library fills these by copying out of its own host staging."""
-    return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False, label="GPU",
-                      reuse_needs_event=True)
+def device_slots(device: str, new_event: Callable[[], Any]) -> SlotMemory:
+    """A ring made of device memory. direct_io=False because nothing reads straight into a device:
+    the library fills these by copying out of its own host staging.
+
+    new_event is passed in rather than looked up, so this names no vendor and a test can supply its
+    own. Production takes it from DeviceSupport."""
+    return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False,
+                      label=torch.device(device).type.upper(), new_event=new_event)
 
 
 def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
@@ -339,7 +342,8 @@ class FileStreamer:
             # Asked once: the ring's memory does not change under a stream. Inside the try and behind
             # the live_requests check, because there is no iterator at all until stream_files has run
             # - get_chunks() before it is an empty generator, not an error.
-            device_ring = self.live_requests and self.requests_iterator.slots.reuse_needs_event
+            new_event = (self.requests_iterator.slots.new_event if self.live_requests else None)
+            device_ring = new_event is not None
 
             while self.live_requests:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
@@ -427,7 +431,7 @@ class FileStreamer:
                         # orders the C++ layer's next write against our stream.
                         ready_event = None
                         if device_ring:
-                            ready_event = torch.cuda.Event()
+                            ready_event = new_event()
                             ready_event.record()
                         self.requests_iterator.release(ready_request, ready_event)
                         self._submit_while_buffers_free()

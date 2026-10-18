@@ -1,4 +1,3 @@
-import contextlib
 import os
 import shutil
 import tempfile
@@ -19,9 +18,10 @@ RANGE_SIZE = 8
 
 
 class FakeCudaEvent:
-    """A torch CUDA event is unavailable on a host-only runner, and `device_slots("cpu")` is a
-    "device" ring made of CPU tensors. Completing at once keeps the ring flowing; what is under test
-    is that an event is recorded and handed to release(), not when it fires."""
+    """A torch CUDA event is unavailable on a host-only runner, so these tests build a "device" ring
+    out of CPU tensors and pass this in as its event factory. Completing at once keeps the ring
+    flowing; what is under test is that an event is recorded and handed to release(), not when it
+    fires."""
 
     recorded = 0
 
@@ -74,8 +74,7 @@ class TestDeviceRingPath(unittest.TestCase):
             handle.write("".join(expected[i] for i in range(count)))
         return path, expected
 
-    def stream(self, count, ring_slots, buffer_size=RANGE_SIZE * 4, num_buffers=2,
-               patch_event=True):
+    def stream(self, count, ring_slots, buffer_size=RANGE_SIZE * 4, num_buffers=2):
         """Stream `count` ranges through a ring made of `ring_slots`, recording every release."""
         path, expected = self.write_ranges(count)
         chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * count)]
@@ -98,9 +97,7 @@ class TestDeviceRingPath(unittest.TestCase):
             self.ring = ring
             return ring
 
-        event_patch = (patch("torch.cuda.Event", FakeCudaEvent) if patch_event
-                       else contextlib.nullcontext())
-        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), event_patch:
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring):
             with FileStreamer() as fs:
                 fs.stream_files(chunks)
                 got = [(index, bytes(buffer.numpy().tobytes()).decode(), buffer)
@@ -108,13 +105,13 @@ class TestDeviceRingPath(unittest.TestCase):
         return got, expected
 
     def test_a_device_ring_yields_the_right_bytes(self):
-        got, expected = self.stream(12, device_slots("cpu"))
+        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent))
         self.assertEqual({i: text for i, text, _ in got}, expected)
 
     def test_the_yielded_tensor_is_a_clone_not_a_view_into_the_slot(self):
         """The point of the clone. Overwriting every slot after the stream must not change a tensor
         the caller is still holding - with a view it would."""
-        got, expected = self.stream(12, device_slots("cpu"))
+        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent))
         kept = {i: buffer.clone() for i, _, buffer in got}     # what the caller saw, snapshotted
 
         for slot in self.ring._pool._slots:
@@ -126,7 +123,7 @@ class TestDeviceRingPath(unittest.TestCase):
                             f"range {i} changed when its slot was overwritten - it was a view")
 
     def test_every_device_release_carries_an_event(self):
-        self.stream(12, device_slots("cpu"))
+        self.stream(12, device_slots("cpu", FakeCudaEvent))
         self.assertGreater(len(self.released), 0, "no slot was released at all")
         self.assertTrue(all(isinstance(e, FakeCudaEvent) for e in self.released))
         self.assertEqual(FakeCudaEvent.recorded, len(self.released),
@@ -142,8 +139,7 @@ class TestDeviceRingPath(unittest.TestCase):
         last live request into a pending state submits nothing, the response loop ends because
         live_requests is empty, and the stream finishes short - no hang, just missing data."""
         SlowCudaEvent.synchronized = 0
-        with patch("torch.cuda.Event", SlowCudaEvent):
-            got, expected = self.stream(12, device_slots("cpu"), patch_event=False)
+        got, expected = self.stream(12, device_slots("cpu", SlowCudaEvent))
         self.assertEqual({i: text for i, text, _ in got}, expected,
                          "the stream ended short - the blocking fallback was not taken")
         self.assertGreater(SlowCudaEvent.synchronized, 0, "no slot was ever waited on")
@@ -157,7 +153,7 @@ class TestDeviceRingPath(unittest.TestCase):
 
         def build_ring(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 4, 2, chunks, owned=False, slots=device_slots("cpu")
+                RANGE_SIZE * 4, 2, chunks, owned=False, slots=device_slots("cpu", SlowCudaEvent)
             )
 
         real_response = file_streamer_module.runai_response
@@ -170,7 +166,6 @@ class TestDeviceRingPath(unittest.TestCase):
             return real_response(streamer, *args, **kwargs)
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
-                patch("torch.cuda.Event", SlowCudaEvent), \
                 patch.object(file_streamer_module, "runai_response", response_then_teardown):
             with FileStreamer() as fs:
                 fs.stream_files(chunks)
@@ -186,11 +181,10 @@ class TestDeviceRingPath(unittest.TestCase):
 
         def build_ring(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 2, 2, chunks, owned=False, slots=device_slots("cpu")
+                RANGE_SIZE * 2, 2, chunks, owned=False, slots=device_slots("cpu", FakeCudaEvent)
             )
 
-        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
-                patch("torch.cuda.Event", FakeCudaEvent):
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring):
             with self.assertRaises(ValueError):
                 with FileStreamer() as fs:
                     fs.stream_files(chunks)
