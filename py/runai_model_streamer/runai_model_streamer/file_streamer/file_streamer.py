@@ -69,7 +69,8 @@ def alloc_device_slot(slot_size: int, device: str) -> Slot:
 def device_slots(device: str) -> SlotMemory:
     """A ring made of device memory. direct_io=False because nothing reads straight into a GPU: the
     library fills these by copying out of its own host staging."""
-    return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False, label="GPU")
+    return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False, label="GPU",
+                      reuse_needs_event=True)
 
 
 def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
@@ -259,9 +260,14 @@ class FileStreamer:
         direct_block = (DIRECT_IO_BLOCK if object_storage or not paths
                         else runai_probe_direct_block_size(self.streamer, paths))
 
-        # Only a host destination hands its slots over. For any other, get_chunks yields
-        # tensor.to(device) and the caller never sees the slot, so handing it over would throw away
-        # a buffer per submission and fault a fresh one in, for nothing.
+        # Only a host ring read to a host destination hands its slots over, because that is the only
+        # case where the caller receives the SLOT itself. A device destination gets a copy - .to() out
+        # of a host ring, or a clone out of a device ring - so the slot is reused and handing it over
+        # would throw away a buffer per submission and fault a fresh one in, for nothing.
+        #
+        # Not "the caller never sees the slot because we yield tensor.to(device)": .to() RETURNS SELF
+        # when the device already matches, so on a device ring that would hand back the live slot.
+        # What makes it safe is the clone in get_chunks, not this condition.
         self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
             file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
         )
@@ -300,7 +306,15 @@ class FileStreamer:
         range_dsts are RAW ADDRESSES into the ring's buffers: they keep nothing alive. A buffer must
         outlive its submission, until that submission's last response has been consumed - which is
         exactly when get_chunks releases it back to the pool."""
-        while self.requests_iterator.has_free_buffer():
+        while True:
+            if not self.requests_iterator.has_free_buffer():
+                if self.outstanding > 0:
+                    return    # a response will free one; do not block the drain
+                # Nothing in flight and nothing free: every slot is waiting on its clones. Returning
+                # here would end the stream with data unsent - the caller's loop runs while
+                # live_requests is non-empty, and we just emptied it.
+                self.requests_iterator.wait_for_free_buffer()
+
             request = self.requests_iterator.next_request()
             if request is None:
                 return    # no data left to submit; the live submissions still have to be drained
@@ -325,6 +339,11 @@ class FileStreamer:
             raise ValueError("Streamer not initialized")
 
         try:
+            # Asked once: the ring's memory does not change under a stream. Inside the try and behind
+            # the live_requests check, because there is no iterator at all until stream_files has run
+            # - get_chunks() before it is an empty generator, not an error.
+            device_ring = self.live_requests and self.requests_iterator.slots.reuse_needs_event
+
             while self.live_requests:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
                 # serves whichever submission completed a range first, so responses INTERLEAVE.
@@ -358,10 +377,11 @@ class FileStreamer:
                 file_id, range_index, range_buffer = self.requests_iterator.get_global_file_and_range(
                     request, file_relative_index, range_relative_index
                 )
-                # create one dimensional tensor from the range buffer
-                # we return a tensor of shape (1, range_buffer.size)
-                # the data type of the original range_buffer, as created by the requests_iterator, is preserved (uint8)
-                tensor = torch.from_numpy(range_buffer).view(1, -1)
+                # One dimensional, shape (1, n), uint8 as the requests_iterator made it. Built from
+                # whatever the slot is MADE of: a host ring hands out a numpy view, a device ring a
+                # torch one, and from_numpy accepts only the first.
+                tensor = (range_buffer if torch.is_tensor(range_buffer)
+                          else torch.from_numpy(range_buffer)).view(1, -1)
 
                 # Park it, or take back the run it completes. Nothing is handed over for a response
                 # that arrived early, so a response and a yield stop being one to one.
@@ -378,7 +398,12 @@ class FileStreamer:
                 )
 
                 for ready_id, ready_request, ready_file, ready_index, ready_tensor in ready:
-                    if self.device_str != "cpu":
+                    if device_ring:
+                        # The owned tensor. Enqueued on the CALLER's stream and not waited on: stream
+                        # order already puts it before whatever they do with the tensor next. It is
+                        # also what makes the slot reusable at all - .to() below would return self.
+                        ready_tensor = ready_tensor.clone()
+                    elif self.device_str != "cpu":
                         ready_tensor = ready_tensor.to(self.device_str)
                     yield ready_file, ready_index, ready_tensor
 
@@ -400,7 +425,14 @@ class FileStreamer:
                         self.reported_done.discard(ready_id)
                         del self.ranges_not_yielded[ready_id]
                         del self.live_requests[ready_id]
-                        self.requests_iterator.release(ready_request)
+                        # The clones out of this slot are enqueued, not finished. The event marks the
+                        # last of them, and the pool holds the slot until it completes - nothing else
+                        # orders the C++ layer's next write against our stream.
+                        ready_event = None
+                        if device_ring:
+                            ready_event = torch.cuda.Event()
+                            ready_event.record()
+                        self.requests_iterator.release(ready_request, ready_event)
                         self._submit_while_buffers_free()
         finally:
             self.drain_live_submissions()
