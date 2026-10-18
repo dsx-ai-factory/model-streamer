@@ -46,6 +46,7 @@ echo "== environment"
 date -u
 uname -r
 echo "seed: $SEED"
+echo "matrix: ${GPU_MATRIX:-core}"
 python3 --version
 nvidia-smi
 echo "ulimit -n: $(ulimit -n)   ulimit -l: $(ulimit -l)"
@@ -109,6 +110,7 @@ wait_for_generator() {
 phase wait_for_generator wait_for_generator
 
 export STREAMER_LIBRARY="$PWD/cpp/bazel-bin/streamer/libstreamer.so"
+export GPU_MATRIX="${GPU_MATRIX:-core}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=2
 export NCCL_DEBUG=INFO

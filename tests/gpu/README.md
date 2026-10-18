@@ -4,9 +4,10 @@ Streams synthetic safetensors models to real GPUs with the model streamer and co
 the generator recorded. CI otherwise runs on CPU and mock devices only, so this is where a real CUDA copy,
 real NCCL and the real storage path are exercised together.
 
-The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs it daily at 00:17 UTC and on
-`workflow_dispatch`, on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`: two T4s,
-12 cores, 48 GB). To run it on a branch: `gh workflow run nightly-gpu.yaml --ref <branch> [-f seed=N]`.
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs the `core` rows every night at
+00:17 UTC and all the rows (`full`) every Sunday at 01:47 UTC, on runner group `nv-gpu-amd64-t4-2gpu` (label
+`linux-amd64-gpu-t4-latest-2`: two T4s, 12 cores, 48 GB). With `workflow_dispatch` either can be run on demand:
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=full] [-f seed=N]`.
 
 ## What it does
 
@@ -55,12 +56,25 @@ python3 -m unittest tests/gpu/test_gen_models.py
 
 ## The test (`test_synthetic_models.py`)
 
-Each row of `ROWS` is one load, named after its model and what is special about it (`mixed.solo`,
-`mixed.dist.chunks`, `many_files.dist.files`, ...): a model, distributed or not, a partition policy, `owned`, a destination
-(`cuda` or `cpu` then `.to()`) and a memory limit. `tight` sets `RUNAI_STREAMER_MEMORY_LIMIT` to about a
-sixteenth of the model (never below twice the largest range, a tensor or a file header, times the ranks sharing
-the limit), so the host buffers are reused many times; with the default limit a small model fits in the ring
-once and no buffer is ever reused.
+The rows are defined in `matrix.py` (no GPU needed; `test_matrix.py` tests it). A row is one load: a model,
+distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_to`: load to host memory, then
+`.to()` each tensor) and a memory limit. Its id says all of it: `mixed.solo.owned.cuda.tight`,
+`many_files.dist.files.owned.cuda.tight`. `GPU_MATRIX` picks the rows:
+
+- `core` (nightly): 14 rows. One option at a time on the `mixed` model (borrowed tensors, `chunks`, host then
+  `.to()`, the deep and default limits), and one solo and one distributed load of every other model.
+- `full` (weekly): every valid combination, 94 rows. A distributed row needs `cuda`; the `files` policy needs more
+  than one file; the deep limit needs a model that can use it.
+
+The memory limit decides whether the host buffers, the ring the streamer reads into, are reused. With
+N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
+
+- `tight`: about a sixteenth of the model, never below twice the largest range (a tensor or a file header) times
+  the ranks sharing the limit: two buffers for `mixed`, five for `many_tensors`, one for the other two. The
+  model passes through the ring many times, and every buffer is reused.
+- `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
+  once. Only `mixed` and `many_tensors` can have this.
+- `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
 
 After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
 the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until

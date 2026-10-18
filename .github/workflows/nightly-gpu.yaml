@@ -12,9 +12,18 @@ on:
       - 'tests/gpu/**'
       - '.devcontainer/gpu/**'
   schedule:
-    - cron: '17 0 * * *'
+    - cron: '17 0 * * *'   # every night: the core rows
+    - cron: '47 1 * * 0'   # every Sunday: all the rows
   workflow_dispatch:
     inputs:
+      matrix:
+        description: Which rows to run, see tests/gpu/matrix.py.
+        required: false
+        default: core
+        type: choice
+        options:
+          - core
+          - full
       seed:
         description: Seed of the synthetic models (default is the run id).
         required: false
@@ -63,6 +72,7 @@ jobs:
           push: never
           env: |
             GPU_SEED=${{ inputs.seed || github.run_id }}
+            GPU_MATRIX=${{ inputs.matrix || ((github.event_name == 'push' || github.event.schedule == '47 1 * * 0') && 'full') || 'core' }}
           runCmd: bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went

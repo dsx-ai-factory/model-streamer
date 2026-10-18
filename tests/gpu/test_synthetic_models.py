@@ -8,13 +8,14 @@ Launched by torchrun with two ranks, one GPU each, once per filesystem strategy:
     RUNAI_STREAMER_FS_STRATEGY=sync_buffered \\
         torchrun --standalone --nproc_per_node=2 tests/gpu/test_synthetic_models.py
 
-Each row of ROWS is one load: a model, distributed or not, a partition policy, `owned`, a destination and a
-memory limit. After a load, every tensor is checked for name, dtype, shape, device and the CRC32 of its
+Each row (see matrix.py) is one load: a model, distributed or not, a partition policy, `owned`, a destination
+and a memory limit. After a load, every tensor is checked for name, dtype, shape, device and the CRC32 of its
 bytes. A tensor is compared by its bytes, never by value, so NaN payloads and negative zero compare right.
 
+    GPU_MATRIX     core (default) or full: which rows to run, see matrix.py
     GPU_FIXTURES   directory written by gen_models.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
-    GPU_ROWS       comma-separated row ids to run (default all)
+    GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them
 """
 
 import gc
@@ -23,7 +24,6 @@ import os
 import sys
 import time
 import zlib
-from collections import namedtuple
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -32,39 +32,16 @@ import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_models import MODEL_NAMES  # noqa: E402
+from matrix import WORLD, memory_limit, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 
 from runai_model_streamer import SafetensorsStreamer  # noqa: E402
 from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype  # noqa: E402
 
 MIB = 1 << 20
-WORLD = 2
 D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
 MAX_ERRORS_PER_ROW = 40
-
-# dist: None = not distributed. device: "cuda" streams straight to the rank's GPU, "cpu_to" streams to host
-# memory and copies each tensor to the GPU. limit: "tight" forces the host ring to be reused many times,
-# "default" leaves RUNAI_STREAMER_MEMORY_LIMIT unset.
-Row = namedtuple("Row", "id model dist policy owned device limit strategies")
-
-# The models are the ones of gen_models.py. strategies: None = every filesystem strategy, otherwise only the
-# ones named. A row id is the model, then what is special about the row.
-ROWS = [
-    Row("mixed.solo", "mixed", False, None, True, "cuda", "tight", None),
-    Row("mixed.solo.borrowed", "mixed", False, None, False, "cuda", "tight", None),
-    Row("mixed.dist.spans", "mixed", True, "spans", True, "cuda", "tight", None),
-    Row("mixed.dist.chunks", "mixed", True, "chunks", True, "cuda", "tight", None),
-    Row("mixed.host_then_to", "mixed", False, None, True, "cpu_to", "tight", None),
-    Row("mixed.default_limit", "mixed", False, None, True, "cuda", "default", None),
-    Row("many_tensors.solo", "many_tensors", False, None, True, "cuda", "tight", None),
-    Row("many_tensors.dist.spans", "many_tensors", True, "spans", True, "cuda", "tight", None),
-    Row("giant_tensor.solo", "giant_tensor", False, None, True, "cuda", "tight", None),
-    Row("giant_tensor.dist.spans", "giant_tensor", True, "spans", True, "cuda", "tight", None),
-    Row("many_files.solo", "many_files", False, None, True, "cuda", "tight", None),
-    Row("many_files.dist.files", "many_files", True, "files", True, "cuda", "tight", None),
-    Row("many_files.dist.spans", "many_files", True, "spans", True, "cuda", "tight", None),
-]
 
 
 class Fixtures:
@@ -81,19 +58,6 @@ class Fixtures:
     def expected(self, model):
         """name -> manifest entry, across all files of the model."""
         return {t["name"]: t for f in self.manifests[model]["files"] for t in f["tensors"]}
-
-
-def memory_limit(manifest, distributed):
-    """About a sixteenth of the model, so the host ring is reused many times - but never below twice the
-    largest range the streamer reads, times the ranks sharing the limit. A range must fit in one buffer and a
-    distributed rank only gets its share of the limit; twice the largest range leaves room for at least two
-    buffers, so a buffer can be read while the previous one is consumed. (Where the whole model is smaller
-    than two largest ranges, as in giant_tensor, the ring still has one buffer.) The largest range is a tensor,
-    or a file's header: the streamer reads each header as one range, and many_tensors' is 10 MB."""
-    ranks = WORLD if distributed else 1
-    largest = max([manifest["largest_tensor_bytes"]] + [f["header_len"] for f in manifest["files"]])
-    floor = 2 * largest * ranks
-    return max(manifest["total_data_bytes"] // 16, floor, MIB)
 
 
 @contextmanager
@@ -174,11 +138,11 @@ class RowRun:
 
     def run(self):
         row = self.row
+        limit = memory_limit(self.manifest, bool(row.dist), row.limit)
         settings = {
             "RUNAI_STREAMER_PARTITION_POLICY": row.policy or "spans",
             "RUNAI_STREAMER_DIST": "auto",
-            "RUNAI_STREAMER_MEMORY_LIMIT": (
-                None if row.limit == "default" else str(memory_limit(self.manifest, bool(row.dist)))),
+            "RUNAI_STREAMER_MEMORY_LIMIT": None if limit is None else str(limit),
         }
         destination = "cpu" if row.device == "cpu_to" else str(self.device)
         held = {}
@@ -248,12 +212,12 @@ def release_gpu_memory():
     torch.cuda.empty_cache()
 
 
-def selected_rows(strategy):
+def selected_rows():
+    rows = rows_for(os.environ.get("GPU_MATRIX", "core"))
     wanted = os.environ.get("GPU_ROWS")
-    rows = [r for r in ROWS if r.strategies is None or strategy in r.strategies]
     if wanted:
-        ids = set(wanted.split(","))
-        rows = [r for r in rows if r.id in ids]
+        prefixes = tuple(wanted.split(","))
+        rows = [r for r in rows if r.id.startswith(prefixes)]
     return rows
 
 
@@ -286,7 +250,9 @@ def main():
     with timer.phase("init.manifests"):
         fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"))
 
-    rows = selected_rows(strategy)
+    rows = selected_rows()
+    if rank == 0:
+        stamp("matrix %s: %d rows, strategy %s" % (os.environ.get("GPU_MATRIX", "core"), len(rows), strategy))
     outcomes = []
     failed = False
     try:
