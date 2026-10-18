@@ -177,14 +177,21 @@ class SlotMemory(NamedTuple):
     direct_io: bool
     # What the ring's debug line calls this memory.
     label: str
-    # Whether a slot may be refilled as soon as its last range was handed over. A host ring may: the
-    # copy out of it finishes before tensor.to() returns. A device ring may not - the clone out of it
-    # is only ENQUEUED, and the next writer is the C++ layer's own stream, which torch orders against
-    # nothing - so its release carries an event and the slot stays pending until that event clears.
-    reuse_needs_event: bool
+    # Makes a fresh event, or None when this ring needs none. A host ring needs none: the copy out of
+    # it finishes before tensor.to() returns. A device ring does - the clone out of it is only
+    # ENQUEUED, and the next writer is the C++ layer's own stream, which torch orders against nothing -
+    # so its release carries an event and the slot stays pending until that event clears.
+    #
+    # The FACTORY rather than a flag, so the two cannot disagree and no consumer has to name a vendor
+    # to build one. It comes from DeviceSupport, which is the one table that knows per-vendor calls.
+    new_event: Optional[Callable[[], Any]]
+
+    @property
+    def reuse_needs_event(self) -> bool:
+        return self.new_event is not None
 
 
-HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", reuse_needs_event=False)
+HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None)
 
 
 class FilesRequestsIteratorWithBuffer:

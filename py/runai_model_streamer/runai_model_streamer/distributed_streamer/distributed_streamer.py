@@ -16,6 +16,8 @@ from runai_model_streamer.file_streamer import (
 
 from runai_model_streamer.file_streamer.file_streamer import host_or_device
 
+from runai_model_streamer.file_streamer.device_support import device_support
+
 from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
@@ -152,11 +154,11 @@ class DistributedStreamer:
             return 1
         return dist.get_world_size()
 
-    def get_cuda_free_memory(self, device: str) -> int:
-        if not torch.cuda.is_available():
-            return 0
-        free_memory, total_memory = torch.cuda.mem_get_info(device)
-        return free_memory
+    def get_device_free_memory(self, device: str) -> int:
+        """Free bytes on this rank's device, read through the one table that knows per-vendor calls.
+        0 when the vendor is unknown here or has no usable device, which fails the check below."""
+        support = device_support(device)
+        return support.free_memory(device) if support else 0
 
     def get_xpu_free_memory(self) -> int:
         if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
@@ -164,7 +166,7 @@ class DistributedStreamer:
         free_memory, total_memory = torch.xpu.mem_get_info()
         return free_memory
 
-    def get_min_cuda_free_memory(self, device: str) -> int:
+    def get_min_device_free_memory(self, device: str) -> int:
         """The smallest free memory among the ranks of the distribution group: every rank under
         RUNAI_STREAMER_DIST_GLOBAL, otherwise the ranks on this node.
 
@@ -180,7 +182,7 @@ class DistributedStreamer:
         warmup = torch.zeros(1, dtype=torch.uint8, device=device)
         dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
 
-        free_memory = torch.tensor([self.get_cuda_free_memory(device)], dtype=torch.int64, device=device)
+        free_memory = torch.tensor([self.get_device_free_memory(device)], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
         return int(free_memory.item())
 
@@ -236,7 +238,7 @@ class DistributedStreamer:
         xpu_dist = self.is_distributed and backend_name == "xccl" and hasattr(torch, "xpu") and torch.xpu.is_available()
         # check if there is enough free memory on the device
         if self.is_distributed and (cuda_dist or xpu_dist):
-            free_memory = (self.get_min_cuda_free_memory(device) if cuda_dist
+            free_memory = (self.get_min_device_free_memory(device) if cuda_dist
                            else self.get_xpu_free_memory())
             required = dist_device_bytes_required(self.params.max_chunk)
             if free_memory < required:
