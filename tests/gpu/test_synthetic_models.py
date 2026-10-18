@@ -47,9 +47,7 @@ MAX_ERRORS_PER_ROW = 40
 # "default" leaves RUNAI_STREAMER_MEMORY_LIMIT unset.
 Row = namedtuple("Row", "id model dist policy owned device limit strategies")
 
-# Model C holds the 2 GiB tensor, so it runs under two strategies only: its load dominates the time.
-HEAVY_STRATEGIES = ("sync_buffered", "io_uring_direct,sync_buffered")
-
+# strategies: None = every filesystem strategy, otherwise only the ones named.
 ROWS = [
     Row("A1", "A", False, None, True, "cuda", "tight", None),
     Row("A2", "A", False, None, False, "cuda", "tight", None),
@@ -59,8 +57,8 @@ ROWS = [
     Row("A6", "A", False, None, True, "cuda", "default", None),
     Row("B1", "B", False, None, True, "cuda", "tight", None),
     Row("B2", "B", True, "spans", True, "cuda", "tight", None),
-    Row("C1", "C", False, None, True, "cuda", "tight", HEAVY_STRATEGIES),
-    Row("C2", "C", True, "spans", True, "cuda", "tight", HEAVY_STRATEGIES),
+    Row("C1", "C", False, None, True, "cuda", "tight", None),
+    Row("C2", "C", True, "spans", True, "cuda", "tight", None),
     Row("D1", "D", False, None, True, "cuda", "tight", None),
     Row("D2", "D", True, "files", True, "cuda", "tight", None),
     Row("D3", "D", True, "spans", True, "cuda", "tight", None),
