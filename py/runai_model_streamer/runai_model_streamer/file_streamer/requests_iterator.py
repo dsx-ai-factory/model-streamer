@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from typing import Callable, List, NamedTuple, Tuple, Optional
+from typing import Any, Callable, List, NamedTuple, Tuple, Optional
 from collections import deque
 from functools import partial
 import bisect
@@ -177,9 +177,14 @@ class SlotMemory(NamedTuple):
     direct_io: bool
     # What the ring's debug line calls this memory.
     label: str
+    # Whether a slot may be refilled as soon as its last range was handed over. A host ring may: the
+    # copy out of it finishes before tensor.to() returns. A device ring may not - the clone out of it
+    # is only ENQUEUED, and the next writer is the C++ layer's own stream, which torch orders against
+    # nothing - so its release carries an event and the slot stays pending until that event clears.
+    reuse_needs_event: bool
 
 
-HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU")
+HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", reuse_needs_event=False)
 
 
 class FilesRequestsIteratorWithBuffer:
@@ -245,17 +250,41 @@ class FilesRequestsIteratorWithBuffer:
     def has_free_buffer(self) -> bool:
         return self._pool.has_free()
 
-    def release(self, request: FilesRequest) -> None:
-        """Hand a drained request's slot back to the pool, which decides whether it survives."""
+    def release(self, request: FilesRequest, ready_event=None) -> None:
+        """Hand a drained request's slot back to the pool, which decides whether it survives.
+
+        ready_event, when given, marks the last reader of that slot: the pool keeps the slot pending
+        until it completes. Required for a ring whose slots.reuse_needs_event is set."""
         if request.buffer_index is None:
             raise ValueError("request has no buffer to release (released twice?)")
 
-        self._pool.release(request.buffer_index)
+        if ready_event is None and self._slot_memory.reuse_needs_event:
+            raise ValueError(
+                f"a {self._slot_memory.label} ring slot needs an event to be released: the copy out "
+                f"of it is still running, and nothing orders the next write against it"
+            )
+
+        self._pool.release(request.buffer_index, ready_event)
         request.buffer_index = None
+
+    def wait_for_free_buffer(self) -> None:
+        """Block until a slot is free. For the caller that has nothing left to submit and nothing in
+        flight - returning instead would leave it waiting for a response that can never arrive."""
+        self._pool.wait_for_free()
+
+    @property
+    def slots(self) -> SlotMemory:
+        """What this ring's slots are made of, for a caller that must handle them accordingly."""
+        return self._slot_memory
 
     def get_global_file_and_range(
         self, request: FilesRequest, local_file_index: int, local_range_index: int
-    ) -> Tuple[int, int, np.ndarray]:
+    ) -> Tuple[int, int, Any]:
+        """(file id, range index, a view of that range inside its slot).
+
+        The view's type is whatever the slot is MADE of - a numpy array for a host ring, a torch
+        tensor for a device one - so it is only ever handed back, never assumed. The caller turns it
+        into a tensor knowing which it has."""
         file_id, global_range_index = self.files_requests_iterator.get_global_file_and_range(
             request, local_file_index, local_range_index
         )

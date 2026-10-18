@@ -83,6 +83,20 @@ class TestSlotMemory(unittest.TestCase):
         self.assertFalse(device._slot_memory.direct_io)
         self.assertTrue(host._slot_memory.direct_io)
 
+    def test_a_device_ring_refuses_a_release_without_an_event(self):
+        """The clone out of a device slot is only enqueued, so releasing it as free would let the
+        next write land in memory the clone is still reading."""
+        ring = self.ring(slots=device_slots("cpu"))
+        request = ring.next_request()
+        with self.assertRaises(ValueError) as raised:
+            ring.release(request)
+        self.assertIn("needs an event", str(raised.exception))
+
+    def test_a_host_ring_releases_without_one(self):
+        ring = self.ring()
+        ring.release(ring.next_request())
+        self.assertTrue(ring.has_free_buffer())
+
     def test_the_debug_line_names_the_memory(self):
         self.assertEqual(device_slots("cpu").label, "GPU")
         self.assertEqual(HOST_SLOTS.label, "CPU")
