@@ -257,7 +257,8 @@ def main():
     failed = False
     try:
         for row in rows:
-            dist.barrier()
+            with timer.phase("%s.barrier" % row.id):
+                dist.barrier()
             run = RowRun(row, fixtures, device, timer)
             if rank == 0:
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
@@ -273,20 +274,23 @@ def main():
             elapsed = time.perf_counter() - started
             # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
             # The second element is 1 when a rank raised: its collectives may be out of step.
-            flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0], device=device)
-            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
-            ok = flag[0].item() == 0
-            any_raised = flag[1].item() == 1
+            with timer.phase("%s.agree" % row.id):
+                flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0], device=device)
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+                ok = flag[0].item() == 0
+                any_raised = flag[1].item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
                              "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
             for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)
-            release_gpu_memory()
+            with timer.phase("%s.release" % row.id):
+                release_gpu_memory()
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
-            write_results(results_dir, strategy, rank, timer, outcomes)
+            with timer.phase("%s.results" % row.id):
+                write_results(results_dir, strategy, rank, timer, outcomes)
             if not ok:
                 failed = True
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and

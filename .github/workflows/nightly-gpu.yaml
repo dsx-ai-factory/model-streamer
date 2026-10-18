@@ -42,7 +42,7 @@ jobs:
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
-    timeout-minutes: 120
+    timeout-minutes: 180   # TEMPORARY: a full run took over 2 hours; lower or keep once the time is understood
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
