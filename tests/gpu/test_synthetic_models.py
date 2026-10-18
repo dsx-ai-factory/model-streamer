@@ -40,7 +40,7 @@ MIB = 1 << 20
 WORLD = 2
 D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
-MAX_ERRORS_PER_ROW = 20
+MAX_ERRORS_PER_ROW = 40
 
 # dist: None = not distributed. device: "cuda" streams straight to the rank's GPU, "cpu_to" streams to host
 # memory and copies each tensor to the GPU. limit: "tight" forces the host ring to be reused many times,
@@ -85,10 +85,12 @@ class Fixtures:
 
 def memory_limit(manifest, distributed):
     """About a sixteenth of the model, so the host ring is reused many times - but never below the largest
-    tensor times the ranks sharing the limit, because a tensor must fit in one buffer and a distributed
-    rank only gets its share (times 1.5 so there is room for a second buffer)."""
+    range the streamer reads times the ranks sharing the limit, because a range must fit in one buffer and a
+    distributed rank only gets its share (times 1.5 so there is room for a second buffer). The largest range
+    is a tensor, or a file's header: the streamer reads each header as one range, and model B's is 10 MB."""
     ranks = WORLD if distributed else 1
-    floor = int(1.5 * manifest["largest_tensor_bytes"]) * ranks
+    largest = max([manifest["largest_tensor_bytes"]] + [f["header_len"] for f in manifest["files"]])
+    floor = int(1.5 * largest) * ranks
     return max(manifest["total_data_bytes"] // 16, floor, MIB)
 
 
@@ -310,8 +312,9 @@ def main():
             if not ok:
                 failed = True
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and
-                # one run reports every failing row. After an exception the collectives may be out of step.
-                if any_raised:
+                # one run reports every failing row. So does a row that raised without distributed streaming,
+                # which has no collectives. After an exception in a distributed row they may be out of step.
+                if any_raised and row.dist:
                     print("[rank %d] a rank raised in row %s: not running the rows after it" % (rank, row.id),
                           flush=True)
                     break
