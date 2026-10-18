@@ -95,16 +95,33 @@ class DistributedJob:
         with patch("torch.distributed.is_initialized", return_value=True), \
                 patch("torch.distributed.get_world_size", return_value=len(self.free_by_rank)), \
                 patch("torch.distributed.get_backend", return_value="nccl"), \
-                patch("torch.cuda.is_available", return_value=True), \
                 patch("torch.tensor", lambda data, dtype=None, device=None: real_tensor(data, dtype=dtype)), \
                 patch("torch.zeros", lambda *args, **kwargs: real_tensor([0])), \
                 patch("torch.distributed.get_global_rank", return_value=0), \
                 patch("torch.distributed.broadcast", side_effect=broadcast), \
                 patch("torch.distributed.all_reduce", side_effect=all_reduce), \
-                patch.object(DistributedStreamer, "get_cuda_free_memory",
+                patch.object(DistributedStreamer, "get_device_free_memory",
                              return_value=self.free_by_rank[self.my_rank]) as own_free:
             self.events.attach_mock(own_free, "read_free_memory")
             yield own_free
+
+
+class TestOwnFreeMemory(unittest.TestCase):
+    """This rank's own reading, before the reduction. It goes through the device table, so the
+    distributed check and the device ring cannot disagree about how much a device has."""
+
+    def test_a_vendor_the_table_does_not_know_reads_as_zero(self):
+        """0, not an exception: the caller turns it into a fallback, which is the safe way to be
+        wrong about a device nobody here can measure."""
+        self.assertEqual(DistributedStreamer().get_device_free_memory("cpu"), 0)
+
+    def test_a_known_vendor_is_read_through_its_table_row(self):
+        support = MagicMock()
+        support.free_memory.return_value = 1234
+        with patch("runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
+                   return_value=support):
+            self.assertEqual(DistributedStreamer().get_device_free_memory("cuda:3"), 1234)
+        support.free_memory.assert_called_once_with("cuda:3")
 
 
 class TestMinFreeMemory(unittest.TestCase):
@@ -113,7 +130,7 @@ class TestMinFreeMemory(unittest.TestCase):
     def test_it_is_the_minimum_over_the_distribution_group(self):
         job = DistributedJob([50, 40, 90, 70], my_rank=2, group_ranks=[2, 3])
         with job.patched():
-            self.assertEqual(job.streamer().get_min_cuda_free_memory("cuda:0"), 70)
+            self.assertEqual(job.streamer().get_min_device_free_memory("cuda:0"), 70)
 
     def test_the_communicator_is_created_before_free_memory_is_read(self):
         """The first collective takes the communicator's device memory, so it must come before the
@@ -121,7 +138,7 @@ class TestMinFreeMemory(unittest.TestCase):
         job = DistributedJob([50, 40])
         streamer = job.streamer()
         with job.patched():
-            streamer.get_min_cuda_free_memory("cuda:0")
+            streamer.get_min_device_free_memory("cuda:0")
         self.assertEqual(job.events.mock_calls,
                          [call.create_group(streamer.params),
                           call.broadcast(0, job.group),
@@ -131,7 +148,7 @@ class TestMinFreeMemory(unittest.TestCase):
     def test_this_rank_reports_the_device_it_was_given(self):
         job = DistributedJob([50, 40])
         with job.patched() as own_free:
-            job.streamer().get_min_cuda_free_memory("cuda:3")
+            job.streamer().get_min_device_free_memory("cuda:3")
         own_free.assert_called_once_with("cuda:3")
 
 
