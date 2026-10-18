@@ -131,11 +131,18 @@ class RowRun:
         self.device = device
         self.timer = timer
         self.errors = []
+        self.error_count = 0
         self.seen = set()
 
     def error(self, message):
+        self.error_count += 1
         if len(self.errors) < MAX_ERRORS_PER_ROW:
             self.errors.append(message)
+
+    def errors_with_total(self):
+        """The recorded errors, and a last line saying how many more there were."""
+        more = self.error_count - len(self.errors)
+        return self.errors + (["... and %d more error(s)" % more] if more > 0 else [])
 
     def check(self, name, tensor):
         """Name, dtype, shape, device and bytes of one tensor."""
@@ -280,25 +287,34 @@ def main():
                     row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
                     row.owned, row.device, row.limit, strategy))
             started = time.perf_counter()
+            raised = False
             try:
                 run.run()
             except Exception as error:  # a streamer exception is a failure of the row, not of the harness
+                raised = True
                 run.error("%s: %s" % (type(error).__name__, error))
             elapsed = time.perf_counter() - started
             # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
-            flag = torch.tensor([1 if run.errors else 0], device=device)
+            # The second element is 1 when a rank raised: its collectives may be out of step.
+            flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0], device=device)
             dist.all_reduce(flag, op=dist.ReduceOp.MAX)
-            ok = flag.item() == 0
+            ok = flag[0].item() == 0
+            any_raised = flag[1].item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
-                             "errors": run.errors})
+                             "errors": run.errors_with_total()})
             print("[rank %d] %s %-3s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
-            for message in run.errors:
+            for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)
             release_gpu_memory()
             if not ok:
                 failed = True
-                break  # the collectives of a failed row may be out of step; do not run on
+                # A row that only found wrong tensors ended in step on every rank, so the next row can run and
+                # one run reports every failing row. After an exception the collectives may be out of step.
+                if any_raised:
+                    print("[rank %d] a rank raised in row %s: not running the rows after it" % (rank, row.id),
+                          flush=True)
+                    break
     finally:
         dump_jsonl(timer.records, os.path.join(results_dir, "timing-%s-rank%d.jsonl" % (
             strategy.replace(",", "+") or "default", rank)))
