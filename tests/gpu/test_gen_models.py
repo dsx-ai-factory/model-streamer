@@ -47,34 +47,34 @@ class GenerateModels(unittest.TestCase):
     def test_same_seed_same_bytes_different_seed_different_bytes(self):
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
             self.assertEqual(generate(other, 11, no_verify=True), 0)
-            again = gen.load_manifest(other, "A")
+            again = gen.load_manifest(other, "mixed")
         crcs = lambda manifest: [t["crc32"] for f in manifest["files"] for t in f["tensors"]]  # noqa: E731
-        self.assertEqual(crcs(again), crcs(self.manifests["A"]))
+        self.assertEqual(crcs(again), crcs(self.manifests["mixed"]))
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
             self.assertEqual(generate(other, 12, no_verify=True), 0)
-            different = gen.load_manifest(other, "A")
-        self.assertNotEqual(crcs(different), crcs(self.manifests["A"]))
+            different = gen.load_manifest(other, "mixed")
+        self.assertNotEqual(crcs(different), crcs(self.manifests["mixed"]))
 
     def test_a_corrupted_byte_is_caught(self):
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
             self.assertEqual(generate(other, 11, no_verify=True), 0)
-            entry = gen.load_manifest(other, "C")["files"][0]
-            path = os.path.join(other, "C", entry["path"])
+            entry = gen.load_manifest(other, "giant_tensor")["files"][0]
+            path = os.path.join(other, "giant_tensor", entry["path"])
             with open(path, "r+b") as handle:
                 handle.seek(entry["size"] - 1)
                 last = handle.read(1)
                 handle.seek(entry["size"] - 1)
                 handle.write(bytes([last[0] ^ 0xFF]))
             with self.assertRaises(gen.VerifyError):
-                gen.verify_model(other, "C")
+                gen.verify_model(other, "giant_tensor")
 
     def test_a_truncated_file_is_caught(self):
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
             self.assertEqual(generate(other, 11, no_verify=True), 0)
-            entry = gen.load_manifest(other, "A")["files"][1]
-            os.truncate(os.path.join(other, "A", entry["path"]), entry["size"] - 5)
+            entry = gen.load_manifest(other, "mixed")["files"][1]
+            os.truncate(os.path.join(other, "mixed", entry["path"]), entry["size"] - 5)
             with self.assertRaises(gen.VerifyError):
-                gen.verify_model(other, "A")
+                gen.verify_model(other, "mixed")
 
     def test_a_budget_too_small_for_the_mandatory_set_fails_loudly(self):
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
@@ -91,34 +91,34 @@ class GenerateModels(unittest.TestCase):
             self.assertEqual(empty, [], "empty tensors are left out until issue #260 is closed")
 
     def test_model_shapes(self):
-        a, b, c, d = (self.manifests[m] for m in gen.MODEL_NAMES)
-        self.assertEqual(a["num_files"], 4)
-        self.assertEqual(b["num_files"], 1)
-        self.assertGreaterEqual(b["num_tensors"], 5000)
-        self.assertEqual(c["num_files"], 2)
-        self.assertEqual(d["num_files"], FILES)
-        self.assertLessEqual(a["largest_tensor_bytes"], gen.A_MAX_TENSOR)
-        self.assertEqual(max(t["end"] - t["start"] for f, t in self.tensors("C")),
-                         c["largest_tensor_bytes"])
+        mixed, many_tensors, giant_tensor, many_files = (self.manifests[m] for m in gen.MODEL_NAMES)
+        self.assertEqual(mixed["num_files"], 4)
+        self.assertEqual(many_tensors["num_files"], 1)
+        self.assertGreaterEqual(many_tensors["num_tensors"], 5000)
+        self.assertEqual(giant_tensor["num_files"], 2)
+        self.assertEqual(many_files["num_files"], FILES)
+        self.assertLessEqual(mixed["largest_tensor_bytes"], gen.MIXED_MAX_TENSOR)
+        self.assertEqual(max(t["end"] - t["start"] for f, t in self.tensors("giant_tensor")),
+                         giant_tensor["largest_tensor_bytes"])
 
     def test_alignment_classes_all_occur(self):
-        starts = [(f["data_start"] + t["start"], t["dtype"]) for f, t in self.tensors("A")]
+        starts = [(f["data_start"] + t["start"], t["dtype"]) for f, t in self.tensors("mixed")]
         size = lambda dtype: gen.DTYPES[dtype][0]  # noqa: E731
         self.assertTrue(any(s % 4096 == 0 for s, _ in starts), "no tensor starts on a 4096 boundary")
         self.assertTrue(any(s % 4096 != 0 for s, _ in starts), "every tensor starts on a 4096 boundary")
         self.assertTrue(any(s % size(d) != 0 for s, d in starts), "no tensor is misaligned for its dtype")
 
-    def test_model_d_has_header_only_and_single_byte_files(self):
-        files = self.manifests["D"]["files"]
+    def test_many_files_has_header_only_and_single_byte_files(self):
+        files = self.manifests["many_files"]["files"]
         self.assertTrue(any(not f["tensors"] for f in files), "no header-only file")
         self.assertTrue(any(len(f["tensors"]) == 1 and f["tensors"][0]["end"] - f["tensors"][0]["start"] == 1
                             for f in files), "no file with a single 1-byte tensor")
 
     def test_bool_tensors_hold_only_zero_and_one(self):
-        for f, t in self.tensors("A"):
+        for f, t in self.tensors("mixed"):
             if t["dtype"] != "BOOL" or t["end"] == t["start"]:
                 continue
-            with open(os.path.join(self.out, "A", f["path"]), "rb") as handle:
+            with open(os.path.join(self.out, "mixed", f["path"]), "rb") as handle:
                 handle.seek(f["data_start"] + t["start"])
                 self.assertLessEqual(set(handle.read(t["end"] - t["start"])), {0, 1}, t["name"])
 
@@ -126,6 +126,10 @@ class GenerateModels(unittest.TestCase):
         for model in gen.MODEL_NAMES:
             names = [t["name"] for _, t in self.tensors(model)]
             self.assertEqual(len(names), len(set(names)), model)
+
+    def test_unknown_model_name_is_refused(self):
+        self.assertEqual(gen.main(["verify", "--out", self.out, "--models", "mixed,nonsense"]), 1)
+        self.assertEqual(gen.parse_models("giant_tensor, many_files"), ["giant_tensor", "many_files"])
 
     def test_manifest_is_json_round_trippable(self):
         for manifest in self.manifests.values():

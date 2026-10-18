@@ -115,7 +115,7 @@ export NCCL_DEBUG=INFO
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export RUNAI_STREAMER_LOG_TO_STDERR=1
 
-# Model D has 5,000 files, and the container starts with a soft limit of 1024 open files. The streamer keeps a
+# The many_files model has 5,000 files, and the container starts with a soft limit of 1024 open files. The streamer keeps a
 # file open until its whole submission ends (https://github.com/dsx-ai-factory/model-streamer/issues/261), so
 # the soft limit is raised to the hard limit for the test. Remove this once that is fixed.
 echo "open files limit before: soft $(ulimit -Sn), hard $(ulimit -Hn)"
@@ -144,7 +144,7 @@ done
 
 # The manifests list every tensor of every model; keep them with the results to debug a failure.
 mkdir -p "$RESULTS/manifests"
-for m in A B C D; do gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true; done
+for m in mixed many_tensors giant_tensor many_files; do gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true; done
 
 echo "== where the time went"
 python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl | tee "$RESULTS/timing-summary.txt"

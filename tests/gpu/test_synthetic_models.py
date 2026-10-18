@@ -31,6 +31,7 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gen_models import MODEL_NAMES  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 
 from runai_model_streamer import SafetensorsStreamer  # noqa: E402
@@ -47,21 +48,22 @@ MAX_ERRORS_PER_ROW = 40
 # "default" leaves RUNAI_STREAMER_MEMORY_LIMIT unset.
 Row = namedtuple("Row", "id model dist policy owned device limit strategies")
 
-# strategies: None = every filesystem strategy, otherwise only the ones named.
+# The models are the ones of gen_models.py. strategies: None = every filesystem strategy, otherwise only the
+# ones named. A row id is the model, then what is special about the row.
 ROWS = [
-    Row("A1", "A", False, None, True, "cuda", "tight", None),
-    Row("A2", "A", False, None, False, "cuda", "tight", None),
-    Row("A3", "A", True, "spans", True, "cuda", "tight", None),
-    Row("A4", "A", True, "chunks", True, "cuda", "tight", None),
-    Row("A5", "A", False, None, True, "cpu_to", "tight", None),
-    Row("A6", "A", False, None, True, "cuda", "default", None),
-    Row("B1", "B", False, None, True, "cuda", "tight", None),
-    Row("B2", "B", True, "spans", True, "cuda", "tight", None),
-    Row("C1", "C", False, None, True, "cuda", "tight", None),
-    Row("C2", "C", True, "spans", True, "cuda", "tight", None),
-    Row("D1", "D", False, None, True, "cuda", "tight", None),
-    Row("D2", "D", True, "files", True, "cuda", "tight", None),
-    Row("D3", "D", True, "spans", True, "cuda", "tight", None),
+    Row("mixed.solo", "mixed", False, None, True, "cuda", "tight", None),
+    Row("mixed.solo.borrowed", "mixed", False, None, False, "cuda", "tight", None),
+    Row("mixed.dist.spans", "mixed", True, "spans", True, "cuda", "tight", None),
+    Row("mixed.dist.chunks", "mixed", True, "chunks", True, "cuda", "tight", None),
+    Row("mixed.host_then_to", "mixed", False, None, True, "cpu_to", "tight", None),
+    Row("mixed.default_limit", "mixed", False, None, True, "cuda", "default", None),
+    Row("many_tensors.solo", "many_tensors", False, None, True, "cuda", "tight", None),
+    Row("many_tensors.dist.spans", "many_tensors", True, "spans", True, "cuda", "tight", None),
+    Row("giant_tensor.solo", "giant_tensor", False, None, True, "cuda", "tight", None),
+    Row("giant_tensor.dist.spans", "giant_tensor", True, "spans", True, "cuda", "tight", None),
+    Row("many_files.solo", "many_files", False, None, True, "cuda", "tight", None),
+    Row("many_files.dist.files", "many_files", True, "files", True, "cuda", "tight", None),
+    Row("many_files.dist.spans", "many_files", True, "spans", True, "cuda", "tight", None),
 ]
 
 
@@ -69,7 +71,7 @@ class Fixtures:
     def __init__(self, directory):
         self.directory = directory
         self.manifests = {}
-        for model in "ABCD":
+        for model in MODEL_NAMES:
             with open(os.path.join(directory, model + ".manifest.json")) as handle:
                 self.manifests[model] = json.load(handle)
 
@@ -86,8 +88,8 @@ def memory_limit(manifest, distributed):
     largest range the streamer reads, times the ranks sharing the limit. A range must fit in one buffer and a
     distributed rank only gets its share of the limit; twice the largest range leaves room for at least two
     buffers, so a buffer can be read while the previous one is consumed. (Where the whole model is smaller
-    than two largest ranges, as in model C, the ring still has one buffer.) The largest range is a tensor, or
-    a file's header: the streamer reads each header as one range, and model B's is 10 MB."""
+    than two largest ranges, as in giant_tensor, the ring still has one buffer.) The largest range is a tensor,
+    or a file's header: the streamer reads each header as one range, and many_tensors' is 10 MB."""
     ranks = WORLD if distributed else 1
     largest = max([manifest["largest_tensor_bytes"]] + [f["header_len"] for f in manifest["files"]])
     floor = 2 * largest * ranks
@@ -311,7 +313,7 @@ def main():
             any_raised = flag[1].item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
                              "errors": run.errors_with_total()})
-            print("[rank %d] %s %-3s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
+            print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
             for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)

@@ -25,19 +25,24 @@ passthrough, 2 GiB of `/dev/shm` for NCCL and the existing io_uring seccomp sett
 
 | Model | Stress | Shape |
 |---|---|---|
-| A mixed | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
-| B tiny flood | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
-| C giant | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
-| D many files | 5,000 files, some header-only, some holding a single 1-byte tensor | about 90 MB |
+| `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
+| `many_tensors` | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
+| `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
+| `many_files` | 5,000 files, some header-only, some holding a single 1-byte tensor | about 90 MB |
+
+Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
+`--models mixed,many_files` to build only some of them.
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
 seed. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU
 when a CUDA device is requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260)). Once
-that is fixed, set `EMPTY_TENSORS = True` in `gen_models.py` to bring them back. The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed
-reproduces the models exactly under the same numpy version (the manifests record it; to rebuild an old model,
-install that numpy and run the generator with the same seed). Each model has a manifest (`<model>.manifest.json`): per tensor the name, dtype,
-shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are uploaded with the results
-(`manifests/`), so a failing tensor can be looked up without regenerating anything.
+that is fixed, set `EMPTY_TENSORS = True` in `gen_models.py` to bring them back.
+
+The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed reproduces
+the models exactly under the same numpy version (the manifests record it; to rebuild an old model, install that
+numpy and run the generator with the same seed). The manifest of a model lists, per tensor, the name, dtype,
+shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are
+uploaded with the results (`manifests/`), so a failing tensor can be looked up without regenerating anything.
 
 The generator checks its own output before anything is streamed (headers, offsets, CRC32 read back from disk,
 a few tensors regenerated from the seed, and coverage of all dtypes/ranks/edge sizes), so a failure in the
@@ -50,7 +55,8 @@ python3 -m unittest tests/gpu/test_gen_models.py
 
 ## The test (`test_synthetic_models.py`)
 
-Each row of `ROWS` is one load: a model, distributed or not, a partition policy, `owned`, a destination
+Each row of `ROWS` is one load, named after its model and what is special about it (`mixed.solo`,
+`mixed.dist.chunks`, `many_files.dist.files`, ...): a model, distributed or not, a partition policy, `owned`, a destination
 (`cuda` or `cpu` then `.to()`) and a memory limit. `tight` sets `RUNAI_STREAMER_MEMORY_LIMIT` to about a
 sixteenth of the model (never below twice the largest range, a tensor or a file header, times the ranks sharing
 the limit), so the host buffers are reused many times; with the default limit a small model fits in the ring
@@ -66,7 +72,7 @@ Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors
 run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
 be out of step. The results of each row are written as soon as it ends.
 
-The script raises the open files limit to the hard limit before the test, because model D has 5,000 files and
+The script raises the open files limit to the hard limit before the test, because the `many_files` model has 5,000 files and
 the streamer keeps a file open until its submission ends
 ([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)).
 

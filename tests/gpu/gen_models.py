@@ -5,10 +5,10 @@
 
 Four models, each isolating one kind of stress:
 
-    A  mixed        every dtype, ranks 0-5, edge sizes, odd names, 4 uneven shards with different alignment
-    B  tiny flood   about 100,000 tiny tensors and a multi-MB header in one file
-    C  giant        a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model)
-    D  many files   5,000 small files, some header-only, some holding a single 1-byte tensor
+    mixed          every dtype, ranks 0-5, edge sizes, odd names, 4 uneven shards with different alignment
+    many_tensors   about 100,000 tiny tensors and a multi-MB header in one file
+    giant_tensor   a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model)
+    many_files     5,000 small files, some header-only, some holding a single 1-byte tensor
 
 The files are written by hand, not through safetensors.save_file, so the layout is under control: header
 padding (and so the alignment of every tensor start), header-only files (and zero-sized dimensions, see EMPTY_TENSORS).
@@ -26,8 +26,10 @@ Alongside each model goes a manifest (<out>/<model>.manifest.json): for every te
 position in the file and the CRC32 of its bytes, computed while the data is generated. The test compares what
 reaches the GPU with it.
 
-    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 5000] [--models ABCD] [--no-verify]
-    gen_models.py verify   --out DIR [--models ABCD]
+    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 5000] [--models NAME,NAME,...] [--no-verify]
+    gen_models.py verify   --out DIR [--models NAME,NAME,...]
+
+The model names are the four above; by default all of them. Each model is written to <out>/<name>/.
 
 Runs under the devcontainer's Python 3.8. Needs only numpy.
 """
@@ -50,10 +52,10 @@ from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 GENERATOR_VERSION = 2
 
 # Tensors with zero elements are left out for now: the streamer yields them on the CPU even when a CUDA device
-# was requested (https://github.com/dsx-ai-factory/model-streamer/issues/260), so every row of model A failed
-# on them. None of 184 real checkpoints surveyed contains one. Once that issue is closed, set this to True: the
-# generator then draws zero dimensions again, model A gets its two mandatory empty tensors, and check_coverage
-# requires one.
+# was requested (https://github.com/dsx-ai-factory/model-streamer/issues/260), so every row of the mixed model
+# failed on them. None of 184 real checkpoints surveyed contains one. Once that issue is closed, set this to
+# True: the generator then draws zero dimensions again, the mixed model gets its two mandatory empty tensors,
+# and check_coverage requires one.
 EMPTY_TENSORS = False
 
 MIB = 1 << 20
@@ -82,12 +84,13 @@ DTYPE_NAMES = sorted(DTYPES)
 EDGE_SIZES = (1, 4095, 4096, 4097, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1,
               8 * MIB - 1, 8 * MIB, 8 * MIB + 1)
 
-# Model A keeps every tensor below this so the memory limit used by the tests can stay small: a tensor must
-# fit in one host buffer, and a distributed rank only gets its share of the limit.
-A_MAX_TENSOR = 24 * MIB
+# The mixed model keeps every tensor below this so the memory limit used by the tests can stay small: a tensor
+# must fit in one host buffer, and a distributed rank only gets its share of the limit.
+MIXED_MAX_TENSOR = 24 * MIB
 
-MODEL_IDS = {"A": 1, "B": 2, "C": 3, "D": 4}
-MODEL_NAMES = "ABCD"
+# The number is part of every seed, so it stays with a model whatever the model is called.
+MODEL_IDS = {"mixed": 1, "many_tensors": 2, "giant_tensor": 3, "many_files": 4}
+MODEL_NAMES = tuple(MODEL_IDS)
 
 TensorSpec = namedtuple("TensorSpec", "name dtype shape gen key")
 ShardPlan = namedtuple("ShardPlan", "filename tensors header_mode metadata")
@@ -99,6 +102,15 @@ class GenerationError(Exception):
 
 class VerifyError(Exception):
     pass
+
+
+def parse_models(text):
+    """The models named in a comma separated list, in the order given."""
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    unknown = [name for name in names if name not in MODEL_IDS]
+    if unknown or not names:
+        raise GenerationError("unknown model(s) %s; the models are %s" % (unknown or [text], ", ".join(MODEL_NAMES)))
+    return names
 
 
 def elements(shape):
@@ -204,8 +216,8 @@ def random_tensor(rng, key, used, max_bytes, dtypes=DTYPE_NAMES, name=None):
     return TensorSpec(name or realistic_name(key, used), dtype, shape, gen, key)
 
 
-def mandatory_tensors_a(first_key, used):
-    """Everything model A must contain whatever the random draw gives: every dtype as a scalar, as a tensor of
+def mandatory_tensors_mixed(first_key, used):
+    """Everything the mixed model must contain whatever the random draw gives: every dtype as a scalar, as a tensor of
     rank 1-5 and as a pattern tensor; empty tensors (with EMPTY_TENSORS); the edge sizes; odd names."""
     specs = []
     key = first_key
@@ -235,17 +247,17 @@ def mandatory_tensors_a(first_key, used):
     return specs, key
 
 
-def plan_a(seed, scale):
-    rng = np.random.default_rng([seed, MODEL_IDS["A"], 0xFFFF])
+def plan_mixed(seed, scale):
+    rng = np.random.default_rng([seed, MODEL_IDS["mixed"], 0xFFFF])
     used = set()
     budget = int(GIB * scale)
-    tensors, key = mandatory_tensors_a(0, used)
+    tensors, key = mandatory_tensors_mixed(0, used)
     total = sum(nbytes_of(t) for t in tensors)
     if total > budget:
-        raise GenerationError("model A: a budget of %d bytes cannot fit the mandatory tensors, which take %d "
+        raise GenerationError("model mixed: a budget of %d bytes cannot fit the mandatory tensors, which take %d "
                               "bytes; raise --scale" % (budget, total))
     while total < budget:
-        spec = random_tensor(rng, key, used, min(A_MAX_TENSOR, budget - total))
+        spec = random_tensor(rng, key, used, min(MIXED_MAX_TENSOR, budget - total))
         tensors.append(spec)
         total += nbytes_of(spec)
         key += 1
@@ -274,7 +286,7 @@ def plan_a(seed, scale):
         mid = rest[:1]
     big = rest[len(mid):]
     if not small or not big:
-        raise GenerationError("model A: could not form four non-empty shards")
+        raise GenerationError("model mixed: could not form four non-empty shards")
 
     def shard(name, indexes, mode, metadata):
         return ShardPlan(name, [tensors[i] for i in indexes], mode, metadata)
@@ -287,8 +299,8 @@ def plan_a(seed, scale):
     ]
 
 
-def plan_b(seed, scale):
-    rng = np.random.default_rng([seed, MODEL_IDS["B"], 0xFFFF])
+def plan_many_tensors(seed, scale):
+    rng = np.random.default_rng([seed, MODEL_IDS["many_tensors"], 0xFFFF])
     used = set()
     count = max(1000, int(100_000 * scale))
     dtypes = ["BF16", "F32", "U8", "F16", "I32"]
@@ -312,8 +324,8 @@ def plan_b(seed, scale):
     return [ShardPlan("model.safetensors", [tensors[i] for i in order], "odd", {"format": "pt"})]
 
 
-def plan_c(seed, scale):
-    rng = np.random.default_rng([seed, MODEL_IDS["C"], 0xFFFF])
+def plan_giant_tensor(seed, scale):
+    rng = np.random.default_rng([seed, MODEL_IDS["giant_tensor"], 0xFFFF])
     giant_bytes = max(1, int(2 * GIB * scale))
     rows = max(1, int(round(128256 * scale)))
     used = set()
@@ -335,8 +347,8 @@ def plan_c(seed, scale):
     ]
 
 
-def plan_d(seed, scale, files):
-    rng = np.random.default_rng([seed, MODEL_IDS["D"], 0xFFFF])
+def plan_many_files(seed, scale, files):
+    rng = np.random.default_rng([seed, MODEL_IDS["many_files"], 0xFFFF])
     modes = ("aligned", "pad8", "odd")
     shards = []
     key = 0
@@ -366,13 +378,13 @@ def plan_d(seed, scale, files):
 
 
 def make_plan(model, seed, scale, files):
-    if model == "A":
-        return plan_a(seed, scale)
-    if model == "B":
-        return plan_b(seed, scale)
-    if model == "C":
-        return plan_c(seed, scale)
-    return plan_d(seed, scale, files)
+    if model == "mixed":
+        return plan_mixed(seed, scale)
+    if model == "many_tensors":
+        return plan_many_tensors(seed, scale)
+    if model == "giant_tensor":
+        return plan_giant_tensor(seed, scale)
+    return plan_many_files(seed, scale, files)
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -573,10 +585,10 @@ def check_coverage(manifests):
 # ----------------------------------------------------------------------------------------------------------
 
 def run_generate(args):
-    models = list(args.models)
+    models = parse_models(args.models)
     jobs = [(m, args.out, args.seed, args.scale, args.files, not args.no_verify) for m in models]
     print("generating models %s, seed %d, scale %g, numpy %s, generator version %d, in %s" % (
-        args.models, args.seed, args.scale, np.__version__, GENERATOR_VERSION, args.out), flush=True)
+        ",".join(models), args.seed, args.scale, np.__version__, GENERATOR_VERSION, args.out), flush=True)
     records = []
     with ProcessPoolExecutor(max_workers=len(jobs)) as pool:
         for model, model_records in pool.map(generate_model, jobs):
@@ -592,7 +604,7 @@ def run_generate(args):
 
 
 def run_verify(args):
-    models = list(args.models)
+    models = parse_models(args.models)
     for model in models:
         verify_model(args.out, model)
     if set(models) == set(MODEL_NAMES):
@@ -606,14 +618,15 @@ def main(argv=None):
     gen = sub.add_parser("generate")
     gen.add_argument("--out", required=True)
     gen.add_argument("--seed", type=int, required=True)
-    gen.add_argument("--scale", type=float, default=1.0, help="size of models A, B, C relative to the full size")
-    gen.add_argument("--files", type=int, default=5000, help="number of files of model D")
-    gen.add_argument("--models", default=MODEL_NAMES)
+    gen.add_argument("--scale", type=float, default=1.0,
+                     help="size of the mixed, many_tensors and giant_tensor models relative to the full size")
+    gen.add_argument("--files", type=int, default=5000, help="number of files of the many_files model")
+    gen.add_argument("--models", default=",".join(MODEL_NAMES), help="comma separated model names")
     gen.add_argument("--no-verify", action="store_true")
     gen.set_defaults(func=run_generate)
     ver = sub.add_parser("verify")
     ver.add_argument("--out", required=True)
-    ver.add_argument("--models", default=MODEL_NAMES)
+    ver.add_argument("--models", default=",".join(MODEL_NAMES), help="comma separated model names")
     ver.set_defaults(func=run_verify)
     args = parser.parse_args(argv)
     try:
