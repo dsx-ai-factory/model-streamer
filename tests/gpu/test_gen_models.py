@@ -83,6 +83,13 @@ class GenerateModels(unittest.TestCase):
     def test_every_dtype_rank_and_edge_size_is_present(self):
         gen.check_coverage(list(self.manifests.values()))
 
+    def test_empty_tensors_only_with_the_flag(self):
+        empty = [t["name"] for m in gen.MODEL_NAMES for _, t in self.tensors(m) if t["end"] == t["start"]]
+        if gen.EMPTY_TENSORS:
+            self.assertTrue(empty, "EMPTY_TENSORS is set but no tensor is empty")
+        else:
+            self.assertEqual(empty, [], "empty tensors are left out until issue #260 is closed")
+
     def test_model_shapes(self):
         a, b, c, d = (self.manifests[m] for m in gen.MODEL_NAMES)
         self.assertEqual(a["num_files"], 4)

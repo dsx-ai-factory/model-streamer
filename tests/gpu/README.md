@@ -25,13 +25,15 @@ passthrough, 2 GiB of `/dev/shm` for NCCL and the existing io_uring seccomp sett
 
 | Model | Stress | Shape |
 |---|---|---|
-| A mixed | every dtype, ranks 0-5, empty tensors, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
+| A mixed | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
 | B tiny flood | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
 | C giant | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
 | D many files | 5,000 files, some header-only, some holding a single 1-byte tensor | about 90 MB |
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
-seed. The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed
+seed. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU
+when a CUDA device is requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260)). Once
+that is fixed, set `EMPTY_TENSORS = True` in `gen_models.py` to bring them back. The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed
 reproduces the models exactly under the same numpy version (the manifests record it; to rebuild an old model,
 install that numpy and run the generator with the same seed). Each model has a manifest (`<model>.manifest.json`): per tensor the name, dtype,
 shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are uploaded with the results
