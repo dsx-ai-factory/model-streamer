@@ -1,6 +1,13 @@
 name: Nightly GPU tests
 
 on:
+  # TEMPORARY: lets a pull request run this workflow from its branch before the file exists on the default
+  # branch, where workflow_dispatch cannot see it yet. Remove before merging.
+  pull_request:
+    paths:
+      - '.github/workflows/nightly-gpu.yaml'
+      - 'tests/gpu/**'
+      - '.devcontainer/gpu/**'
   schedule:
     - cron: '17 0 * * *'
   workflow_dispatch:
