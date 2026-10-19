@@ -26,6 +26,11 @@ class TestRingConcurrency(unittest.TestCase):
 
     RANGE_SIZE = 8
 
+    # Tries allowed to reach a state the library's completion order decides, not us. Most attempts
+    # reach it, so ten makes a spurious failure far rarer than the flake it removes, while still
+    # failing loudly if the state stops being reachable at all.
+    OUTLIVING_ATTEMPTS = 10
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
 
@@ -325,12 +330,27 @@ class TestRingConcurrency(unittest.TestCase):
         path, expected = self.write_ranges("outlived.txt", 8)
         request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
 
-        fs = FileStreamer()
-        with fs:
-            fs.stream_files(request)
-            chunks = fs.get_chunks()
-            next(chunks)
-            self.assertGreater(fs.outstanding, 0)
+        # One next() does not consume one response. outstanding is decremented on RECEIPT, before
+        # ordering, so the generator pops responses until the ORDERED one can be released - and if
+        # range 0 completes last it pops them all, leaving the drain nothing to do. That is correct
+        # behaviour, but it is not the state under test, so set up again rather than assert it away.
+        for _ in range(self.OUTLIVING_ATTEMPTS):
+            fs = FileStreamer()
+            with fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+                # Read inside the context: this is the state __exit__ has to leave behind.
+                outstanding_at_exit = fs.outstanding
+            if outstanding_at_exit > 0:
+                break
+            chunks.close()      # a discarded attempt still owns a live generator
+        else:
+            # Never skip. A precondition that stops holding means the streamer changed, and a test
+            # that skips itself goes green for ever without anyone reading why.
+            self.fail(f"no attempt in {self.OUTLIVING_ATTEMPTS} left a response outstanding at "
+                      f"__exit__ - one next() is now always draining the whole submission")
+
         # the context is gone and the handle with it; the generator is still alive, and closing it now
         # runs the finally against a streamer that no longer exists
         chunks.close()

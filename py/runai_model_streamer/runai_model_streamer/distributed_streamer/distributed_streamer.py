@@ -16,7 +16,10 @@ from runai_model_streamer.file_streamer import (
 
 from runai_model_streamer.file_streamer.file_streamer import host_or_device
 
-from runai_model_streamer.file_streamer.device_support import device_support
+from runai_model_streamer.torch_device.torch_device import (
+    can_measure_device_memory,
+    device_free_memory,
+)
 
 from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
@@ -155,16 +158,18 @@ class DistributedStreamer:
         return dist.get_world_size()
 
     def get_device_free_memory(self, device: str) -> int:
-        """Free bytes on this rank's device, read through the one table that knows per-vendor calls.
-        0 when the vendor is unknown here or has no usable device, which fails the check below."""
-        support = device_support(device)
-        return support.free_memory(device) if support else 0
+        """Free bytes on this rank's device.
 
-    def get_xpu_free_memory(self) -> int:
-        if not (hasattr(torch, "xpu") and torch.xpu.is_available()):
-            return 0
-        free_memory, total_memory = torch.xpu.mem_get_info()
-        return free_memory
+        Raises rather than returning "unknown", because the only caller is about to put this number
+        into an all_reduce: a rank that could not measure would otherwise fail inside the collective
+        while its peers waited on it."""
+        free = device_free_memory(device)
+        if free is None:
+            raise RuntimeError(
+                f"torch cannot measure free memory on {device}, so this rank cannot enter the "
+                f"reduction - can_measure_device_memory() must be checked first"
+            )
+        return free
 
     def get_min_device_free_memory(self, device: str) -> int:
         """The smallest free memory among the ranks of the distribution group: every rank under
@@ -234,12 +239,14 @@ class DistributedStreamer:
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported by default for distributed streaming - To allow this backend, set RUNAI_STREAMER_DIST to `1`", backend_name)
                 self.is_distributed = False
 
-        cuda_dist = self.is_distributed and backend_name == "nccl" and torch.cuda.is_available()
-        xpu_dist = self.is_distributed and backend_name == "xccl" and hasattr(torch, "xpu") and torch.xpu.is_available()
         # check if there is enough free memory on the device
-        if self.is_distributed and (cuda_dist or xpu_dist):
-            free_memory = (self.get_min_device_free_memory(device) if cuda_dist
-                           else self.get_xpu_free_memory())
+        # Gated on whether torch can MEASURE this device, not on whether the streamer can read into
+        # it: distributing moves torch tensors, so it has no such limit. mem_get_info is missing for
+        # several devices torch otherwise supports, and skipping the check there is right - refusing
+        # would fall back from a device that may well have the room. Asked before create_group, so
+        # every rank of a job enters the collective or none does.
+        if self.is_distributed and can_measure_device_memory(device) and dist.get_backend() in ("nccl", "xccl"):
+            free_memory = self.get_min_device_free_memory(device)
             required = dist_device_bytes_required(self.params.max_chunk)
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")

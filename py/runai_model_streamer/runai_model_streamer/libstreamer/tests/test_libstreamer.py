@@ -11,6 +11,7 @@ from unittest.mock import patch
 from runai_model_streamer.libstreamer import (
     RUNAI_FILE_STREAMER_DEVICE_CPU,
     RUNAI_FILE_STREAMER_DEVICE_CUDA,
+    RunaiFileStreamerDeviceType,
 )
 from runai_model_streamer.libstreamer.libstreamer import (
     FILE_ACCESS_ERROR_CODE,
@@ -436,6 +437,21 @@ class TestRequestDevice(unittest.TestCase):
             self.device_of(device_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, device_id=3),
             (RUNAI_FILE_STREAMER_DEVICE_CUDA, 3),
         )
+
+    def test_every_type_the_enum_declares_is_accepted(self):
+        """The enum is the one list. A vendor added there is submittable at once - this fails if the
+        check ever goes back to naming the types it accepts."""
+        for member in RunaiFileStreamerDeviceType:
+            self.assertEqual(self.device_of(device_type=member.value), (member.value, 0), member.name)
+
+    def test_the_refusal_names_every_type_that_is_served(self):
+        """So the message cannot go stale while the enum grows - a caller is told what it may send,
+        not just that what it sent was wrong."""
+        with self.assertRaises(ValueError) as raised:
+            self.device_of(device_type=7)
+        for member in RunaiFileStreamerDeviceType:
+            self.assertIn(f"RUNAI_FILE_STREAMER_DEVICE_{member.name} ({member.value})",
+                          str(raised.exception), member.name)
 
 
 if __name__ == "__main__":

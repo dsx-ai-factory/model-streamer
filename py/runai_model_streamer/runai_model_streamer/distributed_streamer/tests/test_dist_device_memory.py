@@ -107,21 +107,32 @@ class DistributedJob:
 
 
 class TestOwnFreeMemory(unittest.TestCase):
-    """This rank's own reading, before the reduction. It goes through the device table, so the
-    distributed check and the device ring cannot disagree about how much a device has."""
+    """This rank's own reading, before the reduction. It asks torch, so it covers every device torch
+    supports - distributing moves torch tensors, and is not limited to what the C++ layer can write
+    into."""
 
-    def test_a_vendor_the_table_does_not_know_reads_as_zero(self):
-        """0, not an exception: the caller turns it into a fallback, which is the safe way to be
-        wrong about a device nobody here can measure."""
-        self.assertEqual(DistributedStreamer().get_device_free_memory("cpu"), 0)
-
-    def test_a_known_vendor_is_read_through_its_table_row(self):
-        support = MagicMock()
-        support.free_memory.return_value = 1234
-        with patch("runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
-                   return_value=support):
+    def test_it_reads_through_torch_not_the_streamers_device_table(self):
+        with patch("runai_model_streamer.distributed_streamer.distributed_streamer.device_free_memory",
+                   return_value=1234) as read:
             self.assertEqual(DistributedStreamer().get_device_free_memory("cuda:3"), 1234)
-        support.free_memory.assert_called_once_with("cuda:3")
+        read.assert_called_once_with("cuda:3")
+
+    def test_the_check_is_skipped_when_torch_cannot_measure_the_device(self):
+        """Skipped, not failed. mem_get_info is missing for several devices torch supports, and
+        reading "cannot measure" as "no memory" would fall back from a device that is fine.
+
+        XPU is really unmeasurable here, not mocked into it: torch has the module but no
+        mem_get_info, and once it gains one (2.6) is_available() is False on a host without the
+        hardware. Either way the device cannot be measured, which is what this exercises."""
+        streamer = DistributedStreamer()
+        with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1"}), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.get_world_size", return_value=2), \
+                patch("torch.distributed.get_backend", return_value="nccl"), \
+                patch.object(DistributedStreamer, "get_min_device_free_memory") as reduce_free:
+            streamer.set_is_distributed(True, "xpu:0")
+        self.assertTrue(streamer.is_distributed, "an unmeasurable device must not stop distributing")
+        reduce_free.assert_not_called()
 
 
 class TestMinFreeMemory(unittest.TestCase):
