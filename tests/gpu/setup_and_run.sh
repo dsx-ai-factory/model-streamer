@@ -59,8 +59,9 @@ df -h "$FIXTURES" | tail -1
 install_python_packages() {
     # The shared Ubuntu 20.04 devcontainer uses Python 3.8. Keep a compatible CUDA build; make
     # install/test would replace it with CPU-only PyTorch.
-    python3 -m pip install 'torch==2.4.1' --index-url https://download.pytorch.org/whl/cu124
-    python3 -m pip install -r py/runai_model_streamer/requirements.dev
+    # phase runs this function where `set -e` does not apply, so every command ends in `|| return`.
+    python3 -m pip install 'torch==2.4.1' --index-url https://download.pytorch.org/whl/cu124 || return
+    python3 -m pip install -r py/runai_model_streamer/requirements.dev || return
 }
 phase install_python_packages install_python_packages
 
@@ -78,7 +79,7 @@ for index in range(2):
 PY
 
 echo "== generator self-test"
-phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py
+phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py
 
 echo "== generate synthetic models, in the background while libstreamer builds"
 rm -rf "$FIXTURES"
@@ -90,14 +91,16 @@ python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" \
 GENERATOR_PID=$!
 
 build_libstreamer() {
+    # Called through phase, where `set -e` does not apply (not inside the subshell either): every command ends in
+    # `|| return` or `|| exit`, or a failed build or io_uring check would be hidden by the install that follows.
     (
-        cd cpp
-        bazel build --config=x86_64 //streamer:libstreamer.so
+        cd cpp || exit
+        bazel build --config=x86_64 //streamer:libstreamer.so || exit
         # Prove io_uring is usable rather than accepting a fallback or skipped test.
         bazel test --config=x86_64 //posix_io/io_uring_engine:io_uring_engine_test \
-            --test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 --test_output=errors
-    )
-    python3 -m pip install --no-deps -e py/runai_model_streamer
+            --test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 --test_output=errors || exit
+    ) || return
+    python3 -m pip install --no-deps -e py/runai_model_streamer || return
 }
 phase build_libstreamer build_libstreamer
 
@@ -108,6 +111,40 @@ wait_for_generator() {
     fi
 }
 phase wait_for_generator wait_for_generator
+
+# The direct I/O strategies are only tested if the fixtures are on a real block device that serves O_DIRECT. The
+# streamer reads a file from a mount that cannot (tmpfs, for one) with its synchronous reader, quietly, so on such
+# a storage a direct strategy would pass without ever being used. Fail instead.
+check_fixture_storage() {
+    local source fstype
+    source=$(df --output=source "$FIXTURES" | tail -1) || return
+    fstype=$(stat -f -c %T "$FIXTURES") || return
+    echo "fixtures storage: $source ($fstype)"
+    case "$source" in
+        /dev/*) ;;
+        *) echo "ERROR: the fixtures are on $source ($fstype), not on a block device; the direct I/O strategies would not be tested" >&2
+           return 1 ;;
+    esac
+    python3 - "$FIXTURES" <<'PY' || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
+import mmap
+import os
+import sys
+
+path = os.path.join(sys.argv[1], ".direct-io-probe")
+with open(path, "wb") as probe:
+    probe.write(bytes(4096))
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+    try:
+        if os.preadv(fd, [mmap.mmap(-1, 4096)], 0) != 4096:
+            raise OSError("short O_DIRECT read")
+    finally:
+        os.close(fd)
+finally:
+    os.unlink(path)
+PY
+}
+check_fixture_storage || exit 1
 
 export STREAMER_LIBRARY="$PWD/cpp/bazel-bin/streamer/libstreamer.so"
 export GPU_MATRIX="${GPU_MATRIX:-core}"
@@ -124,12 +161,15 @@ echo "open files limit before: soft $(ulimit -Sn), hard $(ulimit -Hn)"
 ulimit -Sn "$(ulimit -Hn)" || echo "could not raise the open files limit"
 echo "open files limit now: soft $(ulimit -Sn)"
 
+# Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so
+# a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
+# lists in the Makefile's test_strategies keep sync_buffered last for hosts of any kind.)
 status=0
 for strategy in \
     sync_buffered \
-    libaio_direct,sync_buffered \
-    io_uring_direct,sync_buffered \
-    io_uring_buffered,sync_buffered
+    libaio_direct \
+    io_uring_direct \
+    io_uring_buffered
 do
     echo "[$(date +%T)] START run.$strategy"
     echo "== streaming with filesystem strategy: $strategy"

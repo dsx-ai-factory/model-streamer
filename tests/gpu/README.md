@@ -22,7 +22,10 @@ passthrough, 2 GiB of `/dev/shm` for NCCL and the existing io_uring seccomp sett
 2. generates four synthetic models into `.gpu-fixtures/` (not in the repo; the runner's VM is discarded after
    the job), in parallel with the build, and verifies them;
 3. runs `test_synthetic_models.py` under `torchrun` with two ranks, once per filesystem strategy
-   (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`);
+   (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with no
+   `sync_buffered` fallback: a reader the host cannot serve fails the run instead of passing on the synchronous
+   reader. Before that, the script fails if the fixtures are not on a real block device that serves `O_DIRECT`
+   (the streamer reads a file from a mount that cannot, such as tmpfs, with its synchronous reader, quietly);
 4. prints a table of where the time went.
 
 ## The models (`gen_models.py`)
@@ -100,7 +103,7 @@ the streamer keeps a file open until its submission ends
 
 ## Timing
 
-Every phase is timed (setup, generation, write, verify, load, per-tensor check, teardown) and written to
+Every phase is timed (setup, generation, write, verify, load, per-tensor check) and written to
 `test-results/gpu/timing-*.jsonl`; the summary table is in the job summary and in `timing-summary.txt`. It is
 there to find slow parts of the run, not to benchmark the streamer.
 

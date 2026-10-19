@@ -153,12 +153,12 @@ class RowRun:
         verify_seconds = 0.0
         tag = row.id
         with environment(settings):
-            streamer = SafetensorsStreamer()
-            with self.timer.phase("%s.setup" % tag):
-                streamer.__enter__()
-                streamer.stream_files(self.paths, device=destination, is_distributed=bool(row.dist),
-                                      owned=row.owned)
-            try:
+            # A real `with`, so the streamer's __exit__ gets the exception of a failed row: the distributed streamer
+            # skips its closing barrier then, which the other rank would not reach.
+            with SafetensorsStreamer() as streamer:
+                with self.timer.phase("%s.setup" % tag):
+                    streamer.stream_files(self.paths, device=destination, is_distributed=bool(row.dist),
+                                          owned=row.owned)
                 if self.timer.announce:
                     stamp("START %s.load" % tag)
                 if streamer.file_streamer.is_distributed != bool(row.dist):
@@ -191,9 +191,6 @@ class RowRun:
                 load_seconds += time.perf_counter() - start
                 if self.timer.announce:
                     stamp("END   %s.load  %.1fs" % (tag, load_seconds))
-            finally:
-                with self.timer.phase("%s.teardown" % tag):
-                    streamer.__exit__(None, None, None)
         self.timer.records.append({"phase": "%s.load" % tag, "seconds": load_seconds,
                                    "bytes": self.manifest["total_data_bytes"]})
         if self.timer.announce and held:
