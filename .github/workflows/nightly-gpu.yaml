@@ -17,6 +17,14 @@ on:
         description: Seed of the synthetic models (default is the run id).
         required: false
         type: string
+      rows:
+        description: Only the rows whose id starts with one of these comma-separated prefixes (default all).
+        required: false
+        type: string
+      drill:
+        description: 'Fault injection, KIND:ROW_ID,... (see tests/gpu/test_synthetic_models.py); passes only if every fault is reported.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -107,6 +115,8 @@ jobs:
           env: |
             GPU_SEED=${{ inputs.seed || github.run_id }}
             GPU_MATRIX=${{ inputs.matrix || 'full' }}
+            GPU_ROWS=${{ inputs.rows }}
+            GPU_DRILL=${{ inputs.drill }}
           runCmd: bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went

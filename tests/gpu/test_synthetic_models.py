@@ -16,6 +16,8 @@ bytes. A tensor is compared by its bytes, never by value, so NaN payloads and ne
     GPU_FIXTURES   directory written by gen_models.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
     GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them
+    GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
+                   and passes only if the fault is reported (see DRILLS below). Off by default.
 """
 
 import gc
@@ -45,6 +47,26 @@ MAX_ERRORS_PER_ROW = 40
 CONTROL_TIMEOUT_SECONDS = 120
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
+
+# Fault injection, to show that the checks catch what they are for. GPU_DRILL=corrupt:ROW,leak:ROW,raise:ROW makes the
+# test break that row on purpose; the run then passes only if the break is reported, and fails if it goes unnoticed.
+#   corrupt  flips one bit of the first tensor of the row after it arrived: the CRC32 check must report it
+#   leak     keeps a 32 MiB GPU tensor alive after the row: the GPU memory check must report it
+#   raise    makes rank 1 raise in the middle of the row: the row must fail on every rank, and the run must go on or
+#            stop in an orderly way (a hang is cut by the timeout, and shows as a failed run)
+# The value is the text that must appear in the row's errors; None means that any error of the row will do.
+DRILL_MARKERS = {"corrupt": "crc32", "leak": "GPU memory leak", "raise": None}
+LEAK_DRILL_BYTES = 32 * MIB
+
+
+def parse_drills(text):
+    drills = {}
+    for item in filter(None, (part.strip() for part in text.split(","))):
+        kind, _, row_id = item.partition(":")
+        if kind not in DRILL_MARKERS or not row_id:
+            raise RuntimeError("GPU_DRILL: %r is not KIND:ROW_ID with KIND one of %s" % (item, sorted(DRILL_MARKERS)))
+        drills[row_id] = kind
+    return drills
 
 
 class Fixtures:
@@ -94,8 +116,11 @@ def tensor_crc32(tensor):
 class RowRun:
     """One load of one model, and its verdict."""
 
-    def __init__(self, row, fixtures, device, timer):
+    def __init__(self, row, fixtures, device, timer, drill=None):
         self.row = row
+        self.drill = drill
+        self.leaked = None
+        self.drilled = False
         self.expected = fixtures.expected(row.model)
         self.paths = fixtures.paths(row.model)
         self.manifest = fixtures.manifests[row.model]
@@ -124,6 +149,8 @@ class RowRun:
         if name in self.seen:
             self.error("tensor %r yielded twice" % name)
         self.seen.add(name)
+        # The expected dtype comes from the streamer's own table, so this checks that the dtype survives the copy to
+        # the device, not that the table is right: that is checked against safetensors in the CPU tests (issue #267).
         want_dtype = safetensors_to_torch_dtype[entry["dtype"]]
         if tensor.dtype != want_dtype:
             self.error("%s: dtype %s, expected %s" % (name, tensor.dtype, want_dtype))
@@ -134,6 +161,9 @@ class RowRun:
         if tensor.device != self.device:
             self.error("%s: on %s, expected %s" % (name, tensor.device, self.device))
             return
+        if self.drill == "corrupt" and not self.drilled and entry["end"] > entry["start"]:
+            self.drilled = True
+            tensor.reshape(-1).view(torch.uint8)[0] ^= 1
         crc = tensor_crc32(tensor)
         if crc != entry["crc32"]:
             self.error("%s (%s %s, %d bytes): crc32 %08x, expected %08x" % (
@@ -176,6 +206,8 @@ class RowRun:
                     if row.device == "cpu_to":
                         tensor = tensor.to(self.device)
                     load_seconds += time.perf_counter() - start
+                    if self.drill == "raise" and dist.get_rank() == 1:
+                        raise RuntimeError("drill: rank 1 raises in the middle of the row")
                     if row.owned:
                         # No clone: an owned tensor must stay right while the stream goes on.
                         if name in held:
@@ -259,14 +291,21 @@ def main():
     gpu_baseline = torch.cuda.memory_allocated(device)
 
     rows = selected_rows()
+    drills = parse_drills(os.environ.get("GPU_DRILL", ""))
+    unknown = sorted(set(drills) - {r.id for r in rows})
+    if unknown:
+        raise RuntimeError("GPU_DRILL names rows that are not selected: %s" % unknown)
     if rank == 0:
         stamp("matrix %s: %d rows, strategy %s" % (os.environ.get("GPU_MATRIX", "core"), len(rows), strategy))
+        if drills:
+            stamp("DRILL: faults are injected on purpose into %s; the run passes only if all of them are reported" % drills)
     outcomes = []
     failed = False
     try:
         for row in rows:
             dist.barrier(group=control)
-            run = RowRun(row, fixtures, device, timer)
+            drill = drills.get(row.id)
+            run = RowRun(row, fixtures, device, timer, drill)
             if rank == 0:
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
                     row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
@@ -279,6 +318,8 @@ def main():
                 raised = True
                 run.error("%s: %s" % (type(error).__name__, error))
             elapsed = time.perf_counter() - started
+            if drill == "leak":
+                run.leaked = torch.empty(LEAK_DRILL_BYTES, dtype=torch.uint8, device=device)
             release_gpu_memory()
             # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is
             # still allocated is a leak of the streamer or of the test.
@@ -292,17 +333,32 @@ def main():
             dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=control)
             ok = flag[0].item() == 0
             any_raised = flag[1].item() == 1
+            # A drilled row must fail, and with the report that its fault is meant to cause.
+            caught = None
+            if drill:
+                marker = DRILL_MARKERS[drill]
+                local = (not ok) if marker is None else any(marker in message for message in run.errors)
+                seen = torch.tensor([1 if local else 0])
+                dist.all_reduce(seen, op=dist.ReduceOp.MAX, group=control)  # reported by any rank is reported
+                caught = seen.item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
+                             "drill": drill, "drill_caught": caught,
                              "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
             for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)
+            if drill:
+                print("[rank %d] DRILL %s on %s: %s" % (rank, drill, row.id,
+                                                         "REPORTED, as it must be" if caught else "NOT REPORTED"),
+                      flush=True)
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
             write_results(results_dir, strategy, rank, timer, outcomes)
+            if drill and not caught:
+                failed = True  # the fault went unnoticed: a check does not do its job
             if not ok:
-                failed = True
+                failed = failed or not drill
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and
                 # one run reports every failing row. So does a row that raised without distributed streaming,
                 # which has no collectives. After an exception in a distributed row they may be out of step.

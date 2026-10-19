@@ -83,6 +83,24 @@ class GenerateModels(unittest.TestCase):
     def test_every_dtype_rank_and_edge_size_is_present(self):
         gen.check_coverage(list(self.manifests.values()))
 
+    def test_every_known_dtype_is_in_the_default_models(self):
+        self.assertEqual(self.manifests["mixed"]["dtypes"], gen.DTYPE_NAMES)
+        self.assertEqual({t["dtype"] for _, t in self.tensors("mixed")}, set(gen.DTYPE_NAMES))
+
+    def test_dtypes_option_narrows_the_mixed_model_and_the_coverage_check(self):
+        narrow = ["F32", "U16", "C64"]
+        with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
+            self.assertEqual(gen.main(["generate", "--out", other, "--seed", "11", "--scale", str(SCALE),
+                                       "--files", str(FILES), "--dtypes", ",".join(narrow)]), 0)
+            mixed = gen.load_manifest(other, "mixed")
+        self.assertEqual(mixed["dtypes"], sorted(narrow))
+        # the mixed model's tensors of the random draw and the mandatory ones, plus the U8 edge sizes
+        self.assertEqual({t["dtype"] for f in mixed["files"] for t in f["tensors"]} - {"U8"}, set(narrow))
+
+    def test_unknown_dtype_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
+            self.assertEqual(gen.main(["generate", "--out", other, "--seed", "11", "--dtypes", "F32,F4"]), 1)
+
     def test_empty_tensors_only_with_the_flag(self):
         empty = [t["name"] for m in gen.MODEL_NAMES for _, t in self.tensors(m) if t["end"] == t["start"]]
         if gen.EMPTY_TENSORS:

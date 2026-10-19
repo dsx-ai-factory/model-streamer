@@ -20,7 +20,8 @@ passthrough, 2 GiB of `/dev/shm` for NCCL and the existing io_uring seccomp sett
 1. installs CUDA PyTorch (2.4.1, the newest build for the image's Python 3.8) and the Python requirements,
    builds the real `libstreamer.so` and proves io_uring works here;
 2. generates four synthetic models into `.gpu-fixtures/` (not in the repo; the runner's VM is discarded after
-   the job), in parallel with the build, and verifies them;
+   the job), after the build, and verifies them. The models hold every dtype that the streamer's own table accepts
+   with the installed PyTorch and that the generator knows (the script prints which ones are left out);
 3. runs `test_synthetic_models.py` under `torchrun` with two ranks, once per filesystem strategy
    (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with no
    `sync_buffered` fallback: a reader the host cannot serve fails the run instead of passing on the synchronous
@@ -41,7 +42,13 @@ Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.
 `--models mixed,many_files` to build only some of them.
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
-seed. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU
+seed. The generator knows 17 dtypes: the 12 of the first version plus `C64`, `U16`, `U32`, `U64` and `F8_E8M0`.
+`--dtypes` narrows them; the test run passes the ones the streamer accepts with the installed PyTorch (2.4.1 has
+no `F8_E8M0`). `F4` is not generated yet: it packs two values per byte, so its header shape is not the torch
+shape, and the streamer rejects it today ([#234](https://github.com/dsx-ai-factory/model-streamer/issues/234)).
+The expected dtype of a streamed tensor is taken from the streamer's own dtype table, so this test does not check
+the table itself; [#267](https://github.com/dsx-ai-factory/model-streamer/issues/267) compares it with safetensors
+in the CPU tests. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU
 when a CUDA device is requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260)). Once
 that is fixed, set `EMPTY_TENSORS = True` in `gen_models.py` to bring them back.
 
@@ -96,6 +103,14 @@ NCCL traffic or GPU work next to the streamer's. Host memory is not checked here
 Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
 run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
 be out of step. The results of each row are written as soon as it ends.
+
+To show that the checks fire, `GPU_DRILL=KIND:ROW_ID,...` (the `drill` input of the workflow, with `rows` to pick the
+rows) injects a fault into a row on purpose: `corrupt` flips a bit of one tensor after it arrived (the CRC32 check
+must report it), `leak` keeps a 32 MiB GPU tensor alive (the GPU memory check must report it), and `raise` makes
+rank 1 raise in the middle of a row (the row must fail on both ranks). A drilled run passes only if every fault is
+reported, and fails if one goes unnoticed. It is off by default.
+Example: `gh workflow run nightly-gpu.yaml --ref <branch> -f rows=mixed.solo,mixed.dist.spans.owned.cuda.tight
+-f drill=corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight,raise:mixed.dist.spans.owned.cuda.tight`.
 
 The script raises the open files limit to the hard limit before the test, because the `many_files` model has 5,000 files and
 the streamer keeps a file open until its submission ends

@@ -26,7 +26,8 @@ Alongside each model goes a manifest (<out>/<model>.manifest.json): for every te
 position in the file and the CRC32 of its bytes, computed while the data is generated. The test compares what
 reaches the GPU with it.
 
-    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 5000] [--models NAME,NAME,...] [--no-verify]
+    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 5000] [--models NAME,NAME,...]
+                           [--dtypes F32,U16,...] [--no-verify]
     gen_models.py verify   --out DIR [--models NAME,NAME,...]
 
 The model names are the four above; by default all of them. Each model is written to <out>/<name>/.
@@ -70,14 +71,37 @@ DTYPES = {
     "BF16": (2, "random"),
     "F8_E4M3": (1, "random"),
     "F8_E5M2": (1, "random"),
+    "F8_E8M0": (1, "random"),
+    "C64": (8, "random"),
     "I64": (8, "random"),
     "I32": (4, "random"),
     "I16": (2, "random"),
     "I8": (1, "random"),
+    "U64": (8, "random"),
+    "U32": (4, "random"),
+    "U16": (2, "random"),
     "U8": (1, "random"),
     "BOOL": (1, "bool"),
 }
 DTYPE_NAMES = sorted(DTYPES)
+
+# F4 (two 4-bit values per byte, so the shape in the header is not the shape of the torch tensor) is not here yet:
+# the streamer rejects such a file (https://github.com/dsx-ai-factory/model-streamer/issues/234). The test run fails
+# when the streamer accepts a dtype that is neither in DTYPES nor here, so that a new dtype is never left untested
+# without someone deciding so.
+KNOWN_GAPS = frozenset({"F4"})
+
+# The dtypes the models are drawn from: all of DTYPES, or the ones given with --dtypes. The test run passes the
+# ones the streamer accepts with the installed torch, which has no unsigned 16/32/64 bit or float8_e8m0 before
+# 2.3 and 2.7 or so. Every one of them is forced into the mixed model, and check_coverage requires it.
+active_dtypes = list(DTYPE_NAMES)
+
+
+def use_dtypes(names):
+    unknown = sorted(set(names) - set(DTYPES))
+    if unknown or not names:
+        raise GenerationError("unknown dtype(s) %s; the dtypes are %s" % (unknown or [names], ", ".join(DTYPE_NAMES)))
+    active_dtypes[:] = sorted(set(names))
 
 # U8 tensor sizes that sit on or next to the boundaries the read path cares about: 4 KiB pages, the 64 KiB
 # direct-I/O block, and the 8 MiB read chunk.
@@ -209,8 +233,8 @@ def random_shape(rng, itemsize, max_bytes):
     return tuple(dims)
 
 
-def random_tensor(rng, key, used, max_bytes, dtypes=DTYPE_NAMES, name=None):
-    dtype = dtypes[int(rng.integers(0, len(dtypes)))]
+def random_tensor(rng, key, used, max_bytes, name=None):
+    dtype = active_dtypes[int(rng.integers(0, len(active_dtypes)))]
     shape = random_shape(rng, DTYPES[dtype][0], max_bytes)
     gen = DTYPES[dtype][1]
     return TensorSpec(name or realistic_name(key, used), dtype, shape, gen, key)
@@ -229,7 +253,7 @@ def mandatory_tensors_mixed(first_key, used):
         specs.append(TensorSpec(name, dtype, tuple(shape), gen, key))
         key += 1
 
-    for index, dtype in enumerate(DTYPE_NAMES):
+    for index, dtype in enumerate(active_dtypes):
         gen = DTYPES[dtype][1]
         rank = 1 + index % 5
         add("mandatory.%s.scalar" % dtype.lower(), dtype, (), gen)
@@ -447,7 +471,8 @@ def drop_page_cache(paths):
 
 
 def generate_model(args):
-    model, out_dir, seed, scale, files, verify = args
+    model, out_dir, seed, scale, files, verify, dtypes = args
+    use_dtypes(dtypes)  # in this process: the pool may spawn workers that do not share the parent's state
     timer = PhaseTimer()
     directory = os.path.join(out_dir, model)
     os.makedirs(directory, exist_ok=True)
@@ -465,6 +490,7 @@ def generate_model(args):
         drop_page_cache([os.path.join(directory, f["path"]) for f in manifest_files])
     manifest = {
         "generator_version": GENERATOR_VERSION, "numpy_version": np.__version__, "seed": seed, "model": model, "scale": scale,
+        "dtypes": list(active_dtypes),
         "num_files": len(manifest_files),
         "num_tensors": sum(len(f["tensors"]) for f in manifest_files),
         "total_data_bytes": data_bytes,
@@ -569,7 +595,8 @@ def check_coverage(manifests):
                     edges.add(tensor["shape"][0])
                 empty = empty or tensor["end"] == tensor["start"]
     missing = []
-    missing += ["dtype " + d for d in DTYPE_NAMES if d not in dtypes]
+    wanted = set().union(*(manifest["dtypes"] for manifest in manifests))
+    missing += ["dtype " + d for d in sorted(wanted) if d not in dtypes]
     missing += ["rank %d" % r for r in range(6) if r not in ranks]
     missing += ["edge size %d" % s for s in EDGE_SIZES if s not in edges]
     if EMPTY_TENSORS and not empty:
@@ -586,7 +613,9 @@ def check_coverage(manifests):
 
 def run_generate(args):
     models = parse_models(args.models)
-    jobs = [(m, args.out, args.seed, args.scale, args.files, not args.no_verify) for m in models]
+    dtypes = [d.strip() for d in args.dtypes.split(",") if d.strip()] if args.dtypes else list(DTYPE_NAMES)
+    use_dtypes(dtypes)
+    jobs = [(m, args.out, args.seed, args.scale, args.files, not args.no_verify, dtypes) for m in models]
     print("generating models %s, seed %d, scale %g, numpy %s, generator version %d, in %s" % (
         ",".join(models), args.seed, args.scale, np.__version__, GENERATOR_VERSION, args.out), flush=True)
     records = []
@@ -622,6 +651,7 @@ def main(argv=None):
                      help="size of the mixed, many_tensors and giant_tensor models relative to the full size")
     gen.add_argument("--files", type=int, default=5000, help="number of files of the many_files model")
     gen.add_argument("--models", default=",".join(MODEL_NAMES), help="comma separated model names")
+    gen.add_argument("--dtypes", default="", help="comma separated dtypes to draw from (default: all of them)")
     gen.add_argument("--no-verify", action="store_true")
     gen.set_defaults(func=run_generate)
     ver = sub.add_parser("verify")

@@ -4,7 +4,7 @@
 #
 # Real-GPU test run, inside the GPU devcontainer on a host with two GPUs:
 #   1. set up: CUDA PyTorch, the real libstreamer, a proof that io_uring works here
-#   2. generate the four synthetic models (in parallel with the build) and check them
+#   2. generate the four synthetic models, with every dtype the streamer accepts here, and check them
 #   3. stream them to the GPUs once per filesystem strategy and compare every tensor
 # Every step is timed; the table at the end shows where the time went.
 set -euo pipefail
@@ -81,15 +81,6 @@ PY
 echo "== generator self-test"
 phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py
 
-echo "== generate synthetic models, in the background while libstreamer builds"
-rm -rf "$FIXTURES"
-mkdir -p "$FIXTURES"
-# Its lines reach the live log marked [gen] and are kept in generate.log. A process substitution, not a
-# pipeline, so that `wait` reports the generator's own exit status.
-python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" \
-    > >(sed -u 's/^/[gen] /' | tee "$RESULTS/generate.log") 2>&1 &
-GENERATOR_PID=$!
-
 build_libstreamer() {
     # Called through phase, where `set -e` does not apply (not inside the subshell either): every command ends in
     # `|| return` or `|| exit`, or a failed build or io_uring check would be hidden by the install that follows.
@@ -104,13 +95,41 @@ build_libstreamer() {
 }
 phase build_libstreamer build_libstreamer
 
-wait_for_generator() {
-    if ! wait "$GENERATOR_PID"; then
-        echo "fixture generation failed (its output is above, marked [gen])"
-        return 1
-    fi
+export STREAMER_LIBRARY="$PWD/cpp/bazel-bin/streamer/libstreamer.so"
+
+# The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
+# streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
+# listed here as not covered rather than failing the load of every file that holds it. (F4 is known to the streamer
+# with PyTorch 2.8 or later but not to the generator, see gen_models.py.) Generation takes under a minute.
+generate_models() {
+    local dtypes
+    dtypes=$(python3 - <<'PY'
+import sys
+sys.path.insert(0, "tests/gpu")
+import gen_models
+from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype
+
+streamer = set(safetensors_to_torch_dtype)
+covered = sorted(streamer & set(gen_models.DTYPES))
+print("streamer dtypes: %s" % " ".join(sorted(streamer)), file=sys.stderr)
+print("not generated:   %s" % (" ".join(sorted(set(gen_models.DTYPES) - streamer)) or "-"), file=sys.stderr)
+unknown = sorted(streamer - set(gen_models.DTYPES) - gen_models.KNOWN_GAPS)
+print("not known to the generator: %s" % (" ".join(unknown) or "-"), file=sys.stderr)
+if unknown:
+    print("ERROR: the streamer accepts %s, which the generator cannot write: add it to DTYPES in tests/gpu/gen_models.py"
+          % " ".join(unknown), file=sys.stderr)
+    sys.exit(1)
+print(",".join(covered))
+PY
+    ) || return
+    rm -rf "$FIXTURES"
+    mkdir -p "$FIXTURES"
+    python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" --dtypes "$dtypes" \
+        2>&1 | tee "$RESULTS/generate.log"
+    return "${PIPESTATUS[0]}"
 }
-phase wait_for_generator wait_for_generator
+echo "== generate synthetic models"
+phase generate_models generate_models
 
 # The direct I/O strategies are only tested if the fixtures are on a real block device that serves O_DIRECT. The
 # streamer reads a file from a mount that cannot (tmpfs, for one) with its synchronous reader, quietly, so on such
@@ -146,7 +165,6 @@ PY
 }
 check_fixture_storage || exit 1
 
-export STREAMER_LIBRARY="$PWD/cpp/bazel-bin/streamer/libstreamer.so"
 export GPU_MATRIX="${GPU_MATRIX:-core}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=2
