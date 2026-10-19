@@ -7,7 +7,8 @@ real NCCL and the real storage path are exercised together.
 The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs all the rows (`full`, about 50 minutes)
 every night at 00:17 UTC, on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`: two T4s,
 12 cores, 48 GB). A scheduled run is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/`
-(documentation files aside) changed since the last scheduled run that passed or failed. With `workflow_dispatch`
+(documentation files aside) changed since the last scheduled run that passed, so a failed run is repeated the next
+night. With `workflow_dispatch`
 either set can be run on demand, and a manual run is never skipped:
 `gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N]`.
 

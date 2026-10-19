@@ -39,7 +39,8 @@ concurrency:
 
 jobs:
   # A scheduled run is skipped when nothing that the tests exercise changed since the last scheduled run that
-  # finished (passed or failed). Pushes and manual runs always run.
+  # passed, so a failed run is repeated the next night and every commit ends up with a passing run. Pushes and
+  # manual runs always run.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -61,10 +62,9 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status completed --limit 20 \
-                   --json headSha,conclusion \
-                   --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")][0].headSha // ""')
-          echo "last scheduled run: ${last:-none}; now: $GITHUB_SHA"
+          last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status success --limit 1 \
+                   --json headSha --jq '.[0].headSha // ""')
+          echo "last successful scheduled run: ${last:-none}; now: $GITHUB_SHA"
           # No earlier run, or its commit is gone (a force push): run.
           if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
