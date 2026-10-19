@@ -82,6 +82,11 @@ the stream ends and check them all then, which tests the ownership guarantee. Ro
 tensor when it is yielded. A row that asks for distributed streaming fails if the streamer silently fell back
 to non-distributed.
 
+After every row the test drops its own references, frees the GPU cache and checks that `torch.cuda.memory_allocated()`
+is back to its value before the run (8 MiB of slack). Anything above that is reported as a GPU memory leak and
+fails the row. The ranks agree on the outcome of a row over a separate CPU-only (gloo) group, so the test adds no
+NCCL traffic or GPU work next to the streamer's. Host memory is not checked here; that belongs in a longevity test.
+
 Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
 run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
 be out of step. The results of each row are written as soon as it ends.

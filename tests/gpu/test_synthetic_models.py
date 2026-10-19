@@ -42,6 +42,9 @@ MIB = 1 << 20
 D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
 MAX_ERRORS_PER_ROW = 40
+CONTROL_TIMEOUT_SECONDS = 120
+# Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
+GPU_LEAK_SLACK = 8 * MIB
 
 
 class Fixtures:
@@ -147,6 +150,7 @@ class RowRun:
         destination = "cpu" if row.device == "cpu_to" else str(self.device)
         held = {}
         load_seconds = 0.0
+        verify_seconds = 0.0
         tag = row.id
         with environment(settings):
             streamer = SafetensorsStreamer()
@@ -179,9 +183,9 @@ class RowRun:
                         held[name] = tensor
                     else:
                         # A borrowed tensor is only good until the iteration advances.
-                        with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size(),
-                                              announce=False):
-                            self.check(name, tensor)
+                        check_start = time.perf_counter()
+                        self.check(name, tensor)
+                        verify_seconds += time.perf_counter() - check_start
                 start = time.perf_counter()
                 torch.cuda.synchronize(self.device)
                 load_seconds += time.perf_counter() - start
@@ -196,11 +200,14 @@ class RowRun:
             stamp("START %s.verify (%d tensors)" % (tag, len(held)))
         verify_start = time.perf_counter()
         for name, tensor in held.items():
-            with self.timer.phase("%s.verify" % tag, nbytes=tensor.numel() * tensor.element_size(),
-                                  announce=False):
-                self.check(name, tensor)
+            self.check(name, tensor)
+        verify_seconds += time.perf_counter() - verify_start
         if self.timer.announce and held:
             stamp("END   %s.verify  %.1fs" % (tag, time.perf_counter() - verify_start))
+        # One record per row: a record per tensor was millions of records, and the file rewritten after every row
+        # took about 8 minutes of a run.
+        self.timer.records.append({"phase": "%s.verify" % tag, "seconds": verify_seconds,
+                                   "bytes": self.manifest["total_data_bytes"]})
         missing = set(self.expected) - self.seen
         if missing:
             self.error("%d tensor(s) never arrived, for example %r" % (len(missing), sorted(missing)[0]))
@@ -249,6 +256,10 @@ def main():
         dist.init_process_group("nccl", timeout=timedelta(seconds=DIST_TIMEOUT_SECONDS))
     with timer.phase("init.manifests"):
         fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"))
+    # The ranks agree on the outcome of a row over a CPU-only group of their own, so the test adds no NCCL traffic
+    # and no GPU work next to the streamer's, and can still report after a distributed row went wrong.
+    control = dist.new_group(backend="gloo", timeout=timedelta(seconds=CONTROL_TIMEOUT_SECONDS))
+    gpu_baseline = torch.cuda.memory_allocated(device)
 
     rows = selected_rows()
     if rank == 0:
@@ -258,7 +269,7 @@ def main():
     try:
         for row in rows:
             with timer.phase("%s.barrier" % row.id):
-                dist.barrier()
+                dist.barrier(group=control)
             run = RowRun(row, fixtures, device, timer)
             if rank == 0:
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
@@ -274,19 +285,25 @@ def main():
             elapsed = time.perf_counter() - started
             # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
             # The second element is 1 when a rank raised: its collectives may be out of step.
+            with timer.phase("%s.release" % row.id):
+                release_gpu_memory()
+            # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is
+            # still allocated is a leak of the streamer or of the test.
+            gpu_allocated = torch.cuda.memory_allocated(device)
+            if not raised and gpu_allocated > gpu_baseline + GPU_LEAK_SLACK:
+                run.error("GPU memory leak: %.1f MiB still allocated after the row, %.1f MiB before the run" % (
+                    gpu_allocated / MIB, gpu_baseline / MIB))
             with timer.phase("%s.agree" % row.id):
-                flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0], device=device)
-                dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+                flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0])
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=control)
                 ok = flag[0].item() == 0
                 any_raised = flag[1].item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
-                             "errors": run.errors_with_total()})
+                             "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
             for message in run.errors_with_total():
                 print("[rank %d]   %s" % (rank, message), flush=True)
-            with timer.phase("%s.release" % row.id):
-                release_gpu_memory()
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
             with timer.phase("%s.results" % row.id):
