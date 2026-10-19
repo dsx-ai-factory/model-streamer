@@ -1,16 +1,6 @@
 name: Nightly GPU tests
 
 on:
-  # TEMPORARY: runs this workflow on a push to its development branch, before the file exists on the default
-  # branch, where workflow_dispatch cannot see it yet. (A pull_request trigger does not work: the NVIDIA
-  # runners refuse pull_request events.) Remove before merging.
-  push:
-    branches:
-      - real-gpu-tests
-    paths:
-      - '.github/workflows/nightly-gpu.yaml'
-      - 'tests/gpu/**'
-      - '.devcontainer/gpu/**'
   schedule:
     - cron: '17 0 * * *'   # every night, if the code changed since the last scheduled run (see the changes job)
   workflow_dispatch:
@@ -39,8 +29,8 @@ concurrency:
 
 jobs:
   # A scheduled run is skipped when nothing that the tests exercise changed since the last scheduled run that
-  # passed, so a failed run is repeated the next night and every commit ends up with a passing run. Pushes and
-  # manual runs always run.
+  # passed, so a failed run is repeated the next night and every commit ends up with a passing run. Manual
+  # runs always run.
   changes:
     runs-on: ubuntu-latest
     outputs:
