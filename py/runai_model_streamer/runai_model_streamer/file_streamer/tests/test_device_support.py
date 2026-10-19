@@ -10,6 +10,7 @@ from runai_model_streamer.file_streamer.device_support import (
 from runai_model_streamer.libstreamer import (
     RUNAI_FILE_STREAMER_DEVICE_CPU,
     RUNAI_FILE_STREAMER_DEVICE_CUDA,
+    RunaiFileStreamerDeviceType,
 )
 
 
@@ -34,23 +35,27 @@ class TestDeviceSupport(unittest.TestCase):
     def test_the_ordinal_does_not_change_the_answer(self):
         self.assertIs(device_support("cuda"), device_support("cuda:3"))
 
-    def test_every_row_supplies_all_three_operations(self):
+    def test_every_row_supplies_both_operations(self):
         """The point of the record: a vendor cannot be half added. Missing one of these would fail
         later, inside a stream, rather than here."""
         for kind, support in _SUPPORTED.items():
             self.assertIsInstance(support, DeviceSupport, kind)
             self.assertIsInstance(support.api_type, int, kind)
-            self.assertTrue(callable(support.free_memory), f"{kind}: free_memory")
             self.assertTrue(callable(support.new_event), f"{kind}: new_event")
 
-    def test_an_absent_vendor_reads_as_zero_rather_than_raising(self):
-        """torch.cuda.mem_get_info raises on a host with no GPU, so the row has to guard it. 0 reads as
-        "do not use this device" at both call sites. A bad ORDINAL is different and still raises - that
-        is a caller bug, and 0 would turn it into a silent fallback."""
+    def test_every_row_names_a_type_the_c_api_serves(self):
+        """The one contract between this table and the C ABI. A row with an invented value passes
+        every other test here and is then refused by runai_request, with a submission already
+        built."""
         for kind, support in _SUPPORTED.items():
-            free = support.free_memory(f"{kind}:0")
-            self.assertIsInstance(free, int, kind)
-            self.assertGreaterEqual(free, 0, kind)
+            with self.subTest(kind=kind):
+                RunaiFileStreamerDeviceType(support.api_type)      # raises if it is not a member
+
+    def test_free_memory_is_not_one_of_them(self):
+        """It is a torch question, answered in torch_device for any device torch supports. The
+        distributed path asks it about devices this table does not list, so a field here would tie
+        that decision to whether the C++ layer can write into the device."""
+        self.assertNotIn("free_memory", DeviceSupport._fields)
 
     def test_no_row_claims_the_host_api_type(self):
         """CPU is the default in runai_request and means "these addresses are host memory". A device
@@ -61,7 +66,6 @@ class TestDeviceSupport(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "needs a CUDA device")
     def test_the_cuda_row_actually_works(self):
         support = device_support("cuda:0")
-        self.assertGreater(support.free_memory("cuda:0"), 0)
         event = support.new_event()
         event.record()
         event.synchronize()

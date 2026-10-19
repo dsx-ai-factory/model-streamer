@@ -3,7 +3,7 @@ from runai_model_streamer.libstreamer import (
     t_streamer,
     RunaiFileStreamerDevice,
     RUNAI_FILE_STREAMER_DEVICE_CPU,
-    RUNAI_FILE_STREAMER_DEVICE_CUDA,
+    RunaiFileStreamerDeviceType,
 )
 from typing import Callable, Dict, List, Optional, Tuple
 import ctypes
@@ -178,11 +178,12 @@ def runai_request(
     # 2**32 arrives as 0, which is the host, so an unserved device type would be read as CPU instead
     # of being refused. Checked against the types the library actually serves rather than against
     # int32, so a value that is merely in range but meaningless is still rejected here.
-    if device_type not in (RUNAI_FILE_STREAMER_DEVICE_CPU, RUNAI_FILE_STREAMER_DEVICE_CUDA):
-        raise ValueError(
-            f"device_type must be RUNAI_FILE_STREAMER_DEVICE_CPU ({RUNAI_FILE_STREAMER_DEVICE_CPU}) "
-            f"or RUNAI_FILE_STREAMER_DEVICE_CUDA ({RUNAI_FILE_STREAMER_DEVICE_CUDA}), got {device_type}"
-        )
+    try:
+        RunaiFileStreamerDeviceType(device_type)
+    except ValueError:
+        served = ", ".join(f"RUNAI_FILE_STREAMER_DEVICE_{member.name} ({member.value})"
+                           for member in RunaiFileStreamerDeviceType)
+        raise ValueError(f"device_type must be one of {served}, got {device_type}") from None
     if not (0 <= device_id < INT32_LIMIT):
         raise ValueError(f"device_id must fit a signed 32-bit integer, got {device_id}")
 

@@ -1,5 +1,6 @@
 import os
 import ctypes
+import enum
 
 DEFAULT_STREAMER_LIBRARY = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "lib/libstreamer.so"
@@ -8,9 +9,26 @@ STREAMER_LIBRARY = os.environ.get("STREAMER_LIBRARY", DEFAULT_STREAMER_LIBRARY)
 
 t_streamer = ctypes.c_void_p
 
-# RunaiFileStreamerDeviceType, from cpp/streamer/api/streamer/device.h. Only CPU is served today.
-RUNAI_FILE_STREAMER_DEVICE_CPU = 0
-RUNAI_FILE_STREAMER_DEVICE_CUDA = 1
+
+class RunaiFileStreamerDeviceType(enum.IntEnum):
+    """Mirrors the C enum in cpp/streamer/api/streamer/device.h, and is THE list of types this build
+    may SEND: runai_request both decides what it accepts and writes its message from the members, so
+    there is no second list to leave behind.
+
+    A member alone does not make the streamer use a device - that needs a row in
+    file_streamer/device_support.py as well. The two are safe in one direction only: a member with no
+    row is simply never sent, while a row naming a value that is not a member is refused here, with a
+    submission already built."""
+
+    CPU = 0
+    CUDA = 1
+
+
+# The flat spellings device.h uses, so Python and a C caller name the same thing the same way. Plain
+# ints, not members, so nothing downstream formats as "RunaiFileStreamerDeviceType.CPU". A new vendor
+# needs only the member above; an alias here is optional.
+RUNAI_FILE_STREAMER_DEVICE_CPU = RunaiFileStreamerDeviceType.CPU.value
+RUNAI_FILE_STREAMER_DEVICE_CUDA = RunaiFileStreamerDeviceType.CUDA.value
 
 
 class RunaiFileStreamerDevice(ctypes.Structure):
