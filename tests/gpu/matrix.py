@@ -14,8 +14,8 @@ A row is one load of one model:
 
 Two sets of rows, chosen with GPU_MATRIX:
 
-    core   the rows that matter most, one option at a time on the richest model: the nightly run
-    full   every valid combination: the weekly run
+    core   the rows that matter most, one option at a time on the richest model: a quick manual run
+    full   every valid combination: the nightly run
 """
 
 import itertools

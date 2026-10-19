@@ -268,8 +268,7 @@ def main():
     failed = False
     try:
         for row in rows:
-            with timer.phase("%s.barrier" % row.id):
-                dist.barrier(group=control)
+            dist.barrier(group=control)
             run = RowRun(row, fixtures, device, timer)
             if rank == 0:
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
@@ -283,21 +282,19 @@ def main():
                 raised = True
                 run.error("%s: %s" % (type(error).__name__, error))
             elapsed = time.perf_counter() - started
-            # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
-            # The second element is 1 when a rank raised: its collectives may be out of step.
-            with timer.phase("%s.release" % row.id):
-                release_gpu_memory()
+            release_gpu_memory()
             # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is
             # still allocated is a leak of the streamer or of the test.
             gpu_allocated = torch.cuda.memory_allocated(device)
             if not raised and gpu_allocated > gpu_baseline + GPU_LEAK_SLACK:
                 run.error("GPU memory leak: %.1f MiB still allocated after the row, %.1f MiB before the run" % (
                     gpu_allocated / MIB, gpu_baseline / MIB))
-            with timer.phase("%s.agree" % row.id):
-                flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0])
-                dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=control)
-                ok = flag[0].item() == 0
-                any_raised = flag[1].item() == 1
+            # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
+            # The second element is 1 when a rank raised: its collectives may be out of step.
+            flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0])
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=control)
+            ok = flag[0].item() == 0
+            any_raised = flag[1].item() == 1
             outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
                              "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
@@ -306,8 +303,7 @@ def main():
                 print("[rank %d]   %s" % (rank, message), flush=True)
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
-            with timer.phase("%s.results" % row.id):
-                write_results(results_dir, strategy, rank, timer, outcomes)
+            write_results(results_dir, strategy, rank, timer, outcomes)
             if not ok:
                 failed = True
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and

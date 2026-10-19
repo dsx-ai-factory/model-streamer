@@ -12,14 +12,13 @@ on:
       - 'tests/gpu/**'
       - '.devcontainer/gpu/**'
   schedule:
-    - cron: '17 0 * * *'   # every night: the core rows
-    - cron: '47 1 * * 0'   # every Sunday: all the rows
+    - cron: '17 0 * * *'   # every night, if the code changed since the last scheduled run (see the changes job)
   workflow_dispatch:
     inputs:
       matrix:
         description: Which rows to run, see tests/gpu/matrix.py.
         required: false
-        default: core
+        default: full
         type: choice
         options:
           - core
@@ -32,17 +31,62 @@ on:
 permissions:
   contents: read
   packages: read
+  actions: read
 
 concurrency:
   group: nightly-gpu-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  # A scheduled run is skipped when nothing that the tests exercise changed since the last scheduled run that
+  # finished (passed or failed). Pushes and manual runs always run.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the code changed since the last scheduled run
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != schedule ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status completed --limit 20 \
+                   --json headSha,conclusion \
+                   --jq '[.[] | select(.conclusion == "success" or .conclusion == "failure")][0].headSha // ""')
+          echo "last scheduled run: ${last:-none}; now: $GITHUB_SHA"
+          # No earlier run, or its commit is gone (a force push): run.
+          if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$last" "$GITHUB_SHA" -- cpp py tests/gpu .devcontainer \
+                      .github/workflows/nightly-gpu.yaml ':(exclude)*.md')
+          if [ -n "$changed" ]; then
+            echo "changed since $last:"; echo "$changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "nothing changed since $last: skipping the GPU run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   gpu-tests:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
-    timeout-minutes: 180   # TEMPORARY: a full run took over 2 hours; lower or keep once the time is understood
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -72,7 +116,7 @@ jobs:
           push: never
           env: |
             GPU_SEED=${{ inputs.seed || github.run_id }}
-            GPU_MATRIX=${{ inputs.matrix || ((github.event_name == 'push' || github.event.schedule == '47 1 * * 0') && 'full') || 'core' }}
+            GPU_MATRIX=${{ inputs.matrix || 'full' }}
           runCmd: bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went

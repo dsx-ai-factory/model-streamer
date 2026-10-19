@@ -4,10 +4,12 @@ Streams synthetic safetensors models to real GPUs with the model streamer and co
 the generator recorded. CI otherwise runs on CPU and mock devices only, so this is where a real CUDA copy,
 real NCCL and the real storage path are exercised together.
 
-The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs the `core` rows every night at
-00:17 UTC and all the rows (`full`) every Sunday at 01:47 UTC, on runner group `nv-gpu-amd64-t4-2gpu` (label
-`linux-amd64-gpu-t4-latest-2`: two T4s, 12 cores, 48 GB). With `workflow_dispatch` either can be run on demand:
-`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=full] [-f seed=N]`.
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs all the rows (`full`, about 50 minutes)
+every night at 00:17 UTC, on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`: two T4s,
+12 cores, 48 GB). A scheduled run is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/`
+(documentation files aside) changed since the last scheduled run that passed or failed. With `workflow_dispatch`
+either set can be run on demand, and a manual run is never skipped:
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N]`.
 
 ## What it does
 
@@ -61,9 +63,9 @@ distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_
 `.to()` each tensor) and a memory limit. Its id says all of it: `mixed.solo.owned.cuda.tight`,
 `many_files.dist.files.owned.cuda.tight`. `GPU_MATRIX` picks the rows:
 
-- `core` (nightly): 14 rows. One option at a time on the `mixed` model (borrowed tensors, `chunks`, host then
+- `core`: 14 rows, a quick set for a manual run. One option at a time on the `mixed` model (borrowed tensors, `chunks`, host then
   `.to()`, the deep and default limits), and one solo and one distributed load of every other model.
-- `full` (weekly): every valid combination, 94 rows. A distributed row needs `cuda`; the `files` policy needs more
+- `full` (nightly): every valid combination, 94 rows. A distributed row needs `cuda`; the `files` policy needs more
   than one file; the deep limit needs a model that can use it.
 
 The memory limit decides whether the host buffers, the ring the streamer reads into, are reused. With
