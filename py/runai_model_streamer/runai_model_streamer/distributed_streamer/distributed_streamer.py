@@ -122,7 +122,7 @@ class DistributedStreamer:
         self.params = _distributedStreamerParams()
         self.distributed_streamer = _distributedStreamer(self.file_streamer)
         self.is_distributed = False
-        self._ring_info: Optional[Tuple[int, int, int]] = None
+        self._ring_info: Optional[Tuple[int, int, int, str]] = None
 
     def __enter__(self) -> DistributedStreamer:
         self.file_streamer.__enter__()
@@ -279,11 +279,14 @@ class DistributedStreamer:
                 self.params.my_global_rank,
                 requests_iterator.num_buffers,
                 requests_iterator.buffer_size,
+                # What the slots are MADE of. A device ring and a host ring of the same shape read
+                # very differently, and the line reporting them cannot tell them apart otherwise.
+                requests_iterator.slots.label,
             )
 
-    def ring_info(self) -> Optional[Tuple[int, int, int]]:
-        """(rank, num_buffers, buffer_size) for the ring the last stream_files built, or None if it
-        built none.
+    def ring_info(self) -> Optional[Tuple[int, int, int, str]]:
+        """(rank, num_buffers, buffer_size, label) for the ring the last stream_files built, or
+        None if it built none.
 
         Captured during stream_files rather than read from the streamer on demand. The FileStreamer is
         shared with the safetensors metadata reads, so its requests_iterator outlives the call that
