@@ -23,10 +23,11 @@ class TestRingConcurrency(unittest.TestCase):
 
     RANGE_SIZE = 8
 
-    # Tries allowed to reach a state the library's completion order decides, not us. Most attempts
-    # reach it, so ten makes a spurious failure far rarer than the flake it removes, while still
-    # failing loudly if the state stops being reachable at all.
-    OUTLIVING_ATTEMPTS = 10
+    # Tries allowed to reach a state the library's completion order decides, not us: one next() does
+    # not consume one response, so a test needing responses still outstanding cannot simply assume
+    # it. Most attempts reach it, so ten makes a spurious failure far rarer than the flake it
+    # removes, while still failing loudly if the state stops being reachable at all.
+    SETUP_ATTEMPTS = 10
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -280,22 +281,33 @@ class TestRingConcurrency(unittest.TestCase):
         # much later, so it has to fail here instead - see the comment on stream_files.
         path, _ = self.write_ranges("undrained.txt", 8)
         request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
-        with FileStreamer() as fs:
-            fs.stream_files(request)
-            # bind the generator: an unreferenced one is collected as soon as next() returns, and
-            # closing it runs the drain - which would leave nothing for the guard to catch
-            chunks = fs.get_chunks()
-            next(chunks)                   # submissions live, nothing drained
-            self.assertGreater(fs.outstanding, 0)
 
-            with self.assertRaises(ValueError) as caught:
+        # Responses still outstanding is the SETUP, not the result: one next() pops responses until
+        # the ordered one can be released, so if range 0 completes last it pops them all and there is
+        # nothing left for the guard to catch. Set up again rather than assert it away.
+        for _ in range(self.SETUP_ATTEMPTS):
+            with FileStreamer() as fs:
                 fs.stream_files(request)
-            self.assertIn("outstanding", str(caught.exception))
+                # bind the generator: an unreferenced one is collected as soon as next() returns, and
+                # closing it runs the drain - which would leave nothing for the guard to catch
+                chunks = fs.get_chunks()
+                next(chunks)                   # submissions live, nothing drained
+                if fs.outstanding == 0:
+                    chunks.close()             # a discarded attempt still owns a live generator
+                    continue
 
-            # the rejected call must leave the streamer exactly as it was, or the guard would turn a
-            # recoverable mistake into the corruption it exists to prevent
-            self.assertGreater(fs.outstanding, 0)
-            self.assertGreater(len(fs.live_requests), 0)
+                with self.assertRaises(ValueError) as caught:
+                    fs.stream_files(request)
+                self.assertIn("outstanding", str(caught.exception))
+
+                # the rejected call must leave the streamer exactly as it was, or the guard would turn
+                # a recoverable mistake into the corruption it exists to prevent
+                self.assertGreater(fs.outstanding, 0)
+                self.assertGreater(len(fs.live_requests), 0)
+                return
+
+        self.fail(f"no attempt in {self.SETUP_ATTEMPTS} left a response outstanding after one next() "
+                  f"- one next() is now always draining the whole submission")
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
@@ -331,7 +343,7 @@ class TestRingConcurrency(unittest.TestCase):
         # ordering, so the generator pops responses until the ORDERED one can be released - and if
         # range 0 completes last it pops them all, leaving the drain nothing to do. That is correct
         # behaviour, but it is not the state under test, so set up again rather than assert it away.
-        for _ in range(self.OUTLIVING_ATTEMPTS):
+        for _ in range(self.SETUP_ATTEMPTS):
             fs = FileStreamer()
             with fs:
                 fs.stream_files(request)
@@ -345,7 +357,7 @@ class TestRingConcurrency(unittest.TestCase):
         else:
             # Never skip. A precondition that stops holding means the streamer changed, and a test
             # that skips itself goes green for ever without anyone reading why.
-            self.fail(f"no attempt in {self.OUTLIVING_ATTEMPTS} left a response outstanding at "
+            self.fail(f"no attempt in {self.SETUP_ATTEMPTS} left a response outstanding at "
                       f"__exit__ - one next() is now always draining the whole submission")
 
         # the context is gone and the handle with it; the generator is still alive, and closing it now

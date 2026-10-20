@@ -937,6 +937,31 @@ class TestDeviceRingSizing(unittest.TestCase):
     def test_a_device_with_nothing_free_falls_back(self):
         self.assertIsNone(device_ring_sizing(0, self.files([GiB] * 8)))
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_device_torch_cannot_measure_falls_back(self):
+        """None is what device_free_memory() reports for a device it cannot measure, and it answers
+        here rather than at each call site, so no caller invents its own meaning for unknown."""
+        self.assertIsNone(device_ring_sizing(None, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_limit_does_not_veto_a_ring_the_device_can_afford(self):
+        """A 3 GiB range needs a 6 GiB floor, above the 4 GiB limit - but the device has 100 GiB.
+        The limit is a target, so the data raises it rather than losing the device ring.
+
+        Eight ranges, not three: the ring never exceeds the stream, so a total below the floor would
+        give one buffer however large the budget is, and the depth below would say nothing."""
+        sizing = device_ring_sizing(100 * GiB, self.files([3 * GiB] * 8))
+        self.assertIsNotNone(sizing, "a setting refused a ring the device had room for")
+        buffer_size, num_buffers = sizing
+        self.assertGreaterEqual(buffer_size, 3 * GiB)      # a range cannot span two buffers
+        self.assertGreaterEqual(num_buffers, 2)            # and two is what lets them overlap
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_fraction_still_refuses_what_the_device_cannot_hold(self):
+        """The one thing that can still say no. 20 GiB free allows 10, and two 50 GiB ranges need
+        100 - raising the target past that would hand out memory the device does not have."""
+        self.assertIsNone(device_ring_sizing(20 * GiB, self.files([50 * GiB, GiB])))
+
     @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: str(2 * GiB)}, clear=True)
     def test_the_limit_is_configurable(self):
         buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))

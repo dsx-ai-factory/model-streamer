@@ -692,7 +692,8 @@ def _device_memory_fraction() -> float:
     return value
 
 
-def device_ring_sizing(free_bytes: int, files_chunks: List[FileChunks]) -> Optional[Tuple[int, int]]:
+def device_ring_sizing(free_bytes: Optional[int],
+                       files_chunks: List[FileChunks]) -> Optional[Tuple[int, int]]:
     """(buffer_size, num_buffers) for a ring in DEVICE memory, or None to use the host ring instead.
 
     The budget is the configured limit, capped at a fraction of what the device has free. The limit
@@ -706,12 +707,44 @@ def device_ring_sizing(free_bytes: int, files_chunks: List[FileChunks]) -> Optio
     once gets fewer buffers, and a single-range stream gets one. Nothing is lost there - with one
     range there is nothing to overlap, and the device ring still avoids the copy the host path makes.
 
-    free_bytes is a parameter rather than a query, so the arithmetic is testable without a device."""
-    budget = min(_device_memory_limit(), int(free_bytes * _device_memory_fraction()))
-    largest = _largest_range(files_chunks)
-    if budget <= 0 or budget < 2 * largest:
+    free_bytes is a parameter rather than a query, so the arithmetic is testable without a device.
+    None is what device_free_memory() reports for a device torch cannot measure, and answers the same
+    way as too little room: no device ring. Taken here rather than at the call site, so every caller
+    of this pair cannot each decide what unknown means."""
+    if free_bytes is None:
+        return None
+    budget = device_ring_budget(free_bytes, files_chunks)
+    if budget <= 0 or budget < device_ring_floor(files_chunks):
         return None
     return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
+
+
+def device_ring_budget(free_bytes: int, files_chunks: List[FileChunks]) -> int:
+    """Bytes a device ring may take: the configured target, raised when the data needs more, and
+    capped by the fraction of free memory in every case.
+
+    The limit is a TARGET, not a veto. A range carries one destination address and so cannot span two
+    buffers, so a model whose largest range needs more than the target would otherwise lose the
+    device ring entirely - on a device with the room to spare, because a setting said 4 GiB. Only the
+    fraction refuses, and then the device really is too full.
+
+    Public so a caller that falls back can report the number that bound it. Free memory alone does
+    not: printing it against the floor reads as nonsense, gigabytes being 'not enough' for
+    kilobytes."""
+    return min(max(_device_memory_limit(), device_ring_floor(files_chunks)),
+               int(free_bytes * _device_memory_fraction()))
+
+
+def device_ring_floor(files_chunks: List[FileChunks]) -> int:
+    """The smallest budget a device ring can work with: two of the largest range.
+
+    Two because that is where overlap becomes possible at all - one buffer is refilled only once it
+    has been handed over, so reading and consuming never run together. Not a tuning choice: a deeper
+    floor would refuse the device ring for more models, and depth saturates early (see _ring_sizing).
+
+    Public so the caller that falls back can say what was missing, read from here rather than
+    restated - a message that drifts from the rule reports a limit nothing enforces."""
+    return 2 * _largest_range(files_chunks)
 
 
 def _get_memory_mode(memory_limit: int) -> MemoryCapMode:
