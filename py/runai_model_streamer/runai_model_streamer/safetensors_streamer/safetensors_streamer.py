@@ -385,15 +385,15 @@ class SafetensorsStreamer:
             ring = self.file_streamer.ring_info()
             if ring is None:
                 return
-            rank, num_buffers, buffer_size = ring
+            rank, num_buffers, buffer_size, label = ring
             logger.info(
-                f"[RunAI Streamer] Rank {rank}: CPU ring {num_buffers} x "
+                f"[RunAI Streamer] Rank {rank}: {label} ring {num_buffers} x "
                 f"{humanize.naturalsize(buffer_size, binary=True)} = "
                 f"{humanize.naturalsize(num_buffers * buffer_size, binary=True)} "
                 f"for {humanize.naturalsize(self.total_size, binary=True)} in {len(self.files_to_tensors_metadata)} file(s)"
             )
         except Exception:
-            logger.debug("[RunAI Streamer] could not report the CPU ring", exc_info=True)
+            logger.debug("[RunAI Streamer] could not report the ring", exc_info=True)
 
     def get_tensors(self) -> Iterator[torch.tensor]:
         for file_index, ready_chunk_index, buffer in self.file_streamer.get_chunks():
