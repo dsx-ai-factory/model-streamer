@@ -1389,6 +1389,50 @@ TEST(AsyncIoWorker, An_Engine_That_Cannot_Be_Built_Is_Not_An_Internal_Error)
     EXPECT_TRUE(told) << "the streamer must learn the mount is dead, or it keeps routing here";
 }
 
+// --- staging buffer sizing -------------------------------------------------------------------------
+
+// THE PROPERTY, not the formula: whatever offset the file gives us, the rounded read must fit.
+//
+// A direct read starts at the block below the chunk's offset and ends at the block above its last
+// byte. The head can be anything from 0 to block - 1, and the tail then rounds up from there, so the
+// two together are what the buffer has to cover. Asserting `chunk + 2 * block` instead would only
+// restate the implementation and would pass if both were wrong in the same way.
+//
+// A chunk size that is NOT a block multiple, so the tail rounds as well as the head.
+TEST(StagingBytesize, Holds_The_Rounded_Read_At_Every_Head)
+{
+    constexpr size_t Block = 4096;
+    constexpr size_t Chunk = 8 * Block + 123;
+
+    const size_t capacity = staging_bytesize(Chunk, Block, true /* direct */);
+
+    for (size_t head = 0; head < Block; ++head)
+    {
+        const size_t rounded = ((head + Chunk + Block - 1) / Block) * Block;
+
+        // ASSERT, so a buffer that is short stops at the first head it fails on. EXPECT would print
+        // one line per head below the block size, which is thousands of them for one mistake.
+        ASSERT_LE(rounded, capacity)
+            << "a chunk at head " << head << " would read " << rounded << " bytes into a buffer of "
+            << capacity;
+    }
+}
+
+// A buffered read is issued exactly as asked, so padding it would pin memory nothing can use.
+TEST(StagingBytesize, A_Buffered_Read_Needs_No_Room)
+{
+    EXPECT_EQ(staging_bytesize(8192, 4096, false /* direct */), 8192u);
+}
+
+// The block is a per-mount measurement, so the room has to follow it rather than a fixed number.
+TEST(StagingBytesize, The_Room_Follows_The_Block)
+{
+    const size_t small = staging_bytesize(8192, 512, true /* direct */);
+    const size_t large = staging_bytesize(8192, 65536, true /* direct */);
+
+    EXPECT_GT(large, small) << "a mount with a larger block needs more room, not the same";
+}
+
 // --- device destinations -------------------------------------------------------------------------
 
 namespace

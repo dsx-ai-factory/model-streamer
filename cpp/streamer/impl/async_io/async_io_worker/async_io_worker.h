@@ -50,6 +50,17 @@ struct QueuedChunk
     char * buffer = nullptr;
 };
 
+// How big one staging buffer must be, for a chunk of `chunk_bytesize` on a mount whose block is
+// `block`.
+//
+// A DIRECT read into a staging buffer may start at the block below the chunk's offset and end at the
+// block above its last byte, because this buffer is ours rather than the caller's. That costs at most
+// one block at each end. A buffered read is issued exactly as asked and needs neither.
+//
+// Separated from the worker so the rule can be tested: the cost of getting it wrong is a read running
+// past the end of a pinned buffer, which no test of the worker would report.
+size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct);
+
 // The single worker driving one IoEngine.
 //
 // A CapacityWorker, so the base owns the in-flight window and the submit/drain interleave and this

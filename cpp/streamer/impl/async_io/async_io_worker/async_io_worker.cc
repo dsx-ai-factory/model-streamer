@@ -57,6 +57,11 @@ size_t device_slab_bytesize()
 
 } // namespace
 
+size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct)
+{
+    return direct ? chunk_bytesize + 2 * block : chunk_bytesize;
+}
+
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
                              EngineFactory factory, std::function<void()> on_engine_dead,
                              std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
@@ -148,12 +153,16 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     // Beside the engine, because both are sized by the same number. The client allocates nothing
     // until a device workload actually asks for a buffer, so a host-only mount pays 160 bytes for it.
     //
-    // ONE BUFFER PER CHUNK, so buffer_bytesize is the chunk size: a read is one buffer and one copy,
-    // with nothing to split or join. The slab stays small and independent of the window - see
-    // DeviceWriterClient::Buffers for why a slab covering the window would stall the first read.
+    // ONE BUFFER PER CHUNK: a read is one buffer and one copy, with nothing to split or join. The
+    // slab stays small and independent of the window - see DeviceWriterClient::Buffers for why a slab
+    // covering the window would stall the first read.
+    //
+    // Sized for today's block, which can only shrink later because adoption refuses a larger one - so
+    // the room a direct read needs at each end stays enough.
     DeviceWriterClient::Buffers buffers;
-    buffers.buffer_bytesize = _settings->chunk_bytesize();
-    buffers.slab_bytesize = std::max(_settings->chunk_bytesize(), device_slab_bytesize());
+    buffers.buffer_bytesize = staging_bytesize(_settings->chunk_bytesize(), _block,
+                                               posix_io::is_direct(_strategy));
+    buffers.slab_bytesize = std::max(buffers.buffer_bytesize, device_slab_bytesize());
 
     // NOT the window. The window says how many reads may be in flight; the pool must also cover the
     // chunks whose read has landed and whose copy has not, or a copy would cost a read its slot. The
