@@ -102,15 +102,31 @@ NCCL traffic or GPU work next to the streamer's. Host memory is not checked here
 
 Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
 run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
-be out of step. The results of each row are written as soon as it ends.
+be out of step.
 
-To show that the checks fire, `GPU_DRILL=KIND:ROW_ID,...` (the `drill` input of the workflow, with `rows` to pick the
-rows) injects a fault into a row on purpose: `corrupt` flips a bit of one tensor after it arrived (the CRC32 check
-must report it), `leak` keeps a 32 MiB GPU tensor alive (the GPU memory check must report it), and `raise` makes
-rank 1 raise in the middle of a row (the row must fail on both ranks). A drilled run passes only if every fault is
-reported, and fails if one goes unnoticed. It is off by default.
-Example: `gh workflow run nightly-gpu.yaml --ref <branch> -f rows=mixed.solo,mixed.dist.spans.owned.cuda.tight
--f drill=corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight,raise:mixed.dist.spans.owned.cuda.tight`.
+When a rank fails inside a distributed row, the streamer's NCCL group never completes its next collective, and after
+the streamer's timeout (`RUNAI_STREAMER_DIST_TIMEOUT`, 300 s here) the NCCL watchdog aborts the other rank
+(`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`). The whole `torchrun` of that strategy ends, so the rows after the failing one
+are not run for that strategy; the other strategies still run. A drill on 2026-10-20 showed this (a rank raising
+mid-row ended with `Watchdog caught collective operation timeout` and exit code -6 on the other rank).
+The run is bounded, but it cannot report the row from inside the process, so the results file lists a row as
+started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran`: for every results file how many
+of the expected rows finished, and in which row the run ended. An incomplete strategy fails the job.
+
+The results of each row are written as soon as it ends, in `rows-<strategy>-rank<N>.json`:
+`{"strategy", "expected_rows", "rows": [...]}`.
+
+## Self-check of the checks
+
+A check that never fails could be silently broken, so the run can prove that the CRC32 check and the GPU memory check
+fire. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs two rows once more (`sync_buffered` only, about 2 minutes)
+with a fault injected on purpose (`GPU_DRILL=KIND:ROW_ID,...` in `test_synthetic_models.py`): `corrupt` flips a bit of
+one tensor after it arrived, and `leak` keeps a 32 MiB GPU tensor alive after the row. That pass succeeds only if
+both are reported, and fails if one goes unnoticed. Its results are in `self-check/`.
+
+The workflow turns it on for every manual run, and for a scheduled run when the harness changed since the last
+scheduled run that passed (`test_synthetic_models.py`, `matrix.py`, `phase_timer.py`, `setup_and_run.sh` or the
+workflow itself), so nobody has to remember to run it.
 
 The script raises the open files limit to the hard limit before the test, because the `many_files` model has 5,000 files and
 the streamer keeps a file open until its submission ends

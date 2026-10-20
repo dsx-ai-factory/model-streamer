@@ -44,23 +44,20 @@ MIB = 1 << 20
 D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
 MAX_ERRORS_PER_ROW = 40
-# The CPU-only group that the ranks agree on must wait longer than the streamer's own distributed timeout: after a rank
-# raised, the other one stays inside the streamer until that timeout, and only then reaches the agreement. A drill that
-# makes a rank raise would otherwise end in a timeout of the agreement (the drill run of 2026-10-19 did) and not in
-# a report. A drilled run also shortens the streamer's timeout, so the faulted row does not take minutes.
+# The CPU-only group that the ranks agree on waits longer than the streamer's own distributed timeout, so that a rank
+# that is only slow is never mistaken for a failed one. (When a rank does fail inside a distributed row, the other one
+# is aborted by the NCCL watchdog after the streamer's timeout, and the whole run ends: see the README.)
 CONTROL_MARGIN_SECONDS = 120
-DRILL_DIST_TIMEOUT_SECONDS = 30
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
 
-# Fault injection, to show that the checks catch what they are for. GPU_DRILL=corrupt:ROW,leak:ROW,raise:ROW makes the
-# test break that row on purpose; the run then passes only if the break is reported, and fails if it goes unnoticed.
+# Fault injection, to show that the checks catch what they are for. GPU_DRILL=corrupt:ROW,leak:ROW makes the test
+# break that row on purpose; the run then passes only if the break is reported, and fails if it goes unnoticed.
 #   corrupt  flips one bit of the first tensor of the row after it arrived: the CRC32 check must report it
 #   leak     keeps a 32 MiB GPU tensor alive after the row: the GPU memory check must report it
-#   raise    makes rank 1 raise in the middle of the row: the row must fail on every rank, and the run must go on or
-#            stop in an orderly way (a hang is cut by the timeout, and shows as a failed run)
-# The value is the text that must appear in the row's errors; None means that any error of the row will do.
-DRILL_MARKERS = {"corrupt": "crc32", "leak": "GPU memory leak", "raise": None}
+# The value is the text that must appear in the row's errors. A rank that fails inside a distributed row is not a
+# drill: the NCCL watchdog aborts the other rank, so there is nothing left to report it.
+DRILL_MARKERS = {"corrupt": "crc32", "leak": "GPU memory leak"}
 LEAK_DRILL_BYTES = 32 * MIB
 
 
@@ -211,8 +208,6 @@ class RowRun:
                     if row.device == "cpu_to":
                         tensor = tensor.to(self.device)
                     load_seconds += time.perf_counter() - start
-                    if self.drill == "raise" and dist.get_rank() == 1:
-                        raise RuntimeError("drill: rank 1 raises in the middle of the row")
                     if row.owned:
                         # No clone: an owned tensor must stay right while the stream goes on.
                         if name in held:
@@ -262,11 +257,14 @@ def selected_rows():
     return rows
 
 
-def write_results(results_dir, strategy, rank, timer, outcomes):
+def write_results(results_dir, strategy, rank, timer, outcomes, expected_rows):
+    """The rows of this run so far. A row is listed with "ok": null from the moment it starts, so that if the process
+    is killed in the middle of it (the NCCL watchdog does that when a rank fails inside a distributed row), the file
+    names that row. expected_rows lets a reader see how many rows never started."""
     name = strategy.replace(",", "+") or "default"
     dump_jsonl(timer.records, os.path.join(results_dir, "timing-%s-rank%d.jsonl" % (name, rank)))
     with open(os.path.join(results_dir, "rows-%s-rank%d.json" % (name, rank)), "w") as handle:
-        json.dump(outcomes, handle, indent=1)
+        json.dump({"strategy": strategy, "expected_rows": expected_rows, "rows": outcomes}, handle, indent=1)
 
 
 def main():
@@ -283,9 +281,7 @@ def main():
     strategy = os.environ.get("RUNAI_STREAMER_FS_STRATEGY", "")
     results_dir = os.environ.get("GPU_RESULTS", "test-results/gpu")
     os.makedirs(results_dir, exist_ok=True)
-    streamer_timeout = int(os.environ.setdefault(
-        "RUNAI_STREAMER_DIST_TIMEOUT",
-        str(DRILL_DIST_TIMEOUT_SECONDS if os.environ.get("GPU_DRILL") else DIST_TIMEOUT_SECONDS)))
+    streamer_timeout = int(os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS)))
 
     timer = PhaseTimer(announce=(rank == 0))
     with timer.phase("init.nccl"):
@@ -317,6 +313,9 @@ def main():
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
                     row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
                     row.owned, row.device, row.limit, strategy))
+            outcome = {"row": row.id, "strategy": strategy, "ok": None}
+            outcomes.append(outcome)
+            write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
             started = time.perf_counter()
             raised = False
             try:
@@ -343,14 +342,12 @@ def main():
             # A drilled row must fail, and with the report that its fault is meant to cause.
             caught = None
             if drill:
-                marker = DRILL_MARKERS[drill]
-                local = (not ok) if marker is None else any(marker in message for message in run.errors)
+                local = any(DRILL_MARKERS[drill] in message for message in run.errors)
                 seen = torch.tensor([1 if local else 0])
                 dist.all_reduce(seen, op=dist.ReduceOp.MAX, group=control)  # reported by any rank is reported
                 caught = seen.item() == 1
-            outcomes.append({"row": row.id, "strategy": strategy, "ok": ok, "seconds": elapsed,
-                             "drill": drill, "drill_caught": caught,
-                             "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
+            outcome.update({"ok": ok, "seconds": elapsed, "drill": drill, "drill_caught": caught,
+                            "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
             for message in run.errors_with_total():
@@ -361,7 +358,7 @@ def main():
                       flush=True)
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
-            write_results(results_dir, strategy, rank, timer, outcomes)
+            write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
             if drill and not caught:
                 failed = True  # the fault went unnoticed: a check does not do its job
             if not ok:
@@ -374,7 +371,7 @@ def main():
                           flush=True)
                     break
     finally:
-        write_results(results_dir, strategy, rank, timer, outcomes)
+        write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
         if rank == 0:
             print(report(timer.records, top=15), flush=True)
         if dist.is_initialized():

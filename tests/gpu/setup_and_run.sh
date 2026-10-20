@@ -202,6 +202,57 @@ do
     record "run.$strategy" "$start" "$(date +%s.%N)"
 done
 
+# Self-check of the test's own checks: when the test harness changed (the workflow decides), run two rows once more with
+# a fault injected on purpose, a corrupted tensor and a leaked GPU tensor. This pass succeeds only if the CRC32 check and
+# the GPU memory check report them. sync_buffered is enough: the faults do not depend on how the file is read.
+if [ "${GPU_SELF_CHECK:-false}" = true ]; then
+    echo "[$(date +%T)] START run.self_check"
+    echo "== self-check: faults injected on purpose, the checks must report them"
+    start=$(date +%s.%N)
+    if ! GPU_ROWS="mixed.solo.owned.cuda.tight,mixed.solo.borrowed.cuda.tight" \
+        GPU_DRILL="corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight" \
+        GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
+        timeout --signal=TERM --kill-after=30s 15m \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py; then
+        status=1
+        echo "[$(date +%T)] FAILED run.self_check"
+    fi
+    record "run.self_check" "$start" "$(date +%s.%N)"
+fi
+
+# Which rows ran. A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends
+# that strategy's run: the rows after it never start. They must not hide behind the strategies that did finish.
+echo "== rows that ran"
+python3 - "$RESULTS" sync_buffered libaio_direct io_uring_direct io_uring_buffered <<'PY' || status=1
+import glob
+import json
+import os
+import sys
+
+results, strategies = sys.argv[1], sys.argv[2:]
+incomplete = False
+for path in sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True)):
+    data = json.load(open(path))
+    rows = data["rows"]
+    finished = [r for r in rows if r["ok"] is not None]
+    unexpected = [r["row"] for r in finished if not r["ok"] and not r.get("drill")]
+    line = "%s: %d of %d rows finished, %d failed" % (os.path.relpath(path, results), len(finished),
+                                                       data["expected_rows"], len(unexpected))
+    killed = [r["row"] for r in rows if r["ok"] is None]
+    if killed:
+        line += "; the run ended inside row " + killed[0]
+    if len(finished) < data["expected_rows"]:
+        incomplete = True
+        line += "  <-- INCOMPLETE"
+    print(line)
+for strategy in strategies:
+    if not glob.glob(os.path.join(results, "rows-%s-rank*.json" % strategy)):
+        incomplete = True
+        print("%s: no results at all  <-- INCOMPLETE" % strategy)
+sys.exit(1 if incomplete else 0)
+PY
+
 # The manifests list every tensor of every model; keep them with the results to debug a failure.
 mkdir -p "$RESULTS/manifests"
 for m in mixed many_tensors giant_tensor many_files; do gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true; done

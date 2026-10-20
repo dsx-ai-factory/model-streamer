@@ -21,10 +21,6 @@ on:
         description: Only the rows whose id starts with one of these comma-separated prefixes (default all).
         required: false
         type: string
-      drill:
-        description: 'Fault injection, KIND:ROW_ID,... (see tests/gpu/test_synthetic_models.py); passes only if every fault is reported.'
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -43,6 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      self_check: ${{ steps.decide.outputs.self_check }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -56,20 +53,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
         run: |
+          # self_check: whether the run ends with the self-check of the test's own checks (faults injected on purpose, see
+          # tests/gpu/setup_and_run.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
           if [ "$EVENT" != schedule ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status success --limit 1 \
                    --json headSha --jq '.[0].headSha // ""')
           echo "last successful scheduled run: ${last:-none}; now: $GITHUB_SHA"
-          # No earlier run, or its commit is gone (a force push): run.
+          # No earlier run, or its commit is gone (a force push): run, with the self-check.
           if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$last" "$GITHUB_SHA" -- cpp py tests/gpu .devcontainer \
                       .github/workflows/nightly-gpu.yaml ':(exclude)*.md')
+          harness=$(git diff --name-only "$last" "$GITHUB_SHA" -- tests/gpu/test_synthetic_models.py \
+                      tests/gpu/matrix.py tests/gpu/phase_timer.py tests/gpu/setup_and_run.sh \
+                      .github/workflows/nightly-gpu.yaml)
+          if [ -n "$harness" ]; then
+            echo "the test harness changed since $last, so the self-check runs:"; echo "$harness"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_check=false" >> "$GITHUB_OUTPUT"
+          fi
           if [ -n "$changed" ]; then
             echo "changed since $last:"; echo "$changed"
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -116,7 +126,7 @@ jobs:
             GPU_SEED=${{ inputs.seed || github.run_id }}
             GPU_MATRIX=${{ inputs.matrix || 'full' }}
             GPU_ROWS=${{ inputs.rows }}
-            GPU_DRILL=${{ inputs.drill }}
+            GPU_SELF_CHECK=${{ needs.changes.outputs.self_check }}
           runCmd: bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went
