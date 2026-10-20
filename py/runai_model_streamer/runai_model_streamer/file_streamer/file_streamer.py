@@ -13,13 +13,19 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_response_str,
     runai_list_files,
 )
+from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CPU
 from runai_model_streamer.file_streamer.yield_order import yield_order_for
+from runai_model_streamer.file_streamer.device_support import device_support
+from runai_model_streamer.torch_device.torch_device import device_free_memory
 from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
     FilesRequestsIteratorWithBuffer,
     FilesRequest,
     FileChunks,
     SlotMemory,
+    device_ring_budget,
+    device_ring_floor,
+    device_ring_sizing,
 )
 from runai_model_streamer.file_streamer.slot_pool import Slot
 
@@ -33,6 +39,7 @@ from runai_model_streamer.s3_utils.s3_utils import (
 
 import torch
 from functools import partial
+from humanize import naturalsize
 
 import logging
 
@@ -127,6 +134,12 @@ class FileStreamer:
         # so responses are demuxed by id rather than assumed to belong to a single current submission.
         self.live_requests: Dict[int, FilesRequest] = {}
         self.outstanding = 0          # responses still owed across ALL live submissions
+        # The ring, for as long as one is in use. None outside a stream: __exit__ frees it, so a
+        # device ring does not hold device memory after the load it was built for.
+        self.requests_iterator: Optional[FilesRequestsIteratorWithBuffer] = None
+        # Where the ring's slots live, as runai_request needs it. Host until stream_files decides
+        # otherwise: a wrong value here has the library write device addresses as host memory.
+        self._device: Tuple[int, int] = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
 
     def __enter__(self) -> "FileStreamer":
         self.streamer = runai_start()
@@ -149,6 +162,12 @@ class FileStreamer:
             runai_end(self.streamer)
             self.streamer = None
             self._credentialed_streamer = None
+
+        # The ring too, and only AFTER runai_end: it has joined the workers, so no range can still be
+        # writing into these slots - freeing them before that is a use after free. Dropped rather
+        # than kept because a device ring holds up to its whole budget in device memory, and would
+        # hold it for the life of this object, competing with the model it has just loaded.
+        self.requests_iterator = None
 
     def handle_object_store(self, path: str, streamer, credentials: Optional[S3Credentials] = None) -> str:
         # Two independent concerns, deliberately gated separately so they can't desync:
@@ -215,6 +234,17 @@ class FileStreamer:
             memory_limit: Optional[int] = None,
             owned: bool = True,
 ) -> None:
+        """owned applies to a HOST destination only, and memory_limit to the host ring only.
+
+        A caller always owns what it receives: to a device the tensor is a copy, by .to() out of a
+        host ring or by a clone out of a device one, so the slot is never handed over and owned=False
+        saves nothing there. It cannot be honoured literally either - yielding views would make a
+        range's dtype view depend on its offset lining up with its element size, which the packing
+        does not promise across mixed dtypes.
+
+        memory_limit caps HOST memory, and says nothing about a GPU. A device ring is bounded by a
+        fraction of free DEVICE memory, with RUNAI_STREAMER_DEVICE_MEMORY_LIMIT as a target that the
+        largest range can raise - so the ring can exceed that setting, but never the fraction."""
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
         #
@@ -247,33 +277,81 @@ class FileStreamer:
             # first object-storage path resolves + applies the credentials to the streamer, once
             file_stream_request.path = self.handle_object_store(file_stream_request.path, self.streamer, credentials)
 
-        # The ring is laid out to the block the mounts require, measured by the library.
-        #
-        # A submission is all filesystem or all object storage - mixing them is rejected with
-        # UnsupportedBackendMix, and homogeneous_paths() above says the same thing on this side - so
-        # the first path decides for the whole list. An object-storage submission has no mount, no
-        # O_DIRECT and no alignment requirement, so it skips the probe entirely rather than asking a
-        # question that can only answer "nothing to measure".
-        #
-        # Asked AFTER handle_object_store() above, so these paths are the ones that will be read.
-        paths = [request.path for request in file_stream_requests]
-        object_storage = bool(paths) and (is_s3_path(paths[0]) or is_gs_path(paths[0])
-                                          or is_azure_path(paths[0]))
+        # Free the previous ring FIRST. Two reasons, and the order matters for both: assigning below
+        # evaluates the new ring before dropping the old, so without this both exist at the peak -
+        # two device rings is twice the budget - and the free memory read below would count the
+        # previous ring's slots as taken, sizing the next one against a device that is not as full as
+        # it looks. Safe here because the guard above proved nothing is in flight.
+        self.requests_iterator = None
 
-        direct_block = (DIRECT_IO_BLOCK if object_storage or not paths
-                        else runai_probe_direct_block_size(self.streamer, paths))
+        # A ring in DEVICE memory when the destination is one the C++ layer can write into and it has
+        # the room; otherwise the host ring and a copy per range, as before. The device ARGUMENT is
+        # the switch - an engine asks for this by naming its device, which it has to do anyway, so
+        # there is no second setting that could disagree with it. Decided before the probe below,
+        # which it does not depend on: free memory and the range sizes name no mount.
+        support = device_support(self.device_str)
+        free = device_free_memory(self.device_str) if support else None
+        sizing = device_ring_sizing(free, file_stream_requests)
 
-        # Only a host ring read to a host destination hands its slots over, because that is the only
-        # case where the caller receives the SLOT itself. A device destination gets a copy - .to() out
-        # of a host ring, or a clone out of a device ring - so the slot is reused and handing it over
-        # would throw away a buffer per submission and fault a fresh one in, for nothing.
-        #
-        # Not "the caller never sees the slot because we yield tensor.to(device)": .to() RETURNS SELF
-        # when the device already matches, so on a device ring that would hand back the live slot.
-        # What makes it safe is the clone in get_chunks, not this condition.
-        self.requests_iterator: FilesRequestsIteratorWithBuffer = FilesRequestsIteratorWithBuffer.with_memory_mode(
-            file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
-        )
+        if sizing is not None:
+            buffer_size, num_buffers = sizing
+            # DIRECT_IO_BLOCK rather than a probe: pread cannot target device memory, so the library
+            # reads into its own pinned host staging and copies on from there. Nothing direct ever
+            # lands on these slots, and the ring reads the block only when slots.direct_io is set.
+            #
+            # owned=False always, and memory_limit unread - see this method's docstring. A device
+            # slot is reused, and the pool refuses an owned slot that is released with an event.
+            self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
+                slots=device_slots(self.device_str, support.new_event),
+            )
+            # The index torch will ALLOCATE on, not the one the caller spelled: "cuda" with no
+            # ordinal means the CURRENT device, which is not always 0, and the library has to be told
+            # where the slots it writes into actually live. A vendor with no ordinals at all reports
+            # None, and 0 is then the only device there is.
+            ordinal = torch.empty(0, device=self.device_str).device.index
+            self._device = (support.api_type, 0 if ordinal is None else ordinal)
+        else:
+            if support is not None:
+                # The BUDGET, not free memory: it is the number that refused the ring, and a limit
+                # far below free memory is the usual reason.
+                why = ("torch cannot measure its free memory" if free is None else
+                       f"its ring budget is "
+                       f"{naturalsize(device_ring_budget(free, file_stream_requests), binary=True)} "
+                       f"of the {naturalsize(free, binary=True)} free")
+                logger.warning(
+                    f"[RunAI Streamer] no device ring on {self.device_str}: {why}, and a ring needs "
+                    f"at least {naturalsize(device_ring_floor(file_stream_requests), binary=True)}"
+                    f" - reading into host memory and copying to the device instead"
+                )
+            # The ring is laid out to the block the mounts require, measured by the library.
+            #
+            # A submission is all filesystem or all object storage - mixing them is rejected with
+            # UnsupportedBackendMix, and homogeneous_paths() above says the same thing on this side -
+            # so the first path decides for the whole list. An object-storage submission has no mount,
+            # no O_DIRECT and no alignment requirement, so it skips the probe entirely rather than
+            # asking a question that can only answer "nothing to measure".
+            #
+            # Asked AFTER handle_object_store() above, so these paths are the ones that will be read.
+            paths = [request.path for request in file_stream_requests]
+            object_storage = bool(paths) and (is_s3_path(paths[0]) or is_gs_path(paths[0])
+                                              or is_azure_path(paths[0]))
+
+            direct_block = (DIRECT_IO_BLOCK if object_storage or not paths
+                            else runai_probe_direct_block_size(self.streamer, paths))
+
+            # Only a host ring read to a host destination hands its slots over, because that is the
+            # only case where the caller receives the SLOT itself. A device destination gets a copy -
+            # .to() out of this ring - so the slot is reused and handing it over would throw away a
+            # buffer per submission and fault a fresh one in, for nothing.
+            #
+            # Keyed on the DESTINATION, never on "the caller cannot see the slot because we yield
+            # tensor.to(device)": .to() RETURNS SELF when the device already matches, so that reading
+            # hands the live slot back on any ring whose memory is already on the target.
+            self._device = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
+            self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
+                file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
+            )
         # Built from the request list, which is where the file order is defined.
         self.yield_order = yield_order_for(file_stream_requests)
 
@@ -329,6 +407,7 @@ class FileStreamer:
                 [offset for file_request in request.files for offset in file_request.offsets],
                 [size for file_request in request.files for size in file_request.sizes],
                 request.range_dsts,
+                *self._device,
             )
             self.live_requests[submission_id] = request
             self.ranges_not_yielded[submission_id] = request.num_ranges
@@ -436,8 +515,12 @@ class FileStreamer:
                         if device_ring:
                             ready_event = new_event()
                             ready_event.record()
-                        self.requests_iterator.release(ready_request, ready_event)
-                        self._submit_while_buffers_free()
+                        # The ring is gone once the context has exited, and a generator can still be
+                        # resumed past that point. Nothing to hand the slot back to, and nothing will
+                        # write into it again - runai_end joined the workers before it was freed.
+                        if self.requests_iterator is not None:
+                            self.requests_iterator.release(ready_request, ready_event)
+                            self._submit_while_buffers_free()
         finally:
             self.drain_live_submissions()
 
