@@ -60,6 +60,15 @@ struct InflightChunk
     //
     // Taken at submit rather than at enqueue, so a chunk waiting in the queue holds no pinned memory.
     StagingBuffer staging;
+
+    // How many bytes of the staging buffer come BEFORE this chunk.
+    //
+    // A direct read into a staging buffer starts at the block below the chunk's offset, because the
+    // buffer is ours and the file's layout is not. Those earlier bytes land at the front and nobody
+    // wants them, so the chunk's own bytes begin here instead of at the buffer's base.
+    //
+    // Zero for a host chunk and for a buffered read, both of which are issued exactly as asked.
+    size_t staging_skip = 0;
 };
 
 // What a completion meant for the chunk it belongs to.
@@ -110,11 +119,19 @@ class InflightChunks
     // meaningful after a Partial.
     //
     // `buffer` is the STAGING buffer when the chunk has one, so every pass - including a bounced one -
-    // lands in the same place and the copy afterwards has one contiguous source.
+    // lands in the same place and the copy afterwards has one contiguous source. It is offset by
+    // staging_skip, the bytes a rounded direct read put in front of the chunk.
     Chunk pending(posix_io::RequestId id) const;
 
     // Give `id` the staging buffer its passes read into.
     void set_staging(posix_io::RequestId id, const StagingBuffer & buffer);
+
+    // Say that `skip` bytes of the staging buffer precede this chunk - see InflightChunk::staging_skip.
+    //
+    // Set when the first direct pass is planned, not when the buffer is taken: whether a file is read
+    // directly is decided per file, at the open, and a file that falls back to buffered has no skip.
+    // Once set it holds for every later pass, so a resumed read lands where the first one did.
+    void set_staging_skip(posix_io::RequestId id, size_t skip);
 
     // Remove `id` and return the chunk it was reading, so the caller can account its tasks.
     Chunk release(posix_io::RequestId id);
