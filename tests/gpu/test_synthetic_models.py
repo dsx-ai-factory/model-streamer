@@ -44,7 +44,12 @@ MIB = 1 << 20
 D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
 MAX_ERRORS_PER_ROW = 40
-CONTROL_TIMEOUT_SECONDS = 120
+# The CPU-only group that the ranks agree on must wait longer than the streamer's own distributed timeout: after a rank
+# raised, the other one stays inside the streamer until that timeout, and only then reaches the agreement. A drill that
+# makes a rank raise would otherwise end in a timeout of the agreement (the drill run of 2026-10-19 did) and not in
+# a report. A drilled run also shortens the streamer's timeout, so the faulted row does not take minutes.
+CONTROL_MARGIN_SECONDS = 120
+DRILL_DIST_TIMEOUT_SECONDS = 30
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
 
@@ -278,7 +283,9 @@ def main():
     strategy = os.environ.get("RUNAI_STREAMER_FS_STRATEGY", "")
     results_dir = os.environ.get("GPU_RESULTS", "test-results/gpu")
     os.makedirs(results_dir, exist_ok=True)
-    os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS))
+    streamer_timeout = int(os.environ.setdefault(
+        "RUNAI_STREAMER_DIST_TIMEOUT",
+        str(DRILL_DIST_TIMEOUT_SECONDS if os.environ.get("GPU_DRILL") else DIST_TIMEOUT_SECONDS)))
 
     timer = PhaseTimer(announce=(rank == 0))
     with timer.phase("init.nccl"):
@@ -287,7 +294,7 @@ def main():
         fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"))
     # The ranks agree on the outcome of a row over a CPU-only group of their own, so the test adds no NCCL traffic
     # and no GPU work next to the streamer's, and can still report after a distributed row went wrong.
-    control = dist.new_group(backend="gloo", timeout=timedelta(seconds=CONTROL_TIMEOUT_SECONDS))
+    control = dist.new_group(backend="gloo", timeout=timedelta(seconds=streamer_timeout + CONTROL_MARGIN_SECONDS))
     gpu_baseline = torch.cuda.memory_allocated(device)
 
     rows = selected_rows()
