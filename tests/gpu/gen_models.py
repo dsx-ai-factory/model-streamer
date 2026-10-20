@@ -458,18 +458,6 @@ def write_shard(path, shard, seed, model):
             "tensors": entries}
 
 
-def drop_page_cache(paths):
-    """Make the next read of these files come from the disk, as far as the kernel allows."""
-    if not hasattr(os, "posix_fadvise"):
-        return
-    for path in paths:
-        fd = os.open(path, os.O_RDONLY)
-        try:
-            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-        finally:
-            os.close(fd)
-
-
 def generate_model(args):
     model, out_dir, seed, scale, files, verify, dtypes = args
     use_dtypes(dtypes)  # in this process: the pool may spawn workers that do not share the parent's state
@@ -485,9 +473,6 @@ def generate_model(args):
             manifest_files.append(entry)
     data_bytes = sum(e["end"] - e["start"] for f in manifest_files for e in f["tensors"])
     timer.records[-1]["bytes"] = data_bytes
-    with timer.phase("%s.sync" % model):
-        os.sync()
-        drop_page_cache([os.path.join(directory, f["path"]) for f in manifest_files])
     manifest = {
         "generator_version": GENERATOR_VERSION, "numpy_version": np.__version__, "seed": seed, "model": model, "scale": scale,
         "dtypes": list(active_dtypes),
