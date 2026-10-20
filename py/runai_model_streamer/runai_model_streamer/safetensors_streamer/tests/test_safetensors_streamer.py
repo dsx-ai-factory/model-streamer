@@ -63,7 +63,48 @@ class TestSafetensorsStreamer(unittest.TestCase):
         return filepath
 
     def ring_records(self, logs):
-        return [r for r in logs.records if "CPU ring" in r.getMessage()]
+        # " ring " and not "CPU ring": the line names the memory the slots are made of, so a device
+        # ring says CUDA. Matching the host spelling would quietly stop finding the device one.
+        return [r for r in logs.records if " ring" in r.getMessage()]
+
+    def test_ring_info_carries_the_memory_the_slots_are_made_of(self):
+        """The label is read from the ring, not assumed. A host ring must say so itself, or the line
+        below is just a constant that happens to be right."""
+        from runai_model_streamer.distributed_streamer import DistributedStreamer
+        from runai_model_streamer.file_streamer import FileChunks
+
+        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "test_files", "test.safetensors")
+        if not os.path.exists(file_path):
+            self.skipTest(f"Original test file not found at {file_path}")
+        requests = [FileChunks.contiguous(0, file_path, 0, [os.path.getsize(file_path)])]
+
+        with DistributedStreamer() as streamer:
+            streamer.stream_files(requests, None, "cpu", False)
+            for _chunk in streamer.get_chunks():
+                pass
+            rank, num_buffers, buffer_size, label = streamer.ring_info()
+        self.assertEqual(label, "CPU")
+
+    def test_the_ring_line_names_the_label_rather_than_a_literal(self):
+        """It used to print the word "CPU" whatever the slots were, so a device ring reported itself
+        as a host ring - and that line is the only thing a user sees about the ring. Fed a CUDA
+        label, the line must say CUDA; a real device ring is covered on a GPU in
+        test_device_routing."""
+        from runai_model_streamer.distributed_streamer import DistributedStreamer
+
+        with patch.object(DistributedStreamer, "ring_info",
+                          return_value=(0, 2, 1 << 20, "CUDA")):
+            with self.assertLogs("runai_model_streamer", level="INFO") as logs:
+                with SafetensorsStreamer() as run_sf:
+                    run_sf.total_size = 1 << 21
+                    run_sf.files_to_tensors_metadata = {"a": []}
+                    run_sf._log_ring()
+
+        records = self.ring_records(logs)
+        self.assertEqual(len(records), 1, [r.getMessage() for r in records])
+        self.assertIn("CUDA ring", records[0].getMessage())
+        self.assertNotIn("CPU ring", records[0].getMessage())
 
     def test_the_ring_is_reported_once_per_load_with_the_rank(self):
         """One INFO line per load, carrying the rank.
@@ -740,7 +781,7 @@ class TestDistributedPathOrder(unittest.TestCase):
         """The path list stream_files actually works from, captured before anything reads a file."""
         seen = []
 
-        def capture(_streamer, paths, _credentials):
+        def capture(_streamer, paths, _credentials, discover_ranks):
             seen.extend(paths)
             raise RuntimeError("stop here - the order is all this test needs")
 
