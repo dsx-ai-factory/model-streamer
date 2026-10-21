@@ -409,8 +409,16 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
 TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
 {
     constexpr size_t Total = 4 * Buffer;
+    constexpr unsigned Ranges = 8;
+    constexpr size_t Chunk = Total / Ranges;
 
-    const auto data = utils::random::buffer(Total);
+    // OFF EVERY BLOCK BOUNDARY, which is what a real file looks like: a safetensors header has an
+    // arbitrary length, so the data after it starts at an odd offset and every range inherits that.
+    // Ranges tiling a file from 0 land on multiples of the range size, which are block multiples - so
+    // the rounded read this path exists for would never run, and only a mock engine would ever see it.
+    constexpr size_t Shift = 1000;
+
+    const auto data = utils::random::buffer(Total + Shift);
     utils::temp::File file(data);
 
     void * target = nullptr;
@@ -420,12 +428,10 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
 
     std::vector<FileRanges> request(1);
     request[0].path = file.path;
-    constexpr unsigned Ranges = 8;
     for (unsigned i = 0; i < Ranges; ++i)
     {
         request[0].ranges.push_back(
-            ReadRange{ i * (Total / Ranges), Total / Ranges,
-                       static_cast<char *>(target) + i * (Total / Ranges) });
+            ReadRange{ Shift + i * Chunk, Chunk, static_cast<char *>(target) + i * Chunk });
     }
 
     SubmissionId submission_id = 0;
@@ -456,7 +462,7 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
     ASSERT_EQ(worst, common::ResponseCode::Success) << "strategy " << streamer.fs_strategy();
 
     const auto landed = read_back(target, Total);
-    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+    EXPECT_EQ(std::memcmp(landed.data(), data.data() + Shift, Total), 0)
         << "the bytes on the device are not the bytes in the file";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
@@ -472,8 +478,12 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
 {
     constexpr size_t Total = 4 * Buffer;
     constexpr unsigned Ranges = 4;
+    constexpr size_t Chunk = Total / Ranges;
 
-    const auto data = utils::random::buffer(Total);
+    // Off every block boundary, for the reason given in A_Submission_Reads_Into_Device_Memory.
+    constexpr size_t Shift = 1000;
+
+    const auto data = utils::random::buffer(Total + Shift);
     utils::temp::File file(data);
 
     void * target = nullptr;
@@ -486,12 +496,12 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
     unsigned num_ranges = Ranges;
 
     std::vector<size_t> offsets(Ranges);
-    std::vector<size_t> sizes(Ranges, Total / Ranges);
+    std::vector<size_t> sizes(Ranges, Chunk);
     std::vector<void *> dsts(Ranges);
     for (unsigned i = 0; i < Ranges; ++i)
     {
-        offsets[i] = i * (Total / Ranges);
-        dsts[i] = static_cast<char *>(target) + offsets[i];
+        offsets[i] = Shift + i * Chunk;
+        dsts[i] = static_cast<char *>(target) + i * Chunk;
     }
 
     RunaiFileStreamerDevice device;
@@ -519,7 +529,7 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
     runai_file_streamer_end(streamer);
 
     const auto landed = read_back(target, Total);
-    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+    EXPECT_EQ(std::memcmp(landed.data(), data.data() + Shift, Total), 0)
         << "the bytes on the device are not the bytes in the file";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
