@@ -8,14 +8,36 @@
 #include <algorithm>
 #include <utility>
 
+#include "common/exception/exception.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::impl
 {
 
+namespace
+{
+
+// Settled once, so every size and address in this class is already a multiple of the alignment and
+// no caller has to remember. Buffer n starts n * buffer_bytesize into the slab, so the SIZE has to be
+// a multiple too - aligning only the base would leave every later buffer out of step.
+StagingPool::Params normalised(StagingPool::Params params)
+{
+    params.alignment = std::max<size_t>(params.alignment, 1);
+
+    ASSERT((params.alignment & (params.alignment - 1)) == 0)
+        << "a staging alignment of " << params.alignment << " is not a power of two, and the aligned"
+           " start in add_slab would be wrong rather than refused";
+
+    params.buffer_bytesize = ((params.buffer_bytesize + params.alignment - 1) / params.alignment)
+                           * params.alignment;
+    return params;
+}
+
+} // namespace
+
 StagingPool::StagingPool(std::shared_ptr<device::Device> device, Params params) :
     _device(std::move(device)),
-    _params(params)
+    _params(normalised(params))
 {
 }
 
@@ -82,10 +104,19 @@ unsigned StagingPool::plan_slab(size_t & bytesize) const
         return 0;
     }
 
-    unsigned per_slab = static_cast<unsigned>(_params.slab_bytesize / _params.buffer_bytesize);
+    // Rounded UP to whole buffers. The slab size says how much to register at ONCE, so dividing it
+    // down lets a buffer a few kilobytes past a divisor halve the buffers per registration: 8 MiB
+    // plus a block against a 16 MiB slab gives one instead of two, and the same pinned total then
+    // costs twice as many pinnings. Pinning is the expensive part, so a slightly larger slab is the
+    // cheaper way to be wrong.
+    unsigned per_slab = static_cast<unsigned>((_params.slab_bytesize + _params.buffer_bytesize - 1)
+                                              / _params.buffer_bytesize);
     per_slab = std::min(std::max(per_slab, 1u), room);
 
-    bytesize = static_cast<size_t>(per_slab) * _params.buffer_bytesize;
+    // Plus the slack the aligned start costs. The slab is allocated wherever the host allocator puts
+    // it, so up to alignment - 1 bytes of the front are unusable and the buffers would not all fit
+    // without this.
+    bytesize = static_cast<size_t>(per_slab) * _params.buffer_bytesize + _params.alignment - 1;
     return per_slab;
 }
 
@@ -115,10 +146,15 @@ common::ResponseCode StagingPool::add_slab(size_t bytesize, unsigned per_slab, S
         // removed, so it stays this slab's index for the life of the pool.
         const auto slab_index = static_cast<unsigned>(_slabs.size() - 1);
 
+        // The first aligned address in the slab. The registration below still names the whole slab,
+        // so the bytes in front of this are registered and simply never read into.
+        char * const first = static_cast<char *>(base)
+                           + ((-reinterpret_cast<uintptr_t>(base)) % _params.alignment);
+
         for (unsigned i = 0; i < per_slab; ++i)
         {
             StagingBuffer buffer;
-            buffer.data = static_cast<char *>(base) + static_cast<size_t>(i) * _params.buffer_bytesize;
+            buffer.data = first + static_cast<size_t>(i) * _params.buffer_bytesize;
             buffer.bytesize = _params.buffer_bytesize;
             buffer.index = static_cast<unsigned>(_buffers.size());
             buffer.slab = slab_index;

@@ -110,6 +110,7 @@ common::ResponseCode DeviceWriterClient::take(common::Device device, StagingBuff
         params.buffer_bytesize = _buffers.buffer_bytesize;
         params.slab_bytesize = _buffers.slab_bytesize;
         params.max_buffers = _max_buffers;
+        params.alignment = _buffers.alignment;
 
         _pool = std::make_shared<StagingPool>(_writer->device(channel), params);
     }

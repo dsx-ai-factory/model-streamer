@@ -10,6 +10,7 @@ runai_cc_auto_library(
     # sub-packages.
     visibility = ["//streamer:__subpackages__"],
     deps = [
+        "//common/exception",
         "//device",
         "//device/owned",
         "//utils/deque",

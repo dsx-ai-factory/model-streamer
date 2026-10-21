@@ -54,7 +54,8 @@ class DeviceWriterClient
     struct Buffers
     {
         size_t buffer_bytesize = 0;   // one read, and one copy
-        size_t slab_bytesize = 0;     // registration unit, rounded down to whole buffers
+        size_t slab_bytesize = 0;     // registration unit, rounded UP to whole buffers
+        size_t alignment = 1;         // every buffer starts on a multiple of this
     };
 
     // `max_buffers` is this worker's in-flight window, so take() never comes back empty: a worker

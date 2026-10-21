@@ -42,6 +42,71 @@ class StagingPoolTest : public ::testing::Test
 
 } // namespace
 
+// --- alignment ---------------------------------------------------------------------------------
+
+// Every buffer must be usable by a DIRECT read, which needs its address aligned to the mount's
+// block. Neither the host allocator nor this pool would give that otherwise: pinned memory is page
+// aligned, which is not enough for a mount whose block is larger than a page.
+TEST_F(StagingPoolTest, Every_Buffer_Is_Aligned)
+{
+    constexpr size_t Alignment = 16384;   // larger than a page, so the allocator cannot supply it
+
+    auto p = params(8);
+    p.alignment = Alignment;
+
+    StagingPool pool(_mock, p);
+
+    std::vector<StagingBuffer> taken;
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        StagingBuffer buffer;
+        ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+        ASSERT_TRUE(buffer.valid()) << "buffer " << i;
+        taken.push_back(buffer);
+    }
+
+    for (const auto & buffer : taken)
+    {
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffer.data) % Alignment, 0u)
+            << "a direct read into this buffer would be refused with EINVAL";
+    }
+}
+
+// Buffer n starts n * buffer_bytesize into the slab, so the SIZE has to be a multiple of the
+// alignment as well - aligning only the base would leave every later buffer out of step.
+TEST_F(StagingPoolTest, A_Buffer_Is_Rounded_Up_To_The_Alignment)
+{
+    auto p = params(2);
+    p.buffer_bytesize = 4097;   // one byte past a page
+    p.alignment = 4096;
+
+    StagingPool pool(_mock, p);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+
+    EXPECT_EQ(buffer.bytesize, 8192u) << "a buffer that is not a multiple cannot tile the slab";
+}
+
+// A BUFFER A LITTLE OVER A DIVISOR MUST NOT HALVE THE BUFFERS PER REGISTRATION.
+//
+// The slab size says how much to register at once. Dividing it DOWN means a buffer a few kilobytes
+// past a divisor packs one buffer per slab instead of two, and the same pinned total then costs
+// twice as many pinnings - which is the expensive part. A slightly larger slab is the cheaper miss.
+TEST_F(StagingPoolTest, A_Slab_Rounds_Up_To_Whole_Buffers)
+{
+    auto p = params(4, 4 * Buffer);
+    p.buffer_bytesize = Buffer + 8;   // 4 of these do not fit in a slab of 4 plain ones
+
+    StagingPool pool(_mock, p);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+
+    EXPECT_EQ(pool.created(), 4u) << "rounding down would carve three, and pin a fourth slab later";
+    EXPECT_EQ(_mock->host_allocs, 1u);
+}
+
 // Nothing is pinned until a buffer is asked for, so a load with no device destination costs
 // nothing at all.
 TEST_F(StagingPoolTest, Allocates_Nothing_Until_Asked)
