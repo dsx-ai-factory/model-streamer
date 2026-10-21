@@ -324,6 +324,8 @@ TEST_F(RealDevice, A_Skip_Is_Copied_Correctly_By_The_Driver)
     const auto landed = read_back(target, payload.size());
     EXPECT_EQ(std::memcmp(landed.data(), payload.data(), payload.size()), 0)
         << "the driver did not copy from an unaligned source the way a memcpy does";
+
+    EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
 }
 
 // Pinned memory is allocated through ONE context and used from every other. The whole per-worker
