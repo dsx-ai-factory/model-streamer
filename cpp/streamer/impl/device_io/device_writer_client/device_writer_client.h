@@ -86,8 +86,12 @@ class DeviceWriterClient
     // more reason to wait for completions instead of submitting.
     common::ResponseCode take(common::Device device, StagingBuffer & out);
 
-    // Copies `bytesize` bytes from the front of `buffer` to `destination`, then takes the buffer back
-    // once that copy has landed. Returns as soon as the copy is ENQUEUED.
+    // Copies `bytesize` bytes from `skip` bytes into `buffer` to `destination`, then takes the buffer
+    // back once that copy has landed. Returns as soon as the copy is ENQUEUED.
+    //
+    // `skip` is what a rounded direct read put in front of the payload: a read into a buffer the
+    // library owns may start at the block below what was asked for, and those bytes belong to nobody.
+    // A reader that fills its buffer from the base passes 0.
     //
     // `on_done` is called exactly when this returns Success, from the waiter's thread. On any error
     // the return value is the only report.
@@ -96,6 +100,7 @@ class DeviceWriterClient
     // worker writing to a device it never read for.
     common::ResponseCode write(common::Device device,
                                const StagingBuffer & buffer,
+                               size_t skip,
                                size_t bytesize,
                                void * destination,
                                Completion on_done);
@@ -106,6 +111,7 @@ class DeviceWriterClient
     common::ResponseCode write(common::Device device,
                                const std::shared_ptr<StagingPool> & pool,
                                const StagingBuffer & buffer,
+                               size_t skip,
                                size_t bytesize,
                                void * destination,
                                Completion on_done);

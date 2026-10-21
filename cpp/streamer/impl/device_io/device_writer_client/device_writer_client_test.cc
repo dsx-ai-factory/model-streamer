@@ -140,7 +140,7 @@ TEST_F(DeviceWriterClientTest, Write_Copies_And_Returns_The_Buffer)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> reported{-1};
-    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destination.data(),
+    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, 0 /* skip */, Buffer, destination.data(),
                            [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); }),
               common::ResponseCode::Success);
 
@@ -171,7 +171,7 @@ TEST_F(DeviceWriterClientTest, A_Buffer_Can_Go_To_Any_Device_The_Reader_Has_Open
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, Buffer, destination.data(),
+    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, 0 /* skip */, Buffer, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
@@ -206,7 +206,7 @@ TEST_F(DeviceWriterClientTest, Write_To_An_Unopened_Device_Is_Reported_And_The_B
     ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(client.write(common::Device::cuda(3), buffer, Buffer, destination.data(), nullptr),
+    EXPECT_EQ(client.write(common::Device::cuda(3), buffer, 0 /* skip */, Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
     EXPECT_EQ(_writer->devices(), 1u) << "and the device was not opened on the way";
 
@@ -251,7 +251,7 @@ TEST_F(DeviceWriterClientTest, Dropping_The_Client_Returns_Everything_It_Pinned)
             StagingBuffer buffer;
             ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
             ASSERT_TRUE(buffer.valid());
-            ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destination.data() + i * Buffer, nullptr),
+            ASSERT_EQ(client.write(common::Device::cuda(0), buffer, 0 /* skip */, Buffer, destination.data() + i * Buffer, nullptr),
                       common::ResponseCode::Success);
         }
 
@@ -303,7 +303,7 @@ TEST_F(DeviceWriterClientTest, Every_Worker_Has_Its_Own_Client)
                         continue;   // this worker's window is full - not an error
                     }
                     ++issued;
-                    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, destinations[w].data(),
+                    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, 0 /* skip */, Buffer, destinations[w].data(),
                                            [&](common::ResponseCode) { ++written; }),
                               common::ResponseCode::Success);
                 }
@@ -408,7 +408,7 @@ TEST_F(DeviceWriterClientTest, Copies_Interleave_Across_Devices)
         }
 
         std::memset(buffer.data, static_cast<int>('a' + ordinal), Buffer);
-        ASSERT_EQ(client.write(common::Device::cuda(ordinal), buffer, Buffer, destinations[ordinal].data(),
+        ASSERT_EQ(client.write(common::Device::cuda(ordinal), buffer, 0 /* skip */, Buffer, destinations[ordinal].data(),
                                [&](common::ResponseCode) { ++done; }),
                   common::ResponseCode::Success);
         ++issued;

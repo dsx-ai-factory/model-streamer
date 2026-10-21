@@ -64,11 +64,14 @@ size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct)
         return chunk_bytesize;
     }
 
-    // The largest a rounded read can be: the head is at most block - 1, and the whole thing is then
-    // rounded up. That is chunk + block for every chunk size that is a block multiple, which the
-    // default 8 MiB is for every block we use - so chunk + 2 * block would reserve a second block
-    // that nothing can reach.
-    return ((chunk_bytesize + block - 1 + block - 1) / block) * block;
+    // The worst case is the largest head a chunk can have, and then the end rounded up to a block.
+    //
+    // In two steps on purpose. Folded into one expression the round-up reads as a ceiling over the
+    // whole sum, and two independent readers took it for chunk + 2 * block. It is chunk + block for
+    // every chunk size that is a block multiple, which the 8 MiB default is for every block we use.
+    const size_t worst = chunk_bytesize + block - 1;
+
+    return ((worst + block - 1) / block) * block;
 }
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
@@ -825,8 +828,10 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
     // ONLY WHILE NOTHING HAS LANDED. _block can change between two passes of one chunk - a later
     // submission may adopt a measured block while this one is still in flight - and moving the skip
     // then would strand the bytes already in the buffer, to be copied from the wrong place with no
-    // error anywhere. Keeping the first skip stays legal: the new block divides the old one, so the
-    // address is still aligned, and rounding to a smaller block can only shrink the extent.
+    // error anywhere. Keeping the first skip costs nothing: every block we see is a power of two, so
+    // a smaller one divides the skip and the address stays aligned, and rounding to it can only
+    // shrink the extent. A block that did NOT divide it would fail with EINVAL and demote to
+    // buffered, which still lands the bytes where the skip says.
     if (direct && staged && entry->cursor == entry->chunk.offset)
     {
         _chunks.set_staging_skip(id, entry->chunk.offset % _block);
@@ -1124,8 +1129,10 @@ bool AsyncIoWorker::issue_copy(posix_io::RequestId id, const InflightChunk & ent
 {
     // chunk.bytesize, not what the last pass moved: every pass landed in this buffer, so the whole
     // extent is here by the time a chunk completes.
+    // staging_skip, not chunk.offset % _block. The block can change under a chunk between its read
+    // and its copy, and recomputing would then disagree with where the read actually put the bytes.
     const auto code = _device_out->write(
-        batch.device, entry.staging, entry.chunk.bytesize, entry.chunk.buffer,
+        batch.device, entry.staging, entry.staging_skip, entry.chunk.bytesize, entry.chunk.buffer,
         [this, id](common::ResponseCode ret) { _copies.push(CopyDone{ id, ret }); });
 
     if (code != common::ResponseCode::Success)
