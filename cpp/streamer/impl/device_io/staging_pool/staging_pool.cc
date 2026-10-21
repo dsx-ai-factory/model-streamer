@@ -109,9 +109,19 @@ unsigned StagingPool::plan_slab(size_t & bytesize) const
     // plus a block against a 16 MiB slab gives one instead of two, and the same pinned total then
     // costs twice as many pinnings. Pinning is the expensive part, so a slightly larger slab is the
     // cheaper way to be wrong.
-    unsigned per_slab = static_cast<unsigned>((_params.slab_bytesize + _params.buffer_bytesize - 1)
-                                              / _params.buffer_bytesize);
-    per_slab = std::min(std::max(per_slab, 1u), room);
+    //
+    // Divided first and carried in size_t. One caller takes slab_bytesize from the environment, where
+    // it is bounded only by SIZE_MAX: adding buffer_bytesize - 1 to it wraps, and the division then
+    // answers the opposite of what the rounding is for. The cast comes after the clamp for the same
+    // reason.
+    const size_t whole = _params.slab_bytesize / _params.buffer_bytesize
+                       + (_params.slab_bytesize % _params.buffer_bytesize != 0 ? 1 : 0);
+
+    unsigned per_slab = static_cast<unsigned>(std::min<size_t>(whole, room));
+
+    // At least one, because a slab smaller than a buffer still has to hold one. Without this a pool
+    // whose slab size was never set reports no room and goes barren instead of working.
+    per_slab = std::max(per_slab, 1u);
 
     // Plus the slack the aligned start costs. The slab is allocated wherever the host allocator puts
     // it, so up to alignment - 1 bytes of the front are unusable and the buffers would not all fit

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -104,6 +105,39 @@ TEST_F(StagingPoolTest, A_Slab_Rounds_Up_To_Whole_Buffers)
     ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
 
     EXPECT_EQ(pool.created(), 4u) << "rounding down would carve three, and pin a fourth slab later";
+    EXPECT_EQ(_mock->host_allocs, 1u);
+}
+
+// THE ROUNDING MUST NOT WRAP. slab_bytesize is read from the environment and bounded only by
+// SIZE_MAX, and rounding up by adding buffer_bytesize - 1 before dividing overflows there. The
+// division then answers 0, and the pool carves ONE buffer per slab - a slab pinned per buffer, which
+// is the opposite of what the rounding is for.
+TEST_F(StagingPoolTest, A_Slab_Too_Large_To_Round_Up_Still_Fills_The_Pool)
+{
+    StagingPool pool(_mock, params(4, std::numeric_limits<size_t>::max()));
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success);
+
+    EXPECT_EQ(pool.created(), 4u) << "the slab size wrapped, so one buffer was carved";
+    EXPECT_EQ(_mock->host_allocs, 1u);
+}
+
+// A SLAB TOO SMALL FOR ONE BUFFER STILL HOLDS ONE.
+//
+// Params::slab_bytesize defaults to 0, so this is what a caller that sets the buffer size and forgets
+// the slab gets. Rounding up answers 0 buffers there, and plan_slab would report no room - which both
+// callers turn into barren(), a pool that refuses every acquire for the life of the streamer. The
+// floor is the only thing between those two, and it is one line nothing else defends.
+TEST_F(StagingPoolTest, A_Slab_Smaller_Than_A_Buffer_Still_Carves_One)
+{
+    StagingPool pool(_mock, params(4, 0 /* slab */));
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool.try_acquire(buffer), common::ResponseCode::Success) << "the pool went barren";
+    EXPECT_TRUE(buffer.valid());
+
+    EXPECT_EQ(pool.created(), 1u);
     EXPECT_EQ(_mock->host_allocs, 1u);
 }
 
