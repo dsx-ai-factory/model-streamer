@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <vector>
 #include <array>
@@ -30,6 +31,7 @@
 
 #include "common/exception/exception.h"
 #include "posix_io/alignment/alignment.h"
+#include "utils/fd/fd.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::posix_io
@@ -104,31 +106,32 @@ DioAlign statx_dio_align(const std::string & path)
 
 // Can this fd serve a direct read of exactly `block` bytes, at that alignment?
 //
-// A real read, because that is the only answer that cannot be wrong. A file shorter than a block
-// returns a short read rather than EINVAL, which still proves the alignment was accepted.
+// A real read, because that is the only answer that cannot be wrong. O_DIRECT constrains three
+// things - the buffer address, the transfer length and the file offset - and all three must be
+// aligned to `block` and NOT to 2 * block. Any one of them aligned to more would let a mount that
+// needs more than `block` answer yes.
 //
-// The buffer is placed at `base + block`, NOT at whatever posix_memalign(block) returns. That matters:
-// posix_memalign only promises AT LEAST the requested alignment, so asking for 512 can hand back a
-// page-aligned address - and then a mount that really needs 4096 would accept the read and the ladder
-// would report 512. Measured on this container: posix_memalign(512) returned an address that happened
-// to be 512 mod 4096, so the answer was right by luck rather than by construction.
+// The buffer is placed at `base + block`, NOT at whatever posix_memalign(block) returns. That
+// matters: posix_memalign only promises AT LEAST the requested alignment, so asking for 512 can hand
+// back a page-aligned address. base is aligned to MaxProbeBlock and block divides it, so base + block
+// is aligned to `block` alone.
 //
-// base is aligned to MaxProbeBlock, so base + block is aligned to `block` and, because block divides
-// MaxProbeBlock, is NOT aligned to 2 * block. That is the strictest test of this candidate.
-bool direct_read_at(int fd, size_t block)
+// `offset` must be chosen the same way, and it must have at least `block` bytes of file after it.
+// Past the end the read returns 0 without the kernel reaching the alignment check, and every rung
+// would pass. ladder_direct_block picks it, and is where both of those rules live.
+bool direct_read_at(int fd, size_t block, off_t offset)
 {
-    void * base = nullptr;
-    if (::posix_memalign(&base, MaxProbeBlock, 2 * MaxProbeBlock) != 0)
+    void * raw = nullptr;
+    if (::posix_memalign(&raw, MaxProbeBlock, 2 * MaxProbeBlock) != 0)
     {
-        return false;
+        return false;   // nothing was allocated - posix_memalign leaves raw untouched on failure
     }
 
-    char * const buffer = static_cast<char *>(base) + block;
+    const std::unique_ptr<char, void (*)(void *)> base(static_cast<char *>(raw), &std::free);
+    char * const buffer = base.get() + block;
 
-    const ssize_t got = ::pread(fd, buffer, block, 0);
+    const ssize_t got = ::pread(fd, buffer, block, offset);
     const int error = errno;
-
-    ::free(base);
 
     // EINVAL is the alignment answer. Anything else belongs to this file or this moment.
     return got >= 0 || error != EINVAL;
@@ -364,6 +367,70 @@ namespace
 
 } // namespace
 
+LadderBlock ladder_direct_block(off_t size, size_t page,
+                                const std::function<bool(size_t, off_t)> & accepts)
+{
+    // ASCENDING, and the first success wins. The smallest workable block is the one we want: a larger
+    // one pads more between ranges and bounces more of every chunk's head and tail. 512 is the
+    // smallest logical block any device reports; 65536 covers every size announced so far.
+    //
+    // A GUESS, and weaker than statx. It assumes the filesystem REFUSES a badly aligned read - most
+    // do, and direct_read_at puts all three of the things O_DIRECT constrains out of step with every
+    // larger block, so a mount that checks any one of them is caught.
+    //
+    // A filesystem that accepts all three and quietly serves the read buffered is not. It passes the
+    // first rung, and we then believe reads are direct while the kernel copies through its cache.
+    // The EINVAL demotion in the async worker does not help, because such a mount never returns
+    // EINVAL.
+    //
+    // The top rung IS MaxProbeBlock, not a literal that happens to equal it, so lowering that constant
+    // cannot leave a rung behind that overruns the probe buffer. ladder_is_usable checks that and the
+    // rest of what direct_read_at needs, on every rung.
+    static constexpr std::array<size_t, 4> ladder{ 512, 4096, 16384, MaxProbeBlock };
+    static_assert(ladder_is_usable(ladder),
+                  "a rung must be a power of two, divide MaxProbeBlock, and come after the rung below"
+                  " it; the last rung must be MaxProbeBlock");
+
+    size_t untested = 0;   // the smallest rung the file was too short to place
+
+    for (const size_t candidate : ladder)
+    {
+        // AT THE RUNG'S OWN OFFSET. Zero is a multiple of every block, so a probe there asks nothing
+        // of a mount that checks the offset, and such a mount accepts the first rung whatever it
+        // really needs. The buffer and the length are made strict inside the probe; this is the third.
+        const off_t offset = static_cast<off_t>(candidate);
+
+        // The read starts at `offset` and is `candidate` long, so the file must hold both. Past the
+        // end pread returns 0 without the kernel reaching the alignment check, and the rung would
+        // pass for a reason that says nothing about the mount.
+        if (size < offset + static_cast<off_t>(candidate))
+        {
+            untested = candidate;   // rungs ascend, so every rung above this one is too big as well
+            break;
+        }
+
+        if (accepts(candidate, offset))
+        {
+            return { candidate, true };
+        }
+    }
+
+    if (untested != 0)
+    {
+        // Some rung went untested, so "no rung worked" says nothing about the mount - and a zero here
+        // is remembered, which would condemn the mount on the strength of one short file.
+        //
+        // Rungs ascend and the untested ones are a suffix, so `untested` is above every rung that was
+        // tried and refused. `page` is the floor under it, and the same answer the router gives for a
+        // mount it could not measure.
+        return { std::max(untested, page), false };
+    }
+
+    // Every rung was tried and refused. No direct I/O at all, which is what the caller already
+    // handles - rather than inventing a block and failing every read with EINVAL.
+    return { 0, true };
+}
+
 size_t MountCapabilities::measure_direct_block(const std::string & file_path)
 {
     // The kernel's own answer first: exact, and no I/O.
@@ -382,52 +449,27 @@ size_t MountCapabilities::measure_direct_block(const std::string & file_path)
     }
 
     // No statx answer - below 6.1, or a filesystem that does not implement it. Measure by reading.
-    const int fd = ::open(file_path.c_str(), O_RDONLY | O_DIRECT);
-    if (fd < 0)
+    const utils::Fd fd(::open(file_path.c_str(), O_RDONLY | O_DIRECT));
+    if (fd.fd() < 0)
     {
         return 0;   // the caller already distinguishes "mount refuses" from "cannot tell"
     }
 
-    // ASCENDING, and the first success wins. The smallest workable block is the one we want: a larger
-    // one pads more between ranges and bounces more of every chunk's head and tail. 512 is the
-    // smallest logical block any device reports; 65536 covers every size announced so far.
-    //
-    // A GUESS, and weaker than statx above. It assumes the filesystem REFUSES a badly aligned read.
-    // Most do - measured on this container's overlay, a wrong offset, a wrong length and a wrong
-    // buffer address are each rejected with EINVAL. But a lenient filesystem accepts the read and
-    // quietly serves it buffered instead, with no error.
-    //
-    // On such a filesystem the first rung always "works", so this returns 512 for a mount that really
-    // needs 4096. Nothing fails: we would believe reads are direct while the kernel copies through
-    // its cache, and the log would agree with us. Slower than we think, and silent about it.
-    //
-    // Reachable only when BOTH hold: statx cannot answer (below kernel 6.1, or a filesystem that does
-    // not implement STATX_DIOALIGN), AND that filesystem is lenient about alignment. Phase 1's EINVAL
-    // fallback does not help here either - a lenient filesystem never returns EINVAL, which is the
-    // whole problem.
-    //
-    // The top rung IS MaxProbeBlock, not a literal that happens to equal it, so lowering that constant
-    // cannot leave a rung behind that overruns the probe buffer. ladder_is_usable checks that and the
-    // rest of what direct_read_at needs, on every rung.
-    static constexpr std::array<size_t, 4> ladder{ 512, 4096, 16384, MaxProbeBlock };
-    static_assert(ladder_is_usable(ladder),
-                  "a rung must be a power of two, divide MaxProbeBlock, and come after the rung below"
-                  " it; the last rung must be MaxProbeBlock");
+    // How much file there is to place a probe read in. The ladder decides which rungs that allows.
+    struct stat info;
+    const off_t size = ::fstat(fd, &info) == 0 ? info.st_size : 0;
 
-    for (const size_t candidate : ladder)
+    const auto decided = ladder_direct_block(
+        size, static_cast<size_t>(::sysconf(_SC_PAGESIZE)),
+        [&fd](size_t block, off_t offset) { return direct_read_at(fd, block, offset); });
+
+    if (!decided.measured)
     {
-        if (direct_read_at(fd, candidate))
-        {
-            ::close(fd);
-            return candidate;
-        }
+        LOG(INFO) << "Cannot place a strict probe read in " << file_path << " (" << size
+                  << " bytes); assuming a direct-I/O alignment of " << decided.block << " bytes";
     }
 
-    ::close(fd);
-
-    // Opens but reads at no size we would use. Treated as no direct I/O at all, which is what the
-    // caller already handles - rather than inventing a block and failing every read with EINVAL.
-    return 0;
+    return decided.block;
 }
 
 DirectSupport MountCapabilities::direct_support(dev_t dev, const std::string & file_path)
@@ -466,29 +508,33 @@ common::ResponseCode MountCapabilities::direct_block(dev_t dev, const std::strin
     // The callers keep that out: FsAsyncRouter::groups and FsAsyncRouter::direct_block_for both test
     // memory_backed and skip such a mount before asking. The statfs magic check is the only thing that
     // works here, because a probe by definition cannot detect a filesystem that accepts everything.
-    const int fd = ::open(file_path.c_str(), O_RDONLY | O_DIRECT);
-    if (fd < 0)
+    //
+    // Only the OPEN is the question here, so the descriptor is scoped to it and measure_direct_block
+    // below opens its own.
     {
-        const int error = errno;
-
-        if (error == EINVAL || error == EOPNOTSUPP)
+        const utils::Fd fd(::open(file_path.c_str(), O_RDONLY | O_DIRECT));
+        if (fd.fd() < 0)
         {
-            // The mount itself refuses O_DIRECT. That belongs to the mount, so it is remembered.
-            LOG(INFO) << "Mount " << major(dev) << ":" << minor(dev) << " does not support O_DIRECT ("
-                      << std::strerror(error) << ")";
-            const auto guard = std::unique_lock<std::mutex>(_mutex);
-            _direct.try_emplace(dev, 0);
-            return common::ResponseCode::FileAccessError;
-        }
+            const int error = errno;
 
-        // Anything else is about the FILE - it is missing, or we may not read it. Nothing is
-        // remembered, so the next file answers instead of one bad path condemning the mount.
-        // Deliberately NOT remembered, so the next file - or the next submission - measures again.
-        LOG(DEBUG) << "Cannot tell whether " << file_path << " supports O_DIRECT: "
-                   << std::strerror(error);
-        return common::ResponseCode::UnknownError;
+            if (error == EINVAL || error == EOPNOTSUPP)
+            {
+                // The mount itself refuses O_DIRECT. That belongs to the mount, so it is remembered.
+                LOG(INFO) << "Mount " << major(dev) << ":" << minor(dev) << " does not support"
+                          << " O_DIRECT (" << std::strerror(error) << ")";
+                const auto guard = std::unique_lock<std::mutex>(_mutex);
+                _direct.try_emplace(dev, 0);
+                return common::ResponseCode::FileAccessError;
+            }
+
+            // Anything else is about the FILE - it is missing, or we may not read it. Nothing is
+            // remembered, so the next file answers instead of one bad path condemning the mount.
+            // Deliberately NOT remembered, so the next file - or the next submission - measures again.
+            LOG(DEBUG) << "Cannot tell whether " << file_path << " supports O_DIRECT: "
+                       << std::strerror(error);
+            return common::ResponseCode::UnknownError;
+        }
     }
-    ::close(fd);
 
     // An override replaces the MEASUREMENT, not the capability check above. It must not turn a
     // missing file or a directory into "this mount serves direct reads" - the open decides that, and

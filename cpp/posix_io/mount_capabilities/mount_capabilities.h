@@ -7,6 +7,7 @@
 
 #include <sys/types.h>
 
+#include <functional>
 #include <map>
 #include <mutex>
 #include <ostream>
@@ -164,5 +165,32 @@ class MountCapabilities
     // block has no direct I/O either. Storing a bool as well would let the two disagree.
     std::map<dev_t, size_t> _direct;
 };
+
+// What the ladder decided, and whether it was measured or assumed.
+struct LadderBlock
+{
+    size_t block;      // 0 when every rung was tested and refused
+    bool measured;     // false when a rung went untested and `block` is a floor, not an answer
+};
+
+// The rules the trial-read ladder applies, separated so they can be tested.
+//
+// `size` is how much file there is to probe with, `page` the host page size, and `accepts` answers
+// whether the mount serves a direct read of `block` bytes at `offset`. Returns the smallest accepted
+// rung; or, when the file was too short to place one, the smallest untested rung with `page` as its
+// floor.
+//
+// THE OFFSET IS THIS FUNCTION'S to choose, and `accepts` is told which one to read at. O_DIRECT
+// constrains the buffer address, the length and the file offset, and a rung is only an honest
+// question when all three are aligned to it and to nothing larger. The probe behind `accepts` makes
+// the first two strict; the offset is the third, and probing at 0 - a multiple of every block -
+// leaves a mount that checks only the offset unable to refuse anything. It is decided here so the
+// file-size rule above can be stated in terms of it, and so a test can see it.
+//
+// Exposed because the ladder only runs where statx is silent, and the only such mount available to a
+// test is tmpfs - which accepts every direct read. So a mount that refuses one rung and accepts a
+// larger one, which is the case that matters, has no fixture.
+LadderBlock ladder_direct_block(off_t size, size_t page,
+                                const std::function<bool(size_t block, off_t offset)> & accepts);
 
 }; // namespace runai::llm::streamer::posix_io
