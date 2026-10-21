@@ -1446,8 +1446,9 @@ struct DeviceDriver : Driver
     explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock,
                           unsigned depth = Config::default_fs_async_queue_depth,
                           bool register_buffers = false,
-                          Strategy strategy = Strategy::IoUringBuffered) :
-        Driver(strategy, 4096, std::nullopt, depth,
+                          Strategy strategy = Strategy::IoUringBuffered,
+                          std::optional<size_t> mount_block = std::nullopt) :
+        Driver(strategy, 4096, mount_block, depth,
                std::make_shared<DeviceWriter>([mock](common::DeviceType) -> DeviceWriter::BackendFactory { return [mock]() { return mock; }; }),
                register_buffers),
         backend(std::move(mock))
@@ -1618,6 +1619,149 @@ TEST(AsyncIoWorkerDevice, A_Device_Read_At_An_Unaligned_Offset_Delivers_The_Righ
     // got_at indexes the DESTINATION, expected_at builds the pattern for a FILE offset, and the
     // first range reads from 1000 - so these two differ by exactly the head.
     EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(1000, 600));
+}
+
+// A ROUNDED READ MUST NOT COUNT THE BYTES NOBODY ASKED FOR.
+//
+// bytes_read() is what the caller was delivered, and it is read beside bounced_bytes() to tell
+// whether direct reads are working. A rounded read asks the kernel for whole blocks, so the number it
+// reports covers padding at the tail as well.
+//
+// The offset here is a block boundary, so there is no head and no skip - which is the case that slips
+// through a guard written around the skip. It is also the common one: chunk offsets are multiples of
+// the chunk size, so only the FIRST chunk of a transfer has a head, while the LAST has a ragged tail.
+TEST(AsyncIoWorkerDevice, A_Rounded_Read_Counts_Only_What_Was_Asked_For)
+{
+    constexpr size_t Asked = 600;   // not a block multiple, so the tail is rounded up to 4096
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ Asked }, 1 /* concurrency */, 0 /* start - a block boundary */);
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    driver.issue();
+    driver.engine->complete_all();   // the mock reports the full length it was asked for
+    driver.route();
+    driver.settle();
+
+    EXPECT_EQ(driver.worker_bytes_read(), Asked)
+        << "the padding the rounded read brought back was counted as bytes delivered";
+}
+
+// A CHUNK MUST NOT MOVE INSIDE ITS STAGING BUFFER WHEN THE BLOCK CHANGES UNDER IT.
+//
+// `_block` is not fixed. A worker that could not measure its mount starts at the provisional
+// MaxProbeBlock, and a later submission carrying a measurement lowers it - while chunks of the
+// previous submission are still in flight, because execute() returns once the queue is submitted
+// rather than once it has landed.
+//
+// The skip says where this chunk sits inside its buffer. Recomputing it from the live `_block` on a
+// resumed pass moves the chunk, strands the bytes the first pass already delivered, and the copy then
+// takes whatever was in the buffer instead. Nothing reports it: the read stays legal either way.
+//
+// THE INVARIANT ASSERTED: the staging buffer mirrors the file one byte for one byte, so between two
+// passes the destination must advance by exactly as much as the file offset does. That holds whatever
+// the block is, so the test does not depend on working out either skip by hand.
+//
+// 70000 is the offset because 70000 % 65536 (4464) and 70000 % 4096 (1424) differ - at a smaller
+// offset both blocks would give the same skip and the bug would be invisible.
+TEST(AsyncIoWorkerDevice, A_Block_Adopted_Mid_Chunk_Does_Not_Move_The_Chunk)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 600 }, 1 /* concurrency */, 70000 /* start */);
+
+    // No mount measurement, so the worker starts at the provisional block; the engine still
+    // advertises 4096, which a read aligned to the larger one also satisfies.
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect, 0 /* mount_block */);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto id = driver.in_flight().front();
+    const auto first = driver.engine->request(id);
+    ASSERT_TRUE(first.file.direct) << "nothing is being tested if the read was not direct";
+
+    // Short, so the chunk has to be re-staged and the second pass must agree with the first.
+    // NOT routed yet: in execute() the adoption in enqueue() runs BEFORE drain_batch picks up an
+    // outstanding completion, so that is the order the bug needs.
+    driver.engine->complete_short(id, 5000);
+
+    // What a later submission measured, lower than the provisional block in force so far.
+    auto next = fixture.workload("", common::Device::cuda(0));
+    next.direct_block = 4096;
+    driver.execute(std::move(next));
+
+    driver.route();
+
+    const auto second = driver.engine->request(id);
+    ASSERT_GT(second.offset, first.offset) << "the second pass did not resume further into the file";
+
+    EXPECT_EQ(static_cast<size_t>(second.buffer - first.buffer), second.offset - first.offset)
+        << "the chunk moved inside its staging buffer when the block changed, so the bytes the first"
+        << " pass delivered are stranded and the copy would read past them";
+}
+
+// THE SAME BUG, CHECKED ON THE BYTES RATHER THAN ON THE ADDRESSES.
+//
+// A_Block_Adopted_Mid_Chunk_Does_Not_Move_The_Chunk asserts that the destination advances with the
+// file offset. That is the mechanism. This one asserts what the caller actually receives, so it holds
+// whatever the mechanism turns out to be - and silent wrong data is the failure this whole area
+// exists to prevent, so it is worth paying for twice.
+//
+// The second submission reads a DIFFERENT file into a DIFFERENT destination. Its only job is to carry
+// the measurement that lowers the block. Reusing the first fixture would re-read the same range into
+// the same place and could repair the damage being tested for.
+//
+// FAILS UNTIL THE COPY SKIPS THE PADDING - the step that makes the host-to-device copy start at
+// staging.data + staging_skip. Written now because this is the test that would have caught the
+// corruption, and it should be in place before the code it judges.
+TEST(AsyncIoWorkerDevice, A_Chunk_Spanning_A_Block_Change_Delivers_The_Right_Bytes)
+{
+    constexpr size_t Start = 70000;   // 70000 % 65536 and 70000 % 4096 differ
+    constexpr size_t Asked = 600;
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ Asked }, 1 /* concurrency */, Start);
+    Fixture carrier({ 100 }, 1 /* concurrency */, 0 /* start */);
+
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect, 0 /* mount_block */);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto id = driver.in_flight().front();
+    ASSERT_TRUE(driver.engine->request(id).file.direct);
+
+    // Short, so the rest of this chunk is read under whatever block is in force by then.
+    driver.engine->complete_short(id, 5000);
+
+    auto next = carrier.workload("", common::Device::cuda(0));
+    next.direct_block = 4096;
+    driver.execute(std::move(next));
+
+    // Bounded, so a chunk that never finishes fails here rather than hanging.
+    for (unsigned turn = 0; turn < 50; ++turn)
+    {
+        driver.issue();
+        if (driver.in_flight().empty())
+        {
+            break;
+        }
+        driver.engine->complete_all();
+        driver.route();
+    }
+
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    EXPECT_EQ(responses.front().ret, common::ResponseCode::Success);
+
+    EXPECT_EQ(fixture.got_at(0, Asked), fixture.expected_at(Start, Asked))
+        << "the chunk was assembled from two passes planned under different blocks";
 }
 
 // THE SCOPE OF THE RULE: a HOST destination at the same offset must still fall back.

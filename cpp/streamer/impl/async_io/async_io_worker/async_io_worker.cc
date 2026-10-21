@@ -59,7 +59,16 @@ size_t device_slab_bytesize()
 
 size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct)
 {
-    return direct ? chunk_bytesize + 2 * block : chunk_bytesize;
+    if (!direct)
+    {
+        return chunk_bytesize;
+    }
+
+    // The largest a rounded read can be: the head is at most block - 1, and the whole thing is then
+    // rounded up. That is chunk + block for every chunk size that is a block multiple, which the
+    // default 8 MiB is for every block we use - so chunk + 2 * block would reserve a second block
+    // that nothing can reach.
+    return ((chunk_bytesize + block - 1 + block - 1) / block) * block;
 }
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
@@ -163,6 +172,10 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     buffers.buffer_bytesize = staging_bytesize(_settings->chunk_bytesize(), _block,
                                                posix_io::is_direct(_strategy));
     buffers.slab_bytesize = std::max(buffers.buffer_bytesize, device_slab_bytesize());
+
+    // A direct read needs its BUFFER aligned to the block as well as its offset and length. Pinned
+    // memory is page aligned, which is not enough for a mount whose block is larger than a page.
+    buffers.alignment = posix_io::is_direct(_strategy) ? _block : 1;
 
     // NOT the window. The window says how many reads may be in flight; the pool must also cover the
     // chunks whose read has landed and whose copy has not, or a copy would cost a read its slot. The
@@ -372,7 +385,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
     }
 }
 
-bool AsyncIoWorker::wants_direct(size_t file_offset, const char * buffer) const
+bool AsyncIoWorker::wants_direct(size_t file_offset, const char * buffer, bool staged) const
 {
     if (!posix_io::is_direct(_strategy))
     {
@@ -384,6 +397,14 @@ bool AsyncIoWorker::wants_direct(size_t file_offset, const char * buffer) const
     if (_direct_refused)
     {
         return false;
+    }
+
+    // A STAGED chunk reads into a buffer this library allocated, so the read can be placed to suit
+    // the file: start at the block below the offset and keep the bytes that come back in front. The
+    // question below is about a destination we may not move, and this is not one.
+    if (staged)
+    {
+        return true;
     }
 
     // Congruence, not alignment. A caller can align its buffer and still be out of step with the file,
@@ -403,9 +424,31 @@ bool AsyncIoWorker::wants_direct(size_t file_offset, const char * buffer) const
     return true;
 }
 
-bool AsyncIoWorker::plan_direct_pass(const Chunk & pending, size_t block, DirectPass & out)
+bool AsyncIoWorker::plan_direct_pass(const Chunk & pending, size_t block, bool staged, DirectPass & out)
 {
     const size_t head = pending.offset % block;
+
+    if (staged)
+    {
+        // The destination is ours, so there is nothing to bounce. Read the whole aligned range that
+        // covers what is owed, straight into the buffer: down to the block below the cursor and up to
+        // the block above the last byte. Both ends are legal by construction - the staging buffer is
+        // block aligned and `pending.buffer - head` is `head` bytes before a destination that is
+        // itself `head` past an aligned base.
+        //
+        // The extra bytes at each end are read and ignored. staging_bytesize() reserves room for them
+        // and the copy to the device starts past the ones in front.
+        out.offset = pending.offset - head;
+        out.bytesize = ((head + pending.bytesize + block - 1) / block) * block;
+        out.buffer = pending.buffer - head;
+        out.scratch = nullptr;
+
+        // No scratch, but the same translation: what the kernel reports covers the head as well, and
+        // only `wanted` of it belongs to this chunk.
+        out.skip = head;
+        out.wanted = pending.bytesize;
+        return true;
+    }
 
     if (head != 0)
     {
@@ -498,18 +541,21 @@ size_t AsyncIoWorker::land_bounced_pass(posix_io::RequestId id, size_t bytes_tra
     auto * entry = _chunks.find_mutable(id);
     ASSERT(entry != nullptr) << "landing a bounced pass for an unknown request " << id;
 
-    if (entry->scratch == nullptr)
+    if (entry->scratch == nullptr && entry->scratch_skip == 0 && entry->scratch_wanted == 0)
     {
-        return bytes_transferred;   // not bounced; the bytes are already where they belong
+        return bytes_transferred;   // read exactly as asked; the bytes are already where they belong
     }
 
     // What the kernel gave us minus the part we did not ask for. A short read can land inside the
     // skipped head, in which case nothing wanted arrived at all.
+    //
+    // A rounded read into a staging buffer has a skip and NO scratch: its bytes already landed where
+    // they belong, `head` further along, so only the count has to be translated.
     const size_t useful = bytes_transferred <= entry->scratch_skip
                         ? 0
                         : std::min(entry->scratch_wanted, bytes_transferred - entry->scratch_skip);
 
-    if (useful > 0)
+    if (useful > 0 && entry->scratch != nullptr)
     {
         // pending() gives the destination for the cursor, which is where these bytes belong.
         const auto pending = _chunks.pending(id);
@@ -521,7 +567,11 @@ size_t AsyncIoWorker::land_bounced_pass(posix_io::RequestId id, size_t bytes_tra
         _bounced_bytes.fetch_add(useful, std::memory_order_relaxed);
     }
 
-    _scratch->give(_chunks.clear_bounce(id));
+    if (char * scratch = _chunks.clear_bounce(id))
+    {
+        _scratch->give(scratch);
+    }
+
     return useful;
 }
 
@@ -656,7 +706,7 @@ common::ResponseCode AsyncIoWorker::demote_to_buffered(const InflightChunk & ent
 }
 
 int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offset, const char * buffer,
-                          common::ResponseCode & out_error)
+                          bool staged, common::ResponseCode & out_error)
 {
     BatchFd & entry = wl.fds[batch_index];
 
@@ -673,7 +723,7 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
 
     const auto & path = wl.workload.batches()[batch_index].path;
 
-    if (wants_direct(file_offset, buffer))
+    if (wants_direct(file_offset, buffer, staged))
     {
         entry.fd = utils::Fd::open_for_read(path, O_DIRECT);
         if (entry.fd >= 0)
@@ -750,10 +800,15 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
     // Read BEFORE the open, because the open needs it: whether a direct read is possible depends on
     // this chunk's offset and destination, and the file is opened lazily on the first chunk exactly so
     // that the answer is available in time.
-    const auto pending = _chunks.pending(id);
+    const bool staged = entry->staging.valid();
+
+    // Named rather than reused below: the skip is set between here and there, and pending() answers
+    // differently once it is.
+    const auto before_open = _chunks.pending(id);
 
     auto error = common::ResponseCode::Success;
-    const int fd = fd_for(wlit->second, entry->batch_index, pending.offset, pending.buffer, error);
+    const int fd = fd_for(wlit->second, entry->batch_index,
+                          before_open.offset, before_open.buffer, staged, error);
     if (fd < 0)
     {
         complete_chunk(id, error);
@@ -764,11 +819,27 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
     const bool direct = wlit->second.fds[entry->batch_index].direct;
     const posix_io::FileRef file{ fd, direct };
 
-    // A buffered read is issued exactly as asked. A direct one is cut to what the kernel will accept,
-    // which may mean reading one block into scratch and copying the wanted part out.
+    // Where this chunk sits inside its staging buffer, now that the open has decided. Before pending()
+    // below, because pending() places the destination using it.
+    //
+    // ONLY WHILE NOTHING HAS LANDED. _block can change between two passes of one chunk - a later
+    // submission may adopt a measured block while this one is still in flight - and moving the skip
+    // then would strand the bytes already in the buffer, to be copied from the wrong place with no
+    // error anywhere. Keeping the first skip stays legal: the new block divides the old one, so the
+    // address is still aligned, and rounding to a smaller block can only shrink the extent.
+    if (direct && staged && entry->cursor == entry->chunk.offset)
+    {
+        _chunks.set_staging_skip(id, entry->chunk.offset % _block);
+    }
+
+    const auto pending = _chunks.pending(id);
+
+    // A buffered read is issued exactly as asked. A direct one is cut to what the kernel will accept:
+    // into a caller's destination that means bouncing the ragged ends through scratch, and into a
+    // staging buffer it means rounding the read out to whole blocks instead.
     auto pass = DirectPass{ pending.offset, pending.bytesize, pending.buffer, nullptr, 0, 0 };
 
-    if (direct && !plan_direct_pass(pending, _block, pass))
+    if (direct && !plan_direct_pass(pending, _block, staged, pass))
     {
         // No scratch was free. Not expected - there is one per in-flight read - but failing the whole
         // read over it would be worse than reading a little less this pass.
@@ -778,7 +849,10 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
         return;
     }
 
-    if (pass.scratch != nullptr)
+    // `wanted` is what says this pass asked for more of the file than the chunk owes - a bounced one
+    // or a rounded one. A rounded pass at a block boundary has no skip and still over-reads at the
+    // tail, so testing the skip would leave its count untranslated.
+    if (pass.scratch != nullptr || pass.wanted != 0)
     {
         _chunks.set_bounce(id, pass.scratch, pass.skip, pass.wanted);
     }

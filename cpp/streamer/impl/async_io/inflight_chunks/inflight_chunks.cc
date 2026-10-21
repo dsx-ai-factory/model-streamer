@@ -113,8 +113,10 @@ void InflightChunks::set_bounce(posix_io::RequestId id, char * scratch, size_t s
     const auto it = _chunks.find(id);
     ASSERT(it != _chunks.end()) << "no in-flight chunk for request " << id;
 
-    ASSERT(it->second.scratch == nullptr)
-        << "request " << id << " already holds a scratch buffer - a pass was staged without landing";
+    // Both fields, not just the scratch. A rounded pass into a staging buffer records a `wanted` and
+    // no scratch, so testing the pointer alone would leave that shape unguarded.
+    ASSERT(it->second.scratch == nullptr && it->second.scratch_wanted == 0)
+        << "request " << id << " already has a pass recorded - one was staged without landing";
 
     it->second.scratch = scratch;
     it->second.scratch_skip = skip;

@@ -67,7 +67,11 @@ struct InflightChunk
     // buffer is ours and the file's layout is not. Those earlier bytes land at the front and nobody
     // wants them, so the chunk's own bytes begin here instead of at the buffer's base.
     //
-    // Zero for a host chunk and for a buffered read, both of which are issued exactly as asked.
+    // Zero for a host chunk, which is read exactly as asked into the caller's own memory.
+    //
+    // A chunk that was read directly and is then DEMOTED to buffered keeps its skip. The bytes the
+    // direct passes delivered really are that far into the buffer, so the buffered passes have to
+    // continue after them and the copy has to start there.
     size_t staging_skip = 0;
 };
 
@@ -129,8 +133,11 @@ class InflightChunks
     // Say that `skip` bytes of the staging buffer precede this chunk - see InflightChunk::staging_skip.
     //
     // Set when the first direct pass is planned, not when the buffer is taken: whether a file is read
-    // directly is decided per file, at the open, and a file that falls back to buffered has no skip.
-    // Once set it holds for every later pass, so a resumed read lands where the first one did.
+    // directly is decided per file, at the open, so a file that never reads directly never gets one.
+    //
+    // Once set it holds for the life of the chunk - through later passes, and through a demotion to
+    // buffered - so every pass lands where the first one did. Setting it again after bytes have
+    // arrived would strand them.
     void set_staging_skip(posix_io::RequestId id, size_t skip);
 
     // Remove `id` and return the chunk it was reading, so the caller can account its tasks.

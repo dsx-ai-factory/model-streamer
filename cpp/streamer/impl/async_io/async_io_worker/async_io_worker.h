@@ -297,7 +297,7 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     void account_inflight();
 
     int fd_for(Inflight & wl, unsigned batch_index, size_t file_offset, const char * buffer,
-               common::ResponseCode & out_error);
+               bool staged, common::ResponseCode & out_error);
 
     // Whether this file should be opened with O_DIRECT.
     //
@@ -306,7 +306,11 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // copy every byte through a scratch buffer - on our one worker - while buffered I/O copies too
     // and gets readahead as well. So a non-congruent file is opened buffered on purpose, not as a
     // failure.
-    bool wants_direct(size_t file_offset, const char * buffer) const;
+    //
+    // `staged` says the destination is a staging buffer this library allocated. Congruence does not
+    // apply to one: the read can be placed to suit the file instead, which is what plan_direct_pass
+    // does for it. Asking congruence of a buffer we are free to move refuses nearly every offset.
+    bool wants_direct(size_t file_offset, const char * buffer, bool staged) const;
 
     // What one pass of a DIRECT read should ask the kernel for.
     //
@@ -341,10 +345,18 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // read does not land in, and the engine would decline anyway.
     posix_io::Registration registration_for(const StagingBuffer & staging, const DirectPass & pass) const;
 
-    bool plan_direct_pass(const Chunk & pending, size_t block, DirectPass & out);
+    // `staged` reads the whole aligned range that covers what is owed, straight into the staging
+    // buffer, and reports the head as `skip`. Nothing is bounced: the bytes land where they belong.
+    bool plan_direct_pass(const Chunk & pending, size_t block, bool staged, DirectPass & out);
 
-    // Copy a bounced pass out of its scratch buffer, give the buffer back, and return how many WANTED
-    // bytes arrived.
+    // Turn what the kernel reported into how many WANTED bytes arrived, and release the pass.
+    //
+    // TWO SHAPES, and the field that tells them apart is `scratch`. A bounced pass read into scratch,
+    // so the wanted part is copied out and the buffer given back. A rounded pass read into a staging
+    // buffer, so its bytes are already where they belong and only the count is translated - both read
+    // more of the file than was asked for, which is why both have a `skip`.
+    //
+    // A pass with neither is returned unchanged: it was issued exactly as asked.
     //
     // The conversion matters: the kernel reports a whole block, but only part of it was asked for.
     // Recording the raw count would advance the cursor past bytes that were never delivered, and the
