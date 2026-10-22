@@ -83,6 +83,13 @@ struct AsyncIoCounters
     // says reads are being split and each one is costing more than one round trip.
     uint64_t short_read_restages = 0;
 
+    // Reads a signal interrupted before anything was transferred, and which were issued again.
+    //
+    // Any value above zero says this host delivers signals into our reads. A load that finishes with
+    // a large number here finished in spite of that, which is worth knowing before the day a chunk
+    // runs out of attempts and the load fails instead.
+    uint64_t transient_retries = 0;
+
     // The most reads any single engine had outstanding at once.
     //
     // A MAXIMUM ACROSS ENGINES, not a sum: each engine has its own window, and adding them would
