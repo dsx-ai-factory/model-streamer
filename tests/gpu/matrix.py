@@ -12,10 +12,11 @@ A row is one load of one model:
     device    "cuda": stream to the rank's GPU; "cpu_to": stream to host memory, then copy each tensor with .to()
     limit     the host memory limit, which decides how the ring of read buffers is used (see memory_limit)
 
-Two sets of rows, chosen with GPU_MATRIX:
+Three sets of rows, chosen with GPU_MATRIX:
 
-    core   the rows that matter most, one option at a time on the richest model: a quick manual run
-    full   every valid combination: the nightly run
+    core    the rows that matter most, one option at a time on the richest model: a quick run
+    full    every valid combination
+    smoke   a few loads of the small real model (real_model.py), with the streamer's default settings
 """
 
 import itertools
@@ -25,6 +26,7 @@ from collections import namedtuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from gen_models import MODEL_NAMES  # noqa: E402
+from real_model import MODEL_NAME as REAL_MODEL  # noqa: E402
 
 MIB = 1 << 20
 WORLD = 2  # ranks of the test
@@ -128,9 +130,25 @@ def core_rows():
     return [by_id[wanted] for wanted in CORE_IDS]
 
 
+# The small real model, loaded the way a user loads it: the default memory limit. One solo load straight to the GPU,
+# one distributed over the two ranks, and one to host memory and then .to() (what most callers do).
+SMOKE_ROWS = (
+    (False, None, True, "cuda"),
+    (True, "spans", True, "cuda"),
+    (False, None, False, "cpu_to"),
+)
+
+
+def smoke_rows():
+    return [Row(row_id(REAL_MODEL, dist, policy, owned, device, "default"), REAL_MODEL, dist, policy, owned, device,
+                "default") for dist, policy, owned, device in SMOKE_ROWS]
+
+
 def rows_for(mode):
     if mode == "core":
         return core_rows()
     if mode == "full":
         return full_rows()
-    raise ValueError("GPU_MATRIX must be core or full, not %r" % (mode,))
+    if mode == "smoke":
+        return smoke_rows()
+    raise ValueError("GPU_MATRIX must be core, full or smoke, not %r" % (mode,))

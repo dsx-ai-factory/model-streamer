@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       matrix:
-        description: Which rows to run, see tests/gpu/matrix.py.
+        description: Which rows the newest-torch leg runs, see tests/gpu/matrix.py (the oldest-torch leg always runs core).
         required: false
         default: full
         type: choice
@@ -72,7 +72,7 @@ jobs:
           changed=$(git diff --name-only "$last" "$GITHUB_SHA" -- cpp py tests/gpu .devcontainer \
                       .github/workflows/nightly-gpu.yaml ':(exclude)*.md')
           harness=$(git diff --name-only "$last" "$GITHUB_SHA" -- tests/gpu/test_synthetic_models.py \
-                      tests/gpu/matrix.py tests/gpu/phase_timer.py tests/gpu/setup_and_run.sh \
+                      tests/gpu/matrix.py tests/gpu/phase_timer.py tests/gpu/real_model.py tests/gpu/setup_and_run.sh \
                       .github/workflows/nightly-gpu.yaml)
           if [ -n "$harness" ]; then
             echo "the test harness changed since $last, so the self-check runs:"; echo "$harness"
@@ -88,13 +88,90 @@ jobs:
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
-  gpu-tests:
+  # The wheel of the streamer, built from the commit under test in the repository's development image, on a CPU runner.
+  # The GPU jobs install it into a clean CUDA container, the way a user installs the package.
+  build-wheel:
     needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CI_IMAGE: ghcr.io/${{ github.repository }}/devcontainer:latest
+      ARCH: x86_64
+      COMPONENT: streamer
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the development image
+        run: docker pull "$CI_IMAGE"
+
+      - name: Start the build container
+        id: container
+        run: |
+          docker run --detach --rm --init --pull never \
+            --name gpu-wheel-build \
+            --security-opt seccomp=unconfined \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env ARCH --env COMPONENT --env PACKAGE_VERSION="0.0.0+dev.${GITHUB_SHA::7}" \
+            --entrypoint sleep \
+            "$CI_IMAGE" infinity
+
+      - name: Build libstreamer
+        run: docker exec gpu-wheel-build make ci-build-cpp
+
+      - name: Build the wheel
+        run: docker exec gpu-wheel-build make ci-build-python
+
+      - name: Stop the build container
+        if: ${{ always() && steps.container.outcome == 'success' }}
+        run: docker stop gpu-wheel-build
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: py/runai_model_streamer/dist/runai_model_streamer-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  # Two legs, each on two T4s in a clean container (nvidia/cuda, Ubuntu 22.04, the system Python, pip): the newest
+  # PyTorch with the whole set of rows, which is what covers the newest dtypes, and the oldest PyTorch that the package
+  # supports (torch>=2.0) with the core rows. The versions in between are not run.
+  gpu-tests:
+    name: GPU tests (${{ matrix.name }})
+    needs: [changes, build-wheel]
     if: needs.changes.outputs.run == 'true'
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: newest-torch
+            newest: true
+            torch_spec: torch
+            numpy_spec: numpy
+            rows: full
+          - name: oldest-torch
+            newest: false
+            torch_spec: torch==2.0.0
+            numpy_spec: numpy<2
+            rows: core
+    env:
+      GPU_TEST_IMAGE: nvidia/cuda:12.4.1-base-ubuntu22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -104,43 +181,42 @@ jobs:
       - name: Check runner GPUs
         run: nvidia-smi
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Download the wheel
+        uses: actions/download-artifact@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          name: gpu-test-wheel
+          path: wheel
 
-      - name: Set up Node.js for Dev Containers CLI
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
+      - name: Pull the CUDA image
+        run: docker pull "$GPU_TEST_IMAGE"
 
       - name: Generate synthetic models, stream them to two GPUs and compare
-        uses: devcontainers/ci@v0.3
-        with:
-          configFile: .devcontainer/gpu/devcontainer.json
-          imageName: ghcr.io/${{ github.repository }}/devcontainer
-          push: never
-          env: |
-            GPU_SEED=${{ inputs.seed || github.run_id }}
-            GPU_MATRIX=${{ inputs.matrix || 'full' }}
-            GPU_ROWS=${{ inputs.rows }}
-            GPU_SELF_CHECK=${{ needs.changes.outputs.self_check }}
-          runCmd: bash tests/gpu/setup_and_run.sh
+        env:
+          GPU_SEED: ${{ inputs.seed || github.run_id }}
+          GPU_MATRIX: ${{ matrix.newest && (inputs.matrix || matrix.rows) || matrix.rows }}
+          GPU_ROWS: ${{ inputs.rows }}
+          GPU_SELF_CHECK: ${{ matrix.newest && needs.changes.outputs.self_check || 'false' }}
+          GPU_TORCH_SPEC: ${{ matrix.torch_spec }}
+          GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
+        run: |
+          docker run --rm --gpus all --shm-size=2g --security-opt seccomp=unconfined \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_WHEEL_DIR=wheel \
+            "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went
         if: always()
         run: |
           if [ -f test-results/gpu/timing-summary.txt ]; then
-            { echo '### Where the time went'; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload GPU test logs and timing
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-test-results
+          name: gpu-test-results-${{ matrix.name }}
           path: test-results/gpu/
           if-no-files-found: warn
           retention-days: 14

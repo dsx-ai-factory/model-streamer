@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Real-GPU test run, inside the GPU devcontainer on a host with two GPUs:
-#   1. set up: CUDA PyTorch, the real libstreamer, a proof that io_uring works here
+# Real-GPU test run, inside a clean CUDA container (nvidia/cuda, Ubuntu, nothing but the system Python) on a host with
+# two GPUs. The streamer is installed from the wheel that the workflow built from this commit, the way a user installs
+# it, with the PyTorch and numpy versions that the workflow asks for (GPU_TORCH_SPEC, GPU_NUMPY_SPEC):
+#   1. set up: system Python and pip, PyTorch, the wheel
 #   2. generate the four synthetic models, with every dtype the streamer accepts here, and check them
-#   3. stream them to the GPUs once per filesystem strategy and compare every tensor
+#   3. download the small real model, pinned by revision and SHA-256, and describe it (timed)
+#   4. stream the synthetic models to the GPUs once per filesystem strategy and compare every tensor
+#   5. optionally prove that the checks fire (GPU_SELF_CHECK), then load the real model with the default settings
 # Every step is timed; the table at the end shows where the time went.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -13,6 +17,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 RESULTS=${GPU_RESULTS:-test-results/gpu}
 FIXTURES=${GPU_FIXTURES:-.gpu-fixtures}
 SEED=${GPU_SEED:-$(date +%s)}
+WHEEL_DIR=${GPU_WHEEL_DIR:-wheel}
+TORCH_SPEC=${GPU_TORCH_SPEC:-torch}
+NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy}
 export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES"
 mkdir -p "$RESULTS"
 exec > >(tee "$RESULTS/run.log") 2>&1
@@ -45,9 +52,9 @@ phase() {
 echo "== environment"
 date -u
 uname -r
+. /etc/os-release && echo "$PRETTY_NAME"
 echo "seed: $SEED"
-echo "matrix: ${GPU_MATRIX:-core}"
-python3 --version
+echo "matrix: ${GPU_MATRIX:-core}   torch: $TORCH_SPEC   numpy: $NUMPY_SPEC   self-check: ${GPU_SELF_CHECK:-false}"
 nvidia-smi
 echo "ulimit -n: $(ulimit -n)   ulimit -l: $(ulimit -l)"
 free -g | head -2
@@ -56,20 +63,45 @@ mkdir -p "$FIXTURES"
 echo "fixtures in $FIXTURES: $(stat -f -c %T "$FIXTURES")"
 df -h "$FIXTURES" | tail -1
 
+# The image has no Python. What is installed is what a user needs: Python, pip and the certificates for HTTPS.
+# phase runs these functions where `set -e` does not apply, so every command ends in `|| return`.
+install_system_packages() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq || return
+    apt-get install -y -qq --no-install-recommends python3 python3-pip ca-certificates || return
+}
+phase install_system_packages install_system_packages
+python3 --version
+
 install_python_packages() {
-    # The shared Ubuntu 20.04 devcontainer uses Python 3.8. Keep a compatible CUDA build; make
-    # install/test would replace it with CPU-only PyTorch.
-    # phase runs this function where `set -e` does not apply, so every command ends in `|| return`.
-    python3 -m pip install 'torch==2.4.1' --index-url https://download.pytorch.org/whl/cu124 || return
-    python3 -m pip install -r py/runai_model_streamer/requirements.dev || return
+    local wheels wheel
+    # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
+    python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
+    mapfile -t wheels < <(find "$WHEEL_DIR" -name 'runai_model_streamer-*.whl')
+    if [ "${#wheels[@]}" -ne 1 ]; then
+        echo "ERROR: expected one runai_model_streamer wheel in $WHEEL_DIR, found ${#wheels[@]}: ${wheels[*]:-}" >&2
+        return 1
+    fi
+    wheel=${wheels[0]}
+    echo "installing $wheel"
+    python3 -m pip install --no-cache-dir "$wheel" || return
 }
 phase install_python_packages install_python_packages
+python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
 
 python3 - <<'PY'
 import torch
 import torch.distributed as dist
+import runai_model_streamer
+from runai_model_streamer.libstreamer import STREAMER_LIBRARY
 
-print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}", flush=True)
+nccl = torch.cuda.nccl.version()
+nccl = ".".join(map(str, nccl)) if isinstance(nccl, tuple) else str(nccl)
+print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; NCCL {nccl}", flush=True)
+print(f"streamer package: {runai_model_streamer.__file__}", flush=True)
+print(f"streamer library: {STREAMER_LIBRARY}", flush=True)
+if "site-packages" not in runai_model_streamer.__file__ and "dist-packages" not in runai_model_streamer.__file__:
+    raise RuntimeError("the streamer was not imported from the installed wheel")
 if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
     raise RuntimeError("GPU tests require two visible CUDA GPUs")
 if not dist.is_nccl_available():
@@ -78,29 +110,15 @@ for index in range(2):
     print(f"GPU {index}: {torch.cuda.get_device_name(index)}", flush=True)
 PY
 
-echo "== generator self-test"
-phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py
-
-build_libstreamer() {
-    # Called through phase, where `set -e` does not apply (not inside the subshell either): every command ends in
-    # `|| return` or `|| exit`, or a failed build or io_uring check would be hidden by the install that follows.
-    (
-        cd cpp || exit
-        bazel build --config=x86_64 //streamer:libstreamer.so || exit
-        # Prove io_uring is usable rather than accepting a fallback or skipped test.
-        bazel test --config=x86_64 //posix_io/io_uring_engine:io_uring_engine_test \
-            --test_env=RUNAI_STREAMER_REQUIRE_IO_URING=1 --test_output=errors || exit
-    ) || return
-    python3 -m pip install --no-deps -e py/runai_model_streamer || return
-}
-phase build_libstreamer build_libstreamer
-
-export STREAMER_LIBRARY="$PWD/cpp/bazel-bin/streamer/libstreamer.so"
+echo "== self-test of the generator, the rows and the real model download"
+phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
+    tests/gpu/test_real_model.py
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
 # streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
 # listed here as not covered rather than failing the load of every file that holds it. (F4 is known to the streamer
-# with PyTorch 2.8 or later but not to the generator, see gen_models.py.) Generation takes under a minute.
+# with PyTorch 2.8 or later but not to the generator, see gen_models.py.) The generator needs the installed streamer
+# for that table, so it runs after the install. Generation takes under a minute.
 generate_models() {
     local dtypes
     dtypes=$(python3 - <<'PY'
@@ -130,6 +148,13 @@ PY
 }
 echo "== generate synthetic models"
 phase generate_models generate_models
+
+# The small real model, downloaded on every run: real_model.py times the download and the manifest separately
+# (timing-real.jsonl), to show what the download adds to a run.
+if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
+    echo "== download the small real model"
+    phase fetch_real_model python3 tests/gpu/real_model.py fetch --out "$FIXTURES"
+fi
 
 # The direct I/O strategies are only tested if the fixtures are on a real block device that serves O_DIRECT. The
 # streamer reads a file from a mount that cannot (tmpfs, for one) with its synchronous reader, quietly, so on such
@@ -169,7 +194,10 @@ export GPU_MATRIX="${GPU_MATRIX:-core}"
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=2
 export NCCL_DEBUG=INFO
+# The name of the variable that makes the NCCL watchdog abort the process on a timeout or an error: TORCH_NCCL_* from
+# PyTorch 2.2, NCCL_* before.
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_ASYNC_ERROR_HANDLING=1
 export RUNAI_STREAMER_LOG_TO_STDERR=1
 
 # The many_files model has 5,000 files, and the container starts with a soft limit of 1024 open files. The streamer keeps a
@@ -221,16 +249,31 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
     record "run.self_check" "$start" "$(date +%s.%N)"
 fi
 
+# The small real model, loaded with the streamer's default settings (no filesystem strategy chosen): what a user runs.
+if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
+    echo "[$(date +%T)] START run.real_smoke"
+    echo "== smoke test: the small real model, default settings"
+    start=$(date +%s.%N)
+    if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY \
+        timeout --signal=TERM --kill-after=30s 15m \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py; then
+        status=1
+        echo "[$(date +%T)] FAILED run.real_smoke"
+    fi
+    record "run.real_smoke" "$start" "$(date +%s.%N)"
+fi
+
 # Which rows ran. A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends
 # that strategy's run: the rows after it never start. They must not hide behind the strategies that did finish.
 echo "== rows that ran"
-python3 - "$RESULTS" sync_buffered libaio_direct io_uring_direct io_uring_buffered <<'PY' || status=1
+python3 - "$RESULTS" "${GPU_REAL_SMOKE:-true}" sync_buffered libaio_direct io_uring_direct io_uring_buffered <<'PY' || status=1
 import glob
 import json
 import os
 import sys
 
-results, strategies = sys.argv[1], sys.argv[2:]
+results, smoke, strategies = sys.argv[1], sys.argv[2] == "true", sys.argv[3:]
 incomplete = False
 for path in sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True)):
     data = json.load(open(path))
@@ -250,14 +293,22 @@ for strategy in strategies:
     if not glob.glob(os.path.join(results, "rows-%s-rank*.json" % strategy)):
         incomplete = True
         print("%s: no results at all  <-- INCOMPLETE" % strategy)
+if smoke and not glob.glob(os.path.join(results, "smoke", "rows-*-rank*.json")):
+    incomplete = True
+    print("smoke: no results at all  <-- INCOMPLETE")
 sys.exit(1 if incomplete else 0)
 PY
 
 # The manifests list every tensor of every model; keep them with the results to debug a failure.
 mkdir -p "$RESULTS/manifests"
-for m in mixed many_tensors giant_tensor many_files; do gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true; done
+for m in mixed many_tensors giant_tensor many_files real_smoke; do
+    if [ -f "$FIXTURES/$m.manifest.json" ]; then
+        gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true
+    fi
+done
 
 echo "== where the time went"
-python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl | tee "$RESULTS/timing-summary.txt"
+python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl "$FIXTURES"/timing-real.jsonl \
+    "$RESULTS"/smoke/timing-*.jsonl | tee "$RESULTS/timing-summary.txt"
 
 exit "$status"

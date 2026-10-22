@@ -77,9 +77,23 @@ class Rows(unittest.TestCase):
             self.assertTrue(any(r.model == model and not r.dist for r in core), model)
             self.assertTrue(any(r.model == model and r.dist for r in core), model)
 
+    def test_smoke_rows_load_the_real_model_with_the_default_limit(self):
+        rows = matrix.smoke_rows()
+        self.assertEqual({row.model for row in rows}, {matrix.REAL_MODEL})
+        self.assertEqual({row.limit for row in rows}, {"default"})
+        self.assertEqual(len({row.id for row in rows}), len(rows))
+        self.assertTrue(any(r.dist for r in rows) and any(not r.dist for r in rows))
+        self.assertTrue(any(r.device == "cpu_to" for r in rows))
+        for row in rows:
+            self.assertTrue(matrix.is_valid(row.model, row.dist, row.policy, row.owned, row.device, row.limit),
+                            row.id)
+        # the real model is not one of the synthetic models, so it is never in the full or core sets
+        self.assertFalse({row.id for row in rows} & {row.id for row in matrix.full_rows()})
+
     def test_rows_for_refuses_an_unknown_mode(self):
         self.assertEqual(matrix.rows_for("core"), matrix.core_rows())
         self.assertEqual(matrix.rows_for("full"), matrix.full_rows())
+        self.assertEqual(matrix.rows_for("smoke"), matrix.smoke_rows())
         with self.assertRaises(ValueError):
             matrix.rows_for("everything")
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Load the synthetic models (see gen_models.py) to real GPUs with the model streamer and compare every
-tensor with what the generator recorded.
+"""Load the synthetic models (see gen_models.py), and the small real model (see real_model.py), to real GPUs with the
+model streamer and compare every tensor with what the manifest recorded.
 
 Launched by torchrun with two ranks, one GPU each, once per filesystem strategy:
 
@@ -12,8 +12,8 @@ Each row (see matrix.py) is one load: a model, distributed or not, a partition p
 and a memory limit. After a load, every tensor is checked for name, dtype, shape, device and the CRC32 of its
 bytes. A tensor is compared by its bytes, never by value, so NaN payloads and negative zero compare right.
 
-    GPU_MATRIX     core (default) or full: which rows to run, see matrix.py
-    GPU_FIXTURES   directory written by gen_models.py (default .gpu-fixtures)
+    GPU_MATRIX     core (default), full or smoke: which rows to run, see matrix.py
+    GPU_FIXTURES   directory written by gen_models.py and real_model.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
     GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them
     GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
@@ -33,7 +33,6 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from gen_models import MODEL_NAMES  # noqa: E402
 from matrix import WORLD, memory_limit, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 
@@ -72,10 +71,12 @@ def parse_drills(text):
 
 
 class Fixtures:
-    def __init__(self, directory):
+    """The manifests of the models that the selected rows load."""
+
+    def __init__(self, directory, models):
         self.directory = directory
         self.manifests = {}
-        for model in MODEL_NAMES:
+        for model in models:
             with open(os.path.join(directory, model + ".manifest.json")) as handle:
                 self.manifests[model] = json.load(handle)
 
@@ -106,9 +107,17 @@ def environment(settings):
                 os.environ[key] = value
 
 
+def as_bytes(tensor):
+    """The tensor's memory as a flat uint8 view. A complex tensor goes through view_as_real first, because older torch
+    versions cannot view a complex tensor as bytes directly."""
+    if tensor.is_complex():
+        tensor = torch.view_as_real(tensor)
+    return tensor.reshape(-1).view(torch.uint8)
+
+
 def tensor_crc32(tensor):
     """CRC32 of the tensor's bytes, copied to the host in slices so a 2 GiB tensor needs no 2 GiB buffer."""
-    flat = tensor.reshape(-1).view(torch.uint8)
+    flat = as_bytes(tensor)
     crc = 0
     for start in range(0, flat.numel(), D2H_CHUNK):
         crc = zlib.crc32(flat[start:start + D2H_CHUNK].cpu().numpy(), crc)
@@ -165,7 +174,7 @@ class RowRun:
             return
         if self.drill == "corrupt" and not self.drilled and entry["end"] > entry["start"]:
             self.drilled = True
-            tensor.reshape(-1).view(torch.uint8)[0] ^= 1
+            as_bytes(tensor)[0] ^= 1
         crc = tensor_crc32(tensor)
         if crc != entry["crc32"]:
             self.error("%s (%s %s, %d bytes): crc32 %08x, expected %08x" % (
@@ -283,17 +292,17 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     streamer_timeout = int(os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS)))
 
+    rows = selected_rows()
     timer = PhaseTimer(announce=(rank == 0))
     with timer.phase("init.nccl"):
         dist.init_process_group("nccl", timeout=timedelta(seconds=DIST_TIMEOUT_SECONDS))
     with timer.phase("init.manifests"):
-        fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"))
+        fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"), sorted({r.model for r in rows}))
     # The ranks agree on the outcome of a row over a CPU-only group of their own, so the test adds no NCCL traffic
     # and no GPU work next to the streamer's, and can still report after a distributed row went wrong.
     control = dist.new_group(backend="gloo", timeout=timedelta(seconds=streamer_timeout + CONTROL_MARGIN_SECONDS))
     gpu_baseline = torch.cuda.memory_allocated(device)
 
-    rows = selected_rows()
     drills = parse_drills(os.environ.get("GPU_DRILL", ""))
     unknown = sorted(set(drills) - {r.id for r in rows})
     if unknown:

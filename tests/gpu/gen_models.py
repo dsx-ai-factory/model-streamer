@@ -32,7 +32,7 @@ reaches the GPU with it.
 
 The model names are the four above; by default all of them. Each model is written to <out>/<name>/.
 
-Runs under the devcontainer's Python 3.8. Needs only numpy.
+Runs under Python 3.8 or later. Needs only numpy.
 """
 
 import argparse
