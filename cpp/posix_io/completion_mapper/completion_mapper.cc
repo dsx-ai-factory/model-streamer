@@ -40,6 +40,35 @@ bool is_internal_error(long res, const FileRef & file)
     return err == EINVAL && file.direct;
 }
 
+bool is_transient(long res)
+{
+    if (res >= 0)
+    {
+        return false;
+    }
+
+    switch (-res)
+    {
+    // The kernel's restart codes. linux/errno.h puts them at 512 and up and says they should never
+    // reach a program; userspace headers do not define the names. All four mean a signal arrived and
+    // nothing was read.
+    case 512:   // ERESTARTSYS
+    case 513:   // ERESTARTNOINTR
+    case 514:   // ERESTARTNOHAND
+    case 516:   // ERESTART_RESTARTBLOCK
+
+    // The same thing, already retried by the synchronous reader, by both engines' wait paths, and by
+    // libaio's submit path.
+    case EINTR:
+        return true;
+
+    // EAGAIN is absent on purpose: as a completion it needs a non-blocking read, and we never ask for
+    // one - see RWF_NOWAIT in libaio_engine.h.
+    default:
+        return false;
+    }
+}
+
 common::ResponseCode map_completion(long res, const FileRef & file)
 {
     if (res >= 0)

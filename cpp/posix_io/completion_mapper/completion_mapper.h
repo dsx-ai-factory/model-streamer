@@ -50,10 +50,8 @@ namespace runai::llm::streamer::posix_io
 // The synchronous reader made the same choice, with the same reasoning - see file.cc. Both readers
 // must agree, because which one served a request is meant to be invisible to the caller.
 //
-// No -EINTR row on purpose. It is unreachable as a completion: regular-file reads sit in
-// uninterruptible sleep, io-wq workers do not take signals the usual way, and libaio surfaces EINTR
-// from io_getevents - the wait, not the result. The default branch covers it if it ever appears, which
-// beats an untested branch claiming to handle it.
+// No row for an interrupted read: a signal leaves the read undone rather than failed, which
+// is_transient() below answers separately.
 common::ResponseCode map_completion(long res, const FileRef & file);
 
 // True when a result means "our bug" rather than "the storage failed".
@@ -62,5 +60,12 @@ common::ResponseCode map_completion(long res, const FileRef & file);
 // this repo's ASSERT is fatal in EVERY build, and throwing here would break wait_for_completions,
 // which returns a code. Never FileAccessError - that sends an operator to the wrong system.
 bool is_internal_error(long res, const FileRef & file);
+
+// True when a result means "this read did not happen": nothing was transferred and the same read is
+// still right. Asked of a result, not returned by one - "retry internally" must not cross the C ABI.
+//
+// Engine-independent: these come from the kernel's read path, not from io_uring or libaio, so one
+// predicate serves both.
+bool is_transient(long res);
 
 }; // namespace runai::llm::streamer::posix_io
