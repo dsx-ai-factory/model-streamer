@@ -13,6 +13,7 @@
 
 #include "common/exception/exception.h"
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/completion_mapper/completion_mapper.h"
 #include "posix_io/io_uring_probe/io_uring_probe.h"
 #include "utils/logging/logging.h"
 
@@ -335,7 +336,11 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued, bool & out_defe
         // Zero progress is the hazard, so it is REPORTED rather than retried here: only reaping frees
         // capacity, and reaping runs on this same thread, so a loop would spin against itself (5.9).
         //
-        if (error == EAGAIN || error == EBUSY)
+        // An INTERRUPTED submit belongs here too, and used to fall through: a direct read is
+        // performed inline by io_uring_submit, so a signal reaches it. Failing instead ends this
+        // engine, and a dead engine sends its whole mount to the synchronous reader for the life of
+        // the streamer - the cost of one signal.
+        if (submit_can_defer(error))
         {
             LOG(DEBUG) << "io_uring_submit deferred " << _staged << " staged reads: "
                        << std::strerror(error);

@@ -13,6 +13,7 @@
 
 #include "common/exception/exception.h"
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/completion_mapper/completion_mapper.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::posix_io
@@ -286,10 +287,11 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued, bool & out_defer
             // (design 5.9). A submit thread would make the retry legal - that was one of its
             // attractions - but it bought no throughput, so the constraint stays and so does this.
             //
-            // EINTR is handled the same way, defensively. It is not documented for io_submit, but any
-            // negative return means nothing was accepted, so retrying the untouched array is right
-            // whatever the errno.
-            if (error == EAGAIN || error == EINTR)
+            // An interrupted submit is handled the same way, for the reason this comment already
+            // gave: any negative return means nothing was accepted, so the untouched array is still
+            // right whatever the errno. EBUSY joins it - io_uring deferred that and this did not, so
+            // a saturated queue failed a file here and merely waited there.
+            if (submit_can_defer(error))
             {
                 out_deferred = true;
                 LOG(DEBUG) << "io_submit deferred " << _pending.size() << " staged reads: "
