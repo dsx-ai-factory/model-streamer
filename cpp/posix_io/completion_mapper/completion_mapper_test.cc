@@ -168,6 +168,39 @@ TEST(CompletionMapper, Other_Kernel_Internal_Codes_Are_Not_Transient)
     EXPECT_FALSE(is_transient(-529));   // EIOCBQUEUED
 }
 
+// --- submit_can_defer --------------------------------------------------------------------------
+
+// Backpressure: the queue is full and reaping will make room. Both engines already deferred EAGAIN;
+// only io_uring deferred EBUSY, and they are supposed to be indistinguishable to a caller.
+TEST(CompletionMapper, A_Full_Queue_Is_Deferred)
+{
+    EXPECT_TRUE(submit_can_defer(EAGAIN));
+    EXPECT_TRUE(submit_can_defer(EBUSY));
+}
+
+// An interrupted submit accepted nothing either, so the staged array is still right. io_uring ended
+// its engine for this - and an engine ending means the whole mount falls back to the synchronous
+// reader for the life of the streamer.
+TEST(CompletionMapper, An_Interrupted_Submit_Is_Deferred)
+{
+    EXPECT_TRUE(submit_can_defer(EINTR));
+
+    for (const int err : { 512, 513, 514, 516 })
+    {
+        EXPECT_TRUE(submit_can_defer(err)) << "errno " << err;
+    }
+}
+
+// A real failure must still end the engine. Deferring these would stage the same doomed reads for
+// ever instead of reporting them.
+TEST(CompletionMapper, A_Broken_Ring_Is_Not_Deferred)
+{
+    for (const int err : { EIO, EBADF, EINVAL, EFAULT, ENOMEM, EPERM, 515, 518, 528 })
+    {
+        EXPECT_FALSE(submit_can_defer(err)) << "errno " << err;
+    }
+}
+
 // Bytes transferred are never a retry, including a short read - the caller re-stages that from its
 // cursor, and zero is the caller's question too.
 TEST(CompletionMapper, Transferred_Bytes_Are_Not_Transient)

@@ -68,4 +68,12 @@ bool is_internal_error(long res, const FileRef & file);
 // predicate serves both.
 bool is_transient(long res);
 
+// True when a SUBMIT error means the kernel accepted nothing, so the staged entries are untouched
+// and the next flush issues them unchanged. `error` is positive, as both engines report it.
+//
+// One predicate for both, because they had two: io_uring deferred EAGAIN and EBUSY, libaio EAGAIN
+// and EINTR. The same interrupted submit therefore cost one file under libaio and a whole mount
+// under io_uring, which ends its engine on anything it does not defer.
+bool submit_can_defer(int error);
+
 }; // namespace runai::llm::streamer::posix_io

@@ -69,6 +69,20 @@ bool is_transient(long res)
     }
 }
 
+bool submit_can_defer(int error)
+{
+    // The queue is full, and only reaping frees room - which runs on the same thread, so this is
+    // reported as backpressure rather than retried in place.
+    if (error == EAGAIN || error == EBUSY)
+    {
+        return true;
+    }
+
+    // Interrupted before anything was accepted, which is the same conclusion the completion side
+    // draws from the same errnos.
+    return is_transient(-static_cast<long>(error));
+}
+
 common::ResponseCode map_completion(long res, const FileRef & file)
 {
     if (res >= 0)
