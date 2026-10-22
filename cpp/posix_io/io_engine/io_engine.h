@@ -228,7 +228,23 @@ class IoEngine
     // on this same thread, so spinning here deadlocks.
     //
     // So out_issued matters, and zero progress is backpressure, not an error.
-    virtual common::ResponseCode flush(unsigned & out_issued) = 0;
+    //
+    // out_deferred is TRUE when work was offered and some of it was refused. Its job is to separate
+    // the two ways out_issued can be zero - the kernel refused everything, or there was nothing to
+    // offer - which look identical and need opposite treatment: a caller that cannot tell them apart
+    // either spins on a refusal that repeats, or mistakes an idle flush for one and gives up while
+    // copies are still draining.
+    //
+    // It can also be true WITH out_issued > 0, when an engine issues part of what it holds and is
+    // refused the rest. A caller that wants the stall signal reads the two together.
+    virtual common::ResponseCode flush(unsigned & out_issued, bool & out_deferred) = 0;
+
+    // For callers that only need the count. Not virtual: an engine implements the one above.
+    common::ResponseCode flush(unsigned & out_issued)
+    {
+        bool deferred = false;
+        return flush(out_issued, deferred);
+    }
 
     // Collect completions into a caller-owned array - nothing is allocated here.
     //

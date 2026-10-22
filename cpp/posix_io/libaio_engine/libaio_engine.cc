@@ -232,9 +232,10 @@ common::ResponseCode LibaioEngine::stage(RequestId id, FileRef file, size_t offs
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
+common::ResponseCode LibaioEngine::flush(unsigned & out_issued, bool & out_deferred)
 {
     out_issued = 0;
+    out_deferred = false;
 
     // Everything staged goes out on this call, SubmitBatch at a time - see that constant for why the
     // batch is one. The loop ends on an empty queue, on backpressure, or on an error, and each pass
@@ -290,6 +291,7 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
             // whatever the errno.
             if (error == EAGAIN || error == EINTR)
             {
+                out_deferred = true;
                 LOG(DEBUG) << "io_submit deferred " << _pending.size() << " staged reads: "
                            << std::strerror(error);
                 return common::ResponseCode::Success;
@@ -356,6 +358,13 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
         // forever, would spin here and never reap - and reaping is what this same thread does next.
         if (issued == 0)
         {
+            // Offered work and took none, which is what a deferral is - the caller bounds how often
+            // it may happen with nothing in flight to free it.
+            //
+            // No test reaches this: it needs a kernel that breaks io_submit's documented contract,
+            // and stage() caps staging at the context depth so the context cannot be over-offered.
+            out_deferred = true;
+
             LOG(WARNING) << "io_submit accepted none of " << batch << " offered without reporting an"
                             " error; leaving " << _pending.size() << " staged for the next flush";
             return common::ResponseCode::Success;

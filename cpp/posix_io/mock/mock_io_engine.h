@@ -57,7 +57,8 @@ class MockIoEngine : public IoEngine
 
     // Issues up to the flush limit, oldest first. The rest stays staged - both real APIs issue a
     // prefix, so the unissued set is always the tail.
-    common::ResponseCode flush(unsigned & out_issued) override;
+    common::ResponseCode flush(unsigned & out_issued, bool & out_deferred) override;
+    using IoEngine::flush;   // keep the count-only overload visible through this type
 
     // Returns what the test has completed, in the order it completed it. Never blocks: with nothing
     // ready this is Success and zero for both wait modes, which is also the expired-timeout case - so
