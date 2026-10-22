@@ -60,6 +60,12 @@ struct InflightChunk
     //
     // Taken at submit rather than at enqueue, so a chunk waiting in the queue holds no pinned memory.
     StagingBuffer staging;
+
+    // How many times a transient result has sent this chunk back to be read again.
+    //
+    // NEVER reset, not even when a pass makes progress: the budget covers the chunk's whole life, so
+    // interruptions separated by progress still add up.
+    unsigned transient_retries = 0;
 };
 
 // What a completion meant for the chunk it belongs to.
@@ -129,6 +135,10 @@ class InflightChunks
     // when the pass was not bounced. Safe to call on every path, including failure - which is the
     // point, since a leaked buffer drains the pool.
     char * clear_bounce(posix_io::RequestId id);
+
+    // Count one transient retry and say whether it is allowed. False means this chunk has spent its
+    // attempts, and the caller must report the failure it kept receiving.
+    bool may_retry_transient(posix_io::RequestId id);
 
     // Mutable access for the worker, which needs the scratch fields to copy out of. Const would mean
     // a second lookup to clear them.

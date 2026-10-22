@@ -122,6 +122,36 @@ char * InflightChunks::clear_bounce(posix_io::RequestId id)
     return scratch;
 }
 
+namespace
+{
+
+// A signal can arrive again, so this must end: an unbounded retry turns a loud failure into a load
+// that never finishes. Generous because an interrupted read returns before transferring anything, so
+// the whole budget is spent in milliseconds - and a bound too low fails a load that would have
+// survived a burst of signals.
+constexpr unsigned MaxTransientRetries = 1024;
+
+} // namespace
+
+bool InflightChunks::may_retry_transient(posix_io::RequestId id)
+{
+    const auto it = _chunks.find(id);
+    if (it == _chunks.end())
+    {
+        return false;   // gone already; nothing to re-issue
+    }
+
+    // Saturating, so a spent budget stays spent however often this is asked, and the count a log
+    // reports on the failing path is the budget rather than a number that kept climbing.
+    if (it->second.transient_retries >= MaxTransientRetries)
+    {
+        return false;
+    }
+
+    ++it->second.transient_retries;
+    return true;
+}
+
 InflightChunk * InflightChunks::find_mutable(posix_io::RequestId id)
 {
     const auto it = _chunks.find(id);
