@@ -350,8 +350,18 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued)
     out_issued = static_cast<unsigned>(ret);
     _submit_stats.requests += out_issued;
 
-    ASSERT(out_issued <= _staged) << "io_uring_submit issued " << out_issued << " of " << _staged
-                                  << " staged";
+    // REPORTED, not asserted. ASSERT is fatal in every build here (no NDEBUG gate, see logging.h),
+    // and a library inside a serving stack must not end its host - the same reasoning completion
+    // mapping already follows. Issuing more than was staged means this engine's own accounting is
+    // wrong, so the engine ends rather than carrying on with a count it cannot trust.
+    if (out_issued > _staged)
+    {
+        LOG(ERROR) << "io_uring_submit issued " << out_issued << " of " << _staged
+                   << " staged - this engine's accounting is wrong";
+        _staged = 0;
+        return common::ResponseCode::FsAsyncEngineError;
+    }
+
     _staged -= out_issued;
 
     return common::ResponseCode::Success;
