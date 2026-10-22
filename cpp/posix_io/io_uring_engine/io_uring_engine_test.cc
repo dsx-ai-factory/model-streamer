@@ -687,9 +687,11 @@ TEST(IoUringEngine, Flush_With_Nothing_Staged)
 
     IoUringEngine engine(config_with(8));
 
-    unsigned issued = 7;   // must be overwritten
-    EXPECT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    unsigned issued = 7;    // must be overwritten
+    bool deferred = true;   // likewise - nothing was offered, so nothing was refused
+    EXPECT_EQ(engine.flush(issued, deferred), common::ResponseCode::Success);
     EXPECT_EQ(issued, 0u);
+    EXPECT_FALSE(deferred);
 }
 
 // The whole window at once: depth requests staged, one flush, all of them complete and land where
@@ -716,8 +718,13 @@ TEST(IoUringEngine, Fills_The_Window)
     }
 
     unsigned issued = 0;
-    ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    bool deferred = true;   // must be overwritten
+    ASSERT_EQ(engine.flush(issued, deferred), common::ResponseCode::Success);
     EXPECT_EQ(issued, Depth);
+
+    // The case that runs on every read, and the only coverage of the success path's own flag: a
+    // flush that issued everything refused nothing.
+    EXPECT_FALSE(deferred);
 
     const auto completions = reap(engine, Depth);
     ASSERT_EQ(completions.size(), Depth);

@@ -306,9 +306,10 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode IoUringEngine::flush(unsigned & out_issued)
+common::ResponseCode IoUringEngine::flush(unsigned & out_issued, bool & out_deferred)
 {
     out_issued = 0;
+    out_deferred = false;
 
     if (_staged == 0)
     {
@@ -327,16 +328,18 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued)
     {
         const int error = error_of(ret);
 
-        // Backpressure, not failure. The staged entries keep their place at the head of the ring and
+        // The kernel took nothing, so the staged entries keep their place at the head of the ring and
         // go out on the next flush, in order - both APIs issue a prefix, so the unissued set is
         // always the tail and nothing has to be tracked.
         //
         // Zero progress is the hazard, so it is REPORTED rather than retried here: only reaping frees
         // capacity, and reaping runs on this same thread, so a loop would spin against itself (5.9).
+        //
         if (error == EAGAIN || error == EBUSY)
         {
             LOG(DEBUG) << "io_uring_submit deferred " << _staged << " staged reads: "
                        << std::strerror(error);
+            out_deferred = true;
             return common::ResponseCode::Success;
         }
 
@@ -363,6 +366,11 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued)
     }
 
     _staged -= out_issued;
+
+    // Accepted nothing while entries are still staged: the same state as a refusal, and the caller
+    // bounds it the same way. Reached only with _staged > 0, because flush returns early when
+    // nothing is staged - so the test is on out_issued alone.
+    out_deferred = (out_issued == 0);
 
     return common::ResponseCode::Success;
 }

@@ -492,6 +492,15 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     std::atomic<uint64_t> _short_read_restages{ 0 };
     std::atomic<uint64_t> _transient_retries{ 0 };
 
+    // Consecutive turns where the engine refused everything and nothing was in flight to free it.
+    // Reset by any progress, so only a refusal that never clears reaches the ceiling.
+    //
+    // A COUNT, not a duration: each turn is one submit syscall, so this bounds the spin to a few
+    // milliseconds. A deadline would need the thread to sleep, which would cost throughput on the
+    // path that drains copies.
+    static constexpr unsigned MaxStalledFlushes = 1024;
+    unsigned _stalled_flushes = 0;
+
     // One line per WORKER the first time a signal interrupts a read, and one the first time a chunk
     // runs out of attempts - so a pool of N threads says each at most N times, not once. Both are
     // facts about the host rather than about a chunk, and map_completion already reports every read

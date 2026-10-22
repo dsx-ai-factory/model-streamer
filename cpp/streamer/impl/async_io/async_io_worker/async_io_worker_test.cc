@@ -726,6 +726,68 @@ TEST(AsyncIoWorker, A_Storage_Failure_Is_Not_Retried)
     EXPECT_EQ(driver.worker.counters().transient_retries, 0u);
 }
 
+// THE SPIN THAT A DEFERRAL USED TO CAUSE. An engine that refuses everything, with nothing in flight
+// to free it, left execute() looping at full CPU for ever - proven before the bound existed.
+//
+// set_flush_stalled models exactly that, and its own comment names the hazard: "reaping frees
+// nothing and a retry loop livelocks".
+TEST(AsyncIoWorker, A_Flush_That_Never_Issues_Gives_Up_Instead_Of_Spinning)
+{
+    Driver driver(Strategy::IoUringBuffered, 4096, std::nullopt, 3 /* depth */);
+
+    Fixture warmup({ ChunkSize });
+    driver.execute(warmup.workload());          // builds the engine
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    drain_responses(*warmup.responder, 1);
+
+    driver.engine->set_flush_stalled(true);     // every flush from here takes nothing
+
+    // MORE CHUNKS THAN THE WINDOW, which is what keeps execute() looping: its condition is that the
+    // QUEUE is empty, and with everything staged in one pump it would return without ever spinning.
+    Fixture fixture({ ChunkSize, ChunkSize, ChunkSize, ChunkSize, ChunkSize, ChunkSize });
+
+    std::atomic<bool> returned{ false };
+    std::thread runner([&]()
+    {
+        driver.worker.execute(fixture.workload(), driver.stopped);
+        returned.store(true);
+    });
+
+    for (unsigned i = 0; i < 300 && !returned.load(); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_TRUE(returned.load()) << "execute() never returned - the deferral is still unbounded";
+
+    // Released before joining, so a REGRESSION fails this test instead of hanging the whole target:
+    // execute() then leaves through its stopped branch rather than spinning for ever in join().
+    driver.stopped.store(true);
+    runner.join();
+
+    // Answered, not silently dropped: the ranges owe a response however the engine failed.
+    const auto responses = drain_responses(*fixture.responder, 6);
+    ASSERT_EQ(responses.size(), 6u);
+
+    // THE CODE MATTERS. abort_all only marks the engine dead when the code is not FinishedError, and
+    // a dead engine is what stops the next request repeating the whole 1024-turn stall.
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::FsAsyncEngineError);
+    }
+
+    // And the mount is not tried again: a second request fails at once rather than stalling afresh.
+    // No need to clear `stopped`: enqueue() answers a dead engine before anything reads it.
+    Fixture second({ ChunkSize });
+    driver.execute(second.workload());
+
+    const auto after = drain_responses(*second.responder, 1);
+    EXPECT_EQ(after.front().ret, common::ResponseCode::FsAsyncEngineError)
+        << "the dead engine was used again";
+}
+
 // A demotion must not break requests of the same file that are already staged against the old
 // descriptor.
 //
