@@ -19,6 +19,14 @@ engine reads data concurrently, and a Python SDK lets applications consume tenso
 as data arrives. Applications can transfer tensors from CPU memory to GPU memory
 while the engine reads more data from storage.
 
+It is for ML engineers who load large SafeTensors checkpoints into PyTorch
+applications, including inference services.
+
+Model Streamer supplies the checkpoint-loading part of a PyTorch application.
+`SafetensorsStreamer` supplies named PyTorch tensors while the native engine
+continues storage reads. With the default CPU destination, the application
+transfers tensors to CUDA, as shown below, and uses them for model execution.
+
 ## Features
 
 - Stream one SafeTensors file with `stream_file()` or several files with
