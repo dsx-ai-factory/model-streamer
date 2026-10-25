@@ -405,11 +405,9 @@ common::ResponseCode Streamer::async_request(
         }
     }
 
-    // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: up to
-    // FD_LIMIT_FACTOR submissions of this many batches are in flight together. So when the headroom,
-    // which excludes descriptors already open, is below that, raise the soft limit to at least double,
-    // up to the hard limit. Best effort, and never lowered again: the process is not ours. The batches
-    // are built but nothing has opened a file yet, and nothing is committed.
+    // Each batch holds a descriptor until its workload is destroyed. Assuming FD_LIMIT_FACTOR such
+    // submissions in flight, raise the soft limit when the headroom (limit minus open descriptors) is
+    // below that: at least double, up to the hard limit. Best effort, and never lowered again.
     if (!object_storage)
     {
         const rlim_t limit = utils::get_cur_file_descriptors();
