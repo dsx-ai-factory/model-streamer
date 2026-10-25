@@ -211,7 +211,7 @@ jobs:
         run: |
           if [ -f test-results/gpu/env-check.txt ]; then
             if grep -q '^ERROR' test-results/gpu/env-check.txt; then
-              title="The ${{ matrix.name }} leg is not testing the newest torch. Its tests still ran: the thing to fix is the base container"
+              title="The ${{ matrix.name }} leg is not testing the newest torch (fix: the base container). Its tests still ran: look at their results separately"
             else
               title="Newest torch check (${{ matrix.name }})"
             fi

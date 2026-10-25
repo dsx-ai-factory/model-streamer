@@ -70,9 +70,10 @@ class Assess(unittest.TestCase):
         self.assertIn("Python >=3.11", text)
         self.assertIn("Python 3.10.12", text)
         self.assertIn("Change the base container", text)
-        # the reader is told that the tests still run, and that the leg is red for the environment, not for a test
+        # the reader is told that the tests still run, and that failing tests need a look whatever the environment is
         self.assertIn("still run, with torch 2.14.1", lines[-1])
-        self.assertIn("not because of a failing test", lines[-1])
+        self.assertIn("separate problem from the test results", lines[-1])
+        self.assertIn("looked into regardless", lines[-1])
 
     def test_an_older_torch_that_the_python_could_have_upgraded_is_flagged_differently(self):
         data = pypi(("2.14.1", ">=3.10"), ("2.15.0", ">=3.10"))

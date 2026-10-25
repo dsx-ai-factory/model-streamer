@@ -322,11 +322,15 @@ python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-ge
 
 # A container that limits the newest torch fails the leg, but the tests above did run, with the older torch. Say so at
 # the end of the log, in the file that the job summary shows, and as an annotation on the run, with the verdict of the
-# tests, so that nobody reads the red leg as failing tests, or the passing tests as a test of the newest torch.
+# tests. The two are separate problems: the environment never explains a failing test, so failures are to be looked
+# into whatever the environment is, and passing tests are not a test of the newest torch.
 if [ "$env_limited" -ne 0 ]; then
     torch_version=$(python3 -c "import importlib.metadata as m; print(m.version('torch'))")
-    if [ "$status" -eq 0 ]; then verdict="passed"; else verdict="did not all pass (see above)"; fi
-    message="The tests ran with torch $torch_version, which is not the newest, and $verdict. This leg is red because of its environment, not because of a test: change the base container so that it can run the newest torch (see env-check.txt)."
+    if [ "$status" -eq 0 ]; then
+        message="The tests ran with torch $torch_version, which is not the newest, and all passed. This leg is red only because of its environment: change the base container so that it can run the newest torch (see env-check.txt)."
+    else
+        message="The tests ran with torch $torch_version, which is not the newest, and some failed (see above). Two separate problems make this leg red: the failing tests, which need to be looked into regardless of the environment, and the environment, which needs a base container that can run the newest torch (see env-check.txt)."
+    fi
     echo
     echo "== NOT TESTING THE NEWEST TORCH: $message"
     printf '\nTests of this leg: %s\n' "$message" >> "$RESULTS/env-check.txt"
