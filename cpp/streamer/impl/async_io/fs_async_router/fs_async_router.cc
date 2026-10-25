@@ -243,14 +243,10 @@ bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device,
                                    common::Device destination)
 {
     // CONGRUENCE IS A QUESTION ABOUT THE CALLER'S OWN MEMORY, so it is asked only when the bytes are
-    // going there. A device read lands in a staging buffer the worker allocates, aligns and places to
-    // suit the file; the pointer in the request describes memory this read never touches, and asking
-    // whether THAT is congruent answers no for nearly every offset and loses the file.
-    //
-    // That is true only while the worker stages on the SAME condition - AsyncIoWorker::stage_pending
-    // takes a staging buffer for every destination that is not host. A device that read straight into
-    // its own memory would make this skip wrong, and nothing here would notice.
-    if (destination.is_host())
+    // going there. A staged read lands in a buffer the worker allocates, aligns and places to suit the
+    // file; the pointer in the request describes memory this read never touches, and asking whether
+    // THAT is congruent answers no for nearly every offset and loses the file.
+    if (!reads_through_staging(destination))
     {
         // THIS MOUNT's block, not the process-wide assumption: testing against a larger block rejects
         // files the mount would have served. On a mount that accepts 512, testing at 65536 makes

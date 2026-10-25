@@ -19,6 +19,7 @@
 #include "posix_io/io_engine/io_engine.h"
 #include "posix_io/scratch_pool/scratch_pool.h"
 #include "posix_io/strategy/strategy.h"
+#include "common/device/device.h"
 #include "common/response_code/response_code.h"
 
 #include "streamer/impl/async_io/async_io_settings/async_io_settings.h"
@@ -60,6 +61,17 @@ struct QueuedChunk
 // Separated from the worker so the rule can be tested: the cost of getting it wrong is a read running
 // past the end of a pinned buffer, which no test of the worker would report.
 size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct);
+
+// Whether this destination's bytes land in a staging buffer of ours instead of the caller's memory.
+//
+// Two places need the same answer: stage_pending takes a buffer when it is true, and the router asks
+// congruence of the caller's pointer when it is false. They are opposite uses of one fact, so they
+// share one predicate rather than each testing the device themselves.
+//
+// The answer is the device type only while every non-host read is staged. A backend that reads
+// straight into device memory makes it a property of the read path, and then this takes that path
+// rather than growing a second condition beside stage_pending.
+bool reads_through_staging(const common::Device & destination);
 
 // The single worker driving one IoEngine.
 //

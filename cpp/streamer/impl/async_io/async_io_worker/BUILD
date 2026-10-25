@@ -15,6 +15,7 @@ runai_cc_auto_library(
         "//posix_io/io_engine",
         "//posix_io/scratch_pool",
         "//posix_io/strategy",
+        "//common/device",
         "//common/exception",
         "//streamer/impl/async_io/async_io_settings",
         "//streamer/impl/async_io/async_io_stats",

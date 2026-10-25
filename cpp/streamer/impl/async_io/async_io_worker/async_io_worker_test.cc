@@ -1433,6 +1433,34 @@ TEST(StagingBytesize, The_Room_Follows_The_Block)
     EXPECT_GT(large, small) << "a mount with a larger block needs more room, not the same";
 }
 
+// --- reads_through_staging -----------------------------------------------------------------------
+
+// The caller's own memory, so the read goes there and the router must ask whether it is congruent.
+TEST(ReadsThroughStaging, A_Host_Destination_Is_Read_Into_Directly)
+{
+    EXPECT_FALSE(reads_through_staging(common::Device::host()));
+}
+
+// Pinned host memory of ours, copied to the device afterwards. The pointer in the request is device
+// memory this read never touches, so congruence must NOT be asked of it.
+TEST(ReadsThroughStaging, A_Cuda_Destination_Is_Staged)
+{
+    EXPECT_TRUE(reads_through_staging(common::Device::cuda(0)));
+    EXPECT_TRUE(reads_through_staging(common::Device::cuda(3)));
+}
+
+// A type the C header publishes and this rule was never taught. Nothing in the build warns about it
+// (no -Wall), so the only protection is the answer it gives.
+//
+// Staging is the safe one. Reading directly would make the router ask congruence of a pointer the
+// host may not be able to write, and the synchronous reader would then pread into it.
+TEST(ReadsThroughStaging, An_Unknown_Type_Is_Staged)
+{
+    const auto unknown = static_cast<common::DeviceType>(4242);
+
+    EXPECT_TRUE(reads_through_staging(common::Device{ unknown, 0 }));
+}
+
 // --- device destinations -------------------------------------------------------------------------
 
 namespace

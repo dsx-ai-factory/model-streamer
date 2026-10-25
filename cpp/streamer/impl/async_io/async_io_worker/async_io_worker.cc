@@ -74,6 +74,26 @@ size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct)
     return ((worst + block - 1) / block) * block;
 }
 
+bool reads_through_staging(const common::Device & destination)
+{
+    switch (destination.type)
+    {
+    case common::DeviceType::Cpu:
+        return false;
+
+    case common::DeviceType::Cuda:
+        return true;
+    }
+
+    // A type the C header publishes and this rule was never taught. The build sets neither -Wall nor
+    // -Werror, so nothing warns. Staging is the safe answer: reading into the caller's pointer would
+    // send the router to ask congruence of memory the host may not be able to write, and the
+    // synchronous reader would then pread into it.
+    LOG(ERROR) << "[RunAI Streamer] no staging rule for device type "
+               << static_cast<int>(destination.type) << " - reading through a staging buffer";
+    return true;
+}
+
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
                              EngineFactory factory, std::function<void()> on_engine_dead,
                              std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
@@ -776,7 +796,7 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
     if (!entry->staging.valid())
     {
         const auto & batch = wlit->second.workload.batches()[entry->batch_index];
-        if (!batch.device.is_host())
+        if (reads_through_staging(batch.device))
         {
             auto error = common::ResponseCode::Success;
             switch (stage_into_device_buffer(id, batch, error))
