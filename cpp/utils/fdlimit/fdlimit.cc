@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <dirent.h>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -41,6 +42,29 @@ rlim_t get_max_file_descriptors()
     return 0;
 }
 
+rlim_t count_open_fds()
+{
+    DIR * dir = opendir("/proc/self/fd");
+    if (dir == nullptr)
+    {
+        LOG(DEBUG) << "Cannot read /proc/self/fd : " << std::strerror(errno);
+        return 0;
+    }
+
+    rlim_t count = 0;
+    while (const struct dirent * entry = readdir(dir))
+    {
+        if (std::strcmp(entry->d_name, ".") != 0 && std::strcmp(entry->d_name, "..") != 0)
+        {
+            ++count;
+        }
+    }
+    closedir(dir);
+
+    // one of the entries is the descriptor of `dir` itself
+    return count > 0 ? count - 1 : 0;
+}
+
 FdLimitSetter::FdLimitSetter(rlim_t new_limit)
 {
     ASSERT(getrlimit(RLIMIT_NOFILE, &_previous) == 0) << "Failed to get fd limit";
@@ -64,7 +88,8 @@ bool FdLimitSetter::raise_to(rlim_t limit)
     struct rlimit current;
     if (getrlimit(RLIMIT_NOFILE, &current) != 0)
     {
-        LOG(WARNING) << "Failed to get fd limit, not raising it to " << limit << " : " << std::strerror(errno);
+        const int get_errno = errno;
+        LOG(WARNING) << "Failed to get fd limit, not raising it to " << limit << " : " << std::strerror(get_errno);
         return false;
     }
 

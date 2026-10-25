@@ -11,6 +11,7 @@
 
 #include <fnmatch.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <map>
@@ -42,8 +43,9 @@ namespace runai::llm::streamer::impl
 namespace
 {
 
-// submissions assumed in flight together, each of a similar number of files
-constexpr size_t FD_LIMIT_FACTOR = 5;
+// submissions assumed in flight together, each of a similar number of files: the depth of the
+// Python ring (DEFAULT_RING_BUFFERS)
+constexpr size_t FD_LIMIT_FACTOR = 18;
 
 }   // namespace
 
@@ -340,19 +342,30 @@ common::ResponseCode Streamer::async_request(
         return common::ResponseCode::Success;
     }
 
-    // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: a submission with
-    // many files has small files, one batch each, and a few such submissions are in flight together. So
-    // when its files exceed the soft limit, raise it to FD_LIMIT_FACTOR times the files. Best effort.
-    if (!object_storage && utils::get_cur_file_descriptors() < request.size())
+    // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: up to
+    // FD_LIMIT_FACTOR submissions of this many files are in flight together, each file one batch. So
+    // when the headroom, which excludes descriptors already open, is below that, raise the soft limit
+    // to at least double, up to the hard limit. Best effort.
+    if (!object_storage)
     {
-        raise_fd_limit(request.size() * FD_LIMIT_FACTOR);
-
-        if (utils::get_cur_file_descriptors() < request.size())
+        const rlim_t limit = utils::get_cur_file_descriptors();
+        const rlim_t open = utils::count_open_fds();
+        const rlim_t need = request.size() * FD_LIMIT_FACTOR;
+        if (limit < open + need)
         {
-            LOG(WARNING) << "Submission " << submission_id << " has " << request.size()
-                         << " files but the soft limit is " << utils::get_cur_file_descriptors()
-                         << " (hard limit " << utils::get_max_file_descriptors()
-                         << "); reading may fail with a file access error";
+            const rlim_t target = std::max(2 * limit, open + need);
+            LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
+                      << request.size() << " files, with " << open << " descriptors open";
+            raise_fd_limit(target);
+
+            const rlim_t raised = utils::get_cur_file_descriptors();
+            if (raised < open + request.size())
+            {
+                LOG(WARNING) << "Submission " << submission_id << " has " << request.size()
+                             << " files but the soft limit is " << raised << " with " << open
+                             << " descriptors open (hard limit " << utils::get_max_file_descriptors()
+                             << "); reading may fail with a file access error";
+            }
         }
     }
 

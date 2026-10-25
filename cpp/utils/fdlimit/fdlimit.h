@@ -16,6 +16,9 @@ namespace runai::llm::streamer::utils
 rlim_t get_max_file_descriptors();
 rlim_t get_cur_file_descriptors();
 
+// The descriptors this process has open, from /proc/self/fd (Linux). 0 when that cannot be read.
+rlim_t count_open_fds();
+
 struct FdLimitSetter
 {
     explicit FdLimitSetter(rlim_t new_limit);

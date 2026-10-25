@@ -212,6 +212,11 @@ struct Streamer
     // this the slabs would be freed while a plugin could still be writing into them.
     std::shared_ptr<StagingPoolRetainer> _retained_pools = std::make_shared<StagingPoolRetainer>();
 
+    // Shared by object storage and filesystem, raised in place: replacing it would restore a lower limit.
+    // Declared BEFORE _pools, so the limit is restored only after the workers have stopped opening files.
+    std::unique_ptr<utils::FdLimitSetter> _fd_limit;
+    std::mutex _fd_limit_mutex;
+
     AsyncIoStats _stats;
 
     std::unique_ptr<S3Cleanup> _s3;
@@ -219,9 +224,6 @@ struct Streamer
     // to, so object-storage workers still join between _s3_stop (S3Stop) and _s3 (S3Cleanup) on teardown.
     BackendPools _pools;
     std::unique_ptr<S3Stop> _s3_stop;
-    // Shared by object storage and filesystem, raised in place: replacing it would restore a lower limit
-    std::unique_ptr<utils::FdLimitSetter> _fd_limit;
-    std::mutex _fd_limit_mutex;
     std::shared_ptr<common::Responder> _responder;
 
     // Lazy S3 init, each part exactly once in the streamer's lifetime and only for s3 paths.

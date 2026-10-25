@@ -5,6 +5,11 @@
 
 #include "utils/fdlimit/fdlimit.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "utils/random/random.h"
@@ -53,6 +58,26 @@ TEST(SetFdLimit, Hard_Limit)
     auto res = get_max_file_descriptors();
     EXPECT_EQ(res, current);
     EXPECT_EQ(get_max_file_descriptors(), hard_limit);
+}
+
+TEST(CountOpenFds, Counts_Opened_And_Closed)
+{
+    const auto before = count_open_fds();
+    ASSERT_NE(before, 0);
+
+    std::vector<int> fds;
+    for (int i = 0; i < 5; ++i)
+    {
+        fds.push_back(open("/dev/null", O_RDONLY));
+        ASSERT_GE(fds.back(), 0);
+    }
+    EXPECT_EQ(count_open_fds(), before + 5);
+
+    for (int fd : fds)
+    {
+        close(fd);
+    }
+    EXPECT_EQ(count_open_fds(), before);
 }
 
 TEST(RaiseFdLimit, Raises_And_Restores_The_Original)
