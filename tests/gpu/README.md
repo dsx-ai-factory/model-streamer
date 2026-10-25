@@ -31,9 +31,13 @@ demand, and a manual run is never skipped:
 
    pip installs the newest torch that the image's Python can use (Python 3.10 on Ubuntu 22.04), so when a torch release
    stops supporting that Python, the newest leg would quietly test an older one. `env_check.py newest-torch` asks PyPI
-   for the newest release and compares: if they differ it fails the leg, says which release needs which Python, and
-   that the base container of the leg has to change (the check is in the job summary and in `env-check.txt`). The
-   run goes on, so the older torch still gets tested. If PyPI cannot be reached the check says it could not verify.
+   for the newest release and compares: if they differ it fails the leg and says which release needs which Python, and
+   that the base container of the leg has to change. **The tests still run, with the older torch**: the leg is red
+   because it is not testing the newest torch, not because a test failed, and the fix is the environment of the leg
+   (`GPU_TEST_IMAGE` in the workflow). This is visible in four places: the check's output at the start of the log, a
+   `NOT TESTING THE NEWEST TORCH` line at the end of the log with the verdict of the tests, an error annotation on the
+   run, and a section at the top of the job summary. If PyPI cannot be reached the check says it could not verify and
+   does not fail.
 
 ## What `setup_and_run.sh` does
 

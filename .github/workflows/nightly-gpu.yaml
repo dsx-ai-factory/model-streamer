@@ -210,7 +210,12 @@ jobs:
         if: always()
         run: |
           if [ -f test-results/gpu/env-check.txt ]; then
-            { echo "### Does this container limit the newest torch? (${{ matrix.name }})"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            if grep -q '^ERROR' test-results/gpu/env-check.txt; then
+              title="The ${{ matrix.name }} leg is not testing the newest torch. Its tests still ran: the thing to fix is the base container"
+            else
+              title="Newest torch check (${{ matrix.name }})"
+            fi
+            { echo "### $title"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f test-results/gpu/timing-summary.txt ]; then
             { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

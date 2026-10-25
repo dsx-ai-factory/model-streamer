@@ -106,6 +106,8 @@ def assess(installed, pypi_json, python_version):
         lines.append("ERROR: torch %s is installed, but torch %s is the newest and this Python can use it. Something "
                      "else in the install (a version limit on a dependency?) held torch back."
                      % (installed, newest[1]))
+    lines.append("The tests of this leg still run, with torch %s. The leg is red because it is not testing the newest "
+                 "torch, not because of a failing test: the thing to fix is the environment of the leg." % installed)
     return True, lines
 
 

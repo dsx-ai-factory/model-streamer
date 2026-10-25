@@ -114,9 +114,10 @@ PY
 # The newest-torch leg is meant to test the newest PyTorch. pip installs the newest release that this image's Python can
 # use, so when torch stops supporting that Python the leg quietly tests an older one. Flag it: the run goes on and
 # reports what it can, but it fails, and env-check.txt (shown in the job summary) says the base container has to change.
+env_limited=0
 if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
     echo "== is this container limiting the newest torch?"
-    python3 tests/gpu/env_check.py newest-torch || status=1
+    python3 tests/gpu/env_check.py newest-torch || env_limited=1
 fi
 
 echo "== self-test of the generator, the rows, the real model download and the environment check"
@@ -318,5 +319,19 @@ done
 echo "== where the time went"
 python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl "$FIXTURES"/timing-real.jsonl \
     "$RESULTS"/smoke/timing-*.jsonl | tee "$RESULTS/timing-summary.txt"
+
+# A container that limits the newest torch fails the leg, but the tests above did run, with the older torch. Say so at
+# the end of the log, in the file that the job summary shows, and as an annotation on the run, with the verdict of the
+# tests, so that nobody reads the red leg as failing tests, or the passing tests as a test of the newest torch.
+if [ "$env_limited" -ne 0 ]; then
+    torch_version=$(python3 -c "import importlib.metadata as m; print(m.version('torch'))")
+    if [ "$status" -eq 0 ]; then verdict="passed"; else verdict="did not all pass (see above)"; fi
+    message="The tests ran with torch $torch_version, which is not the newest, and $verdict. This leg is red because of its environment, not because of a test: change the base container so that it can run the newest torch (see env-check.txt)."
+    echo
+    echo "== NOT TESTING THE NEWEST TORCH: $message"
+    printf '\nTests of this leg: %s\n' "$message" >> "$RESULTS/env-check.txt"
+    echo "::error title=The newest-torch leg is not testing the newest torch::$message"
+    status=1
+fi
 
 exit "$status"

@@ -59,6 +59,7 @@ class Assess(unittest.TestCase):
         limited, lines = env_check.assess("2.14.1+cu128", data, PY310)
         self.assertFalse(limited)
         self.assertIn("OK", lines[-1])
+        self.assertNotIn("still run", "\n".join(lines))
 
     def test_a_newest_torch_that_needs_a_newer_python_is_flagged_with_the_reason(self):
         data = pypi(("2.14.1", ">=3.10"), ("2.15.0", ">=3.11"))
@@ -69,13 +70,17 @@ class Assess(unittest.TestCase):
         self.assertIn("Python >=3.11", text)
         self.assertIn("Python 3.10.12", text)
         self.assertIn("Change the base container", text)
+        # the reader is told that the tests still run, and that the leg is red for the environment, not for a test
+        self.assertIn("still run, with torch 2.14.1", lines[-1])
+        self.assertIn("not because of a failing test", lines[-1])
 
     def test_an_older_torch_that_the_python_could_have_upgraded_is_flagged_differently(self):
         data = pypi(("2.14.1", ">=3.10"), ("2.15.0", ">=3.10"))
         limited, lines = env_check.assess("2.14.1", data, PY310)
         self.assertTrue(limited)
-        self.assertIn("held torch back", lines[-1])
-        self.assertNotIn("Change the base container", lines[-1])
+        self.assertIn("held torch back", lines[-2])
+        self.assertNotIn("Change the base container", lines[-2])
+        self.assertIn("still run", lines[-1])
 
     def test_pre_releases_and_yanked_releases_do_not_count_as_the_newest(self):
         data = pypi(("2.14.1", ">=3.10"), ("2.15.0rc1", ">=3.11"), ("2.15.0", ">=3.11", True))
