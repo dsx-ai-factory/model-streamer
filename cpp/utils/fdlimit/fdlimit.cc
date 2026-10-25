@@ -50,6 +50,13 @@ rlim_t count_open_fds()
     if (dir == nullptr)
     {
         const int open_errno = errno;
+
+        // opendir needs a descriptor itself: with none left, every one up to the limit is open
+        if (open_errno == EMFILE || open_errno == ENFILE)
+        {
+            return get_cur_file_descriptors();
+        }
+
         static std::atomic<bool> warned{false};
         if (!warned.exchange(true))
         {

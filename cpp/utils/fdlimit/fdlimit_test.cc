@@ -84,6 +84,19 @@ TEST(CountOpenFds, Counts_Opened_And_Closed)
 }
 
 // The setter in these tests only puts the limit back at the end of the test: the raise itself is not undone.
+// Reading /proc/self/fd takes a descriptor itself, so with the limit reached the count is the limit.
+TEST(CountOpenFds, At_The_Limit_Is_The_Limit)
+{
+    const auto before = count_open_fds();
+    if (before == 0)
+    {
+        GTEST_SKIP() << "/proc/self/fd cannot be read";
+    }
+
+    FdLimitSetter restore(before);
+    EXPECT_EQ(count_open_fds(), before);
+}
+
 TEST(RaiseFdLimit, Raises_And_Never_Lowers)
 {
     const auto current = get_cur_file_descriptors();

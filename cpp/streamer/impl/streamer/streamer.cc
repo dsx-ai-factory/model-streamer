@@ -732,6 +732,7 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
                 LOG(INFO) << "Increasing fd soft limit to " << desired_fd_limit << " for concurrency level " << _config->s3_concurrency;
                 if (!utils::raise_file_descriptors(desired_fd_limit))
                 {
+                    LOG(ERROR) << "Failed to increase the fd soft limit " << fd_limit << " to " << desired_fd_limit << " for concurrency level " << _config->s3_concurrency;
                     // thrown out of call_once, so the next submission retries
                     throw common::Exception(common::ResponseCode::InsufficientFdLimit);
                 }
