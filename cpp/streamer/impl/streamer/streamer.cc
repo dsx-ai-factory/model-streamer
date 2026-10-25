@@ -709,7 +709,11 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
                     throw common::Exception(common::ResponseCode::InsufficientFdLimit);
                 }
                 LOG(INFO) << "Increasing fd soft limit to " << desired_fd_limit << " for concurrency level " << _config->s3_concurrency;
-                raise_fd_limit(desired_fd_limit);
+                if (!raise_fd_limit(desired_fd_limit))
+                {
+                    // thrown out of call_once, so the next submission retries
+                    throw common::Exception(common::ResponseCode::InsufficientFdLimit);
+                }
             }
             _s3_stop = std::make_unique<S3Stop>();
         });
