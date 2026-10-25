@@ -50,22 +50,25 @@ size_t usable_direct_block(unsigned long configured)
     // takes a maximum of the two alignments.
     const bool power_of_two = configured != 0 && (configured & (configured - 1)) == 0;
 
-    if (!power_of_two || configured < 512)
+    // And no larger than MaxProbeBlock, which a worker runs at until it measures and sizes its
+    // buffers for. A value above that is not merely unusual - it overflows the staging size, which
+    // rounds a chunk up by a block at each end, and it asks posix_memalign for an alignment no
+    // allocator will serve.
+    if (!power_of_two || configured < 512 || configured > MaxProbeBlock)
     {
         // REJECTED, not replaced. An earlier version fell back to DirectBlockSize with a warning, and
         // that hides the typo it exists to catch: the operator asked for 3000, got 65536, and nothing
         // they would read says so. Failing here surfaces as InvalidParameterError from runai_file_streamer_start,
         // which is what every other malformed variable already does.
         LOG(ERROR) << "RUNAI_STREAMER_DIRECT_BLOCK=" << configured << " is not usable: it must be a"
-                   << " power of two and at least 512";
+                   << " power of two between 512 and " << MaxProbeBlock;
         throw common::Exception(common::ResponseCode::InvalidParameterError);
     }
 
     if (configured != DirectBlockSize)
     {
-        LOG(INFO) << "Direct-read block set to " << configured << " by RUNAI_STREAMER_DIRECT_BLOCK."
-                  << " Python must read the same value, or destinations stop being congruent and"
-                  << " direct reads quietly stop";
+        LOG(INFO) << "Direct-read block set to " << configured << " by RUNAI_STREAMER_DIRECT_BLOCK,"
+                  << " overriding what every mount reports";
     }
 
     return static_cast<size_t>(configured);

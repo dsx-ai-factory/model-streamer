@@ -107,6 +107,7 @@ std::shared_ptr<device::Device> DeviceWriter::device(Channel channel) const
 
 common::ResponseCode DeviceWriter::write(Channel channel,
                                          Copy copy,
+                                         size_t skip,
                                          size_t bytesize,
                                          void * destination,
                                          Completion on_done)
@@ -138,10 +139,12 @@ common::ResponseCode DeviceWriter::write(Channel channel,
         return common::ResponseCode::InvalidParameterError;
     }
 
-    if (bytesize > buffer.bytesize)
+    // The whole extent, not just the length: the copy reads [skip, skip + bytesize). Written as a
+    // subtraction so a skip past the end of the buffer cannot wrap the sum past it and back.
+    if (skip > buffer.bytesize || bytesize > buffer.bytesize - skip)
     {
-        LOG(ERROR) << "[RunAI Streamer] asked to copy " << bytesize << " bytes from a staging buffer of "
-                   << buffer.bytesize;
+        LOG(ERROR) << "[RunAI Streamer] asked to copy " << bytesize << " bytes from " << skip
+                   << " bytes into a staging buffer of " << buffer.bytesize;
         pool->release(buffer);
         copy.events->release(copy.event);
         return common::ResponseCode::InvalidParameterError;
@@ -150,7 +153,8 @@ common::ResponseCode DeviceWriter::write(Channel channel,
     // These two are NOT atomic. Two workers can share a device, so another thread may enqueue between
     // them and this event then marks a later point on the stream. A stream is FIFO, so the event fires
     // late and never early: the buffer is held longer, the bytes are still right.
-    auto code = target->device->memcpy_h2d_async(destination, buffer.data, bytesize, target->stream.get());
+    auto code = target->device->memcpy_h2d_async(destination, buffer.data + skip, bytesize,
+                                                 target->stream.get());
 
     // Which of the two failed decides whether this buffer is safe to give back.
     const bool enqueued = code == common::ResponseCode::Success;

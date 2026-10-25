@@ -67,8 +67,19 @@ class StagingPool
     struct Params
     {
         size_t   buffer_bytesize = 0;   // one read, and one copy
-        size_t   slab_bytesize = 0;     // registration unit, rounded down to whole buffers
+        size_t   slab_bytesize = 0;     // registration unit, rounded UP to whole buffers
         unsigned max_buffers = 0;       // ceiling; the pool never grows past it
+
+        // Every buffer starts on a multiple of this. 1 means no requirement.
+        //
+        // A POWER OF TWO. add_slab finds the aligned start with a remainder of the negated address,
+        // which is the distance to the next multiple only when the alignment divides 2^64.
+        //
+        // A buffer read into by O_DIRECT must be aligned to the mount's block, and neither the host
+        // allocator nor this pool would be otherwise: pinned memory is page aligned, which is not
+        // enough for a mount whose block is larger than a page. buffer_bytesize is rounded up to a
+        // multiple of it as well, because buffer n starts that far into the slab.
+        size_t   alignment = 1;
     };
 
     StagingPool(std::shared_ptr<device::Device> device, Params params);
