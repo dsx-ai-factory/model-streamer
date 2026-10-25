@@ -19,7 +19,7 @@ FULL_SIZE = {
     "mixed": {"total_data_bytes": 1073741824, "largest_tensor_bytes": 24595200, "header_len": 120_000},
     "many_tensors": {"total_data_bytes": 105_000_000, "largest_tensor_bytes": 4 * MIB, "header_len": 10_900_000},
     "giant_tensor": {"total_data_bytes": 4_250_000_000, "largest_tensor_bytes": 2 ** 31, "header_len": 1_000},
-    "many_files": {"total_data_bytes": 95_000_000, "largest_tensor_bytes": 9_069_300, "header_len": 2_000},
+    "many_files": {"total_data_bytes": 10_770_000, "largest_tensor_bytes": 2_950_000, "header_len": 4_088},
 }
 
 

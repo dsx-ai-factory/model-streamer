@@ -21,11 +21,6 @@ on:
         description: Only the rows whose id starts with one of these comma-separated prefixes (default all).
         required: false
         type: string
-      raise_open_files:
-        description: Raise the soft open files limit to the hard limit for the test (the workaround for issue 261). Turn it off to see whether the streamer copes with the container's limit.
-        required: false
-        default: true
-        type: boolean
 
 permissions:
   contents: read
@@ -204,13 +199,11 @@ jobs:
           GPU_TORCH_SPEC: ${{ matrix.torch_spec }}
           GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
           GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
-          # format() because the input is empty on a scheduled run, and null == false is true in an expression
-          GPU_RAISE_OPEN_FILES: ${{ format('{0}', inputs.raise_open_files) == 'false' && 'false' || 'true' }}
         run: |
           docker run --rm --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
-            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_RAISE_OPEN_FILES --env GPU_WHEEL_DIR=wheel \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_WHEEL_DIR=wheel \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went

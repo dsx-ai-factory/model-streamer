@@ -8,7 +8,7 @@ Four models, each isolating one kind of stress:
     mixed          every dtype, ranks 0-5, edge sizes, odd names, 4 uneven shards with different alignment
     many_tensors   about 100,000 tiny tensors and a multi-MB header in one file
     giant_tensor   a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model)
-    many_files     5,000 small files, some header-only, some holding a single 1-byte tensor
+    many_files     500 small files, some header-only, some holding a single 1-byte tensor
 
 The files are written by hand, not through safetensors.save_file, so the layout is under control: header
 padding (and so the alignment of every tensor start), header-only files (and zero-sized dimensions, see EMPTY_TENSORS).
@@ -26,7 +26,7 @@ Alongside each model goes a manifest (<out>/<model>.manifest.json): for every te
 position in the file and the CRC32 of its bytes, computed while the data is generated. The test compares what
 reaches the GPU with it.
 
-    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 5000] [--models NAME,NAME,...]
+    gen_models.py generate --out DIR --seed N [--scale 1.0] [--files 500] [--models NAME,NAME,...]
                            [--dtypes F32,U16,...] [--no-verify]
     gen_models.py verify   --out DIR [--models NAME,NAME,...]
 
@@ -50,7 +50,13 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
-GENERATOR_VERSION = 4
+GENERATOR_VERSION = 5
+
+# Files of the many_files model. The largest real checkpoint surveyed has about 160 files, so 500 is three times that,
+# and still far below the soft limit of 1024 open files: the streamer keeps a file open until its submission ends
+# (https://github.com/dsx-ai-factory/model-streamer/issues/261), and with an asynchronous reader about every file
+# can be open at once. A count above the limit makes this model a test of that, not of many small files.
+DEFAULT_FILES = 500
 
 # Tensors with zero elements: the generator draws zero dimensions (about 2% of the shapes), the mixed model gets two
 # mandatory empty tensors, and check_coverage requires one. They were left out while the streamer yielded them on the
@@ -661,7 +667,7 @@ def main(argv=None):
     gen.add_argument("--seed", type=int, required=True)
     gen.add_argument("--scale", type=float, default=1.0,
                      help="size of the mixed, many_tensors and giant_tensor models relative to the full size")
-    gen.add_argument("--files", type=int, default=5000, help="number of files of the many_files model")
+    gen.add_argument("--files", type=int, default=DEFAULT_FILES, help="number of files of the many_files model")
     gen.add_argument("--models", default=",".join(MODEL_NAMES), help="comma separated model names")
     gen.add_argument("--dtypes", default="", help="comma separated dtypes to draw from (default: all of them)")
     gen.add_argument("--no-verify", action="store_true")

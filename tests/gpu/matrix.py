@@ -45,8 +45,8 @@ Row = namedtuple("Row", "id model dist policy owned device limit")
 LIMITS = ("tight", "deep", "default")
 
 # A deep ring needs 18 buffers of the largest tensor to be smaller than the model, or nothing is reused. That
-# holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) and many_files (tensors of up to
-# 10 MiB in a 90 MB model) cannot have a deep ring that recycles.
+# holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) cannot have a deep ring that recycles, and
+# many_files (a few tensors of up to 10 MiB among small files, 5 to 15 MB in all) can only for some seeds.
 DEEP_MODELS = ("mixed", "many_tensors")
 
 POLICIES = ((False, None), (True, "spans"), (True, "chunks"), (True, "files"))
