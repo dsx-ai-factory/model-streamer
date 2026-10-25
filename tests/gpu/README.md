@@ -76,7 +76,7 @@ one to host memory and then `.to()`.
 | `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
 | `many_tensors` | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
 | `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
-| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, a few with a larger tensor | 5 to 15 MB, depending on the seed |
+| `many_files` | 5,000 files, some header-only, some holding a single 1-byte tensor | about 90 MB |
 
 Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
 `--models mixed,many_files` to build only some of them.
@@ -131,9 +131,8 @@ The memory limit decides whether the host buffers, the ring the streamer reads i
 N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
 
 - `tight`: about a sixteenth of the model, never below twice the largest range (a tensor or a file header) times
-  the ranks sharing the limit (and at least 1 MiB): two buffers for `mixed`, five for `many_tensors`, one for
-  `giant_tensor`, and for `many_files` between two and about fourteen, depending on the seed (the size of its largest
-  tensor). The model passes through the ring many times, and every buffer is reused.
+  the ranks sharing the limit: two buffers for `mixed`, five for `many_tensors`, one for the other two. The
+  model passes through the ring many times, and every buffer is reused.
 - `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
   once. Only `mixed` and `many_tensors` can have this.
 - `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
@@ -177,12 +176,15 @@ The workflow turns it on, in the newest-torch leg, for every manual run, and for
 since the last scheduled run that passed (`test_synthetic_models.py`, `matrix.py`, `phase_timer.py`, `real_model.py`,
 `setup_and_run.sh` or the workflow itself), so nobody has to remember to run it.
 
-The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files), and far
-below the container's soft limit of 1024 open files, so the test does not touch the limit that the streamer's file
-descriptor handling has to deal with ([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)): the streamer
-keeps a file open until its submission ends, and with an asynchronous reader about every file can be open at once.
-If that code changes and a model with more files has to be loaded, the count (`DEFAULT_FILES` in `gen_models.py`)
-changes with it.
+The `many_files` model has 5,000 files: a stress test, about 30 times the largest real checkpoint surveyed (about 160
+files), and above the container's soft limit of 1024 open files on purpose. The streamer keeps a file open until its
+submission ends, and with an asynchronous reader about every file can be open at once, so without a raise of the limit
+the load fails with `File access error` ([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)). The tests
+do not raise the limit: the streamer has to raise it itself, which it does since
+[pull request #297](https://github.com/dsx-ai-factory/model-streamer/pull/297) (it raises the soft limit when the
+descriptors already open plus 18 times the files of a submission would exceed it). On a streamer without that change
+the `many_files` rows fail (measured on the T4 runner on master: 8 of 12 finished rows failed under each of the
+asynchronous strategies). If the descriptor code changes, the count (`DEFAULT_FILES` in `gen_models.py`) changes with it.
 
 ## Timing
 
