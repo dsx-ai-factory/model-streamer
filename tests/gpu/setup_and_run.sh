@@ -212,9 +212,15 @@ export RUNAI_STREAMER_LOG_TO_STDERR=1
 
 # The many_files model has 5,000 files, and the container starts with a soft limit of 1024 open files. The streamer keeps a
 # file open until its whole submission ends (https://github.com/dsx-ai-factory/model-streamer/issues/261), so
-# the soft limit is raised to the hard limit for the test. Remove this once that is fixed.
+# the soft limit is raised to the hard limit for the test. GPU_RAISE_OPEN_FILES=false leaves the limit as the container
+# has it, to see whether the streamer copes on its own (a fix for #261 is in progress, pull request #297). Remove the
+# raise once that is fixed and confirmed.
 echo "open files limit before: soft $(ulimit -Sn), hard $(ulimit -Hn)"
-ulimit -Sn "$(ulimit -Hn)" || echo "could not raise the open files limit"
+if [ "${GPU_RAISE_OPEN_FILES:-true}" = true ]; then
+    ulimit -Sn "$(ulimit -Hn)" || echo "could not raise the open files limit"
+else
+    echo "GPU_RAISE_OPEN_FILES=false: the open files limit is left as it is"
+fi
 echo "open files limit now: soft $(ulimit -Sn)"
 
 # Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so

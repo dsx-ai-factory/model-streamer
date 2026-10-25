@@ -50,14 +50,14 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
-GENERATOR_VERSION = 3
+GENERATOR_VERSION = 4
 
-# Tensors with zero elements are left out for now: the streamer yields them on the CPU even when a CUDA device
-# was requested (https://github.com/dsx-ai-factory/model-streamer/issues/260), so every row of the mixed model
-# failed on them. None of 184 real checkpoints surveyed contains one. Once that issue is closed, set this to
-# True: the generator then draws zero dimensions again, the mixed model gets its two mandatory empty tensors,
-# and check_coverage requires one.
-EMPTY_TENSORS = False
+# Tensors with zero elements: the generator draws zero dimensions (about 2% of the shapes), the mixed model gets two
+# mandatory empty tensors, and check_coverage requires one. They were left out while the streamer yielded them on the
+# CPU even when a CUDA device was requested (https://github.com/dsx-ai-factory/model-streamer/issues/260, fixed), so
+# every row of the mixed model failed on them. None of 184 real checkpoints surveyed contains one, but a model
+# of a different producer might. Set this to False to leave them out.
+EMPTY_TENSORS = True
 
 MIB = 1 << 20
 GIB = 1 << 30
@@ -284,8 +284,12 @@ def mandatory_tensors_mixed(first_key, used):
         add("mandatory.%s.special" % dtype.lower(), dtype,
             (len(special_pattern(dtype)) * values // DTYPES[dtype][0],), "pattern")
     if EMPTY_TENSORS:
-        add("mandatory.empty.f32", "F32", (0,), "random")
-        add("mandatory.empty.i8", "I8", (3, 0, 2), "random")
+        # Dtypes that are in use (--dtypes may narrow them): F32 and I8 when they are, the first and last otherwise.
+        # Both shapes end in an even dimension, which a packed dtype needs.
+        first = "F32" if "F32" in active_dtypes else active_dtypes[0]
+        second = "I8" if "I8" in active_dtypes else active_dtypes[-1]
+        add("mandatory.empty.a", first, (0,), "random")
+        add("mandatory.empty.b", second, (3, 0, 2), "random")
     for size in EDGE_SIZES:
         add("mandatory.edge.%d" % size, "U8", (size,), "random")
     add("mandatory.name.long." + "x" * 280 + ".weight", "F32", (3,), "random")

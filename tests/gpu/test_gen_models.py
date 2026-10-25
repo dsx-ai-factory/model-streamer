@@ -136,7 +136,7 @@ class GenerateModels(unittest.TestCase):
         if gen.EMPTY_TENSORS:
             self.assertTrue(empty, "EMPTY_TENSORS is set but no tensor is empty")
         else:
-            self.assertEqual(empty, [], "empty tensors are left out until issue #260 is closed")
+            self.assertEqual(empty, [], "EMPTY_TENSORS = False leaves empty tensors out")
 
     def test_model_shapes(self):
         mixed, many_tensors, giant_tensor, many_files = (self.manifests[m] for m in gen.MODEL_NAMES)

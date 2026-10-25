@@ -93,9 +93,10 @@ last dimension that is even and no scalar form. The streamer loads such tensors 
 with `packed_shape` of the manifest's. A copy of the F4 tensor to CUDA is exercised here for the first time.
 The expected dtype of a streamed tensor is taken from the streamer's own dtype table, so this test does not check
 the table itself; [#267](https://github.com/dsx-ai-factory/model-streamer/issues/267) compares it with safetensors
-in the CPU tests. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU
-when a CUDA device is requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260)). Once
-that is fixed, set `EMPTY_TENSORS = True` in `gen_models.py` to bring them back.
+in the CPU tests. The models hold empty tensors (zero elements): about 2% of the drawn shapes have a zero dimension, and
+the mixed model has two mandatory ones. They were left out while the streamer yielded them on the CPU when a CUDA
+device was requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260), fixed), and a run on GPU
+is what confirms the fix. `EMPTY_TENSORS = False` in `gen_models.py` leaves them out again.
 
 The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed reproduces
 the models exactly under the same numpy version (the manifests record it; to rebuild an old model, install that
@@ -177,7 +178,13 @@ since the last scheduled run that passed (`test_synthetic_models.py`, `matrix.py
 
 The script raises the open files limit to the hard limit before the test, because the `many_files` model has 5,000 files and
 the streamer keeps a file open until its submission ends
-([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)).
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)). `-f raise_open_files=false` (`GPU_RAISE_OPEN_FILES=false`)
+leaves the container's limit (soft 1024 on the runner), to see whether the streamer copes on its own. The model keeps its
+5,000 files for that: it has more files than the soft limit, which is what makes it a test of the fix. With the sync
+reader and the model as generated, at most about 850 files were in one submission and about 650 descriptors were open at
+once, so a fix that only reacts to a single submission with more files than the limit (pull request #297) does not
+trigger for this model; whether the asynchronous readers, which keep more submissions in flight, then run out of
+descriptors is what a run without the workaround shows.
 
 ## Timing
 
