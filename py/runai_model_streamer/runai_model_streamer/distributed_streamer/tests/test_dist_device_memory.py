@@ -92,7 +92,13 @@ class DistributedJob:
             self.events.all_reduce(op, group)
             tensor.fill_(min(self.free_by_rank[rank] for rank in self.group_ranks))
 
-        with patch("torch.distributed.is_initialized", return_value=True), \
+        # Measurable on purpose: this harness exercises the memory DECISION, and the gate in front of
+        # it has its own test on a genuinely unmeasurable device. Without this the check never runs on
+        # a host with no CUDA, and a test asserting "keeps distributing" passes because nothing was
+        # asked rather than because the memory was enough.
+        with patch("runai_model_streamer.distributed_streamer.distributed_streamer."
+                   "can_measure_device_memory", return_value=True), \
+                patch("torch.distributed.is_initialized", return_value=True), \
                 patch("torch.distributed.get_world_size", return_value=len(self.free_by_rank)), \
                 patch("torch.distributed.get_backend", return_value="nccl"), \
                 patch("torch.tensor", lambda data, dtype=None, device=None: real_tensor(data, dtype=dtype)), \
