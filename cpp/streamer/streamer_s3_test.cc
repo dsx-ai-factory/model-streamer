@@ -1057,6 +1057,11 @@ TEST_F(StreamerTest, Filesystem_Submission_Raises_The_Fd_Limit)
 TEST_F(StreamerTest, Filesystem_Submission_That_Fits_Does_Not_Raise_The_Fd_Limit)
 {
     const rlim_t low = limit_with_room(FD_HEADROOM);
+    if (utils::get_max_file_descriptors() < low)
+    {
+        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << low;
+    }
+
     utils::FdLimitSetter fd_limit(low);
 
     void * streamer;
