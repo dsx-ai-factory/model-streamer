@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARCH := $(shell uname -m)
-PLATFORM := manylinux_2_30_${ARCH}
+PLATFORM := manylinux_2_28_${ARCH}
 PACKAGE_VERSION ?= 0.0.0
 
 .PHONY: build clean

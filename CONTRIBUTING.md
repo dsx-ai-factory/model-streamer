@@ -183,6 +183,14 @@ Each pull request should meet the following requirements:
 
 ## Pull Request CI Environment
 
+### Linux wheel compatibility
+
+All four packages target `manylinux_2_28` on x86_64 and aarch64. The Ubuntu
+build image is newer than that runtime baseline: the semaphore resolves
+`sem_clockwait` at runtime and uses `sem_timedwait` when unavailable, while
+the portable linker rules select older compatible libm symbols for SDK calls.
+Do not lower wheel tags without checking the actual ELF requirements.
+
 The setup job checks whether `.devcontainer/**` changed. If it did, a single
 preparation job builds the checked-out devcontainer using the reusable
 `devcontainer.yml` workflow and the published image as a build cache. With

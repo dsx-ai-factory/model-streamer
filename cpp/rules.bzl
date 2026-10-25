@@ -60,6 +60,7 @@ def _runai_portable_binary(rule, deps=[], linkopts=[], **kwargs):
         ],
         linkopts = linkopts + [
             "-Wl,--wrap=memcpy,--wrap=__fdelt_chk",
+            "-Wl,--wrap=log,--wrap=log2,--wrap=pow",
 
             # we link against librt.so in order to cause `clock_gettime()`
             # to be taken from glibc version 2.2.5.
