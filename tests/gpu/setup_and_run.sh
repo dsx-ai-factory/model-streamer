@@ -209,6 +209,7 @@ export NCCL_DEBUG=INFO
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_ASYNC_ERROR_HANDLING=1
 export RUNAI_STREAMER_LOG_TO_STDERR=1
+export RUNAI_STREAMER_LOG_LEVEL=INFO   # EXPERIMENT: to see the streamer's own INFO lines, such as the fd limit raise
 
 # Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so
 # a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
