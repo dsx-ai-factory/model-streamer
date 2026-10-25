@@ -43,8 +43,8 @@ namespace runai::llm::streamer::impl
 namespace
 {
 
-// submissions assumed in flight together, each of a similar number of files: the depth of the
-// Python ring (DEFAULT_RING_BUFFERS). Kept equal by hand: RUNAI_STREAMER_RING_BUFFERS is read only there.
+// submissions assumed in flight together, each of a similar number of files. An estimate: the streamer
+// does not know how many its caller keeps in flight.
 constexpr size_t FD_LIMIT_FACTOR = 18;
 
 }   // namespace
