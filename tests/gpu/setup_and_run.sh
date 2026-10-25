@@ -256,7 +256,8 @@ if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
     echo "[$(date +%T)] START run.real_smoke"
     echo "== smoke test: the small real model, default settings"
     start=$(date +%s.%N)
-    if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY \
+    # Without GPU_ROWS: a filter of the rows of the synthetic models would leave no smoke row.
+    if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
         timeout --signal=TERM --kill-after=30s 15m \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
