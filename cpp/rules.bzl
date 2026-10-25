@@ -71,6 +71,9 @@ def _runai_portable_binary(rule, deps=[], linkopts=[], **kwargs):
         **kwargs
     )
 
+def runai_portable_cc_test(**kwargs):
+    _runai_portable_binary(rule = runai_cc_test, **kwargs)
+
 def runai_cc_so(linkopts=[], deps=None, srcs=None, use_exception_override=None, **kwargs):
     srcs = srcs if srcs else []
 
