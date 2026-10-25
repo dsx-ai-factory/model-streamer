@@ -73,9 +73,13 @@ class DeviceWriter
     // because it belongs to the context that made it - a buffer serves any device, an event does not.
     using Copy = StreamWaiter::Copy;
 
-    // Copies `bytesize` bytes from the front of `copy.buffer` to `destination`, then returns the
+    // Copies `bytesize` bytes from `skip` bytes into `copy.buffer` to `destination`, then returns the
     // buffer and the event to their pools once that copy has landed. Returns as soon as the copy is
     // ENQUEUED.
+    //
+    // `skip` is what a rounded direct read put in front of the payload. The read may start at the
+    // block below what was asked for, because the buffer is the library's; those bytes belong to
+    // nobody and must not reach the device.
     //
     // `on_done` is called exactly when this returns Success, from the waiter's thread. On any error
     // the return value is the only report, so a caller is never told twice.
@@ -85,6 +89,7 @@ class DeviceWriter
     // give them back to.
     common::ResponseCode write(Channel channel,
                                Copy copy,
+                               size_t skip,
                                size_t bytesize,
                                void * destination,
                                Completion on_done);

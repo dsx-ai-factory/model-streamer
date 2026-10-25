@@ -99,7 +99,10 @@ void DeviceIssuer::submit(common::Device device,
 
 void DeviceIssuer::issue(common::Device device, DeviceWriterClient & client, Request && request)
 {
-    const auto code = client.write(device, request.pool, request.buffer,
+    // No skip: both readers this issuer serves - the synchronous one and object storage - fill their
+    // buffer from its base, so the payload starts there. Only a rounded direct read puts anything in
+    // front of it, and neither of them rounds.
+    const auto code = client.write(device, request.pool, request.buffer, 0 /* skip */,
                                    request.bytesize, request.destination, request.on_done);
 
     if (code != common::ResponseCode::Success)

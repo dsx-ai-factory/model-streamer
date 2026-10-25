@@ -68,27 +68,29 @@ constexpr size_t DirectBlockSize = 65536;
 // visible. It also must not change under a running streamer - routing decided congruence against one
 // value and the worker must plan passes against the same one.
 //
-// Rejected values fall back to DirectBlockSize with a warning rather than failing: a mistyped block
-// should not stop a model loading, and every rejected value would break posix_memalign in ScratchPool
-// or the congruence maths.
+// A rejected value THROWS rather than falling back - see usable_direct_block below for what is
+// rejected and why. Config forces this call at startup, so a mistyped block surfaces as
+// InvalidParameterError from runai_file_streamer_start instead of serving a value nobody asked for.
 //
-// PYTHON READS THE SAME VARIABLE (requests_iterator.py, DIRECT_IO_BLOCK). The two must agree: Python
-// pads the ring to make destinations congruent, and if it padded to a different block than this one
-// tests against, congruence would fail and direct reads would quietly stop happening.
+// Python does NOT read this variable. It asks the library per request, through
+// runai_probe_direct_block_size, and that path applies the override - so the two sides cannot
+// disagree about the block they pad destinations to.
 size_t direct_block_size();
 
-// The largest block a mount probe will ever return, and therefore the value a worker runs at while it
-// has no measurement.
+// The top rung of the trial-read ladder, and the value a worker runs at while it has no measurement.
 //
-// Provisional-at-the-maximum is what makes a later measurement safe to adopt: it can only be smaller,
-// so buffers sized for this one are big enough for it and nothing has to be reallocated.
+// Provisional-at-the-maximum is what makes a later measurement safe to adopt: a LADDER answer can
+// only be smaller, so buffers sized for this one are big enough and nothing has to be reallocated.
+// That argument does not extend to statx, which reports whatever the filesystem says and is bounded
+// by nothing here - so AsyncIoWorker refuses a measurement its scratch pool cannot serve rather than
+// assuming none can arrive.
 constexpr size_t MaxProbeBlock = 65536;
 
 // The rules direct_block_size() applies to a configured value, separated so they can be tested.
 //
-// Returns `configured` when it is usable - a power of two, at least 512 - and DirectBlockSize
-// otherwise, with a warning. Exposed because direct_block_size() caches its answer for the life of
-// the process, so a test cannot reach these rules through the environment.
+// Returns `configured` when it is usable - a power of two, from 512 to MaxProbeBlock - and THROWS
+// InvalidParameterError otherwise. Exposed because direct_block_size() caches its answer for the life
+// of the process, so a test cannot reach these rules through the environment.
 size_t usable_direct_block(unsigned long configured);
 
 // RUNAI_STREAMER_DIRECT_BLOCK as a number, or DirectBlockSize when it is absent or is not a number.
