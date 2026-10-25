@@ -150,10 +150,6 @@ struct Streamer
     // client creation, from credentials()); the batch params carry the URI, which is all the per-read path uses.
     common::s3::S3ClientWrapper::Params handle_s3(unsigned file_index, const std::string & path);
 
-    // Raises the soft open files limit to at least `limit`, never lowers it. Best effort: returns
-    // whether it reaches `limit`.
-    bool raise_fd_limit(rlim_t limit);
-
     // The streamer's credentials (empty Credentials if none set), read via _credentials_state (which locks
     // its own mutex). Called only at client-creation points (the worker's first client build, and list_files)
     // - never on the per-request path.
@@ -211,11 +207,6 @@ struct Streamer
     // SDK - and only then is the pinned memory freed. Removing a client merely parks it, so without
     // this the slabs would be freed while a plugin could still be writing into them.
     std::shared_ptr<StagingPoolRetainer> _retained_pools = std::make_shared<StagingPoolRetainer>();
-
-    // Shared by object storage and filesystem, raised in place: replacing it would restore a lower limit.
-    // Declared BEFORE _pools, so the limit is restored only after the workers have stopped opening files.
-    std::unique_ptr<utils::FdLimitSetter> _fd_limit;
-    std::mutex _fd_limit_mutex;
 
     AsyncIoStats _stats;
 

@@ -80,7 +80,8 @@ TEST(CountOpenFds, Counts_Opened_And_Closed)
     EXPECT_EQ(count_open_fds(), before);
 }
 
-TEST(RaiseFdLimit, Raises_And_Restores_The_Original)
+// The setter in these tests only puts the limit back at the end of the test: the raise itself is not undone.
+TEST(RaiseFdLimit, Raises_And_Never_Lowers)
 {
     const auto current = get_cur_file_descriptors();
     const auto hard_limit = get_max_file_descriptors();
@@ -90,14 +91,15 @@ TEST(RaiseFdLimit, Raises_And_Restores_The_Original)
     }
 
     {
-        FdLimitSetter setter(current);
-        EXPECT_TRUE(setter.raise_to(current + 1));
+        FdLimitSetter restore(current);
+        EXPECT_TRUE(raise_file_descriptors(current + 1));
         EXPECT_EQ(get_cur_file_descriptors(), current + 1);
 
-        // raised again, never lowered
-        EXPECT_TRUE(setter.raise_to(current + 2));
+        EXPECT_TRUE(raise_file_descriptors(current + 2));
         EXPECT_EQ(get_cur_file_descriptors(), current + 2);
-        EXPECT_TRUE(setter.raise_to(current));
+
+        // already above, so left as it is
+        EXPECT_TRUE(raise_file_descriptors(current));
         EXPECT_EQ(get_cur_file_descriptors(), current + 2);
     }
 
@@ -114,8 +116,8 @@ TEST(RaiseFdLimit, Capped_At_The_Hard_Limit)
     }
 
     {
-        FdLimitSetter setter(current);
-        EXPECT_FALSE(setter.raise_to(hard_limit + 1));
+        FdLimitSetter restore(current);
+        EXPECT_FALSE(raise_file_descriptors(hard_limit + 1));
         EXPECT_EQ(get_cur_file_descriptors(), hard_limit);
     }
 

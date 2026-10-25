@@ -10,6 +10,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <vector>
 
@@ -83,8 +84,12 @@ FdLimitSetter::FdLimitSetter(rlim_t new_limit)
     _valid = true;
 }
 
-bool FdLimitSetter::raise_to(rlim_t limit)
+bool raise_file_descriptors(rlim_t limit)
 {
+    // the read and the write below must not interleave with another raise, which could lower the limit
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
     struct rlimit current;
     if (getrlimit(RLIMIT_NOFILE, &current) != 0)
     {

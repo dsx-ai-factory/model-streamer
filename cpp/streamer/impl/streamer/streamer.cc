@@ -345,7 +345,8 @@ common::ResponseCode Streamer::async_request(
     // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: up to
     // FD_LIMIT_FACTOR submissions of this many files are in flight together, each file one batch. So
     // when the headroom, which excludes descriptors already open, is below that, raise the soft limit
-    // to at least double, up to the hard limit. Best effort.
+    // to at least double, up to the hard limit. Best effort, and never lowered again: the process
+    // is not ours.
     if (!object_storage)
     {
         const rlim_t limit = utils::get_cur_file_descriptors();
@@ -356,7 +357,7 @@ common::ResponseCode Streamer::async_request(
             const rlim_t target = std::max(2 * limit, open + need);
             LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
                       << request.size() << " files, with " << open << " descriptors open";
-            raise_fd_limit(target);
+            utils::raise_file_descriptors(target);
 
             const rlim_t raised = utils::get_cur_file_descriptors();
             if (raised < open + request.size())
@@ -722,7 +723,7 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
                     throw common::Exception(common::ResponseCode::InsufficientFdLimit);
                 }
                 LOG(INFO) << "Increasing fd soft limit to " << desired_fd_limit << " for concurrency level " << _config->s3_concurrency;
-                if (!raise_fd_limit(desired_fd_limit))
+                if (!utils::raise_file_descriptors(desired_fd_limit))
                 {
                     // thrown out of call_once, so the next submission retries
                     throw common::Exception(common::ResponseCode::InsufficientFdLimit);
@@ -738,35 +739,6 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
     // Batch params carry only the URI (used by the per-read path) - no credentials. Credentials are applied
     // once, at client creation, from the streamer's credentials() (see ObjectStorageWorker::capacity).
     return common::s3::S3ClientWrapper::Params(uri, _config->s3_block_bytesize, _config->s3_concurrency);
-}
-
-bool Streamer::raise_fd_limit(rlim_t limit)
-{
-    std::lock_guard<std::mutex> lock(_fd_limit_mutex);
-
-    if (_fd_limit == nullptr)
-    {
-        // created at the current limit, which is what it restores on destruction. Its constructor
-        // throws when the limit cannot be read or set, which must not fail a best effort raise.
-        try
-        {
-            // 0 means the read failed: a real soft limit of 0 allows no file, and the setter would set it
-            const rlim_t current = utils::get_cur_file_descriptors();
-            if (current == 0)
-            {
-                LOG(WARNING) << "Cannot read the fd limit, not raising it to " << limit;
-                return false;
-            }
-            _fd_limit = std::make_unique<utils::FdLimitSetter>(current);
-        }
-        catch (const std::exception & e)
-        {
-            LOG(WARNING) << "Cannot raise the fd limit to " << limit << " : " << e.what();
-            return false;
-        }
-    }
-
-    return _fd_limit->raise_to(limit);
 }
 
 std::vector<std::pair<std::string, size_t>> Streamer::list_files(

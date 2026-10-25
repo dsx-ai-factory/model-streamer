@@ -19,6 +19,11 @@ rlim_t get_cur_file_descriptors();
 // The descriptors this process has open, from /proc/self/fd (Linux). 0 when that cannot be read.
 rlim_t count_open_fds();
 
+// Raises the soft limit to at least `limit`, capped at the hard limit; never lowers it. The limit is
+// left raised: the process is not ours to restore. Best effort: warns on failure. Returns whether it
+// reaches `limit`.
+bool raise_file_descriptors(rlim_t limit);
+
 struct FdLimitSetter
 {
     explicit FdLimitSetter(rlim_t new_limit);
@@ -29,10 +34,6 @@ struct FdLimitSetter
 
     FdLimitSetter(FdLimitSetter&& other) noexcept;
     FdLimitSetter& operator=(FdLimitSetter&& other) noexcept;
-
-    // Raises the soft limit to at least `limit`, capped at the hard limit; never lowers it. The limit
-    // restored on destruction is unchanged. Best effort: warns on failure. Returns whether it reaches `limit`.
-    bool raise_to(rlim_t limit);
 
  private:
     struct rlimit _previous;
