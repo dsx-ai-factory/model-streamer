@@ -729,8 +729,17 @@ bool Streamer::raise_fd_limit(rlim_t limit)
 
     if (_fd_limit == nullptr)
     {
-        // created at the current limit, which is what it restores on destruction
-        _fd_limit = std::make_unique<utils::FdLimitSetter>(utils::get_cur_file_descriptors());
+        // created at the current limit, which is what it restores on destruction. Its constructor
+        // throws when the limit cannot be read or set, which must not fail a best effort raise.
+        try
+        {
+            _fd_limit = std::make_unique<utils::FdLimitSetter>(utils::get_cur_file_descriptors());
+        }
+        catch (const std::exception & e)
+        {
+            LOG(WARNING) << "Cannot raise the fd limit to " << limit << " : " << e.what();
+            return false;
+        }
     }
 
     return _fd_limit->raise_to(limit);

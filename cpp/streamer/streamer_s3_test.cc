@@ -944,15 +944,18 @@ void read_small_files(void * streamer, unsigned count)
 // below any object-storage need (at least 64)
 constexpr rlim_t LOW_FD_LIMIT = 50;
 
+// descriptors the process already holds, which count against the limit
+constexpr rlim_t FD_HEADROOM = 100;
+
 }   // namespace
 
 // Raised when the submission does not fit, restored when the streamer ends.
 TEST_F(StreamerTest, Filesystem_Submission_Raises_And_Restores_The_Fd_Limit)
 {
     const unsigned count = LOW_FD_LIMIT + 50;
-    if (utils::get_max_file_descriptors() < count)
+    if (utils::get_max_file_descriptors() < count + FD_HEADROOM)
     {
-        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count;
+        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count + FD_HEADROOM;
     }
 
     utils::FdLimitSetter fd_limit(LOW_FD_LIMIT);
@@ -1044,9 +1047,9 @@ TEST_F(StreamerTest, Filesystem_Then_Object_Storage_Raises_And_Restores_The_Fd_L
     auto verify_mock = dylib.dlsym<int(*)(void)>("runai_mock_s3_clients");
 
     const unsigned count = _concurrency * 64 + 50;
-    if (utils::get_max_file_descriptors() < count)
+    if (utils::get_max_file_descriptors() < count + FD_HEADROOM)
     {
-        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count;
+        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count + FD_HEADROOM;
     }
 
     utils::FdLimitSetter fd_limit(LOW_FD_LIMIT);
@@ -1083,9 +1086,9 @@ TEST_F(StreamerTest, Object_Storage_Then_Filesystem_Raises_And_Restores_The_Fd_L
 
     const rlim_t object_storage_need = _concurrency * 64;
     const unsigned count = object_storage_need + 50;
-    if (utils::get_max_file_descriptors() < count)
+    if (utils::get_max_file_descriptors() < count + FD_HEADROOM)
     {
-        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count;
+        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is below " << count + FD_HEADROOM;
     }
 
     utils::FdLimitSetter fd_limit(LOW_FD_LIMIT);
