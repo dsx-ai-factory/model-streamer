@@ -143,15 +143,24 @@ TEST(Handle, Stopped)
 {
     for (auto size : { 1U, 2U, 10U, utils::random::number(10, 100), 100U })
     {
+        std::atomic<unsigned> started = 0;
+        std::atomic<unsigned> released = 0;
         std::atomic<unsigned> total = 0;
         const auto count = utils::random::number(5000, 10000);
 
         {
             ThreadPool<unsigned> pool([&](auto _, std::atomic<bool> & stopped)
                 {
+                    // Until the pool stops, every thread is held in its first request, so the first `size`
+                    // entries are those requests and any later one is a request taken after the stop.
+                    const auto index = started++;
                     while (!stopped)
                     {
                         ::usleep(utils::random::number(10000));
+                    }
+                    if (index < size)
+                    {
+                        released++;
                     }
                     total++;
                 }, size);
@@ -161,13 +170,21 @@ TEST(Handle, Stopped)
                 pool.push(utils::random::boolean());
             }
 
-            ::usleep(utils::random::number(100000, 1000000));
+            // wait for every thread to be inside its request, so none can miss the stop by starting late
+            for (int i = 0; i < 10000 && started < size; ++i)
+            {
+                ::usleep(1000);
+            }
+            ASSERT_EQ(started, size);
+
+            ::usleep(utils::random::number(10000, 100000));
 
             EXPECT_EQ(total, 0);
         }
 
-        // verify all threads stopped and each thread performed a single task
+        // verify all threads stopped, and that no request was handled after the stop
 
+        EXPECT_EQ(released, size);
         EXPECT_EQ(total, size);
     }
 }
