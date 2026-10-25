@@ -944,6 +944,38 @@ void read_small_files(void * streamer, unsigned count)
     SmallFiles(streamer, count).drain(streamer);
 }
 
+// One file read in `count` ranges with a gap between each: every range is a transfer of its own, so
+// one file is several batches.
+void read_sparse_file(void * streamer, unsigned count)
+{
+    constexpr size_t RANGE_SIZE = 100;
+
+    utils::temp::File file(utils::random::buffer(2 * count * RANGE_SIZE));
+    const char * path = file.path.c_str();
+    unsigned ranges = count;
+    std::vector<size_t> offsets(count);
+    std::vector<size_t> bytesizes(count, RANGE_SIZE);
+    std::vector<void *> dsts(count);
+    std::vector<unsigned char> dst(count * RANGE_SIZE);
+    for (unsigned i = 0; i < count; ++i)
+    {
+        offsets[i] = 2 * i * RANGE_SIZE;
+        dsts[i] = dst.data() + i * RANGE_SIZE;
+    }
+
+    SubmissionId submission_id = 0;
+    EXPECT_EQ(runai_file_streamer_request(streamer, &submission_id, 1, &path, &ranges, offsets.data(),
+                                          bytesizes.data(), dsts.data(), RunaiFileStreamerDevice{}),
+              static_cast<int>(common::ResponseCode::Success));
+
+    for (unsigned i = 0; i < count; ++i)
+    {
+        unsigned file_index = 0;
+        unsigned range_index = 0;
+        ASSERT_EQ(next_response(streamer, &file_index, &range_index), static_cast<int>(common::ResponseCode::Success));
+    }
+}
+
 // below any object-storage need (at least 64)
 constexpr rlim_t LOW_FD_LIMIT = 50;
 
@@ -1035,6 +1067,30 @@ TEST_F(StreamerTest, Filesystem_Submission_That_Fits_Does_Not_Raise_The_Fd_Limit
 
     runai_file_streamer_end(streamer);
     EXPECT_EQ(utils::get_cur_file_descriptors(), low);
+}
+
+// One file, so the file count alone would not raise the limit, but its ranges are several batches and
+// each holds a descriptor.
+TEST_F(StreamerTest, Batches_Of_One_File_Count_Against_The_Fd_Limit)
+{
+    const unsigned ranges = 5;
+    const rlim_t room = 40;
+    const rlim_t low = limit_with_room(room);
+    ASSERT_LT(FD_FACTOR * 1, room);
+    if (utils::get_max_file_descriptors() < 2 * low + FD_FACTOR * ranges)
+    {
+        GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is too low";
+    }
+
+    utils::FdLimitSetter fd_limit(low);
+
+    void * streamer;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    read_sparse_file(streamer, ranges);
+    EXPECT_GT(utils::get_cur_file_descriptors(), low);
+
+    runai_file_streamer_end(streamer);
 }
 
 // Fewer files than the soft limit, but the headroom left by the open descriptors is not enough for the

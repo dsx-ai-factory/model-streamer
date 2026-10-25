@@ -43,7 +43,7 @@ namespace runai::llm::streamer::impl
 namespace
 {
 
-// submissions assumed in flight together, each of a similar number of files. An estimate: the streamer
+// submissions assumed in flight together, each of a similar number of batches. An estimate: the streamer
 // does not know how many its caller keeps in flight.
 constexpr size_t FD_LIMIT_FACTOR = 18;
 
@@ -342,40 +342,6 @@ common::ResponseCode Streamer::async_request(
         return common::ResponseCode::Success;
     }
 
-    // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: up to
-    // FD_LIMIT_FACTOR submissions of this many files are in flight together, each file one batch. So
-    // when the headroom, which excludes descriptors already open, is below that, raise the soft limit
-    // to at least double, up to the hard limit. Best effort, and never lowered again: the process
-    // is not ours.
-    if (!object_storage)
-    {
-        const rlim_t limit = utils::get_cur_file_descriptors();
-        const rlim_t open = utils::count_open_fds();
-        const rlim_t need = request.size() * FD_LIMIT_FACTOR;
-        if (limit < open + need)
-        {
-            const rlim_t hard = utils::get_max_file_descriptors();
-            const rlim_t target = std::min(std::max(2 * limit, open + need), hard);
-            if (target > limit)
-            {
-                LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
-                          << request.size() << " files, with " << open << " descriptors open";
-                utils::raise_file_descriptors(target);
-            }
-
-            // once: a limit that cannot be raised stays too low for every submission after this one
-            static std::atomic<bool> warned{false};
-            const rlim_t raised = utils::get_cur_file_descriptors();
-            if (raised < open + request.size() && !warned.exchange(true))
-            {
-                LOG(WARNING) << "Submission " << submission_id << " has " << request.size()
-                             << " files but the soft limit is " << raised << " with " << open
-                             << " descriptors open (hard limit " << hard
-                             << "); reading may fail with a file access error";
-            }
-        }
-    }
-
     // Object storage has no mount to probe and no strategy to consult, so it is not asked.
     const auto groups = object_storage ? FsAsyncRouter::Groups{}
                                        : _router.groups(request, _config->fs_async_queue_depth,
@@ -392,6 +358,7 @@ common::ResponseCode Streamer::async_request(
     unsigned params_file_index = 0;
     bool has_params = false;
     common::s3::S3ClientWrapper::Params params;
+    size_t total_batches = 0;
 
     for (const auto & transfer : assigner.transfers())
     {
@@ -433,6 +400,41 @@ common::ResponseCode Streamer::async_request(
             {
                 LOG(ERROR) << "Submission " << submission_id << " failed to add batch to workload " << workload_index << " error: " << result;
                 return result; // nothing committed yet
+            }
+            ++total_batches;
+        }
+    }
+
+    // Each batch holds a descriptor until its workload is destroyed (#261). Heuristic: up to
+    // FD_LIMIT_FACTOR submissions of this many batches are in flight together. So when the headroom,
+    // which excludes descriptors already open, is below that, raise the soft limit to at least double,
+    // up to the hard limit. Best effort, and never lowered again: the process is not ours. The batches
+    // are built but nothing has opened a file yet, and nothing is committed.
+    if (!object_storage)
+    {
+        const rlim_t limit = utils::get_cur_file_descriptors();
+        const rlim_t open = utils::count_open_fds();
+        const rlim_t need = total_batches * FD_LIMIT_FACTOR;
+        if (limit < open + need)
+        {
+            const rlim_t hard = utils::get_max_file_descriptors();
+            const rlim_t target = std::min(std::max(2 * limit, open + need), hard);
+            if (target > limit)
+            {
+                LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
+                          << total_batches << " batches, with " << open << " descriptors open";
+                utils::raise_file_descriptors(target);
+            }
+
+            // once: a limit that cannot be raised stays too low for every submission after this one
+            static std::atomic<bool> warned{false};
+            const rlim_t raised = utils::get_cur_file_descriptors();
+            if (raised < open + total_batches && !warned.exchange(true))
+            {
+                LOG(WARNING) << "Submission " << submission_id << " has " << total_batches
+                             << " batches but the soft limit is " << raised << " with " << open
+                             << " descriptors open (hard limit " << hard
+                             << "); reading may fail with a file access error";
             }
         }
     }
