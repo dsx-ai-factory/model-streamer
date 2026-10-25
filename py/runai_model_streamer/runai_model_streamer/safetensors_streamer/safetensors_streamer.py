@@ -308,7 +308,9 @@ class SafetensorsStreamer:
         self.start_time = timer()
 
         # metadata is created on cpu and each process reads it individually
-        safetensors_metadatas = safetensors_pytorch.prepare_request(self.file_streamer, paths, s3_credentials)
+        safetensors_metadatas = safetensors_pytorch.prepare_request(
+            self.file_streamer, paths, s3_credentials, discover_ranks=is_distributed
+        )
 
         # Every kept name, WITH duplicates - only tensor_names carries the expectation of one
         # tensor per requested name, so this is never tracked for the unfiltered load.
@@ -358,6 +360,7 @@ class SafetensorsStreamer:
             device=device,
             is_distributed=is_distributed,
             owned=owned,
+            discover_ranks=is_distributed,
         )
         self._log_ring()
 

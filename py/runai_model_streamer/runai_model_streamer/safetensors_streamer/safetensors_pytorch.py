@@ -169,9 +169,10 @@ class SafetensorsMetadata:
             self.read_sizes.append(required_size)
 
     @staticmethod
-    def from_files(fs: DistributedStreamer, filenames: List[str], s3_credentials: Optional[S3Credentials]) -> List[SafetensorsMetadata]:
+    def from_files(fs: DistributedStreamer, filenames: List[str], s3_credentials: Optional[S3Credentials], discover_ranks: bool = True) -> List[SafetensorsMetadata]:
+        # a distributed load discovers in its first read, because that read fixes the queue depth of the CPP layer
         # 1. Read the first 8 bytes (The Header Size)
-        fs.stream_files([FileChunks.contiguous(i, filenames[i], 0, [SAFETENSORS_HEADER_BUFFER_SIZE]) for i in range(len(filenames))], s3_credentials, "cpu", False)
+        fs.stream_files([FileChunks.contiguous(i, filenames[i], 0, [SAFETENSORS_HEADER_BUFFER_SIZE]) for i in range(len(filenames))], s3_credentials, "cpu", False, discover_ranks=discover_ranks)
         
         header_sizes = {}
         
@@ -196,7 +197,7 @@ class SafetensorsMetadata:
 
         # 2. Read the JSON Header Body
         metadatas = {}
-        fs.stream_files([FileChunks.contiguous(i, filenames[i], SAFETENSORS_HEADER_BUFFER_SIZE, [header_size]) for i, header_size in header_sizes.items()], s3_credentials, "cpu", False)
+        fs.stream_files([FileChunks.contiguous(i, filenames[i], SAFETENSORS_HEADER_BUFFER_SIZE, [header_size]) for i, header_size in header_sizes.items()], s3_credentials, "cpu", False, discover_ranks=discover_ranks)
         
         # Wrap the second loop to catch truncation during JSON read
         try:
@@ -304,9 +305,9 @@ class Offsets:
 
 
 def prepare_request(
-    fs: DistributedStreamer, paths: List[str], s3_credentials: Optional[S3Credentials]
+    fs: DistributedStreamer, paths: List[str], s3_credentials: Optional[S3Credentials], discover_ranks: bool = True
 ) -> List[Tuple[int, List[SafetensorMetadata], List[int]]]:
-    safetensors_metadatas = SafetensorsMetadata.from_files(fs, paths, s3_credentials)
+    safetensors_metadatas = SafetensorsMetadata.from_files(fs, paths, s3_credentials, discover_ranks)
     return [(
         safetensors_metadata.offset,
         safetensors_metadata.tensors_metadata,
