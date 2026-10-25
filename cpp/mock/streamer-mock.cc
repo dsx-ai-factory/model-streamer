@@ -236,8 +236,11 @@ extern "C" int runai_file_streamer_request(
         *out_submission_id = 0;
     }
 
-    // Refused like the real C API, so a Python test that asks for a device gets the same answer here.
-    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU) {
+    // The same set the real C API serves (streamer.cc): CUDA is accepted at the boundary, and only a
+    // type beyond it is refused. The mock has no device and writes to whatever addresses it is given,
+    // so a test that declares CUDA over host memory is served and gets its data back.
+    if (device.type != RUNAI_FILE_STREAMER_DEVICE_CPU &&
+        device.type != RUNAI_FILE_STREAMER_DEVICE_CUDA) {
         return static_cast<int>(common::ResponseCode::UnsupportedDeviceType);
     }
 
