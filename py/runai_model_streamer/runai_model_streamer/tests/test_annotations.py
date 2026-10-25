@@ -108,7 +108,16 @@ class TestAnnotationsResolve(unittest.TestCase):
         for module in modules:
             for label, target in self._annotated_targets(module):
                 try:
-                    typing.get_type_hints(target)
+                    # Resolved in the DEFINING module's namespace, which is the property this test is
+                    # about: a name used in an annotation but never imported there.
+                    #
+                    # Not the target's own __globals__, which get_type_hints uses by default. A
+                    # NamedTuple's __new__ is synthesised by collections.namedtuple and carries
+                    # {__builtins__, __name__, _tuple_new}, so every annotation naming anything but a
+                    # builtin fails there however the module is written - and the same annotation
+                    # resolves on the class itself. _annotated_targets already keeps only targets
+                    # defined in this module, so its namespace is the right one for all of them.
+                    typing.get_type_hints(target, globalns=vars(module))
                 except Exception as error:
                     failures.append(f"{module.__name__}.{label}: {type(error).__name__}: {error}")
 
