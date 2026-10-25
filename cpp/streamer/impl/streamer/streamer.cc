@@ -737,7 +737,14 @@ bool Streamer::raise_fd_limit(rlim_t limit)
         // throws when the limit cannot be read or set, which must not fail a best effort raise.
         try
         {
-            _fd_limit = std::make_unique<utils::FdLimitSetter>(utils::get_cur_file_descriptors());
+            // 0 means the read failed: a real soft limit of 0 allows no file, and the setter would set it
+            const rlim_t current = utils::get_cur_file_descriptors();
+            if (current == 0)
+            {
+                LOG(WARNING) << "Cannot read the fd limit, not raising it to " << limit;
+                return false;
+            }
+            _fd_limit = std::make_unique<utils::FdLimitSetter>(current);
         }
         catch (const std::exception & e)
         {
