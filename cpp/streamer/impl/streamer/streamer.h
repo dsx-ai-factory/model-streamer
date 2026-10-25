@@ -220,7 +220,8 @@ struct Streamer
     // Lazy S3 init, each part exactly once in the streamer's lifetime and only for s3 paths.
     // Split because _s3 is shared by list_files and streaming, while fd limit / stop are
     // streaming-only. std::call_once is thread-safe for concurrent submitters and retries if the
-    // callable throws (InsufficientFdLimit), so the error resurfaces on the next s3 submission.
+    // callable throws InsufficientFdLimit, whether the hard limit is too low or the soft limit could
+    // not be raised, so the error resurfaces on the next s3 submission.
     std::once_flag _s3_stream_init_flag;   // fd limit + S3Stop (streaming only)
     std::once_flag _s3_cleanup_init_flag;  // S3Cleanup (list_files and streaming)
 

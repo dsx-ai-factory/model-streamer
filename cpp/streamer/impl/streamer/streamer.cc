@@ -44,7 +44,7 @@ namespace
 {
 
 // submissions assumed in flight together, each of a similar number of files: the depth of the
-// Python ring (DEFAULT_RING_BUFFERS)
+// Python ring (DEFAULT_RING_BUFFERS). Kept equal by hand: RUNAI_STREAMER_RING_BUFFERS is read only there.
 constexpr size_t FD_LIMIT_FACTOR = 18;
 
 }   // namespace
@@ -354,17 +354,23 @@ common::ResponseCode Streamer::async_request(
         const rlim_t need = request.size() * FD_LIMIT_FACTOR;
         if (limit < open + need)
         {
-            const rlim_t target = std::max(2 * limit, open + need);
-            LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
-                      << request.size() << " files, with " << open << " descriptors open";
-            utils::raise_file_descriptors(target);
+            const rlim_t hard = utils::get_max_file_descriptors();
+            const rlim_t target = std::min(std::max(2 * limit, open + need), hard);
+            if (target > limit)
+            {
+                LOG(INFO) << "Increasing fd soft limit from " << limit << " to " << target << " for a submission of "
+                          << request.size() << " files, with " << open << " descriptors open";
+                utils::raise_file_descriptors(target);
+            }
 
+            // once: a limit that cannot be raised stays too low for every submission after this one
+            static std::atomic<bool> warned{false};
             const rlim_t raised = utils::get_cur_file_descriptors();
-            if (raised < open + request.size())
+            if (raised < open + request.size() && !warned.exchange(true))
             {
                 LOG(WARNING) << "Submission " << submission_id << " has " << request.size()
                              << " files but the soft limit is " << raised << " with " << open
-                             << " descriptors open (hard limit " << utils::get_max_file_descriptors()
+                             << " descriptors open (hard limit " << hard
                              << "); reading may fail with a file access error";
             }
         }
@@ -707,8 +713,9 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
 
     if (uri != nullptr)
     {
-        // streaming-only setup (fd limit + stop), once. If the fd-limit raise throws
-        // (InsufficientFdLimit) the flag stays unset, so a later submission retries.
+        // streaming-only setup (fd limit + stop), once. If the callable throws InsufficientFdLimit, because
+        // the hard limit is too low or the soft limit could not be raised, the flag stays unset and a later
+        // submission retries.
         std::call_once(_s3_stream_init_flag, [this]()
         {
             // adjust fd limit acording to concurrency

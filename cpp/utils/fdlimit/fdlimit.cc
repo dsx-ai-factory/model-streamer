@@ -6,6 +6,7 @@
 #include "utils/fdlimit/fdlimit.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <dirent.h>
@@ -48,7 +49,12 @@ rlim_t count_open_fds()
     DIR * dir = opendir("/proc/self/fd");
     if (dir == nullptr)
     {
-        LOG(DEBUG) << "Cannot read /proc/self/fd : " << std::strerror(errno);
+        const int open_errno = errno;
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true))
+        {
+            LOG(WARNING) << "Cannot read /proc/self/fd, the descriptors already open are not counted : " << std::strerror(open_errno);
+        }
         return 0;
     }
 

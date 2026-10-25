@@ -63,7 +63,10 @@ TEST(SetFdLimit, Hard_Limit)
 TEST(CountOpenFds, Counts_Opened_And_Closed)
 {
     const auto before = count_open_fds();
-    ASSERT_NE(before, 0);
+    if (before == 0)
+    {
+        GTEST_SKIP() << "/proc/self/fd cannot be read";
+    }
 
     std::vector<int> fds;
     for (int i = 0; i < 5; ++i)
@@ -85,7 +88,7 @@ TEST(RaiseFdLimit, Raises_And_Never_Lowers)
 {
     const auto current = get_cur_file_descriptors();
     const auto hard_limit = get_max_file_descriptors();
-    if (current + 2 > hard_limit)
+    if (current == RLIM_INFINITY || current + 2 > hard_limit)
     {
         GTEST_SKIP() << "no room to raise the soft limit";
     }
