@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-load("//:rules.bzl", "runai_cc_library", "runai_cc_test")
+load("//:rules.bzl", "runai_cc_library", "runai_portable_cc_test")
 
 runai_cc_library(
     name = "portability",
@@ -10,8 +10,7 @@ runai_cc_library(
     alwayslink = True,
 )
 
-runai_cc_test(
+runai_portable_cc_test(
     name = "math_test",
     srcs = ["math_test.cc"],
-    deps = [":portability"],
 )
