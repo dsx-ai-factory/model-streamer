@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -93,7 +94,24 @@ TEST(CountOpenFds, At_The_Limit_Is_The_Limit)
         GTEST_SKIP() << "/proc/self/fd cannot be read";
     }
 
-    FdLimitSetter restore(before);
+    // fill every free descriptor up to the limit, holes included, so that reading /proc/self/fd fails
+    const rlim_t limit = before + 3;
+    std::vector<int> fds;
+    {
+        FdLimitSetter restore(limit);
+        for (int fd = open("/dev/null", O_RDONLY); fd >= 0; fd = open("/dev/null", O_RDONLY))
+        {
+            fds.push_back(fd);
+        }
+        ASSERT_EQ(errno, EMFILE);
+
+        EXPECT_EQ(count_open_fds(), limit);
+    }
+
+    for (int fd : fds)
+    {
+        close(fd);
+    }
     EXPECT_EQ(count_open_fds(), before);
 }
 

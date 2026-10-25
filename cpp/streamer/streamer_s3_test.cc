@@ -5,6 +5,9 @@
 
 #include "streamer/streamer.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
@@ -950,6 +953,39 @@ constexpr rlim_t FD_HEADROOM = 100;
 // the streamer assumes this many submissions in flight (FD_LIMIT_FACTOR)
 constexpr unsigned FD_FACTOR = 18;
 
+// descriptors held open for the life of the object
+struct HeldFds
+{
+    explicit HeldFds(unsigned count)
+    {
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const int fd = open("/dev/null", O_RDONLY);
+            if (fd < 0)
+            {
+                break;
+            }
+            _fds.push_back(fd);
+        }
+    }
+
+    ~HeldFds()
+    {
+        for (int fd : _fds)
+        {
+            close(fd);
+        }
+    }
+
+    HeldFds(const HeldFds &) = delete;
+    HeldFds & operator=(const HeldFds &) = delete;
+
+    size_t size() const { return _fds.size(); }
+
+ private:
+    std::vector<int> _fds;
+};
+
 // a soft limit leaving `room` descriptors beyond those the process has open now
 rlim_t limit_with_room(rlim_t room)
 {
@@ -1005,13 +1041,20 @@ TEST_F(StreamerTest, Filesystem_Submission_That_Fits_Does_Not_Raise_The_Fd_Limit
 // submissions assumed in flight.
 TEST_F(StreamerTest, Open_Descriptors_Count_Against_The_Fd_Limit)
 {
-    const unsigned count = 5;
-    const rlim_t low = limit_with_room(40);
-    ASSERT_LT(count, low);
+    // Held open so that the limit is well above the need: the need, 54, is above the room, 40, but below
+    // the limit. Only counting the open descriptors makes it raise.
+    HeldFds held(30);
+    ASSERT_EQ(held.size(), 30);
+
+    const unsigned count = 3;
+    const rlim_t room = 40;
+    const rlim_t low = limit_with_room(room);
     if (utils::get_max_file_descriptors() < 2 * low + FD_FACTOR * count)
     {
         GTEST_SKIP() << "hard fd limit " << utils::get_max_file_descriptors() << " is too low";
     }
+    ASSERT_GT(FD_FACTOR * count, room);
+    ASSERT_LT(FD_FACTOR * count, low);
 
     utils::FdLimitSetter fd_limit(low);
 

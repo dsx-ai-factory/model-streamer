@@ -51,8 +51,9 @@ rlim_t count_open_fds()
     {
         const int open_errno = errno;
 
-        // opendir needs a descriptor itself: with none left, every one up to the limit is open
-        if (open_errno == EMFILE || open_errno == ENFILE)
+        // opendir needs a descriptor itself: with none left to this process, every one up to the limit is
+        // open. (ENFILE is the system's table, which says nothing about this process.)
+        if (open_errno == EMFILE)
         {
             return get_cur_file_descriptors();
         }

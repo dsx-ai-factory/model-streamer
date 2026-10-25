@@ -16,8 +16,8 @@ namespace runai::llm::streamer::utils
 rlim_t get_max_file_descriptors();
 rlim_t get_cur_file_descriptors();
 
-// The descriptors this process has open, from /proc/self/fd (Linux). The soft limit when none is left to
-// read it with; 0 when it cannot be read.
+// The descriptors this process has open, from /proc/self/fd (Linux). The soft limit when the process has
+// none left to read it with; 0 when it cannot be read.
 rlim_t count_open_fds();
 
 // Raises the soft limit to at least `limit`, capped at the hard limit; never lowers it. The limit is
