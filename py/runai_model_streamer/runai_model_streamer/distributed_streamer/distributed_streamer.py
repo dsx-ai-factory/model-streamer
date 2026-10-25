@@ -153,7 +153,10 @@ class DistributedStreamer:
             device: str,
             is_distributed: bool,
             owned: bool = True,
+            discover_ranks: bool = True,
     ) -> None:
+        """discover_ranks=False skips the discovery of the local ranks, a collective over all the ranks of the process
+        group, for a read that runs without its peers. Distributed streaming discovers them regardless."""
 
         # Normalised HERE so no spelling of the host reaches a comparison against "cpu": those decide
         # whether a buffer is handed over and whether this host can broadcast, and None or
@@ -164,7 +167,7 @@ class DistributedStreamer:
         # nothing rather than whatever the previous call left behind.
         self._ring_info = None
 
-        self.params.set_params(file_stream_requests)
+        self.params.set_params(file_stream_requests, discover_ranks or is_distributed)
 
         # check if distributed streaming can be used
         self.set_is_distributed(is_distributed, device)
@@ -286,6 +289,7 @@ class _distributedStreamerParams:
     def set_params(
             self,
             file_stream_requests: List[FileChunks], 
+            discover_ranks: bool,
     ) -> None:
 
         self.broadcast_timeout = self.get_broadcast_timeout()
@@ -294,12 +298,23 @@ class _distributedStreamerParams:
         max_chunks_per_file = (fc.max_chunk_size() for fc in file_stream_requests if fc.sizes)
         self.max_chunk = max(max_chunks_per_file, default=0)
 
+        if discover_ranks:
+            self.discover_local_ranks()
+        else:
+            self.set_rank_without_discovery()
+
+    def discover_local_ranks(self) -> None:
         # set the value of RUNAI_STREAMER_PROCESS_GROUP_SIZE to be the number of processes in the distribution group (or 1 if process group is not initialized)
         # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()
         if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") is None:
             os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = str(self.num_processes_on_node)
+
+    def set_rank_without_discovery(self) -> None:
+        # RUNAI_STREAMER_PROCESS_GROUP_SIZE is not guessed, so the CPP layer defaults to 1: a count larger than the readers lowers their throughput
+        if dist.is_initialized():
+            self.my_global_rank = dist.get_rank()
 
 class _distributedStreamer:
     def __init__(self, file_streamer : FileStreamer) -> None:
