@@ -25,9 +25,10 @@ class TestDeviceRouting(unittest.TestCase):
     """Which ring stream_files builds, and what it tells the library about the destination.
 
     Forced through the device_support seam, so these run on a host with no device. The slots are then
-    CPU tensors while the submission declares CUDA, which the library rightly refuses - so these
-    tests read the DECISION and do not consume. Data through a device ring is covered by
-    test_device_ring_path, and end to end on real CUDA at the bottom of this file."""
+    CPU tensors while the submission declares CUDA, so what the library is told does not describe the
+    memory - these tests read the DECISION, and the ones that consume are the host-ring fallbacks,
+    where the two agree again. Data through a device ring is covered by test_device_ring_path, and
+    end to end on real CUDA at the bottom of this file."""
 
     # CUDA because it is a type the C API serves: an invented value would be refused by
     # runai_request, which is a different failure from the one under test.
