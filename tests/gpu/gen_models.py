@@ -50,7 +50,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 
 # Tensors with zero elements are left out for now: the streamer yields them on the CPU even when a CUDA device
 # was requested (https://github.com/dsx-ai-factory/model-streamer/issues/260), so every row of the mixed model
@@ -72,6 +72,7 @@ DTYPES = {
     "F8_E4M3": (1, "random"),
     "F8_E5M2": (1, "random"),
     "F8_E8M0": (1, "random"),
+    "F4": (1, "random"),
     "C64": (8, "random"),
     "I64": (8, "random"),
     "I32": (4, "random"),
@@ -85,11 +86,14 @@ DTYPES = {
 }
 DTYPE_NAMES = sorted(DTYPES)
 
-# F4 (two 4-bit values per byte, so the shape in the header is not the shape of the torch tensor) is not here yet:
-# the streamer rejects such a file (https://github.com/dsx-ai-factory/model-streamer/issues/234). The test run fails
-# when the streamer accepts a dtype that is neither in DTYPES nor here, so that a new dtype is never left untested
-# without someone deciding so.
-KNOWN_GAPS = frozenset({"F4"})
+# F4 packs two 4-bit values into a byte, and torch holds them as one float4_e2m1fn_x2 element. The header of a
+# safetensors file records the shape in values, so the shape of the torch tensor is the header's with the last
+# dimension halved (see packed_shape), and a tensor needs a last dimension that is even, so it has no scalar.
+PACKED_VALUES = {"F4": 2}
+
+# Dtypes that the streamer accepts but the generator cannot write yet. The test run fails when the streamer accepts a
+# dtype that is neither in DTYPES nor here, so that a new dtype is never left untested without someone deciding so.
+KNOWN_GAPS = frozenset()
 
 # The dtypes the models are drawn from: all of DTYPES, or the ones given with --dtypes. The test run passes the
 # ones the streamer accepts with the installed torch, which has no unsigned 16/32/64 bit or float8_e8m0 before
@@ -142,7 +146,17 @@ def elements(shape):
 
 
 def nbytes_of(spec):
-    return elements(spec.shape) * DTYPES[spec.dtype][0]
+    """Bytes of the tensor in the file. The shape counts values, which for a packed dtype (F4) are two to a byte."""
+    return elements(spec.shape) * DTYPES[spec.dtype][0] // PACKED_VALUES.get(spec.dtype, 1)
+
+
+def packed_shape(dtype, shape):
+    """The shape of the torch tensor for the shape in the header: the same, except that a packed dtype's last
+    dimension counts torch elements, each holding several values."""
+    values = PACKED_VALUES.get(dtype, 1)
+    if values == 1:
+        return list(shape)
+    return list(shape[:-1]) + [shape[-1] // values]
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -236,13 +250,18 @@ def random_shape(rng, itemsize, max_bytes):
 def random_tensor(rng, key, used, max_bytes, name=None):
     dtype = active_dtypes[int(rng.integers(0, len(active_dtypes)))]
     shape = random_shape(rng, DTYPES[dtype][0], max_bytes)
+    if dtype in PACKED_VALUES:
+        # A packed dtype needs a last dimension that is a multiple of the values per element, so no scalar. Doubling
+        # the last dimension keeps the bytes of the tensor what the draw gave.
+        shape = (PACKED_VALUES[dtype],) if not shape else shape[:-1] + (shape[-1] * PACKED_VALUES[dtype],)
     gen = DTYPES[dtype][1]
     return TensorSpec(name or realistic_name(key, used), dtype, shape, gen, key)
 
 
 def mandatory_tensors_mixed(first_key, used):
-    """Everything the mixed model must contain whatever the random draw gives: every dtype as a scalar, as a tensor of
-    rank 1-5 and as a pattern tensor; empty tensors (with EMPTY_TENSORS); the edge sizes; odd names."""
+    """Everything the mixed model must contain whatever the random draw gives: every dtype as a scalar (not a packed
+    dtype), as a tensor of rank 1-5 and as a pattern tensor; empty tensors (with EMPTY_TENSORS); the edge sizes; odd
+    names."""
     specs = []
     key = first_key
 
@@ -255,11 +274,15 @@ def mandatory_tensors_mixed(first_key, used):
 
     for index, dtype in enumerate(active_dtypes):
         gen = DTYPES[dtype][1]
+        values = PACKED_VALUES.get(dtype, 1)
         rank = 1 + index % 5
-        add("mandatory.%s.scalar" % dtype.lower(), dtype, (), gen)
-        add("mandatory.%s.rank%d" % (dtype.lower(), rank), dtype, [2 + j % 3 for j in range(rank)], gen)
+        dims = [2 + j % 3 for j in range(rank)]
+        dims[-1] *= values  # a packed dtype needs a last dimension that is a multiple of its values per element
+        if values == 1:
+            add("mandatory.%s.scalar" % dtype.lower(), dtype, (), gen)
+        add("mandatory.%s.rank%d" % (dtype.lower(), rank), dtype, dims, gen)
         add("mandatory.%s.special" % dtype.lower(), dtype,
-            (len(special_pattern(dtype)) // DTYPES[dtype][0],), "pattern")
+            (len(special_pattern(dtype)) * values // DTYPES[dtype][0],), "pattern")
     if EMPTY_TENSORS:
         add("mandatory.empty.f32", "F32", (0,), "random")
         add("mandatory.empty.i8", "I8", (3, 0, 2), "random")

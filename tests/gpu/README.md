@@ -29,11 +29,18 @@ demand, and a manual run is never skipped:
    what covers the newest dtypes; the oldest covers the code paths for a torch without `dtype.itemsize`, float8 or
    the unsigned 16/32/64 bit types.
 
+   pip installs the newest torch that the image's Python can use (Python 3.10 on Ubuntu 22.04), so when a torch release
+   stops supporting that Python, the newest leg would quietly test an older one. `env_check.py newest-torch` asks PyPI
+   for the newest release and compares: if they differ it fails the leg, says which release needs which Python, and
+   that the base container of the leg has to change (the check is in the job summary and in `env-check.txt`). The
+   run goes on, so the older torch still gets tested. If PyPI cannot be reached the check says it could not verify.
+
 ## What `setup_and_run.sh` does
 
 1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the wheel, and checks that the
    streamer is imported from the installed wheel and that two GPUs and NCCL are there;
-2. runs the CPU unit tests (generator, rows, real model download);
+2. in the newest leg, checks that the container does not limit the newest torch; runs the CPU unit tests (generator,
+   rows, real model download, the environment check);
 3. generates four synthetic models into `.gpu-fixtures/` (not in the repo; the runner's VM is discarded after
    the job) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
    hold every dtype that the streamer's own table accepts with the installed PyTorch and that the generator knows (the
@@ -70,10 +77,15 @@ Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.
 `--models mixed,many_files` to build only some of them.
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
-seed. The generator knows 17 dtypes: the 12 of the first version plus `C64`, `U16`, `U32`, `U64` and `F8_E8M0`.
+seed. The generator knows 18 dtypes: `F64`, `F32`, `F16`, `BF16`, the float8 types `F8_E4M3`, `F8_E5M2` and `F8_E8M0`,
+`F4`, `C64`, the signed integers `I64` to `I8`, the unsigned `U64` to `U8`, and `BOOL`.
 `--dtypes` narrows them; the test run passes the ones the streamer accepts with the installed PyTorch (a torch
-before 2.7 or so has no `F8_E8M0`, one before 2.3 has no unsigned 16/32/64 bit types, one before 2.1 no float8). `F4` is not generated yet: it packs two values per byte, so its header shape is not the torch
-shape, and the streamer rejects it today ([#234](https://github.com/dsx-ai-factory/model-streamer/issues/234)).
+before 2.8 has no `F4`, before 2.7 or so no `F8_E8M0`, before 2.3 no unsigned 16/32/64 bit types, before 2.1 no float8).
+`F4` packs two 4-bit values into a byte, so the header records its shape in values and the torch tensor
+(`float4_e2m1fn_x2`) has the last dimension halved (`packed_shape` in `gen_models.py`); an F4 tensor therefore has a
+last dimension that is even and no scalar form. The streamer loads such tensors since
+[#234](https://github.com/dsx-ai-factory/model-streamer/issues/234) was fixed, and the checks compare the torch shape
+with `packed_shape` of the manifest's. A copy of the F4 tensor to CUDA is exercised here for the first time.
 The expected dtype of a streamed tensor is taken from the streamer's own dtype table, so this test does not check
 the table itself; [#267](https://github.com/dsx-ai-factory/model-streamer/issues/267) compares it with safetensors
 in the CPU tests. The models hold no empty tensors (zero elements) for now, because the streamer yields them on the CPU

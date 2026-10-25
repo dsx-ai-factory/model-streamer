@@ -26,6 +26,7 @@ exec > >(tee "$RESULTS/run.log") 2>&1
 
 SETUP_TIMING="$RESULTS/timing-setup.jsonl"
 : > "$SETUP_TIMING"
+status=0
 
 # record NAME START END: append the wall time of a phase to the timing file and print it.
 record() {
@@ -110,9 +111,17 @@ for index in range(2):
     print(f"GPU {index}: {torch.cuda.get_device_name(index)}", flush=True)
 PY
 
-echo "== self-test of the generator, the rows and the real model download"
+# The newest-torch leg is meant to test the newest PyTorch. pip installs the newest release that this image's Python can
+# use, so when torch stops supporting that Python the leg quietly tests an older one. Flag it: the run goes on and
+# reports what it can, but it fails, and env-check.txt (shown in the job summary) says the base container has to change.
+if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
+    echo "== is this container limiting the newest torch?"
+    python3 tests/gpu/env_check.py newest-torch || status=1
+fi
+
+echo "== self-test of the generator, the rows, the real model download and the environment check"
 phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
-    tests/gpu/test_real_model.py
+    tests/gpu/test_real_model.py tests/gpu/test_env_check.py
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
 # streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
@@ -210,7 +219,6 @@ echo "open files limit now: soft $(ulimit -Sn)"
 # Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so
 # a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
 # lists in the Makefile's test_strategies keep sync_buffered last for hosts of any kind.)
-status=0
 for strategy in \
     sync_buffered \
     libaio_direct \

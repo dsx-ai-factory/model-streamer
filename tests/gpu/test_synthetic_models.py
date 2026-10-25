@@ -33,6 +33,7 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gen_models import packed_shape  # noqa: E402
 from matrix import WORLD, memory_limit, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 
@@ -166,8 +167,11 @@ class RowRun:
         if tensor.dtype != want_dtype:
             self.error("%s: dtype %s, expected %s" % (name, tensor.dtype, want_dtype))
             return
-        if list(tensor.shape) != entry["shape"]:
-            self.error("%s: shape %s, expected %s" % (name, list(tensor.shape), entry["shape"]))
+        # The manifest has the shape of the header, in values; the torch shape of a packed dtype (F4) has the last
+        # dimension halved.
+        want_shape = packed_shape(entry["dtype"], entry["shape"])
+        if list(tensor.shape) != want_shape:
+            self.error("%s: shape %s, expected %s" % (name, list(tensor.shape), want_shape))
             return
         if tensor.device != self.device:
             self.error("%s: on %s, expected %s" % (name, tensor.device, self.device))

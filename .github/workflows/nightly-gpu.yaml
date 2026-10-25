@@ -198,16 +198,20 @@ jobs:
           GPU_SELF_CHECK: ${{ matrix.newest && needs.changes.outputs.self_check || 'false' }}
           GPU_TORCH_SPEC: ${{ matrix.torch_spec }}
           GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
+          GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
         run: |
           docker run --rm --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
-            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_WHEEL_DIR=wheel \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_WHEEL_DIR=wheel \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh
 
       - name: Show where the time went
         if: always()
         run: |
+          if [ -f test-results/gpu/env-check.txt ]; then
+            { echo "### Does this container limit the newest torch? (${{ matrix.name }})"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f test-results/gpu/timing-summary.txt ]; then
             { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi

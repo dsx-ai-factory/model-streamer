@@ -7,6 +7,7 @@
 
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -99,7 +100,36 @@ class GenerateModels(unittest.TestCase):
 
     def test_unknown_dtype_is_refused(self):
         with tempfile.TemporaryDirectory(prefix="gen-models-") as other:
-            self.assertEqual(gen.main(["generate", "--out", other, "--seed", "11", "--dtypes", "F32,F4"]), 1)
+            self.assertEqual(gen.main(["generate", "--out", other, "--seed", "11", "--dtypes", "F32,F9"]), 1)
+
+    def test_packed_dtype_shapes_count_values_and_bytes_count_pairs(self):
+        f4 = [t for _, t in self.tensors("mixed") if t["dtype"] == "F4"]
+        self.assertTrue(f4)
+        for tensor in f4:
+            values = 1
+            for dim in tensor["shape"]:
+                values *= dim
+            self.assertTrue(tensor["shape"], "an F4 tensor needs a last dimension, so it has no scalar")
+            self.assertEqual(tensor["shape"][-1] % 2, 0, tensor["name"])
+            self.assertEqual(tensor["end"] - tensor["start"], values // 2, tensor["name"])
+        special = next(t for t in f4 if t["name"] == "mandatory.f4.special")
+        self.assertEqual((special["shape"], special["end"] - special["start"]), ([512], 256))
+
+    def test_packed_shape_halves_only_the_last_dimension_of_a_packed_dtype(self):
+        self.assertEqual(gen.packed_shape("F4", (2, 4)), [2, 2])
+        self.assertEqual(gen.packed_shape("F4", (6,)), [3])
+        self.assertEqual(gen.packed_shape("U8", (2, 4)), [2, 4])
+        self.assertEqual(gen.packed_shape("F32", ()), [])
+
+    def test_the_header_of_an_f4_tensor_records_the_shape_in_values(self):
+        entry = next(f for f, t in self.tensors("mixed") if t["name"] == "mandatory.f4.special")
+        path = os.path.join(self.out, "mixed", entry["path"])
+        with open(path, "rb") as handle:
+            (header_len,) = struct.unpack("<Q", handle.read(8))
+            header = json.loads(handle.read(header_len).decode("utf-8"))
+        self.assertEqual(header["mandatory.f4.special"]["shape"], [512])
+        start, end = header["mandatory.f4.special"]["data_offsets"]
+        self.assertEqual(end - start, 256)
 
     def test_empty_tensors_only_with_the_flag(self):
         empty = [t["name"] for m in gen.MODEL_NAMES for _, t in self.tensors(m) if t["end"] == t["start"]]
