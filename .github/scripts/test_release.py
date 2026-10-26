@@ -28,7 +28,7 @@ class ReleaseBundleTests(unittest.TestCase):
             directory = self.root / "packages" / package / "dist"
             directory.mkdir(parents=True)
             for arch in ("x86_64", "aarch64"):
-                path = directory / f"{package}-{VERSION}-py3-none-manylinux_2_30_{arch}.whl"
+                path = directory / f"{package}-{VERSION}-py3-none-manylinux_2_28_{arch}.whl"
                 path.write_bytes(b"fixture wheel content")
                 self.paths.append(path)
         self.cpp = self.root / "cpp-artifacts"
@@ -129,7 +129,7 @@ class ReleaseBundleTests(unittest.TestCase):
 
     def test_duplicate_platform_wheel_rejected(self):
         path = self.paths[0]
-        path.with_name(path.name.replace("manylinux_2_30", "manylinux2014")).write_bytes(b"duplicate")
+        path.with_name(path.name.replace("manylinux_2_28", "manylinux2014")).write_bytes(b"duplicate")
         self.assertNotEqual(self.collect().returncode, 0)
 
     def test_checksum_detects_modified_wheel(self):
