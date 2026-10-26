@@ -60,6 +60,8 @@ std::ostream & operator<<(std::ostream &, DirectSupport);
 
 std::ostream & operator<<(std::ostream &, const MountCapability &);
 
+struct LadderBlock;
+
 // Probed once per mount, then remembered.
 //
 // A model's shards share a mount, so this turns 200 probes into one. Entries are small values and
@@ -119,11 +121,11 @@ class MountCapabilities
     //
     //   Success              out_block is this mount's requirement.
     //   FileAccessError      the mount refuses O_DIRECT. out_block is 0, and it is remembered.
-    //   UnknownError         nothing could be probed - the path is missing or unreadable. NOTHING is
-    //                        remembered, so the NEXT submission measures again. A caller that treated
-    //                        this as a final answer would freeze a mount on a fallback for the life
-    //                        of the process, which matters for a long-lived streamer serving many
-    //                        submissions - checkpoint restore, not vLLM's single model load.
+    //   UnknownError         no measurement - the path is missing, unreadable, or too short to probe.
+    //                        out_block is 0 and NOTHING is remembered, so the next file can measure.
+    //                        Treating this as a final answer would freeze a mount on a fallback for
+    //                        the life of the process, which matters for a long-lived streamer serving
+    //                        many submissions - checkpoint restore, not vLLM's single model load.
     //
     // Measured, not assumed. A block larger than the mount needs is not free: it pads more between
     // ranges and bounces more of every chunk's head and tail. Measured on NFS under the `chunks`
@@ -142,10 +144,9 @@ class MountCapabilities
     // as an incomplete type, and the system one would never be found.
     MountCapability remember(dev_t dev, bool memory_backed);
 
-    // Records a settled O_DIRECT answer and returns it, so callers read as one line.
-    // Measure this mount's requirement: statx first, then an ascending trial-read ladder. Returns 0
-    // when no candidate works, which means the mount cannot serve direct reads at all.
-    size_t measure_direct_block(const std::string & file_path);
+    // Measure this mount's requirement: statx first, then an ascending trial-read ladder.
+    // A short file leaves the answer unmeasured; only a measured zero rules out direct reads.
+    LadderBlock measure_direct_block(const std::string & file_path);
 
     mutable std::mutex _mutex;
     std::map<dev_t, MountCapability> _mounts;

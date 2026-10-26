@@ -431,7 +431,7 @@ LadderBlock ladder_direct_block(off_t size, size_t page,
     return { 0, true };
 }
 
-size_t MountCapabilities::measure_direct_block(const std::string & file_path)
+LadderBlock MountCapabilities::measure_direct_block(const std::string & file_path)
 {
     // The kernel's own answer first: exact, and no I/O.
     //
@@ -445,14 +445,14 @@ size_t MountCapabilities::measure_direct_block(const std::string & file_path)
 
         LOG(DEBUG) << "statx reports direct-I/O alignment for " << file_path << ": memory "
                    << reported.mem << ", offset and length " << reported.offset;
-        return block;
+        return { block, true };
     }
 
     // No statx answer - below 6.1, or a filesystem that does not implement it. Measure by reading.
     const utils::Fd fd(::open(file_path.c_str(), O_RDONLY | O_DIRECT));
     if (fd.fd() < 0)
     {
-        return 0;   // the caller already distinguishes "mount refuses" from "cannot tell"
+        return { 0, false };   // the file may have become inaccessible since the first open
     }
 
     // How much file there is to place a probe read in. The ladder decides which rungs that allows.
@@ -466,10 +466,10 @@ size_t MountCapabilities::measure_direct_block(const std::string & file_path)
     if (!decided.measured)
     {
         LOG(INFO) << "Cannot place a strict probe read in " << file_path << " (" << size
-                  << " bytes); assuming a direct-I/O alignment of " << decided.block << " bytes";
+                  << " bytes); direct-I/O alignment remains unmeasured";
     }
 
-    return decided.block;
+    return decided;
 }
 
 DirectSupport MountCapabilities::direct_support(dev_t dev, const std::string & file_path)
@@ -540,7 +540,14 @@ common::ResponseCode MountCapabilities::direct_block(dev_t dev, const std::strin
     // missing file or a directory into "this mount serves direct reads" - the open decides that, and
     // it has already run. See direct_block_override().
     const size_t forced = direct_block_override();
-    const size_t block = forced != 0 ? forced : measure_direct_block(file_path);
+    const auto decided = forced != 0 ? LadderBlock{ forced, true } : measure_direct_block(file_path);
+    if (!decided.measured)
+    {
+        // Keep out_block at zero: callers treat any nonzero value as a settled measurement.
+        // Do not cache a short-file guess, so a larger file can establish the mount's alignment.
+        return common::ResponseCode::UnknownError;
+    }
+    const size_t block = decided.block;
 
     const auto guard = std::unique_lock<std::mutex>(_mutex);
     _direct.try_emplace(dev, block);

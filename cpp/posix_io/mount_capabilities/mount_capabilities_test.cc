@@ -512,76 +512,60 @@ TEST(MountCapabilities, The_Reported_Block_Works_At_A_Non_Zero_Offset)
         << ", so every chunk after the first would fail or fall back to buffered reads";
 }
 
-// A file too short to place a rung's read cannot answer for its mount.
-//
-// Each rung is probed at its own offset, so a short file reads at EOF and returns 0 - which is not
-// EINVAL, so the rung would pass without the kernel ever checking the alignment. The size guard
-// skips such a rung and the host page size stands in for the measurement.
-//
-// tmpfs is the only mount here that reaches the ladder: statx reports nothing for it, and (kernel
-// 6.8) it accepts every direct read, so a rung that IS tested always succeeds. That is what makes
-// the pair below sharp. The large file must reach a rung; the short one must not, on the same mount.
-// Both outcomes still allow a kernel that refuses the O_DIRECT open, which reports no block at all.
-TEST(MountCapabilities, A_Short_File_Cannot_Reach_A_Rung)
+// tmpfs reaches the ladder without a statx answer and accepts every probe. A short file cannot
+// place any probe, but a larger file on the SAME MountCapabilities instance must still measure
+// the mount. Production routing excludes tmpfs; here it exercises the probe/cache boundary.
+TEST(MountCapabilities, A_Short_File_Does_Not_Cache_An_Assumed_Block)
 {
     if (!is_tmpfs("/dev/shm"))
     {
         GTEST_SKIP() << "/dev/shm is not tmpfs here";
     }
 
-    const auto write_shm = [](const std::string & path, size_t bytes)
+    utils::temp::File short_file("/dev/shm", utils::random::string(), utils::random::buffer(100));
+    utils::temp::File large("/dev/shm", utils::random::string(), utils::random::buffer(256 * 1024));
+
+    // Check the environment independently of the implementation under test.
+    const utils::Fd fd(::open(short_file.path.c_str(), O_RDONLY | O_DIRECT));
+    if (fd.fd() < 0 && (errno == EINVAL || errno == EOPNOTSUPP))
     {
-        const utils::Fd fd(::open(path.c_str(), O_CREAT | O_RDWR, 0600));
-        if (fd.fd() < 0)
-        {
-            return false;
-        }
+        GTEST_SKIP() << "this kernel refuses O_DIRECT on tmpfs";
+    }
+    ASSERT_GE(fd.fd(), 0);
+    ASSERT_FALSE(raw_statx_dio_align(short_file.path).answered);
+    ASSERT_FALSE(raw_statx_dio_align(large.path).answered);
 
-        const auto data = utils::random::buffer(bytes);
-        return ::write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size());
-    };
+    const dev_t dev = device_of(short_file.path);
+    ASSERT_EQ(dev, device_of(large.path));
+    MountCapabilities mounts;
 
-    const std::string large = "/dev/shm/runai_rung_large_" + utils::random::string();
-    const std::string short_file = "/dev/shm/runai_rung_short_" + utils::random::string();
-
-    ASSERT_TRUE(write_shm(large, 256 * 1024));
-    ASSERT_TRUE(write_shm(short_file, 100));
-
-    ASSERT_FALSE(raw_statx_dio_align(large).answered)
-        << "statx now answers on tmpfs, so neither file reaches the ladder";
-
-    // One instance each: direct_block caches by st_dev, and both files are on the same mount.
-    size_t large_block = 0;
-    size_t short_block = 0;
-    MountCapabilities().direct_block(device_of(large), large, large_block);
-    MountCapabilities().direct_block(device_of(short_file), short_file, short_block);
-
-    ::unlink(large.c_str());
-    ::unlink(short_file.c_str());
-
-    if (large_block == 0 && short_block == 0)
+    size_t block = 123;   // an unknown answer must clear the caller's previous value
+    const auto short_result = mounts.direct_block(dev, short_file.path, block);
+    const size_t forced = direct_block_override();
+    if (forced != 0)
     {
-        RecordProperty("tmpfs_o_direct_open", "refused");
-        return;   // this kernel refuses the open, so no probe ran for either file
+        EXPECT_EQ(short_result, common::ResponseCode::Success);
+        EXPECT_EQ(block, forced) << "an explicit override is settled even for a short file";
+        EXPECT_EQ(mounts.direct_support(dev, short_file.path), DirectSupport::Yes);
+    }
+    else
+    {
+        EXPECT_EQ(short_result, common::ResponseCode::UnknownError);
+        EXPECT_EQ(block, 0u) << "an assumed block must not reach callers as a measurement";
+        EXPECT_EQ(mounts.direct_support(dev, short_file.path), DirectSupport::Unknown);
     }
 
-    // An override replaces the measurement, so neither value came from the ladder and the contrast
-    // below would be asserting nothing. Assert what an override promises instead: that the file's
-    // size cannot change it. RUNAI_STREAMER_DIRECT_BLOCK=4096 is a documented workaround, so a
-    // developer may well have it set.
-    if (const size_t forced = direct_block_override(); forced != 0)
-    {
-        EXPECT_EQ(large_block, forced);
-        EXPECT_EQ(short_block, forced) << "an override must stand whatever the file size";
-        return;
-    }
+    // The large file must get a fresh probe, not the short file's guess or a cached rejection.
+    EXPECT_EQ(mounts.direct_block(dev, large.path, block), common::ResponseCode::Success);
+    const size_t expected = forced != 0 ? forced : 512;
+    EXPECT_EQ(block, expected) << "tmpfs accepts the first rung once the file is long enough";
 
-    const auto page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
-
-    EXPECT_EQ(large_block, 512u) << "tmpfs accepts every read, so the first rung should answer";
-    EXPECT_EQ(short_block, page)
-        << "100 bytes cannot place any rung's read; reporting " << short_block
-        << " means a rung passed on a file too short to test it";
+    // A settled answer IS cached. This path cannot be probed, so only the cache can answer.
+    block = 0;
+    const std::string missing = "/no/such/path/" + utils::random::string();
+    EXPECT_EQ(mounts.direct_block(dev, missing, block), common::ResponseCode::Success);
+    EXPECT_EQ(block, expected);
+    EXPECT_EQ(mounts.direct_support(dev, missing), DirectSupport::Yes);
 }
 
 // The ladder's rules, with the read replaced by an answer a test chooses.
