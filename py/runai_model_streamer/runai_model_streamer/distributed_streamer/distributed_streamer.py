@@ -68,10 +68,17 @@ def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
 
 class DistributedStreamer:
-    def __init__(self) -> None:
+    def __init__(self, process_group: Optional[dist.ProcessGroup] = None) -> None:
+        """Create a streamer, optionally scoped to an existing process group.
+
+        When ``process_group`` is provided, all distributed streaming collectives
+        use that exact group. The caller retains ownership of the group.
+        """
         self.file_streamer = FileStreamer()
-        self.params = _distributedStreamerParams()
-        self.distributed_streamer = _distributedStreamer(self.file_streamer)
+        self.params = _distributedStreamerParams(process_group)
+        self.distributed_streamer = _distributedStreamer(
+            self.file_streamer, process_group
+        )
         self.is_distributed = False
         self._ring_info: Optional[Tuple[int, int, int]] = None
 
@@ -91,7 +98,7 @@ class DistributedStreamer:
     def get_group_size(self) -> int:
         if not dist.is_initialized():
             return 1
-        return dist.get_world_size()
+        return dist.get_world_size(group=self.params.process_group)
 
     def get_cuda_free_memory(self) -> int:
         if not torch.cuda.is_available():
@@ -128,7 +135,7 @@ class DistributedStreamer:
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
         if self.is_distributed:
-            backend_name = dist.get_backend()
+            backend_name = dist.get_backend(group=self.params.process_group)
             if backend_name == "nccl" and device == "cpu":
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for CPU device - fallback to non distributed streaming", backend_name)
                 self.is_distributed = False
@@ -140,7 +147,7 @@ class DistributedStreamer:
                 self.is_distributed = False
 
         # check if there is enough free memory on the device
-        if self.is_distributed and torch.cuda.is_available() and dist.get_backend() == "nccl":
+        if self.is_distributed and torch.cuda.is_available() and dist.get_backend(group=self.params.process_group) == "nccl":
             free_memory = self.get_cuda_free_memory()
             if free_memory < 2 * self.params.max_chunk:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
@@ -226,7 +233,8 @@ class DistributedStreamer:
         return
 
 class _distributedStreamerParams:
-    def __init__(self) -> None:
+    def __init__(self, process_group: Optional[dist.ProcessGroup] = None) -> None:
+        self.process_group = process_group
         self.num_processes_on_node = None
         self.my_global_rank = 0
         self.groups_by_ranks = []
@@ -236,7 +244,16 @@ class _distributedStreamerParams:
     def get_group_size(self) -> int:
         if not dist.is_initialized():
             return 1
-        return dist.get_world_size()
+        return dist.get_world_size(group=self.process_group)
+
+    def get_process_group_ranks(self) -> List[int]:
+        group_size = self.get_group_size()
+        if self.process_group is None:
+            return list(range(group_size))
+        return [
+            dist.get_global_rank(self.process_group, group_rank)
+            for group_rank in range(group_size)
+        ]
 
     def get_broadcast_timeout(self) -> timedelta:
         timeout_val = os.environ.get("RUNAI_STREAMER_DIST_TIMEOUT")
@@ -255,12 +272,16 @@ class _distributedStreamerParams:
         if not dist.is_initialized():
             return 1, 0, [[0]]
 
-        world_size = dist.get_world_size()
-
-        if world_size == 1:
-            return 1, 0, [[0]]
+        world_size = self.get_group_size()
 
         my_global_rank = dist.get_rank()
+
+        if self.process_group is not None:
+            group_ranks = self.get_process_group_ranks()
+            return world_size, my_global_rank, [group_ranks]
+
+        if world_size == 1:
+            return 1, my_global_rank, [[my_global_rank]]
 
         # 1. Discover all peers on all nodes (this is a global collective)
         # create global group just for discovering the local ranks
@@ -317,8 +338,10 @@ class _distributedStreamerParams:
             self.my_global_rank = dist.get_rank()
 
 class _distributedStreamer:
-    def __init__(self, file_streamer : FileStreamer) -> None:
+    def __init__(self, file_streamer : FileStreamer, process_group: Optional[dist.ProcessGroup] = None) -> None:
         self.file_streamer = file_streamer
+        self.process_group = process_group
+        self.owns_distribution_group = process_group is None
         self.device = None
         self.rank_file_chunks_list = {} # post Partitioning FileChunks to be streamed by this rank
         self.rank_dicts_map = {} # maps post partitioning FileChunks.id and chunk index to the original FileChunks.id and chunk index and chunk size
@@ -341,21 +364,25 @@ class _distributedStreamer:
         return self
 
     def __exit__(self, exc_type: any, exc_value: any, traceback: any) -> None:
-        if self.distribution_group:
+        if self.distribution_group is not None:
             try:
                 # Only attempt a barrier if there was no exception.
                 if exc_type is None:
                     torch.distributed.barrier(group=self.distribution_group)
             finally:
-                # ALWAYS destroy the group.
-                torch.distributed.destroy_process_group(group=self.distribution_group)
+                if self.owns_distribution_group:
+                    torch.distributed.destroy_process_group(group=self.distribution_group)
                 del self.distribution_group
                 self.distribution_group = None
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
-        if self.distribution_group:
+        if self.distribution_group is not None:
             return self.distribution_group
+
+        if self.process_group is not None:
+            self.local_group_global_ranks = self.groups_by_ranks[0]
+            return self.process_group
 
         is_global_group = int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
 
@@ -432,7 +459,7 @@ class _distributedStreamer:
         # set rank in the new distribution group
         self.set_rank()
 
-        if self.original_group_rank == 0:
+        if self.rank == 0:
             logger.info(f"[RunAI Streamer][Distributed] Using distributed streaming between {self.group_size} processes")
 
         # Partition tensors between processes in the distribution group.
