@@ -468,6 +468,26 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Broadcast identity verified on all {self.world_size} ranks.")
 
+    def test_1_lone_reader_does_not_wait_for_idle_peers(self):
+        # One rank streams alone while the others wait outside the streamer. A collective in the
+        # streamer would wait for peers that never join it, until the timeout.
+        requests = self._prepare_file_requests([{"size": 100, "chunks": [40, 60]}])
+        with open(requests[0].path, "rb") as f:
+            expected = f.read()
+
+        try:
+            if self.rank == 0:
+                chunks = [None] * len(requests[0].sizes)
+                with patch.dict(os.environ, {"RUNAI_STREAMER_DIST_TIMEOUT": "5"}):
+                    with DistributedStreamer() as streamer:
+                        streamer.stream_files(requests, None, "cpu", False, discover_ranks=False)
+                        for _, chunk_idx, data_tensor in streamer.get_chunks():
+                            chunks[chunk_idx] = data_tensor.numpy().tobytes()
+                self.assertEqual(expected, b"".join(chunks))
+        finally:
+            # the idle ranks wait here, outside the streamer
+            dist.barrier()
+
     def test_9_failure_on_one_rank(self):
         if self.world_size < 2:
             self.skipTest("This failure test requires at least 2 processes.")
