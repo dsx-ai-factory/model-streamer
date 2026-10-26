@@ -8,6 +8,7 @@ import torch.distributed as dist
 import os
 from datetime import timedelta
 import socket
+import threading
 
 from runai_model_streamer.file_streamer import (
     FileStreamer,
@@ -84,8 +85,12 @@ class DistributedStreamer:
         try:
             self.distributed_streamer.__exit__(exc_type, exc_value, traceback)
         finally:
-            # Ensure the second __exit__ is always called
-            self.file_streamer.__exit__(exc_type, exc_value, traceback)
+            try:
+                # Ensure the second __exit__ is always called
+                self.file_streamer.__exit__(exc_type, exc_value, traceback)
+            finally:
+                # after the CPP threads that read the count are joined
+                self.params.clear_process_group_size()
         return
     
     def get_group_size(self) -> int:
@@ -225,6 +230,11 @@ class DistributedStreamer:
                 yield item
         return
 
+# the count discovery wrote, removed when the last session that uses it ends
+_process_group_size_lock = threading.Lock()
+_written_process_group_size: Optional[str] = None
+_process_group_size_sessions = 0
+
 class _distributedStreamerParams:
     def __init__(self) -> None:
         self.num_processes_on_node = None
@@ -232,6 +242,7 @@ class _distributedStreamerParams:
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.max_chunk = 0
+        self.uses_process_group_size = False
  
     def get_group_size(self) -> int:
         if not dist.is_initialized():
@@ -308,13 +319,39 @@ class _distributedStreamerParams:
         # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()
-        if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") is None:
-            os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = str(self.num_processes_on_node)
+        self.use_process_group_size()
+
+    def use_process_group_size(self) -> None:
+        global _written_process_group_size, _process_group_size_sessions
+        if self.uses_process_group_size:
+            return
+        with _process_group_size_lock:
+            current = os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE")
+            if current is None:
+                _written_process_group_size = str(self.num_processes_on_node)
+                os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = _written_process_group_size
+            elif current != _written_process_group_size:
+                return  # the user's count
+            self.uses_process_group_size = True
+            _process_group_size_sessions += 1
 
     def set_rank_without_discovery(self) -> None:
         # RUNAI_STREAMER_PROCESS_GROUP_SIZE is not guessed, so the CPP layer defaults to 1: a count larger than the readers lowers their throughput
         if dist.is_initialized():
             self.my_global_rank = dist.get_rank()
+
+    def clear_process_group_size(self) -> None:
+        # a later session may read without its peers. A count the user set or replaced is kept
+        global _written_process_group_size, _process_group_size_sessions
+        if not self.uses_process_group_size:
+            return
+        self.uses_process_group_size = False
+        with _process_group_size_lock:
+            _process_group_size_sessions -= 1
+            if _process_group_size_sessions == 0:
+                if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") == _written_process_group_size:
+                    del os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"]
+                _written_process_group_size = None
 
 class _distributedStreamer:
     def __init__(self, file_streamer : FileStreamer) -> None:
