@@ -49,7 +49,7 @@ below, the application copies each tensor to a CUDA GPU while reads continue.
 | --- | --- |
 | [`cpp/streamer`](cpp/streamer) | C++ streaming engine and concurrent reads |
 | [`cpp/s3`](cpp/s3), [`cpp/gcs`](cpp/gcs), [`cpp/azure`](cpp/azure) | Object storage backend clients |
-| [`cpp/cc`](cpp/cc) | C API used by the Python wrapper through `ctypes` |
+| [`cpp/streamer/api/streamer`](cpp/streamer/api/streamer) | C API used by the Python wrapper through `ctypes` |
 | [`py/runai_model_streamer`](py/runai_model_streamer) | Python SDK and SafeTensors-to-PyTorch interface |
 
 See the [documentation overview](docs/README.md) for the data flow and supported
