@@ -291,6 +291,10 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued, bool & out_defer
             // gave: any negative return means nothing was accepted, so the untouched array is still
             // right whatever the errno. EBUSY joins it - io_uring deferred that and this did not, so
             // a saturated queue failed a file here and merely waited there.
+            //
+            // Carried for that one rule rather than because this engine meets it: io_submit does not
+            // document EBUSY, and an error raised for one read arrives as a completion instead, so
+            // the queue cannot be blocked by a head that only this errno refuses.
             if (submit_can_defer(error))
             {
                 out_deferred = true;
