@@ -96,7 +96,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CI_IMAGE: ghcr.io/${{ github.repository }}/devcontainer:latest
       ARCH: x86_64
       COMPONENT: streamer
     steps:
@@ -104,6 +103,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      # An image reference has to be lowercase, and github.repository keeps the case of the owner and the repository
+      # (the other workflows of the repository lowercase it the same way).
+      - name: Name the development image
+        run: |
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "CI_IMAGE=ghcr.io/${repository}/devcontainer:latest" >> "$GITHUB_ENV"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3

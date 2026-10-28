@@ -7,8 +7,9 @@
 
 SMOKE is "true" when the smoke test ran. Prints one line per results file (rows-<strategy>-rank<N>.json, anywhere under
 RESULTS_DIR): how many of the expected rows finished, how many of those failed (a row that failed on purpose in a drill
-is not counted), and the row in which the run ended if one was left started. Exits 1 when a file is incomplete, or when
-a strategy, or the smoke test, has no results file at all.
+is not counted), and the row in which the run ended if one was left started. Exits 1 when a file is incomplete, when a
+strategy, or the smoke test, has no results file at all, or when a run has the results file of one rank and not of the
+other (a rank that died before its first write).
 
 A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends that strategy's run:
 the rows after it never start, and must not hide behind the strategies that did finish.
@@ -18,14 +19,19 @@ Needs only the standard library."""
 import glob
 import json
 import os
+import re
 import sys
+
+RANKS = 2  # the ranks of the test (matrix.WORLD; test_rows_summary.py checks that they agree)
+_FILE = re.compile(r"^rows-(?P<name>.+)-rank(?P<rank>\d+)\.json$")
 
 
 def summarize(results, smoke, strategies):
     """(lines, incomplete)."""
     lines = []
     incomplete = False
-    for path in sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True)):
+    paths = sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True))
+    for path in paths:
         with open(path) as handle:
             data = json.load(handle)
         rows = data["rows"]
@@ -40,6 +46,19 @@ def summarize(results, smoke, strategies):
             incomplete = True
             line += "  <-- INCOMPLETE"
         lines.append(line)
+    # A run has one results file per rank. A rank that died before its first write leaves the file of the other rank, and
+    # the run would look present.
+    ranks_of = {}
+    for path in paths:
+        found = _FILE.match(os.path.basename(path))
+        ranks_of.setdefault((os.path.dirname(path), found.group("name")), set()).add(int(found.group("rank")))
+    for (directory, name), ranks in sorted(ranks_of.items()):
+        missing = sorted(set(range(RANKS)) - ranks)
+        if missing:
+            incomplete = True
+            lines.append("%s: no results file of rank %s  <-- INCOMPLETE" % (
+                os.path.relpath(os.path.join(directory, "rows-%s-rank*.json" % name), results),
+                ", ".join(str(rank) for rank in missing)))
     for strategy in strategies:
         if not glob.glob(os.path.join(results, "rows-%s-rank*.json" % strategy)):
             incomplete = True

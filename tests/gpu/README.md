@@ -160,8 +160,9 @@ are not run for that strategy; the other strategies still run. A drill on 2026-1
 mid-row ended with `Watchdog caught collective operation timeout` and exit code -6 on the other rank).
 The run is bounded, but it cannot report the row from inside the process, so the results file lists a row as
 started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran` (`rows_summary.py`): for every
-results file how many of the expected rows finished, and in which row the run ended. An incomplete strategy fails the
-job.
+results file how many of the expected rows finished, and in which row the run ended, and it checks that each of the two
+ranks wrote its results file (a rank that died before its first write leaves only the other's). An incomplete strategy
+fails the job.
 
 The time caps are for a hang: 30 minutes per strategy (a strategy takes about 10 minutes on a healthy runner, 18 on a
 slow day), 10 for the self-check and 10 for the smoke test. They add up, with the setup, to 150 minutes at the very worst,

@@ -82,6 +82,37 @@ class Summary(unittest.TestCase):
         self.assertTrue(incomplete)
         self.assertIn("libaio_direct: no results at all", lines[-1])
 
+    def test_a_rank_without_a_results_file_is_incomplete(self):
+        """A rank that died before its first write leaves the file of the other rank, so the strategy has results."""
+        for strategy in STRATEGIES:
+            self.write("rows-%s-rank0.json" % strategy, [row("a", True)], 1)
+        self.write("rows-sync_buffered-rank1.json", [row("a", True)], 1)
+        lines, incomplete = self.summarize()
+        self.assertTrue(incomplete)
+        self.assertEqual([line for line in lines if "no results file" in line],
+                         ["rows-libaio_direct-rank*.json: no results file of rank 1  <-- INCOMPLETE"])
+
+    def test_the_first_rank_missing_is_found_too(self):
+        for strategy in STRATEGIES:
+            self.write("rows-%s-rank1.json" % strategy, [row("a", True)], 1)
+        lines, incomplete = self.summarize()
+        self.assertTrue(incomplete)
+        self.assertEqual(sum("no results file of rank 0" in line for line in lines), 2)
+
+    def test_the_smoke_and_self_check_results_need_both_ranks_too(self):
+        self.write_all([row("a", True)], 1)
+        self.write("rows-default-rank0.json", [row("s", True)], 1, subdirectory="smoke")
+        self.write("rows-sync_buffered-rank1.json", [row("c", False, drill="leak")], 1, subdirectory="self-check")
+        lines, incomplete = self.summarize(smoke=True)
+        self.assertTrue(incomplete)
+        missing = [line.split(":")[0] for line in lines if "no results file" in line]
+        self.assertEqual(missing, [os.path.join("self-check", "rows-sync_buffered-rank*.json"),
+                                   os.path.join("smoke", "rows-default-rank*.json")])
+
+    def test_the_ranks_are_those_of_the_test(self):
+        import matrix
+        self.assertEqual(rows_summary.RANKS, matrix.WORLD)
+
     def test_a_leg_with_no_row_to_run_is_complete(self):
         self.write_all([], 0)
         lines, incomplete = self.summarize()
@@ -94,12 +125,15 @@ class Summary(unittest.TestCase):
         lines, incomplete = self.summarize(smoke=True)
         self.assertTrue(incomplete)
         self.assertIn("smoke: no results at all", lines[-1])
-        self.write("rows-default-rank0.json", [row("s", True)], 1, subdirectory="smoke")
+        for rank in (0, 1):
+            self.write("rows-default-rank%d.json" % rank, [row("s", True)], 1, subdirectory="smoke")
         self.assertFalse(self.summarize(smoke=True)[1])
 
     def test_results_in_subdirectories_are_listed_with_their_path(self):
         self.write_all([row("a", True)], 1)
-        self.write("rows-sync_buffered-rank0.json", [row("c", False, drill="leak")], 1, subdirectory="self-check")
+        for rank in (0, 1):
+            self.write("rows-sync_buffered-rank%d.json" % rank, [row("c", False, drill="leak")], 1,
+                       subdirectory="self-check")
         lines, _ = self.summarize()
         self.assertTrue(any(line.startswith(os.path.join("self-check", "rows-sync_buffered-rank0.json"))
                             for line in lines), lines)
@@ -108,8 +142,9 @@ class Summary(unittest.TestCase):
 class CommandLine(unittest.TestCase):
     def test_exit_status_follows_the_summary(self):
         with tempfile.TemporaryDirectory(prefix="rows-summary-") as directory:
-            with open(os.path.join(directory, "rows-sync_buffered-rank0.json"), "w") as handle:
-                json.dump({"strategy": "x", "expected_rows": 1, "rows": [row("a", True)]}, handle)
+            for rank in (0, 1):
+                with open(os.path.join(directory, "rows-sync_buffered-rank%d.json" % rank), "w") as handle:
+                    json.dump({"strategy": "x", "expected_rows": 1, "rows": [row("a", True)]}, handle)
             with redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(rows_summary.main([directory, "false", "sync_buffered"]), 0)
                 self.assertEqual(rows_summary.main([directory, "false", "sync_buffered", "libaio_direct"]), 1)
