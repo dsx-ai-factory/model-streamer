@@ -81,6 +81,21 @@ class Manifest(Fixture):
         starts = [t["start"] for t in manifest["files"][0]["tensors"]]
         self.assertEqual(starts, sorted(starts))
 
+    def test_an_empty_tensor_is_accepted_wherever_the_header_lists_it(self):
+        """An empty tensor starts where the next one does. Sorted by start alone, the order of two such tensors was the
+        order of the header, and a header that lists the empty one second was refused as a file with a hole."""
+        for names in (("b", "e"), ("e", "b")):
+            offsets = {"b": [0, 3], "e": [0, 0]}
+            header = {name: {"dtype": "U8", "shape": [offsets[name][1]], "data_offsets": offsets[name]}
+                      for name in names}
+            encoded = json.dumps(header).encode()
+            path = os.path.join(self.dir.name, "empty-%s.safetensors" % "".join(names))
+            with open(path, "wb") as handle:
+                handle.write(struct.pack("<Q", len(encoded)) + encoded + bytes(3))
+            manifest = real_model.build_manifest(self.dir.name, os.path.basename(path))
+            self.assertEqual([t["name"] for t in manifest["files"][0]["tensors"]], ["e", "b"], names)
+            self.assertEqual(manifest["total_data_bytes"], 3)
+
     def test_a_hole_between_tensors_is_refused(self):
         path = os.path.join(self.dir.name, "hole.safetensors")
         header = {"a": {"dtype": "U8", "shape": [2], "data_offsets": [0, 2]},

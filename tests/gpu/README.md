@@ -76,7 +76,7 @@ one to host memory and then `.to()`.
 | `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
 | `many_tensors` | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
 | `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
-| `many_files` | 5,000 files, some header-only, some holding a single 1-byte tensor | about 90 MB |
+| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, a few with a larger tensor | 5 to 11 MB, depending on the seed |
 
 Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
 `--models mixed,many_files` to build only some of them.
@@ -131,8 +131,9 @@ The memory limit decides whether the host buffers, the ring the streamer reads i
 N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
 
 - `tight`: about a sixteenth of the model, never below twice the largest range (a tensor or a file header) times
-  the ranks sharing the limit: two buffers for `mixed`, five for `many_tensors`, one for the other two. The
-  model passes through the ring many times, and every buffer is reused.
+  the ranks sharing the limit (and at least 1 MiB): two buffers for `mixed`, five for `many_tensors`, one for
+  `giant_tensor`, and for `many_files` between two and about seventeen, depending on the seed (the size of its largest
+  tensor decides). The model passes through the ring many times, and every buffer is reused.
 - `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
   once. Only `mixed` and `many_tensors` can have this.
 - `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
@@ -158,8 +159,15 @@ the streamer's timeout (`RUNAI_STREAMER_DIST_TIMEOUT`, 300 s here) the NCCL watc
 are not run for that strategy; the other strategies still run. A drill on 2026-10-20 showed this (a rank raising
 mid-row ended with `Watchdog caught collective operation timeout` and exit code -6 on the other rank).
 The run is bounded, but it cannot report the row from inside the process, so the results file lists a row as
-started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran`: for every results file how many
-of the expected rows finished, and in which row the run ended. An incomplete strategy fails the job.
+started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran` (`rows_summary.py`): for every
+results file how many of the expected rows finished, and in which row the run ended. An incomplete strategy fails the
+job.
+
+The time caps are for a hang: 30 minutes per strategy (a strategy takes about 10 minutes on a healthy runner, 18 on a
+slow day), 10 for the self-check and 10 for the smoke test. They add up, with the setup, to 150 minutes at the very worst,
+below the job's `timeout-minutes` of 180, so the script always gets to say which rows ran. A download of the real model
+that fails fails the run at the end and skips the smoke test, and a failure of the CPU unit tests fails the run at the
+end, but the GPU tests still run in both cases.
 
 The results of each row are written as soon as it ends, in `rows-<strategy>-rank<N>.json`:
 `{"strategy", "expected_rows", "rows": [...]}`.
@@ -168,23 +176,24 @@ The results of each row are written as soon as it ends, in `rows-<strategy>-rank
 
 A check that never fails could be silently broken, so the run can prove that the CRC32 check and the GPU memory check
 fire. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs two rows once more (`sync_buffered` only, about 2 minutes)
-with a fault injected on purpose (`GPU_DRILL=KIND:ROW_ID,...` in `test_synthetic_models.py`): `corrupt` flips a bit of
-one tensor after it arrived, and `leak` keeps a 32 MiB GPU tensor alive after the row. That pass succeeds only if
-both are reported, and fails if one goes unnoticed. Its results are in `self-check/`.
+with a fault injected on purpose (`GPU_DRILL=KIND:ROW_ID,...`, see `drills.py`): `corrupt` flips a bit of one tensor
+after it arrived, and `leak` keeps a 32 MiB GPU tensor alive after the row. That pass succeeds only if both are reported
+as what they are (the CRC32 error must name the tensor that was corrupted, and the memory error must show at least
+the 32 MiB that was leaked), and fails if one goes unnoticed. Its results are in `self-check/`.
 
 The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
 since the last scheduled run that passed (`test_synthetic_models.py`, `matrix.py`, `phase_timer.py`, `real_model.py`,
 `setup_and_run.sh` or the workflow itself), so nobody has to remember to run it.
 
-The `many_files` model has 5,000 files: a stress test, about 30 times the largest real checkpoint surveyed (about 160
-files), and above the container's soft limit of 1024 open files on purpose. The streamer keeps a file open until its
-submission ends, and with an asynchronous reader about every file can be open at once, so without a raise of the limit
-the load fails with `File access error` ([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)). The tests
-do not raise the limit: the streamer has to raise it itself, which it does since
-[pull request #297](https://github.com/dsx-ai-factory/model-streamer/pull/297) (it raises the soft limit when the
-descriptors already open plus 18 times the files of a submission would exceed it). On a streamer without that change
-the `many_files` rows fail (measured on the T4 runner on master: 8 of 12 finished rows failed under each of the
-asynchronous strategies). If the descriptor code changes, the count (`DEFAULT_FILES` in `gen_models.py`) changes with it.
+The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
+not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file
+open until its submission ends, and with an asynchronous reader about every file can be open at once, and a rank holds
+about 60 descriptors before it reads anything, so a model with more than about 900 files makes the load fail with
+`File access error` unless the program that loads it raises its own limit
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261): the streamer does not do that for the program).
+That is measured: on the T4 runner a model of 5,000 files failed under every strategy at the container's limit, on master
+(8 of 12 finished rows under each of the asynchronous strategies). If the descriptor code changes, the count
+(`DEFAULT_FILES` in `gen_models.py`) changes with it.
 
 ## Timing
 

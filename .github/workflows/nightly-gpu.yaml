@@ -18,7 +18,7 @@ on:
         required: false
         type: string
       rows:
-        description: Only the rows whose id starts with one of these comma-separated prefixes (default all).
+        description: Only the rows whose id starts with one of these comma-separated prefixes (default all). A leg with no such row (the oldest-torch leg has only the core rows) has nothing to run and passes.
         required: false
         type: string
 
@@ -155,7 +155,9 @@ jobs:
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
-    timeout-minutes: 120
+    # Longer than the caps inside tests/gpu/setup_and_run.sh add up to (4 x 30 min of strategies, 10 min of self-check and
+    # 10 of smoke test, plus the setup: 150 min at the very worst), so that the script always gets to say which rows ran.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -172,6 +174,9 @@ jobs:
             rows: core
     env:
       GPU_TEST_IMAGE: nvidia/cuda:12.4.1-base-ubuntu22.04
+      # Named, so that the last step can remove it: a cancelled or timed-out job kills the docker client, not the
+      # container, and a container that goes on holds both GPUs.
+      GPU_CONTAINER: gpu-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -200,11 +205,15 @@ jobs:
           GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
           GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
         run: |
-          docker run --rm --gpus all --shm-size=2g --security-opt seccomp=unconfined \
+          docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
             --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_WHEEL_DIR=wheel \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh
+
+      - name: Remove the GPU container if it is still there
+        if: always()
+        run: docker rm -f "$GPU_CONTAINER" >/dev/null 2>&1 || true
 
       - name: Show where the time went
         if: always()

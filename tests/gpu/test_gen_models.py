@@ -5,6 +5,7 @@
     python3 -m unittest tests/gpu/test_gen_models.py
 """
 
+import copy
 import json
 import os
 import struct
@@ -155,6 +156,40 @@ class GenerateModels(unittest.TestCase):
         self.assertTrue(any(s % 4096 == 0 for s, _ in starts), "no tensor starts on a 4096 boundary")
         self.assertTrue(any(s % 4096 != 0 for s, _ in starts), "every tensor starts on a 4096 boundary")
         self.assertTrue(any(s % size(d) != 0 for s, d in starts), "no tensor is misaligned for its dtype")
+
+    def test_header_modes_put_the_data_where_they_say(self):
+        """aligned: the data starts on a 4096 boundary of the file; pad8: on a multiple of 8; odd: 3 past one."""
+        seen = set()
+        for model in gen.MODEL_NAMES:
+            for entry in self.manifests[model]["files"]:
+                mode, start = entry["header_mode"], entry["data_start"]
+                seen.add(mode)
+                if mode == "aligned":
+                    self.assertEqual(start % 4096, 0, (model, entry["path"]))
+                elif mode == "pad8":
+                    self.assertEqual(start % 8, 0, (model, entry["path"]))
+                else:
+                    self.assertEqual((mode, start % 8), ("odd", 3), (model, entry["path"]))
+        self.assertEqual(seen, {"aligned", "pad8", "odd"})
+
+    def test_the_regeneration_check_notices_a_tensor_that_does_not_come_from_the_seed(self):
+        manifest = copy.deepcopy(self.manifests["mixed"])
+        self.assertEqual(gen.check_determinism(manifest), [])
+        sampled = [t for f in manifest["files"] for t in f["tensors"] if 0 < t["end"] - t["start"] <= 8 * gen.MIB]
+        sampled[0]["crc32"] ^= 1  # the first one that it regenerates
+        problems = gen.check_determinism(manifest)
+        self.assertEqual(len(problems), 1)
+        self.assertIn(sampled[0]["name"], problems[0])
+
+    def test_the_regeneration_check_notices_another_seed(self):
+        manifest = copy.deepcopy(self.manifests["mixed"])
+        manifest["seed"] += 1
+        self.assertEqual(len(gen.check_determinism(manifest)), 3)
+
+    def test_the_many_files_model_has_the_default_number_of_files(self):
+        """Not the 40 of these tests: what a run generates, below the soft limit of 1024 open files."""
+        self.assertEqual(gen.DEFAULT_FILES, 500)
+        self.assertLess(gen.DEFAULT_FILES, 1024)
 
     def test_many_files_has_header_only_and_single_byte_files(self):
         files = self.manifests["many_files"]["files"]

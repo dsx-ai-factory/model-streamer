@@ -120,15 +120,16 @@ if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
     python3 tests/gpu/env_check.py newest-torch || env_limited=1
 fi
 
-echo "== self-test of the generator, the rows, the real model download and the environment check"
+# The CPU unit tests of the harness. A failure fails the run, but the GPU tests still run: their results are worth having.
+echo "== self-test of the harness: the generator, the rows, the drills, the tensor checks, the real model download"
 phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
-    tests/gpu/test_real_model.py tests/gpu/test_env_check.py
+    tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
+    tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
 # streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
-# listed here as not covered rather than failing the load of every file that holds it. (F4 is known to the streamer
-# with PyTorch 2.8 or later but not to the generator, see gen_models.py.) The generator needs the installed streamer
-# for that table, so it runs after the install. Generation takes under a minute.
+# listed here as not covered rather than failing the load of every file that holds it. The generator needs the
+# installed streamer for that table, so it runs after the install. Generation takes under a minute.
 generate_models() {
     local dtypes
     dtypes=$(python3 - <<'PY'
@@ -160,10 +161,17 @@ echo "== generate synthetic models"
 phase generate_models generate_models
 
 # The small real model, downloaded on every run: real_model.py times the download and the manifest separately
-# (timing-real.jsonl), to show what the download adds to a run.
+# (timing-real.jsonl), to show what the download adds to a run. It only feeds the smoke test, so a download that fails
+# (the hub is slow or down) fails the run at the end, and does not stop the 94 rows of the synthetic models.
+smoke_expected=false
 if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
     echo "== download the small real model"
-    phase fetch_real_model python3 tests/gpu/real_model.py fetch --out "$FIXTURES"
+    if phase fetch_real_model python3 tests/gpu/real_model.py fetch --out "$FIXTURES"; then
+        smoke_expected=true
+    else
+        status=1
+        echo "ERROR: the real model could not be fetched: the smoke test will not run (the run fails at the end)"
+    fi
 fi
 
 # The direct I/O strategies are only tested if the fixtures are on a real block device that serves O_DIRECT. The
@@ -213,6 +221,11 @@ export RUNAI_STREAMER_LOG_TO_STDERR=1
 # Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so
 # a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
 # lists in the Makefile's test_strategies keep sync_buffered last for hosts of any kind.)
+#
+# The time caps are for a hang, and add up to less than the job's timeout (the workflow's timeout-minutes, 180): 4 x 30 min
+# of strategies, 10 min of self-check and 10 min of smoke test, plus the setup, are 150 min at the very worst, so the
+# script always gets to print which rows ran. A strategy takes about 10 minutes when the runner is healthy (18 on a slow
+# day).
 for strategy in \
     sync_buffered \
     libaio_direct \
@@ -223,7 +236,7 @@ do
     echo "== streaming with filesystem strategy: $strategy"
     start=$(date +%s.%N)
     if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
-        timeout --signal=TERM --kill-after=30s 45m \
+        timeout --signal=TERM --kill-after=30s 30m \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -242,7 +255,7 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
     if ! GPU_ROWS="mixed.solo.owned.cuda.tight,mixed.solo.borrowed.cuda.tight" \
         GPU_DRILL="corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight" \
         GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
-        timeout --signal=TERM --kill-after=30s 15m \
+        timeout --signal=TERM --kill-after=30s 10m \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -252,13 +265,13 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
 fi
 
 # The small real model, loaded with the streamer's default settings (no filesystem strategy chosen): what a user runs.
-if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
+if [ "$smoke_expected" = true ]; then
     echo "[$(date +%T)] START run.real_smoke"
     echo "== smoke test: the small real model, default settings"
     start=$(date +%s.%N)
     # Without GPU_ROWS: a filter of the rows of the synthetic models would leave no smoke row.
     if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
-        timeout --signal=TERM --kill-after=30s 15m \
+        timeout --signal=TERM --kill-after=30s 10m \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -270,37 +283,8 @@ fi
 # Which rows ran. A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends
 # that strategy's run: the rows after it never start. They must not hide behind the strategies that did finish.
 echo "== rows that ran"
-python3 - "$RESULTS" "${GPU_REAL_SMOKE:-true}" sync_buffered libaio_direct io_uring_direct io_uring_buffered <<'PY' || status=1
-import glob
-import json
-import os
-import sys
-
-results, smoke, strategies = sys.argv[1], sys.argv[2] == "true", sys.argv[3:]
-incomplete = False
-for path in sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True)):
-    data = json.load(open(path))
-    rows = data["rows"]
-    finished = [r for r in rows if r["ok"] is not None]
-    unexpected = [r["row"] for r in finished if not r["ok"] and not r.get("drill")]
-    line = "%s: %d of %d rows finished, %d failed" % (os.path.relpath(path, results), len(finished),
-                                                       data["expected_rows"], len(unexpected))
-    killed = [r["row"] for r in rows if r["ok"] is None]
-    if killed:
-        line += "; the run ended inside row " + killed[0]
-    if len(finished) < data["expected_rows"]:
-        incomplete = True
-        line += "  <-- INCOMPLETE"
-    print(line)
-for strategy in strategies:
-    if not glob.glob(os.path.join(results, "rows-%s-rank*.json" % strategy)):
-        incomplete = True
-        print("%s: no results at all  <-- INCOMPLETE" % strategy)
-if smoke and not glob.glob(os.path.join(results, "smoke", "rows-*-rank*.json")):
-    incomplete = True
-    print("smoke: no results at all  <-- INCOMPLETE")
-sys.exit(1 if incomplete else 0)
-PY
+python3 tests/gpu/rows_summary.py "$RESULTS" "$smoke_expected" sync_buffered libaio_direct io_uring_direct \
+    io_uring_buffered || status=1
 
 # The manifests list every tensor of every model; keep them with the results to debug a failure.
 mkdir -p "$RESULTS/manifests"

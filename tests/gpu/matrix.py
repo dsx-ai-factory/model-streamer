@@ -45,8 +45,8 @@ Row = namedtuple("Row", "id model dist policy owned device limit")
 LIMITS = ("tight", "deep", "default")
 
 # A deep ring needs 18 buffers of the largest tensor to be smaller than the model, or nothing is reused. That
-# holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) and many_files (tensors of up to
-# 10 MiB in a 90 MB model) cannot have a deep ring that recycles.
+# holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) cannot have a deep ring that recycles, and
+# many_files (a few tensors of up to 10 MiB among small files, 5 to 11 MB in all) can only for some seeds.
 DEEP_MODELS = ("mixed", "many_tensors")
 
 POLICIES = ((False, None), (True, "spans"), (True, "chunks"), (True, "files"))
@@ -152,3 +152,15 @@ def rows_for(mode):
     if mode == "smoke":
         return smoke_rows()
     raise ValueError("GPU_MATRIX must be core, full or smoke, not %r" % (mode,))
+
+
+def row_prefixes(text):
+    """The prefixes in a comma-separated list. Spaces around a prefix are dropped, and an empty entry (a trailing comma)
+    is ignored: an empty prefix would match every row, and the filter would silently do nothing."""
+    return tuple(part.strip() for part in (text or "").split(",") if part.strip())
+
+
+def filter_rows(rows, text):
+    """The rows whose id starts with one of the prefixes in text; all of them when there is no prefix."""
+    prefixes = row_prefixes(text)
+    return [row for row in rows if row.id.startswith(prefixes)] if prefixes else list(rows)

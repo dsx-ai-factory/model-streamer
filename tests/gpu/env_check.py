@@ -117,7 +117,13 @@ def newest_torch():
             pypi_json = json.load(response)
     except (OSError, ValueError) as error:
         return False, ["could not ask PyPI for the newest torch (%s): not verified" % error]
-    return assess(importlib.metadata.version("torch"), pypi_json, sys.version_info[:3])
+    try:
+        return assess(importlib.metadata.version("torch"), pypi_json, sys.version_info[:3])
+    except (KeyError, IndexError, TypeError, AttributeError) as error:
+        # PyPI's answer has another shape than this expects (the "releases" key is deprecated, for one). That is not a
+        # problem of the container, and must not turn the leg red with a false "not testing the newest torch".
+        return False, ["PyPI's answer for torch has an unexpected shape (%s: %s): not verified" % (
+            type(error).__name__, error)]
 
 
 def main(argv=None):

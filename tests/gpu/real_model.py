@@ -102,7 +102,8 @@ def build_manifest(directory, filename, name=MODEL_NAME):
     metadata = header.pop("__metadata__", None)
     data_start = 8 + header_len
     size = os.path.getsize(path)
-    ordered = sorted(header.items(), key=lambda item: item[1]["data_offsets"][0])
+    # By (start, end): an empty tensor starts where the next one does, and has to come first whatever the header order.
+    ordered = sorted(header.items(), key=lambda item: tuple(item[1]["data_offsets"]))
     entries, position = [], 0
     with open(path, "rb") as handle:
         for key, (tensor_name, tensor) in enumerate(ordered):

@@ -15,9 +15,10 @@ bytes. A tensor is compared by its bytes, never by value, so NaN payloads and ne
     GPU_MATRIX     core (default), full or smoke: which rows to run, see matrix.py
     GPU_FIXTURES   directory written by gen_models.py and real_model.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
-    GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them
+    GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them. A leg with no
+                   such row has nothing to run and passes, saying so
     GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
-                   and passes only if the fault is reported (see DRILLS below). Off by default.
+                   and passes only if the fault is reported (see drills.py). Off by default.
 """
 
 import gc
@@ -25,7 +26,6 @@ import json
 import os
 import sys
 import time
-import zlib
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -33,15 +33,16 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
-from matrix import WORLD, memory_limit, rows_for  # noqa: E402
+from matrix import WORLD, filter_rows, memory_limit, row_prefixes, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
+from tensor_bytes import as_bytes, tensor_crc32  # noqa: E402
 
 from runai_model_streamer import SafetensorsStreamer  # noqa: E402
 from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype  # noqa: E402
 
 MIB = 1 << 20
-D2H_CHUNK = 256 * MIB
 DIST_TIMEOUT_SECONDS = 300
 MAX_ERRORS_PER_ROW = 40
 # The CPU-only group that the ranks agree on waits longer than the streamer's own distributed timeout, so that a rank
@@ -50,26 +51,6 @@ MAX_ERRORS_PER_ROW = 40
 CONTROL_MARGIN_SECONDS = 120
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
-
-# Fault injection, to show that the checks catch what they are for. GPU_DRILL=corrupt:ROW,leak:ROW makes the test
-# break that row on purpose; the run then passes only if the break is reported, and fails if it goes unnoticed.
-#   corrupt  flips one bit of the first tensor of the row after it arrived: the CRC32 check must report it
-#   leak     keeps a 32 MiB GPU tensor alive after the row: the GPU memory check must report it
-# The value is the text that must appear in the row's errors. A rank that fails inside a distributed row is not a
-# drill: the NCCL watchdog aborts the other rank, so there is nothing left to report it.
-DRILL_MARKERS = {"corrupt": "crc32", "leak": "GPU memory leak"}
-LEAK_DRILL_BYTES = 32 * MIB
-
-
-def parse_drills(text):
-    drills = {}
-    for item in filter(None, (part.strip() for part in text.split(","))):
-        kind, _, row_id = item.partition(":")
-        if kind not in DRILL_MARKERS or not row_id:
-            raise RuntimeError("GPU_DRILL: %r is not KIND:ROW_ID with KIND one of %s" % (item, sorted(DRILL_MARKERS)))
-        drills[row_id] = kind
-    return drills
-
 
 class Fixtures:
     """The manifests of the models that the selected rows load."""
@@ -108,23 +89,6 @@ def environment(settings):
                 os.environ[key] = value
 
 
-def as_bytes(tensor):
-    """The tensor's memory as a flat uint8 view. A complex tensor goes through view_as_real first, because older torch
-    versions cannot view a complex tensor as bytes directly."""
-    if tensor.is_complex():
-        tensor = torch.view_as_real(tensor)
-    return tensor.reshape(-1).view(torch.uint8)
-
-
-def tensor_crc32(tensor):
-    """CRC32 of the tensor's bytes, copied to the host in slices so a 2 GiB tensor needs no 2 GiB buffer."""
-    flat = as_bytes(tensor)
-    crc = 0
-    for start in range(0, flat.numel(), D2H_CHUNK):
-        crc = zlib.crc32(flat[start:start + D2H_CHUNK].cpu().numpy(), crc)
-    return crc
-
-
 class RowRun:
     """One load of one model, and its verdict."""
 
@@ -132,7 +96,7 @@ class RowRun:
         self.row = row
         self.drill = drill
         self.leaked = None
-        self.drilled = False
+        self.corrupted_tensor = None  # the tensor that the corrupt drill flipped a bit of
         self.expected = fixtures.expected(row.model)
         self.paths = fixtures.paths(row.model)
         self.manifest = fixtures.manifests[row.model]
@@ -176,8 +140,8 @@ class RowRun:
         if tensor.device != self.device:
             self.error("%s: on %s, expected %s" % (name, tensor.device, self.device))
             return
-        if self.drill == "corrupt" and not self.drilled and entry["end"] > entry["start"]:
-            self.drilled = True
+        if self.drill == "corrupt" and self.corrupted_tensor is None and entry["end"] > entry["start"]:
+            self.corrupted_tensor = name
             as_bytes(tensor)[0] ^= 1
         crc = tensor_crc32(tensor)
         if crc != entry["crc32"]:
@@ -262,12 +226,7 @@ def release_gpu_memory():
 
 
 def selected_rows():
-    rows = rows_for(os.environ.get("GPU_MATRIX", "core"))
-    wanted = os.environ.get("GPU_ROWS")
-    if wanted:
-        prefixes = tuple(wanted.split(","))
-        rows = [r for r in rows if r.id.startswith(prefixes)]
-    return rows
+    return filter_rows(rows_for(os.environ.get("GPU_MATRIX", "core")), os.environ.get("GPU_ROWS"))
 
 
 def write_results(results_dir, strategy, rank, timer, outcomes, expected_rows):
@@ -355,7 +314,7 @@ def main():
             # A drilled row must fail, and with the report that its fault is meant to cause.
             caught = None
             if drill:
-                local = any(DRILL_MARKERS[drill] in message for message in run.errors)
+                local = drill_caught(drill, run.errors, run.corrupted_tensor, gpu_allocated - gpu_baseline)
                 seen = torch.tensor([1 if local else 0])
                 dist.all_reduce(seen, op=dist.ReduceOp.MAX, group=control)  # reported by any rank is reported
                 caught = seen.item() == 1
@@ -390,6 +349,12 @@ def main():
         if dist.is_initialized():
             dist.destroy_process_group()
     if not outcomes:
+        if row_prefixes(os.environ.get("GPU_ROWS")):
+            # A filter was asked for, and this matrix has no such row (the oldest-torch leg runs only the core rows):
+            # there is nothing to run here, which is not a failure.
+            print("no row of the %s matrix starts with %s: nothing to run" % (
+                os.environ.get("GPU_MATRIX", "core"), list(row_prefixes(os.environ["GPU_ROWS"]))), flush=True)
+            return 0
         print("no rows selected", file=sys.stderr)
         return 1
     return 1 if failed else 0

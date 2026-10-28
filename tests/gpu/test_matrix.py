@@ -19,7 +19,7 @@ FULL_SIZE = {
     "mixed": {"total_data_bytes": 1073741824, "largest_tensor_bytes": 24595200, "header_len": 120_000},
     "many_tensors": {"total_data_bytes": 105_000_000, "largest_tensor_bytes": 4 * MIB, "header_len": 10_900_000},
     "giant_tensor": {"total_data_bytes": 4_250_000_000, "largest_tensor_bytes": 2 ** 31, "header_len": 1_000},
-    "many_files": {"total_data_bytes": 95_000_000, "largest_tensor_bytes": 9_069_300, "header_len": 2_000},
+    "many_files": {"total_data_bytes": 10_770_000, "largest_tensor_bytes": 2_950_000, "header_len": 4_088},
 }
 
 
@@ -135,6 +135,64 @@ class MemoryLimit(unittest.TestCase):
     def test_unknown_level_is_refused(self):
         with self.assertRaises(ValueError):
             matrix.memory_limit(manifest("mixed"), False, "huge")
+
+
+class AgainstTheStreamer(unittest.TestCase):
+    """The ring arithmetic of this file is a copy of the streamer's. Where the streamer can be imported (the GPU job
+    installs it before it runs the unit tests), the copy is compared with the real function, so that a change of the
+    streamer's sizing cannot leave these tests green and the memory limits meaningless."""
+
+    def setUp(self):
+        try:
+            from runai_model_streamer.file_streamer import requests_iterator
+        except Exception as error:  # not installed, or its library is not there: a machine without the streamer
+            self.skipTest("the streamer cannot be imported here: %s" % error)
+        self.requests_iterator = requests_iterator
+
+    def data_ranges(self, m):
+        """The ranges of the data read of a model: its largest tensor, then tensors of up to that size, to its total."""
+        largest = m["largest_tensor_bytes"]
+        sizes, rest = [largest], m["total_data_bytes"] - largest
+        while rest > 0:
+            sizes.append(min(largest, rest))
+            rest -= sizes[-1]
+        return [self.requests_iterator.FileChunks.contiguous(0, "file", 0, sizes)]
+
+    def test_the_ring_of_the_tight_and_deep_limits_is_what_the_streamer_derives(self):
+        for model in matrix.DEEP_MODELS:
+            m = manifest(model)
+            for distributed in (False, True):
+                for level in ("tight", "deep"):
+                    per_rank = matrix.memory_limit(m, distributed, level) // (2 if distributed else 1)
+                    derived = self.requests_iterator._ring_sizing(
+                        self.requests_iterator.MemoryCapMode.limited, self.data_ranges(m), per_rank)
+                    self.assertEqual(derived, ring(per_rank, m), (model, distributed, level))
+
+
+class FilterRows(unittest.TestCase):
+    def test_a_prefix_selects_the_rows_whose_id_starts_with_it(self):
+        picked = matrix.filter_rows(matrix.full_rows(), "mixed.solo")
+        self.assertTrue(picked)
+        self.assertTrue(all(row.id.startswith("mixed.solo") for row in picked))
+        self.assertEqual(len(picked), sum(1 for r in matrix.full_rows() if r.id.startswith("mixed.solo")))
+
+    def test_several_prefixes_and_the_spaces_around_them(self):
+        both = matrix.filter_rows(matrix.full_rows(), "giant_tensor.dist.chunks, many_files.solo")
+        self.assertEqual({r.model for r in both}, {"giant_tensor", "many_files"})
+        self.assertEqual(both, matrix.filter_rows(matrix.full_rows(), "giant_tensor.dist.chunks,many_files.solo"))
+
+    def test_an_empty_entry_does_not_select_every_row(self):
+        self.assertEqual(matrix.filter_rows(matrix.full_rows(), "mixed.solo,"), matrix.filter_rows(
+            matrix.full_rows(), "mixed.solo"))
+        self.assertEqual(matrix.row_prefixes("a,, b ,"), ("a", "b"))
+
+    def test_no_prefix_selects_all_the_rows(self):
+        everything = matrix.full_rows()
+        for text in (None, "", " ", " , "):
+            self.assertEqual(matrix.filter_rows(everything, text), everything, repr(text))
+
+    def test_a_prefix_that_no_row_has_selects_none(self):
+        self.assertEqual(matrix.filter_rows(matrix.core_rows(), "giant_tensor.dist.chunks"), [])
 
 
 if __name__ == "__main__":
