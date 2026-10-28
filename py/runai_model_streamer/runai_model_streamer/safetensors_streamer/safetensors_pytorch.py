@@ -172,7 +172,10 @@ class SafetensorsMetadata:
     def from_files(fs: DistributedStreamer, filenames: List[str], s3_credentials: Optional[S3Credentials], discover_ranks: bool = True) -> List[SafetensorsMetadata]:
         # a distributed load discovers in its first read, because that read fixes the queue depth of the CPP layer
         # 1. Read the first 8 bytes (The Header Size)
-        fs.stream_files([FileChunks.contiguous(i, filenames[i], 0, [SAFETENSORS_HEADER_BUFFER_SIZE]) for i in range(len(filenames))], s3_credentials, "cpu", False, discover_ranks=discover_ranks)
+        # ring_buffers=1: this sweep is one 8-byte range per file, and at the default depth the ring
+        # gives each range its own buffer - so 17 shards become 17 submissions, each a full round-trip
+        # through the C++ layer to read 8 bytes. There is nothing to overlap here either way.
+        fs.stream_files([FileChunks.contiguous(i, filenames[i], 0, [SAFETENSORS_HEADER_BUFFER_SIZE]) for i in range(len(filenames))], s3_credentials, "cpu", False, discover_ranks=discover_ranks, ring_buffers=1)
         
         header_sizes = {}
         
@@ -197,7 +200,7 @@ class SafetensorsMetadata:
 
         # 2. Read the JSON Header Body
         metadatas = {}
-        fs.stream_files([FileChunks.contiguous(i, filenames[i], SAFETENSORS_HEADER_BUFFER_SIZE, [header_size]) for i, header_size in header_sizes.items()], s3_credentials, "cpu", False, discover_ranks=discover_ranks)
+        fs.stream_files([FileChunks.contiguous(i, filenames[i], SAFETENSORS_HEADER_BUFFER_SIZE, [header_size]) for i, header_size in header_sizes.items()], s3_credentials, "cpu", False, discover_ranks=discover_ranks, ring_buffers=1)
         
         # Wrap the second loop to catch truncation during JSON read
         try:

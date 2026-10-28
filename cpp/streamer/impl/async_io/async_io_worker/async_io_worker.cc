@@ -1018,8 +1018,23 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     // Non-blocking still HARVESTS whatever is ready - it just does not sleep - so nothing is delayed
     // by taking this path.
     const bool window_full = _engine != nullptr && _issued >= _engine->depth();
-    const auto mode = (_issued > 0 && window_full) ? posix_io::WaitMode::Block
-                                                   : posix_io::WaitMode::NonBlocking;
+
+    // ALSO block when there is nothing left to stage, which is not the same condition.
+    //
+    // drain_batch is reached two ways. From execute() the queue still holds chunks, and a window
+    // with room means go back and submit rather than sleep - that is what the paragraphs above
+    // argue, and it is right. From ThreadPool's drain() the queue is EMPTY: the reads already
+    // issued are all that is left, so 0 < _issued < depth takes the non-blocking path and this
+    // thread then spins - try_pop, an empty resume_waiting, a flush that returns at once, a scan
+    // of an empty completion ring - at a full core until those reads land.
+    //
+    // That is every workload's tail, and the gap between the ring's submissions. It costs no
+    // throughput, since the spin does reap the moment a completion arrives, but on a node running
+    // one process per GPU it is one busy core per process for nothing.
+    const bool nothing_to_stage = _queue == nullptr || (_queue->empty() && _waiting.empty());
+
+    const auto mode = (_issued > 0 && (window_full || nothing_to_stage))
+                    ? posix_io::WaitMode::Block : posix_io::WaitMode::NonBlocking;
 
     unsigned count = 0;
     const auto ret = _engine->wait_for_completions(_completions.data(), _completions.size(), count, mode, WaitTimeoutMs);
