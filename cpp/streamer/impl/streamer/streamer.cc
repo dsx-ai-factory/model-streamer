@@ -44,7 +44,9 @@ namespace
 {
 
 // submissions assumed in flight together, each of a similar number of batches. An estimate: the streamer
-// does not know how many its caller keeps in flight.
+// does not know how many its caller keeps in flight. It fits the async engines, which keep the workloads
+// of several submissions open at once. The synchronous reader opens only the batches of the workloads
+// its threads are running, so there it overestimates, which only raises the limit more than needed.
 constexpr size_t FD_LIMIT_FACTOR = 18;
 
 }   // namespace
