@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import unittest
+import unittest.mock
 
 import torch
 
@@ -12,6 +16,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     FilesRequestsIteratorWithBuffer,
     HOST_SLOTS,
+    RunaiStreamerMemoryLimitException,
 )
 
 # A device ring needs SOME event factory, and these tests never release a slot with an event, so none
@@ -111,3 +116,38 @@ class TestSlotMemory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSlotGoesBackWhenRangesDoNotFit(unittest.TestCase):
+    """The recoverable failure must leave the ring whole.
+
+    When a layout does not fit, the caller is told so and invited to retry - which is only honest if
+    the slot it was about to use went back to the pool. A DEVICE ring is the case that matters:
+    release() refuses a slot handed back without an event, so taking that route here would both lose
+    the slot and replace the message with an event-ordering error.
+
+    _place is forced to fail rather than fed a layout that cannot fit, because the packer caps a
+    request to the slot: the real trigger is a ring built from a different size than the one being
+    packed against, and what is under test is the handler, not the packer."""
+
+    FILES = [FileChunks.contiguous(0, "a.bin", 0, [1024, 1024])]
+
+    def ring(self, **kwargs):
+        return FilesRequestsIteratorWithBuffer(
+            buffer_size=4096, num_buffers=2, files_chunks=self.FILES, **kwargs
+        )
+
+    def assert_slot_comes_back(self, ring):
+        with unittest.mock.patch.object(ring, "_place", return_value=None):
+            with self.assertRaises(RunaiStreamerMemoryLimitException):
+                ring.next_request()
+
+        # The NUMBER, not has_free(): one slot lost out of two still leaves the ring usable, so a
+        # boolean would pass with the slot leaked.
+        self.assertEqual(len(ring._pool._free), 2, "the slot was not handed back")
+
+    def test_a_device_ring_keeps_its_slot_and_says_what_went_wrong(self):
+        self.assert_slot_comes_back(self.ring(slots=device_slots("cpu", UNUSED_EVENT)))
+
+    def test_a_host_ring_does_the_same(self):
+        self.assert_slot_comes_back(self.ring())

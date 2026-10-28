@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -62,6 +66,32 @@ class TestDeviceSupport(unittest.TestCase):
         row claiming it would send device pointers down the host path."""
         for kind, support in _SUPPORTED.items():
             self.assertNotEqual(support.api_type, RUNAI_FILE_STREAMER_DEVICE_CPU, kind)
+
+    def test_a_rocm_build_is_refused_although_torch_calls_it_cuda(self):
+        """ROCm reports its devices as "cuda", so the type string cannot tell the vendors apart.
+
+        Without this the AMD device takes the NVIDIA row, and the C++ layer dlopen()s libcuda.so.1 -
+        which is not there - after the ring has already been allocated. None is the documented
+        answer for a device this layer cannot serve: read into host memory and copy up."""
+        with patch.object(torch.version, "hip", "6.2.41134"):
+            self.assertIsNone(device_support("cuda:0"),
+                              "a ROCm build was handed the NVIDIA row")
+            self.assertIsNone(device_support("cuda"))
+
+    def test_an_nvidia_build_still_gets_the_cuda_row(self):
+        """The guard must refuse ROCm only. torch.version.hip is None on a CUDA build."""
+        with patch.object(torch.version, "hip", None):
+            support = device_support("cuda:0")
+            self.assertIsNotNone(support, "an NVIDIA build was refused")
+            self.assertEqual(support.api_type, RUNAI_FILE_STREAMER_DEVICE_CUDA)
+
+    def test_a_vendor_with_its_own_type_string_needs_no_guard(self):
+        """Every other accelerator torch knows names itself - "xpu" for Intel - so the table refuses
+        it by not listing it. Pinned here so a future row cannot be added without noticing that ROCm
+        is the one vendor that does NOT name itself."""
+        with patch.object(torch.version, "hip", None):
+            self.assertIsNone(device_support("xpu:0"))
+            self.assertIsNone(device_support("cpu"))
 
     @unittest.skipUnless(torch.cuda.is_available(), "needs a CUDA device")
     def test_the_cuda_row_actually_works(self):

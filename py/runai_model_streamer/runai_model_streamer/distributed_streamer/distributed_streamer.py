@@ -240,6 +240,7 @@ class DistributedStreamer:
             is_distributed: bool,
             owned: bool = True,
             discover_ranks: bool = True,
+            ring_buffers: Optional[int] = None,
     ) -> None:
         """discover_ranks=False skips the discovery of the local ranks, a collective over all the ranks of the process
         group, for a read that runs without its peers. Distributed streaming discovers them regardless."""
@@ -262,7 +263,7 @@ class DistributedStreamer:
             # Passed on as asked. Whether a device destination lets the ring be handed over is the
             # FileStreamer's to decide, because that is where the tensor is copied to the device.
             self.file_streamer.stream_files(
-                file_stream_requests, credentials, device, owned=owned
+                file_stream_requests, credentials, device, owned=owned, ring_buffers=ring_buffers
             )
             built_ring = True
         else:

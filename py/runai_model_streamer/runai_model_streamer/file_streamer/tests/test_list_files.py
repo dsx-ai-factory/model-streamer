@@ -151,8 +151,9 @@ class TestListFilesS3(unittest.TestCase):
         self.assertEqual(sorted(results), sorted(self.ENTRIES))
 
     @patch("runai_model_streamer.file_streamer.file_streamer.runai_set_credentials")
-    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")
-    def test_handle_object_store_resolves_and_applies_credentials(self, mock_s3_mod, mock_set_creds):
+    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")  # a lookup now, so the module is its return_value
+    def test_handle_object_store_resolves_and_applies_credentials(self, mock_s3_mod_lookup, mock_set_creds):
+        mock_s3_mod = mock_s3_mod_lookup.return_value
         # handle_object_store resolves credentials via the credentials module (the boto3-resolved values under
         # RUNAI_STREAMER_NO_BOTO3_SESSION=0) and applies exactly those to the streamer, once
         resolved = S3Credentials(
@@ -180,8 +181,9 @@ class TestListFilesS3(unittest.TestCase):
         self.assertEqual(applied_creds.endpoint, "https://s3.example.com")
 
     @patch("runai_model_streamer.file_streamer.file_streamer.runai_set_credentials")
-    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")
-    def test_credentials_applied_to_each_distinct_streamer(self, mock_s3_mod, mock_set_creds):
+    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")  # a lookup now, so the module is its return_value
+    def test_credentials_applied_to_each_distinct_streamer(self, mock_s3_mod_lookup, mock_set_creds):
+        mock_s3_mod = mock_s3_mod_lookup.return_value
         # Resolution happens once, but application happens once PER C++ handle: a second temporary streamer
         # (as an out-of-context list_files creates) must still get its own runai_set_credentials, even though
         # the resolution flag (s3_session) is already set from the first handle.
@@ -201,8 +203,9 @@ class TestListFilesS3(unittest.TestCase):
         self.assertEqual(applied_streamers, [streamer_1, streamer_2])
 
     @patch("runai_model_streamer.file_streamer.file_streamer.runai_set_credentials")
-    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")
-    def test_credentials_applied_once_per_streamer(self, mock_s3_mod, mock_set_creds):
+    @patch("runai_model_streamer.file_streamer.file_streamer.s3_credentials_module")  # a lookup now, so the module is its return_value
+    def test_credentials_applied_once_per_streamer(self, mock_s3_mod_lookup, mock_set_creds):
+        mock_s3_mod = mock_s3_mod_lookup.return_value
         # Repeated calls with the SAME handle (e.g. the per-file loop in stream_files) apply credentials only
         # once, not once per file.
         resolved = S3Credentials(access_key_id="AKID", secret_access_key="SECRET")

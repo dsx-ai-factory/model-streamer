@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from __future__ import annotations
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
@@ -37,6 +40,19 @@ _SUPPORTED: Dict[str, DeviceSupport] = {
 }
 
 
+def _is_rocm() -> bool:
+    """Whether this torch is a ROCm build.
+
+    ROCm reports its devices as "cuda" - the type string, torch.cuda.*, and torch.cuda.Event are all
+    the same there as on NVIDIA. So the device type alone cannot tell the two apart, and the table
+    below would hand an AMD device the NVIDIA row. The C++ layer then dlopen()s libcuda.so.1, which
+    does not exist on such a machine, and the failure lands after the ring is allocated rather than
+    where the device was chosen.
+
+    torch.version.hip is the build's own answer: a version string on ROCm, None on CUDA."""
+    return getattr(torch.version, "hip", None) is not None
+
+
 def device_support(device: str) -> Optional[DeviceSupport]:
     """How to stream straight into `device`, or None when nothing here can.
 
@@ -45,4 +61,13 @@ def device_support(device: str) -> Optional[DeviceSupport]:
     table is therefore not an error - it is the path everyone used before device rings existed."""
     if not device:
         return None
-    return _SUPPORTED.get(torch.device(device).type)
+
+    kind = torch.device(device).type
+
+    # Keyed on the VENDOR, not on what torch calls the device. Every other accelerator torch knows
+    # has a type string of its own - "xpu" for Intel - so the table refuses it by not listing it.
+    # ROCm is the one that shares a string with the vendor above it.
+    if kind == "cuda" and _is_rocm():
+        return None
+
+    return _SUPPORTED.get(kind)
