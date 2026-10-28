@@ -48,7 +48,9 @@ passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`).
    streamer is imported from the installed wheel and that two GPUs and NCCL are there;
 2. in the newest leg, checks that the container does not limit the newest torch; in both legs, runs the CPU unit tests
    (generator, rows, drills, tensor checks, real model download, the environment check);
-3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
+3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo; the runner groups'
+   documentation says the NVKS GPU runners run each job in an ephemeral virtual machine, so nothing stays behind for the
+   next job, and the script does not clean up after itself) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
    hold every dtype that the streamer's own table accepts with the installed PyTorch and that the generator knows (the
    script prints which ones are left out);
 4. downloads the small real model (see below) and describes it, timing both;
