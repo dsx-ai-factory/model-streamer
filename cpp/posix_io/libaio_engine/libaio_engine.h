@@ -76,7 +76,8 @@ class LibaioEngine : public IoEngine
 
     common::ResponseCode stage(RequestId id, FileRef file, size_t offset, size_t bytesize,
                                char * buffer, Registration registration) override;
-    common::ResponseCode flush(unsigned & out_issued) override;
+    common::ResponseCode flush(unsigned & out_issued, bool & out_deferred) override;
+    using IoEngine::flush;   // keep the count-only overload visible through this type
     common::ResponseCode wait_for_completions(Completion * out, unsigned max, unsigned & out_count,
                                       WaitMode mode, unsigned timeout_ms = 0) override;
 

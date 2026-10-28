@@ -98,6 +98,7 @@ AsyncIoCounters & AsyncIoCounters::operator+=(const AsyncIoCounters & other)
     bytes_read += other.bytes_read;
     bounced_bytes += other.bounced_bytes;
     short_read_restages += other.short_read_restages;
+    transient_retries += other.transient_retries;
 
     // MAX, not sum - see the field. Each engine has its own window, so adding them would report a
     // queue depth no device ever saw.
@@ -130,6 +131,13 @@ std::ostream & operator<<(std::ostream & os, const AsyncIoCounters & counters)
 
     os << ", " << counters.short_read_restages << " short reads re-staged"
        << ", deepest engine reached " << counters.achieved_depth;
+
+    // Only when it happened: zero is the normal case on a quiet host, and a column of zeroes trains
+    // a reader to skip the line.
+    if (counters.transient_retries != 0)
+    {
+        os << ", " << counters.transient_retries << " reads re-issued after a signal";
+    }
 
     // Beside the peak, not instead of it. The peak says the window CAN fill; this says whether it
     // stayed full - which is what decides whether time inside io_submit was a real loss.

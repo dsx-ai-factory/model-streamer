@@ -626,6 +626,324 @@ TEST(AsyncIoWorker, Direct_Refused_For_Alignment_Is_Retried_Buffered)
         << "the buffered retry succeeded, so the caller asked for bytes and got them";
 }
 
+// --- interrupted reads ---------------------------------------------------------------------------
+
+// errno 512 is ERESTARTSYS: a signal arrived and NOTHING was read. The same read is still right, so
+// the chunk is issued again rather than failed. A real load died of this, because the default branch
+// called it a storage failure and the caller is fail-fast.
+TEST(AsyncIoWorker, An_Interrupted_Read_Is_Issued_Again)
+{
+    Fixture fixture({ ChunkSize });
+    Driver driver;
+
+    driver.execute(fixture.workload());
+    driver.issue();
+    const auto first = driver.engine->in_flight().front();
+
+    driver.engine->fail(first, 512 /* ERESTARTSYS */);
+    driver.route();
+
+    ASSERT_EQ(driver.engine->staged_count(), 1u) << "the chunk must be re-issued, not failed";
+    ASSERT_EQ(driver.engine->history().size(), 2u) << "exactly one retry, not a loop";
+
+    // Nothing landed, so the retry must ask for the same bytes - not for what a partial read would
+    // have left.
+    const auto second = driver.engine->staged().back();
+    EXPECT_EQ(driver.engine->request(second).offset, driver.engine->request(first).offset);
+    EXPECT_EQ(driver.engine->request(second).bytesize, driver.engine->request(first).bytesize);
+
+    driver.issue();
+    driver.engine->complete(second);
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    ASSERT_EQ(responses.size(), 1u);
+    EXPECT_EQ(responses[0].ret, common::ResponseCode::Success)
+        << "the caller asked for bytes and got them; the signal was ours to absorb";
+
+    EXPECT_EQ(driver.worker.counters().transient_retries, 1u) << "the retry must be visible";
+}
+
+// EINTR means the same thing and arrives the same way.
+TEST(AsyncIoWorker, Eintr_Is_Issued_Again_Too)
+{
+    Fixture fixture({ ChunkSize });
+    Driver driver;
+
+    driver.execute(fixture.workload());
+    driver.issue();
+
+    driver.engine->fail(driver.engine->in_flight().front(), EINTR);
+    driver.route();
+
+    EXPECT_EQ(driver.engine->history().size(), 2u) << "EINTR must be retried like the restart codes";
+}
+
+// THE BOUND. A signal can arrive again and again, and a retry without a limit turns a load that
+// fails loudly into one that never finishes - the worse failure. The chunk must give up and report
+// the errno it kept receiving, not a code of our own.
+TEST(AsyncIoWorker, An_Endlessly_Interrupted_Read_Gives_Up_And_Reports_The_Errno)
+{
+    Fixture fixture({ ChunkSize });
+    Driver driver;
+
+    driver.execute(fixture.workload());
+
+    unsigned issued = 0;
+    for (; issued < 5000; ++issued)
+    {
+        driver.issue();
+        if (driver.engine->in_flight().empty())
+        {
+            break;   // the worker gave up and answered
+        }
+
+        driver.engine->fail(driver.engine->in_flight().front(), 512 /* ERESTARTSYS */);
+        driver.route();
+    }
+
+    EXPECT_LT(issued, 5000u) << "the retry never stopped";
+
+    // It must have RETRIED before giving up. Without this the test passes on a build that never
+    // retries at all: the first failure answers the chunk, the ring is empty on the next turn, and
+    // the loop breaks with the same FileAccessError this asserts below.
+    EXPECT_GT(driver.worker.counters().transient_retries, 1u) << "the chunk was never re-issued";
+    EXPECT_EQ(driver.worker.counters().transient_retries, issued - 1)
+        << "every attempt but the last must have been a retry";
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    ASSERT_EQ(responses.size(), 1u) << "a chunk out of attempts must still be answered";
+    EXPECT_EQ(responses[0].ret, common::ResponseCode::FileAccessError)
+        << "reported as the failure it kept hitting, not as UnknownError, which would end the"
+           " whole submission";
+}
+
+// A failure that is NOT transient must still fail on the first attempt. Retrying a real storage
+// error would turn one bad file into a long wait before the same answer.
+TEST(AsyncIoWorker, A_Storage_Failure_Is_Not_Retried)
+{
+    Fixture fixture({ ChunkSize });
+    Driver driver;
+
+    driver.execute(fixture.workload());
+    driver.issue();
+
+    driver.engine->fail(driver.engine->in_flight().front(), EIO);
+    driver.route();
+
+    EXPECT_EQ(driver.engine->history().size(), 1u) << "EIO was retried";
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    EXPECT_EQ(responses.front().ret, common::ResponseCode::FileAccessError);
+    EXPECT_EQ(driver.worker.counters().transient_retries, 0u);
+}
+
+// A SHORT READ AND A SIGNAL ON THE SAME CHUNK. Both re-stage it, and each must resume where the
+// bytes stopped. A retry that asked for the original range again would read the head twice and put
+// those bytes where the remainder belongs.
+TEST(AsyncIoWorker, An_Interrupted_Read_Resumes_After_A_Short_One)
+{
+    Fixture fixture({ ChunkSize });
+    Driver driver;
+
+    driver.execute(fixture.workload());
+    driver.issue();
+    const auto id = driver.in_flight().front();
+
+    constexpr size_t Landed = 1000;
+    driver.engine->complete_short(id, Landed);
+    driver.route();
+
+    ASSERT_EQ(driver.engine->request(id).offset, Landed) << "the short read must leave a remainder";
+
+    driver.issue();
+    driver.engine->fail(id, 512 /* ERESTARTSYS */);
+    driver.route();
+
+    // THE POINT. The signal took nothing, so the retry asks for what the short read left - not for
+    // the whole chunk, which is what a cursor reset to the caller's range would produce.
+    const auto & retried = driver.engine->request(id);
+    EXPECT_EQ(retried.offset, Landed);
+    EXPECT_EQ(retried.bytesize, ChunkSize - Landed);
+
+    driver.issue();
+    driver.engine->complete(id);
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    ASSERT_EQ(responses.size(), 1u);
+    EXPECT_EQ(responses.front().ret, common::ResponseCode::Success);
+
+    // The bytes, not only the request. The mock fills from the file offset, so a retry at the wrong
+    // one lands the wrong pattern and this is where it shows.
+    EXPECT_EQ(fixture.got_at(0, ChunkSize), fixture.expected_at(0, ChunkSize));
+
+    EXPECT_EQ(driver.worker.counters().transient_retries, 1u);
+    EXPECT_EQ(driver.worker.counters().short_read_restages, 1u);
+}
+
+// A SIGNAL ON A DIRECT READ IS NOT AN ALIGNMENT FAULT. The two live side by side: EINVAL on a direct
+// fd means our alignment rule broke and the file is reopened buffered, while a restart code means a
+// signal arrived and the same direct read is still right. Reading one as the other would give up
+// O_DIRECT for the rest of the load on a host that merely delivers signals.
+TEST(AsyncIoWorker, An_Interrupted_Direct_Read_Is_Not_Demoted)
+{
+    std::vector<char> raw(ChunkSize + 4096);
+    char * const aligned = raw.data() + ((-reinterpret_cast<uintptr_t>(raw.data())) % 4096);
+
+    Fixture fixture({ ChunkSize });
+    Driver driver(Strategy::IoUringDirect);
+
+    fixture.request[0].ranges[0].dst = aligned;
+
+    driver.execute(fixture.workload());
+    ASSERT_EQ(driver.engine->staged_count(), 1u);
+
+    const auto id = driver.engine->staged().front();
+    ASSERT_TRUE(driver.engine->request(id).file.direct) << "the setup must produce a DIRECT read";
+
+    driver.issue();
+    driver.engine->fail(id, 512 /* ERESTARTSYS */);
+    driver.route();
+
+    ASSERT_EQ(driver.engine->staged_count(), 1u) << "the interrupted read must be issued again";
+
+    const auto & retried = driver.engine->request(id);
+    EXPECT_TRUE(retried.file.direct) << "the signal was taken for an alignment fault";
+
+    // The descriptor itself, which is what a demotion reopens. The flag above is what the worker
+    // believes; this is what the kernel holds.
+    const int flags = ::fcntl(retried.file.fd, F_GETFL);
+    ASSERT_NE(flags, -1);
+    EXPECT_NE(flags & O_DIRECT, 0) << "the file was reopened buffered for the rest of the load";
+
+    driver.issue();
+    driver.engine->complete(id);
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    ASSERT_EQ(responses.size(), 1u);
+    EXPECT_EQ(responses.front().ret, common::ResponseCode::Success);
+    EXPECT_EQ(driver.worker.counters().transient_retries, 1u);
+}
+
+// THE SPIN THAT A DEFERRAL USED TO CAUSE. An engine that refuses everything, with nothing in flight
+// to free it, left execute() looping at full CPU for ever - proven before the bound existed.
+//
+// set_flush_stalled models exactly that, and its own comment names the hazard: "reaping frees
+// nothing and a retry loop livelocks".
+TEST(AsyncIoWorker, A_Flush_That_Never_Issues_Gives_Up_Instead_Of_Spinning)
+{
+    Driver driver(Strategy::IoUringBuffered, 4096, std::nullopt, 3 /* depth */);
+
+    Fixture warmup({ ChunkSize });
+    driver.execute(warmup.workload());          // builds the engine
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    drain_responses(*warmup.responder, 1);
+
+    driver.engine->set_flush_stalled(true);     // every flush from here takes nothing
+
+    // MORE CHUNKS THAN THE WINDOW, which is what keeps execute() looping: its condition is that the
+    // QUEUE is empty, and with everything staged in one pump it would return without ever spinning.
+    Fixture fixture({ ChunkSize, ChunkSize, ChunkSize, ChunkSize, ChunkSize, ChunkSize });
+
+    std::atomic<bool> returned{ false };
+    std::thread runner([&]()
+    {
+        driver.worker.execute(fixture.workload(), driver.stopped);
+        returned.store(true);
+    });
+
+    for (unsigned i = 0; i < 300 && !returned.load(); ++i)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_TRUE(returned.load()) << "execute() never returned - the deferral is still unbounded";
+
+    // Released before joining, so a REGRESSION fails this test instead of hanging the whole target:
+    // execute() then leaves through its stopped branch rather than spinning for ever in join().
+    driver.stopped.store(true);
+    runner.join();
+
+    // Answered, not silently dropped: the ranges owe a response however the engine failed.
+    const auto responses = drain_responses(*fixture.responder, 6);
+    ASSERT_EQ(responses.size(), 6u);
+
+    // THE CODE MATTERS. abort_all only marks the engine dead when the code is not FinishedError, and
+    // a dead engine is what stops the next request repeating the whole 1024-turn stall.
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::FsAsyncEngineError);
+    }
+
+    // And the mount is not tried again: a second request fails at once rather than stalling afresh.
+    // No need to clear `stopped`: enqueue() answers a dead engine before anything reads it.
+    Fixture second({ ChunkSize });
+    driver.execute(second.workload());
+
+    const auto after = drain_responses(*second.responder, 1);
+    EXPECT_EQ(after.front().ret, common::ResponseCode::FsAsyncEngineError)
+        << "the dead engine was used again";
+}
+
+// THE OTHER HALF OF THE BOUND: a refusal that clears must not cost the workload anything. The budget
+// is a count of CONSECUTIVE stalled turns, and progress resets it - so two stalls that each spend
+// most of the budget still leave it whole.
+//
+// Without that reset this test aborts: the two stalls below add up to more turns than the budget
+// holds, and the engine would be marked dead between them.
+TEST(AsyncIoWorker, A_Stall_That_Clears_Costs_The_Workload_Nothing)
+{
+    Driver driver;
+
+    Fixture fixture({ ChunkSize, ChunkSize });
+    driver.execute(fixture.workload());
+
+    // One read per flush, so the second chunk is still STAGED while the first is answered. A stalled
+    // turn is only counted with nothing in flight, which is the state this keeps the worker in.
+    driver.engine->set_flush_limit(1);
+
+    // Each stall is most of MaxStalledFlushes. Two of them exceed it.
+    constexpr unsigned Turns = 600;
+
+    driver.engine->set_flush_stalled(true);
+    for (unsigned turn = 0; turn < Turns; ++turn)
+    {
+        driver.issue();
+    }
+
+    driver.engine->set_flush_stalled(false);
+    driver.issue();
+    ASSERT_EQ(driver.engine->in_flight().size(), 1u) << "the cleared stall issued nothing";
+    driver.engine->complete(driver.engine->in_flight().front());
+
+    // Stalled again BEFORE the harvest, so the second chunk stays staged rather than going out on
+    // the same turn that answers the first.
+    driver.engine->set_flush_stalled(true);
+    driver.route();
+
+    for (unsigned turn = 0; turn < Turns; ++turn)
+    {
+        driver.issue();
+    }
+
+    driver.engine->set_flush_stalled(false);
+    driver.issue();
+    ASSERT_EQ(driver.engine->in_flight().size(), 1u) << "the budget was spent by the first stall";
+    driver.engine->complete(driver.engine->in_flight().front());
+    driver.route();
+
+    const auto responses = drain_responses(*fixture.responder, 2);
+    ASSERT_EQ(responses.size(), 2u);
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success) << "a refusal that cleared failed a read";
+    }
+}
+
 // A demotion must not break requests of the same file that are already staged against the old
 // descriptor.
 //
@@ -1546,6 +1864,58 @@ TEST(AsyncIoWorkerDevice, A_Device_Read_Offers_Its_Staging_Slab)
     driver.engine->complete_all();
     driver.route();
     driver.settle();
+}
+
+// A DEVICE READ IS RETRIED LIKE A HOST ONE, and the pool does not grow while it happens.
+//
+// WHAT THIS DOES NOT PROVE: that the retry keeps the same pinned buffer rather than returning it and
+// taking another. It cannot. stage_pending() runs on this same thread immediately after, so nothing
+// can take a returned buffer in between - the copy thread only gives them back. A release and a
+// retake are indistinguishable from holding, and staging_buffers() counts what the pool has
+// ALLOCATED, which never shrinks either way.
+//
+// The code does hold it, via `if (!entry->staging.valid())` in stage_pending, and that is where to
+// look. This test pins the part that is observable: the chunk keeps being re-issued, the counter
+// follows, and the ranges still arrive.
+TEST(AsyncIoWorkerDevice, A_Device_Read_Is_Retried_And_Still_Answered)
+{
+    constexpr unsigned Window = 2;
+    constexpr unsigned Interruptions = 32;
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 });
+    DeviceDriver driver(mock, Window);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto pool = driver.worker.staging_buffers();
+    ASSERT_GT(pool, 0u) << "a device read must have taken a staging buffer";
+
+    // Many more interruptions than the pool holds buffers.
+    for (unsigned i = 0; i < Interruptions; ++i)
+    {
+        ASSERT_FALSE(driver.engine->in_flight().empty())
+            << "the chunk stopped being re-issued after " << i << " interruptions";
+        driver.engine->fail(driver.engine->in_flight().front(), 512 /* ERESTARTSYS */);
+        driver.route();
+        driver.issue();
+    }
+
+    EXPECT_EQ(driver.worker.staging_buffers(), pool) << "the pool grew while one chunk was retrying";
+
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    ASSERT_EQ(responses.size(), 3u) << "the ranges must still be answered after the retries";
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success);
+    }
+
+    EXPECT_EQ(driver.worker.counters().transient_retries, Interruptions);
 }
 
 // The whole point of the step: a device range is read into pinned host memory and copied from there,

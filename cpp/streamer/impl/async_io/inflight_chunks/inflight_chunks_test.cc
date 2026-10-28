@@ -180,6 +180,68 @@ TEST(InflightChunks, Unknown_Id_Asserts)
     EXPECT_THROW(chunks.pending(7), std::exception);
 }
 
+// --- the transient retry budget --------------------------------------------------------------
+
+// A chunk may retry many times and then must stop, so an interrupted read cannot loop for ever.
+TEST(InflightChunks, A_Chunk_Spends_Its_Transient_Budget_And_Stops)
+{
+    std::vector<char> buffer(4096);
+    InflightChunks chunks;
+    const auto id = chunks.add(chunk_at(0, 100, buffer.data()), 1 /* workload */, 0 /* batch */);
+
+    unsigned allowed = 0;
+    while (chunks.may_retry_transient(id))
+    {
+        ASSERT_LT(++allowed, 100000u) << "the budget is not bounded at all";
+    }
+
+    // The NUMBER, not a relation between the counter and itself: comparing the two would hold for any
+    // bound and for either comparison, which is no assertion at all.
+    EXPECT_EQ(allowed, 1024u);
+    EXPECT_EQ(chunks.find(id)->transient_retries, 1024u) << "the count stops at the budget";
+
+    EXPECT_FALSE(chunks.may_retry_transient(id)) << "exhausted stays exhausted";
+    EXPECT_EQ(chunks.find(id)->transient_retries, 1024u) << "a refused call still moved the count";
+}
+
+// The budget covers the chunk's whole life. Resetting it on progress would let a chunk that advances
+// between interruptions retry without limit, which is the loop the bound exists to stop.
+TEST(InflightChunks, Progress_Does_Not_Refund_The_Transient_Budget)
+{
+    std::vector<char> buffer(4096);
+    InflightChunks chunks;
+    const auto id = chunks.add(chunk_at(0, 100, buffer.data()), 1 /* workload */, 0 /* batch */);
+
+    ASSERT_TRUE(chunks.may_retry_transient(id));
+    ASSERT_TRUE(chunks.may_retry_transient(id));
+    ASSERT_EQ(chunks.record(id, 40), Progress::Partial);
+
+    EXPECT_EQ(chunks.find(id)->transient_retries, 2u) << "a short read refunded the budget";
+}
+
+// Budgets belong to a chunk, not to the worker: two chunks interrupted once each are not a pattern.
+TEST(InflightChunks, Transient_Budgets_Are_Per_Chunk)
+{
+    std::vector<char> buffer(4096);
+    InflightChunks chunks;
+    const auto a = chunks.add(chunk_at(0, 100, buffer.data()), 1 /* workload */, 0 /* batch */);
+    const auto b = chunks.add(chunk_at(100, 200, buffer.data() + 100), 1 /* workload */, 0 /* batch */);
+
+    ASSERT_TRUE(chunks.may_retry_transient(a));
+    ASSERT_TRUE(chunks.may_retry_transient(a));
+
+    EXPECT_EQ(chunks.find(b)->transient_retries, 0u) << "b paid for a's interruptions";
+}
+
+// Unlike record() and release(), this does NOT assert on an unknown id: it is asked on a failure
+// path, where a chunk may already have been released, and refusing is the safe answer.
+TEST(InflightChunks, An_Unknown_Id_May_Not_Retry)
+{
+    InflightChunks chunks;
+
+    EXPECT_FALSE(chunks.may_retry_transient(7));
+}
+
 TEST(InflightChunks, Several_Chunks_Are_Independent)
 {
     std::vector<char> buffer(4096);
