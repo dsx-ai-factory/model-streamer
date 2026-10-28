@@ -366,6 +366,11 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued, bool & out_defe
     {
         LOG(ERROR) << "io_uring_submit issued " << out_issued << " of " << _staged
                    << " staged - this engine's accounting is wrong";
+
+        // Clamped before it is returned: the caller adds this to its in-flight count and waits on it
+        // before reporting, and the kernel cannot have taken more than it was offered - so this is
+        // the largest number that can still be true.
+        out_issued = static_cast<unsigned>(_staged);
         _staged = 0;
         return common::ResponseCode::FsAsyncEngineError;
     }

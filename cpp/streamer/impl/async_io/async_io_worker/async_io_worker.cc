@@ -949,6 +949,11 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     const auto flushed = _engine->flush(issued, deferred);
     if (flushed != common::ResponseCode::Success)
     {
+        // COUNTED EVEN THOUGH THE FLUSH FAILED. An engine can issue reads and still report an error,
+        // and quiesce() waits on this count - so dropping it lets abort_all report ranges whose
+        // destinations the kernel still holds.
+        _issued += issued;
+
         LOG(ERROR) << "Failed to issue staged reads: " << flushed;
         abort_all(flushed);
         return;
