@@ -160,6 +160,19 @@ def row_prefixes(text):
     return tuple(part.strip() for part in (text or "").split(",") if part.strip())
 
 
+def no_rows_outcome(filter_text, allow_empty, matrix_name):
+    """(exit status, message) of a run that selected no row. Without a filter that is a mistake of the matrix. With one,
+    it is a leg that has nothing to run only where allow_empty says so (the oldest-torch leg has just the core rows);
+    anywhere else it is a filter that matches nothing, which is a typo, and a green leg that ran nothing would hide it."""
+    prefixes = row_prefixes(filter_text)
+    if not prefixes:
+        return 1, "no rows selected"
+    message = "no row of the %s matrix starts with %s" % (matrix_name, list(prefixes))
+    if allow_empty:
+        return 0, message + ": nothing to run on this leg"
+    return 1, message + ": a typo in the filter? Only a leg that has just some of the rows may select none"
+
+
 def filter_rows(rows, text):
     """The rows whose id starts with one of the prefixes in text; all of them when there is no prefix."""
     prefixes = row_prefixes(text)

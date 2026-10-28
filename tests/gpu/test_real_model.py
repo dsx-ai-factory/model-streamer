@@ -76,10 +76,23 @@ class Manifest(Fixture):
         self.assertEqual(entry["data_start"], 8 + entry["header_len"])
         self.assertEqual(entry["metadata"], {"format": "pt"})
 
-    def test_tensors_are_listed_in_file_order(self):
-        manifest = real_model.build_manifest(self.dir.name, "source.safetensors")
-        starts = [t["start"] for t in manifest["files"][0]["tensors"]]
-        self.assertEqual(starts, sorted(starts))
+    def test_tensors_are_listed_in_file_order_whatever_the_order_of_the_header(self):
+        """A header is a JSON object, and its order is the writer's: here the tensor that is last in the file is first
+        in the header. Without the sort the manifest would list them in header order and refuse the file as holey."""
+        data = bytes(range(30))
+        header = {"last": {"dtype": "U8", "shape": [10], "data_offsets": [20, 30]},
+                  "first": {"dtype": "U8", "shape": [8], "data_offsets": [0, 8]},
+                  "middle": {"dtype": "U8", "shape": [12], "data_offsets": [8, 20]}}
+        encoded = json.dumps(header).encode()
+        path = os.path.join(self.dir.name, "reversed.safetensors")
+        with open(path, "wb") as handle:
+            handle.write(struct.pack("<Q", len(encoded)) + encoded + data)
+        manifest = real_model.build_manifest(self.dir.name, "reversed.safetensors")
+        tensors = manifest["files"][0]["tensors"]
+        self.assertEqual([t["name"] for t in tensors], ["first", "middle", "last"])
+        self.assertEqual([t["start"] for t in tensors], [0, 8, 20])
+        self.assertEqual([t["crc32"] for t in tensors],
+                         [zlib.crc32(data[0:8]), zlib.crc32(data[8:20]), zlib.crc32(data[20:30])])
 
     def test_an_empty_tensor_is_accepted_wherever_the_header_lists_it(self):
         """An empty tensor starts where the next one does. Sorted by start alone, the order of two such tensors was the
@@ -129,6 +142,27 @@ class Download(Fixture):
             real_model.download(self.url, os.path.join(self.dir.name, "x.safetensors"), self.model["size"],
                                 self.model["sha256"], attempts=1)
         self.assertEqual([n for n in os.listdir(self.dir.name) if n.startswith("x.")], [])
+
+    def test_a_download_that_takes_too_long_is_refused_even_if_it_goes_on(self):
+        """The read timeout is per read: a connection that trickles data never trips it, and the deadline does."""
+        data = bytes(3 * real_model.CHUNK + 5)
+        source = os.path.join(self.dir.name, "big.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        with self.assertRaises(real_model.RealModelError) as raised:
+            real_model.download(pathlib.Path(source).as_uri(), os.path.join(self.dir.name, "x.safetensors"), len(data),
+                                hashlib.sha256(data).hexdigest(), attempts=1, max_seconds=-1)
+        self.assertIn("more than", str(raised.exception))
+        self.assertEqual([n for n in os.listdir(self.dir.name) if n.startswith("x.")], [])
+
+    def test_a_download_within_the_deadline_passes(self):
+        data = bytes(2 * real_model.CHUNK + 5)
+        source = os.path.join(self.dir.name, "ok.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        got = real_model.download(pathlib.Path(source).as_uri(), os.path.join(self.dir.name, "y.safetensors"),
+                                  len(data), hashlib.sha256(data).hexdigest(), attempts=1, max_seconds=600)
+        self.assertEqual(got, len(data))
 
     def test_a_wrong_size_is_refused(self):
         with self.assertRaises(real_model.RealModelError):

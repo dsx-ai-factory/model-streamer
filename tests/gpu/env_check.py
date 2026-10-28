@@ -9,7 +9,8 @@ The newest-torch leg is meant to test the newest PyTorch. pip installs the newes
 use, so when a release stops supporting that Python, the leg silently falls back to an older torch and no longer tests
 the newest. This asks PyPI for the newest release, compares it with the installed one, and says so when they differ:
 the base container of the leg has to change (a newer Ubuntu or Python). The result is printed, written to
-env-check.txt in GPU_RESULTS (the workflow shows it in the job summary), and the exit status is 1 when the leg is limited.
+env-check.txt in GPU_RESULTS (the workflow shows it in the job summary), and the exit status is 3 when the leg is limited
+(only that: a crash is 1 and a usage error 2, and neither is a verdict on the container).
 
 If PyPI cannot be reached the check says it could not verify and exits 0: a network problem is not an environment
 problem.
@@ -17,6 +18,7 @@ problem.
 Needs only the standard library.
 """
 
+import http.client
 import importlib.metadata
 import json
 import os
@@ -26,6 +28,7 @@ import urllib.request
 
 PYPI_URL = "https://pypi.org/pypi/torch/json"
 TIMEOUT_SECONDS = 30
+LIMITED_STATUS = 3  # the exit status that says the container limits torch; setup_and_run.sh reads it
 
 _STABLE = re.compile(r"^\d+(\.\d+)*$")
 _CLAUSE = re.compile(r"^\s*(>=|<=|==|!=|~=|>|<)\s*([0-9]+(?:\.[0-9]+)*)(\.\*)?\s*$")
@@ -36,6 +39,10 @@ def version_tuple(text):
     if not _STABLE.match(text):
         return None
     return tuple(int(part) for part in text.split("."))
+
+
+def _padded(version, width):
+    return tuple(version) + (0,) * (width - len(version))
 
 
 def python_allows(requires_python, python_version):
@@ -49,20 +56,21 @@ def python_allows(requires_python, python_version):
             continue
         op, number, wildcard = found.group(1), tuple(int(p) for p in found.group(2).split(".")), found.group(3)
         head = tuple(python_version[:len(number)])
+        # PEP 440 compares with the shorter version padded with zeros: 3.10 is 3.10.0, so ==3.10 is not every 3.10.x
+        width = max(len(python_version), len(number))
+        have, want = _padded(python_version, width), _padded(number, width)
         if wildcard:
             ok = (head == number) if op == "==" else (head != number)
         elif op == ">=":
-            ok = tuple(python_version) >= number
+            ok = have >= want
         elif op == ">":
-            ok = tuple(python_version) > number
+            ok = have > want
         elif op == "<=":
-            ok = tuple(python_version) <= number
+            ok = have <= want
         elif op == "<":
-            ok = tuple(python_version) < number
-        elif op == "==":
-            ok = head == number
-        elif op == "!=":
-            ok = head != number
+            ok = have < want
+        elif op in ("==", "!="):
+            ok = (have == want) if op == "==" else (have != want)
         else:  # ~=
             ok = tuple(python_version) >= number and tuple(python_version[:len(number) - 1]) == number[:-1]
         if not ok:
@@ -115,8 +123,10 @@ def newest_torch():
     try:
         with urllib.request.urlopen(PYPI_URL, timeout=TIMEOUT_SECONDS) as response:
             pypi_json = json.load(response)
-    except (OSError, ValueError) as error:
-        return False, ["could not ask PyPI for the newest torch (%s): not verified" % error]
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        # HTTPException is not an OSError: it is what a body cut short (IncompleteRead) raises.
+        return False, ["could not ask PyPI for the newest torch (%s): not verified" % (repr(error) if not str(error)
+                                                                                          else error)]
     try:
         return assess(importlib.metadata.version("torch"), pypi_json, sys.version_info[:3])
     except (KeyError, IndexError, TypeError, AttributeError) as error:
@@ -139,7 +149,7 @@ def main(argv=None):
         os.makedirs(results, exist_ok=True)
         with open(os.path.join(results, "env-check.txt"), "w") as handle:
             handle.write(text + "\n")
-    return 1 if limited else 0
+    return LIMITED_STATUS if limited else 0
 
 
 if __name__ == "__main__":

@@ -15,8 +15,9 @@ bytes. A tensor is compared by its bytes, never by value, so NaN payloads and ne
     GPU_MATRIX     core (default), full or smoke: which rows to run, see matrix.py
     GPU_FIXTURES   directory written by gen_models.py and real_model.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
-    GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them. A leg with no
-                   such row has nothing to run and passes, saying so
+    GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them. A filter that
+                   matches no row fails the run (a typo), unless GPU_ALLOW_EMPTY_ROWS=true: a leg that has only some of
+                   the rows (the oldest-torch leg has the core rows) then has nothing to run and passes, saying so
     GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
                    and passes only if the fault is reported (see drills.py). Off by default.
 """
@@ -33,9 +34,9 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills  # noqa: E402
+from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills, unexpected_errors  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
-from matrix import WORLD, filter_rows, memory_limit, row_prefixes, rows_for  # noqa: E402
+from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 from tensor_bytes import as_bytes, tensor_crc32  # noqa: E402
 
@@ -333,6 +334,14 @@ def main():
             write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
             if drill and not caught:
                 failed = True  # the fault went unnoticed: a check does not do its job
+            if drill:
+                # A drilled row fails on purpose, but only with the report of its fault: another error of the row (a wrong
+                # dtype, an exception) is a real problem, which the drill must not hide.
+                unexpected = unexpected_errors(drill, run.errors, run.corrupted_tensor, run.error_count)
+                if unexpected:
+                    failed = True
+                    for message in unexpected:
+                        print("[rank %d]   UNEXPECTED in the drilled row: %s" % (rank, message), flush=True)
             if not ok:
                 failed = failed or not drill
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and
@@ -349,14 +358,10 @@ def main():
         if dist.is_initialized():
             dist.destroy_process_group()
     if not outcomes:
-        if row_prefixes(os.environ.get("GPU_ROWS")):
-            # A filter was asked for, and this matrix has no such row (the oldest-torch leg runs only the core rows):
-            # there is nothing to run here, which is not a failure.
-            print("no row of the %s matrix starts with %s: nothing to run" % (
-                os.environ.get("GPU_MATRIX", "core"), list(row_prefixes(os.environ["GPU_ROWS"]))), flush=True)
-            return 0
-        print("no rows selected", file=sys.stderr)
-        return 1
+        status, message = no_rows_outcome(os.environ.get("GPU_ROWS"), os.environ.get("GPU_ALLOW_EMPTY_ROWS") == "true",
+                                          os.environ.get("GPU_MATRIX", "core"))
+        print(message, file=sys.stderr if status else sys.stdout, flush=True)
+        return status
     return 1 if failed else 0
 
 

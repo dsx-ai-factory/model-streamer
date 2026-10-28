@@ -8,7 +8,9 @@ The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs eve
 is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
 the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
 demand, and a manual run is never skipped:
-`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...]`.
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...]`. A `rows` filter
+that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows and
+passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`).
 
 ## Where it runs
 
@@ -44,10 +46,9 @@ demand, and a manual run is never skipped:
 
 1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the wheel, and checks that the
    streamer is imported from the installed wheel and that two GPUs and NCCL are there;
-2. in the newest leg, checks that the container does not limit the newest torch; runs the CPU unit tests (generator,
-   rows, real model download, the environment check);
-3. generates four synthetic models into `.gpu-fixtures/` (not in the repo; the runner's VM is discarded after
-   the job) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
+2. in the newest leg, checks that the container does not limit the newest torch; in both legs, runs the CPU unit tests
+   (generator, rows, drills, tensor checks, real model download, the environment check);
+3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
    hold every dtype that the streamer's own table accepts with the installed PyTorch and that the generator knows (the
    script prints which ones are left out);
 4. downloads the small real model (see below) and describes it, timing both;
@@ -146,8 +147,10 @@ to non-distributed.
 
 After every row the test drops its own references, frees the GPU cache and checks that `torch.cuda.memory_allocated()`
 is back to its value before the run (8 MiB of slack). Anything above that is reported as a GPU memory leak and
-fails the row. The ranks agree on the outcome of a row over a separate CPU-only (gloo) group, so the test adds no
-NCCL traffic or GPU work next to the streamer's. Host memory is not checked here; that belongs in a longevity test.
+fails the row. That counts what the torch allocator holds: memory that the streamer's C++ side allocates itself
+(`cudaMalloc`, pinned memory) is not seen. The ranks agree on the outcome of a row over a separate CPU-only (gloo)
+group, so the test adds no NCCL traffic or GPU work next to the streamer's. Host memory is not checked here; that
+belongs in a longevity test.
 
 Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
 run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
@@ -164,11 +167,16 @@ results file how many of the expected rows finished, and in which row the run en
 ranks wrote its results file (a rank that died before its first write leaves only the other's). An incomplete strategy
 fails the job.
 
-The time caps are for a hang: 30 minutes per strategy (a strategy takes about 10 minutes on a healthy runner, 18 on a
-slow day), 10 for the self-check and 10 for the smoke test. They add up, with the setup, to 150 minutes at the very worst,
-below the job's `timeout-minutes` of 180, so the script always gets to say which rows ran. A download of the real model
-that fails fails the run at the end and skips the smoke test, and a failure of the CPU unit tests fails the run at the
-end, but the GPU tests still run in both cases.
+The time caps are for a hang, and generous: 60 minutes per strategy (about 10 on a healthy runner, 18 on a slow day), 20
+for the self-check and for the smoke test, 45 for installing torch, 30 for the real model (an attempt to download it
+also has a deadline of 10 minutes, so that a connection that trickles data ends), and 15 to 20 for the other setup steps.
+The whole run has a budget as well, `GPU_BUDGET_MINUTES` (285), which is the job's `timeout-minutes` (300) less 15: a
+cap is cut to what is left of the budget less 5 minutes, so the script always gets to say which rows ran, whatever the
+caps add up to, and neither needs adjusting when the other changes (raise the budget with the job's timeout). A leg
+takes about 40 minutes (newest) or 8 (oldest) when healthy.
+A download of the real model that fails, or a failure of the CPU unit tests, fails the run at the end, and the GPU tests
+still run. A step of the setup that fails (the installs, the generation) or fixtures that are not on a block device end
+the script at once, and it says so at the end of the log, with an error annotation: `THE RUN ENDED EARLY`.
 
 The results of each row are written as soon as it ends, in `rows-<strategy>-rank<N>.json`:
 `{"strategy", "expected_rows", "rows": [...]}`.
@@ -183,8 +191,10 @@ as what they are (the CRC32 error must name the tensor that was corrupted, and t
 the 32 MiB that was leaked), and fails if one goes unnoticed. Its results are in `self-check/`.
 
 The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
-since the last scheduled run that passed (`test_synthetic_models.py`, `matrix.py`, `phase_timer.py`, `real_model.py`,
-`setup_and_run.sh` or the workflow itself), so nobody has to remember to run it.
+since the last scheduled run that passed (`test_synthetic_models.py`, what it checks with: `tensor_bytes.py`, `drills.py`,
+`gen_models.py` and `matrix.py`, and `phase_timer.py`, `real_model.py`, `setup_and_run.sh` or the workflow itself), so
+nobody has to remember to run it. A drilled row must fail with its own report and no other error: another error in it
+(a wrong dtype, an exception) fails the run.
 
 The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
 not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file

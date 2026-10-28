@@ -68,6 +68,39 @@ class LeakDrill(unittest.TestCase):
         self.assertEqual(drills.LEAK_DRILL_BYTES, 32 * MIB)
 
 
+class UnexpectedErrors(unittest.TestCase):
+    """The other problems of a drilled row, which the drill must not hide."""
+
+    def test_the_report_alone_leaves_nothing_unexpected(self):
+        self.assertEqual(drills.unexpected_errors("corrupt", [CRC_ERROR], "model.layers.3.q_proj.weight"), [])
+        self.assertEqual(drills.unexpected_errors("leak", [LEAK_ERROR]), [])
+
+    def test_another_error_in_the_row_is_unexpected(self):
+        other = "model.layers.9.q_proj.weight: dtype torch.float16, expected torch.bfloat16"
+        self.assertEqual(drills.unexpected_errors("corrupt", [CRC_ERROR, other], "model.layers.3.q_proj.weight"),
+                         [other])
+        exception = "RuntimeError: NCCL communicator was aborted"
+        self.assertEqual(drills.unexpected_errors("leak", [LEAK_ERROR, exception]), [exception])
+
+    def test_a_crc_error_of_another_tensor_is_unexpected(self):
+        other_crc = "model.layers.9.q_proj.weight (BF16 [4], 8 bytes): crc32 00000001, expected 00000002"
+        self.assertEqual(drills.unexpected_errors("corrupt", [CRC_ERROR, other_crc], "model.layers.3.q_proj.weight"),
+                         [other_crc])
+
+    def test_errors_that_were_not_recorded_are_unexpected(self):
+        unexpected = drills.unexpected_errors("leak", [LEAK_ERROR], error_count=45)
+        self.assertEqual(len(unexpected), 1)
+        self.assertIn("44 more", unexpected[0])
+        self.assertEqual(drills.unexpected_errors("leak", [LEAK_ERROR], error_count=1), [])
+
+    def test_a_corrupt_drill_that_corrupted_nothing_has_every_error_unexpected(self):
+        self.assertEqual(drills.unexpected_errors("corrupt", [CRC_ERROR], None), [CRC_ERROR])
+
+    def test_unknown_kind_is_refused(self):
+        with self.assertRaises(ValueError):
+            drills.unexpected_errors("raise", ["x"])
+
+
 class UnknownKind(unittest.TestCase):
     def test_refused(self):
         with self.assertRaises(ValueError):

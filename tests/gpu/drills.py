@@ -42,3 +42,21 @@ def drill_caught(kind, errors, corrupted_tensor=None, leak_bytes=0):
     if kind == "leak":
         return leak_bytes >= LEAK_DRILL_BYTES and any(error.startswith("GPU memory leak") for error in errors)
     raise ValueError("unknown drill %r" % (kind,))
+
+
+def _is_the_report(kind, error, corrupted_tensor):
+    if kind == "corrupt":
+        return corrupted_tensor is not None and error.startswith(corrupted_tensor + " (") and "crc32" in error
+    if kind == "leak":
+        return error.startswith("GPU memory leak")
+    raise ValueError("unknown drill %r" % (kind,))
+
+
+def unexpected_errors(kind, errors, corrupted_tensor=None, error_count=None):
+    """The errors of a drilled row that are not the report of its fault: the row has another problem, which a drill
+    must not hide. error_count is how many errors the row had in all; the errors beyond those recorded cannot be told
+    apart, and count as unexpected."""
+    unexpected = [error for error in errors if not _is_the_report(kind, error, corrupted_tensor)]
+    if error_count is not None and error_count > len(errors):
+        unexpected.append("... and %d more error(s) that were not recorded" % (error_count - len(errors)))
+    return unexpected

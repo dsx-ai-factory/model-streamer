@@ -195,5 +195,21 @@ class FilterRows(unittest.TestCase):
         self.assertEqual(matrix.filter_rows(matrix.core_rows(), "giant_tensor.dist.chunks"), [])
 
 
+class NoRowsOutcome(unittest.TestCase):
+    def test_an_empty_selection_without_a_filter_is_a_failure(self):
+        for allow in (True, False):
+            self.assertEqual(matrix.no_rows_outcome(None, allow, "core")[0], 1)
+            self.assertEqual(matrix.no_rows_outcome(" , ", allow, "core")[0], 1)
+
+    def test_a_filter_that_matches_nothing_passes_only_where_it_is_allowed(self):
+        status, message = matrix.no_rows_outcome("giant_tensor.dist.chunks", True, "core")
+        self.assertEqual(status, 0)
+        self.assertIn("nothing to run on this leg", message)
+        status, message = matrix.no_rows_outcome("mixd.solo", False, "full")
+        self.assertEqual(status, 1)
+        self.assertIn("typo", message)
+        self.assertIn("mixd.solo", message)
+
+
 if __name__ == "__main__":
     unittest.main()

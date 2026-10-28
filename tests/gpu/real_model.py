@@ -43,7 +43,8 @@ MODEL = {
 }
 MODEL_NAME = "real_smoke"
 DOWNLOAD_ATTEMPTS = 3
-DOWNLOAD_TIMEOUT_SECONDS = 60
+DOWNLOAD_TIMEOUT_SECONDS = 60  # of one read from the socket: a connection that sends nothing
+DOWNLOAD_MAX_SECONDS = 600  # of one attempt, however slowly the data trickles in (it takes 15 seconds on a healthy runner)
 
 
 class RealModelError(Exception):
@@ -54,15 +55,16 @@ def default_url(model=MODEL):
     return "https://huggingface.co/%s/resolve/%s/%s" % (model["repo"], model["revision"], model["filename"])
 
 
-def download(url, destination, size, sha256, attempts=DOWNLOAD_ATTEMPTS):
-    """Download url to destination and check its size and SHA-256. A failed attempt is repeated; the last error is
-    raised. Returns the number of bytes."""
+def download(url, destination, size, sha256, attempts=DOWNLOAD_ATTEMPTS, max_seconds=DOWNLOAD_MAX_SECONDS):
+    """Download url to destination and check its size and SHA-256. A failed attempt (an error, or more than max_seconds
+    in all) is repeated; the last error is raised. Returns the number of bytes."""
     last_error = None
     for attempt in range(1, attempts + 1):
         partial = destination + ".part"
         try:
             digest = hashlib.sha256()
             done = 0
+            deadline = time.monotonic() + max_seconds
             with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response, open(partial, "wb") as out:
                 while True:
                     chunk = response.read(CHUNK)
@@ -71,6 +73,8 @@ def download(url, destination, size, sha256, attempts=DOWNLOAD_ATTEMPTS):
                     out.write(chunk)
                     digest.update(chunk)
                     done += len(chunk)
+                    if time.monotonic() > deadline:
+                        raise RealModelError("more than %d s for %d of %d bytes" % (max_seconds, done, size))
             if done != size:
                 raise RealModelError("downloaded %d bytes, expected %d" % (done, size))
             if digest.hexdigest() != sha256:

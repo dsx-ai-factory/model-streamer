@@ -39,6 +39,23 @@ class AsBytes(unittest.TestCase):
             flat = tensor_bytes.as_bytes(tensor)
             self.assertEqual((flat.dtype, flat.dim(), flat.numel()), (torch.uint8, 1, size), str(tensor.dtype))
 
+    def test_the_dtypes_that_only_a_newer_torch_has(self):
+        """float8, the unsigned 16/32/64 bit types and F4 (two values to an element): present from some torch version
+        on, so each is tried where this torch has it, which is every one of them on the newest-torch leg."""
+        names = ["float8_e4m3fn", "float8_e5m2", "float8_e8m0fnu", "uint16", "uint32", "uint64", "float4_e2m1fn_x2"]
+        present = [name for name in names if hasattr(torch, name)]
+        for name in present:
+            dtype = getattr(torch, name)
+            tensor = torch.zeros(6, dtype=torch.uint8).view(dtype) if name.startswith(("float8", "float4")) else \
+                torch.zeros(3, dtype=dtype)
+            flat = tensor_bytes.as_bytes(tensor)
+            self.assertEqual((flat.dtype, flat.dim()), (torch.uint8, 1), name)
+            self.assertEqual(flat.numel(), tensor.numel() * tensor.element_size(), name)
+            before = tensor_bytes.tensor_crc32(tensor)
+            flat[0] ^= 1
+            self.assertEqual(int(tensor_bytes.as_bytes(tensor)[0]), 1, name)
+            self.assertNotEqual(tensor_bytes.tensor_crc32(tensor), before, name)
+
     def test_it_is_a_view_so_a_write_reaches_the_tensor(self):
         for tensor in (torch.zeros(4, dtype=torch.float32), torch.zeros(2, dtype=torch.complex64),
                        torch.zeros(3, dtype=torch.bool)):

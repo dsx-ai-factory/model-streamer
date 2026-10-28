@@ -28,6 +28,36 @@ SETUP_TIMING="$RESULTS/timing-setup.jsonl"
 : > "$SETUP_TIMING"
 status=0
 
+# Time. Every step that can hang has a cap (cap MINUTES, below), generous: several times what the step takes on a healthy
+# runner. The whole run has a budget, GPU_BUDGET_MINUTES (the workflow's job timeout less 15 minutes), that no step can
+# exceed: a cap is cut to what is left of the budget, less 5 minutes for the report. So the script always gets to say
+# which rows ran, whatever the caps add up to, and they do not need adjusting to fit the job's timeout.
+START_EPOCH=$(date +%s)
+BUDGET_SECONDS=$(( ${GPU_BUDGET_MINUTES:-285} * 60 ))
+REPORT_RESERVE_SECONDS=300
+
+# cap MINUTES: the seconds that a step may take, for timeout: its own cap, or what is left of the budget if that is less
+# (but at least a minute, so that a step is never given none).
+cap() {
+    local want=$(( $1 * 60 )) left
+    left=$(( START_EPOCH + BUDGET_SECONDS - $(date +%s) - REPORT_RESERVE_SECONDS ))
+    if [ "$left" -lt 60 ]; then left=60; fi
+    echo $(( want < left ? want : left ))
+}
+
+# A script that stops before its end (a setup step failed, the fixtures are not on a block device) says so, instead of
+# leaving the log to end on its last step with no report.
+finished=false
+on_exit() {
+    local rc=$?
+    if [ "$finished" != true ]; then
+        echo
+        echo "== THE RUN ENDED EARLY (exit $rc): see the last FAILED or ERROR line above. No rows were run after it, and none is reported."
+        echo "::error title=The GPU test run ended early::The script stopped before it finished (exit $rc): see the last FAILED or ERROR line in the log"
+    fi
+}
+trap on_exit EXIT
+
 # record NAME START END: append the wall time of a phase to the timing file and print it.
 record() {
     local secs
@@ -68,8 +98,9 @@ df -h "$FIXTURES" | tail -1
 # phase runs these functions where `set -e` does not apply, so every command ends in `|| return`.
 install_system_packages() {
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq || return
-    apt-get install -y -qq --no-install-recommends python3 python3-pip ca-certificates || return
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" apt-get update -qq || return
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+        apt-get install -y -qq --no-install-recommends python3 python3-pip ca-certificates || return
 }
 phase install_system_packages install_system_packages
 python3 --version
@@ -77,7 +108,8 @@ python3 --version
 install_python_packages() {
     local wheels wheel
     # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
-    python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
+    timeout --signal=TERM --kill-after=30s "$(cap 45)s" \
+        python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
     mapfile -t wheels < <(find "$WHEEL_DIR" -name 'runai_model_streamer-*.whl')
     if [ "${#wheels[@]}" -ne 1 ]; then
         echo "ERROR: expected one runai_model_streamer wheel in $WHEEL_DIR, found ${#wheels[@]}: ${wheels[*]:-}" >&2
@@ -85,7 +117,7 @@ install_python_packages() {
     fi
     wheel=${wheels[0]}
     echo "installing $wheel"
-    python3 -m pip install --no-cache-dir "$wheel" || return
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" python3 -m pip install --no-cache-dir "$wheel" || return
 }
 phase install_python_packages install_python_packages
 python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
@@ -117,12 +149,22 @@ PY
 env_limited=0
 if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
     echo "== is this container limiting the newest torch?"
-    python3 tests/gpu/env_check.py newest-torch || env_limited=1
+    # Only the check's own verdict (exit status 3) flags the container. A check that cannot reach PyPI says so and
+    # passes; one that crashes or hangs (a cap of its own) is not a verdict, and must not turn into a false flag.
+    check_status=0
+    timeout --signal=TERM --kill-after=10s 180s python3 tests/gpu/env_check.py newest-torch || check_status=$?
+    case "$check_status" in
+        0) ;;
+        3) env_limited=1 ;;
+        *) echo "WARNING: the environment check did not complete (exit $check_status): the newest torch is not verified" ;;
+    esac
 fi
 
 # The CPU unit tests of the harness. A failure fails the run, but the GPU tests still run: their results are worth having.
+# Without GPU_RESULTS, which the tests must not see: it is where the results of this run are written.
 echo "== self-test of the harness: the generator, the rows, the drills, the tensor checks, the real model download"
-phase generator_unit_tests python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
+phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+    python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
     tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
     tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
 
@@ -153,7 +195,8 @@ PY
     ) || return
     rm -rf "$FIXTURES"
     mkdir -p "$FIXTURES"
-    python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" --dtypes "$dtypes" \
+    timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
+        python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" --dtypes "$dtypes" \
         2>&1 | tee "$RESULTS/generate.log"
     return "${PIPESTATUS[0]}"
 }
@@ -162,11 +205,12 @@ phase generate_models generate_models
 
 # The small real model, downloaded on every run: real_model.py times the download and the manifest separately
 # (timing-real.jsonl), to show what the download adds to a run. It only feeds the smoke test, so a download that fails
-# (the hub is slow or down) fails the run at the end, and does not stop the 94 rows of the synthetic models.
+# (the hub is slow or down) fails the run at the end, and does not stop the rows of the synthetic models.
 smoke_expected=false
 if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
     echo "== download the small real model"
-    if phase fetch_real_model python3 tests/gpu/real_model.py fetch --out "$FIXTURES"; then
+    if phase fetch_real_model timeout --signal=TERM --kill-after=30s "$(cap 30)s" \
+        python3 tests/gpu/real_model.py fetch --out "$FIXTURES"; then
         smoke_expected=true
     else
         status=1
@@ -222,10 +266,9 @@ export RUNAI_STREAMER_LOG_TO_STDERR=1
 # a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
 # lists in the Makefile's test_strategies keep sync_buffered last for hosts of any kind.)
 #
-# The time caps are for a hang, and add up to less than the job's timeout (the workflow's timeout-minutes, 180): 4 x 30 min
-# of strategies, 10 min of self-check and 10 min of smoke test, plus the setup, are 150 min at the very worst, so the
-# script always gets to print which rows ran. A strategy takes about 10 minutes when the runner is healthy (18 on a slow
-# day).
+# The time caps are for a hang: a strategy takes about 10 minutes when the runner is healthy (18 on a slow day), and
+# its cap is 60. A cap is cut to what is left of the run's budget (see cap, above), so the caps never need to add up
+# to less than the job's timeout for the script to get to print which rows ran.
 for strategy in \
     sync_buffered \
     libaio_direct \
@@ -236,7 +279,7 @@ do
     echo "== streaming with filesystem strategy: $strategy"
     start=$(date +%s.%N)
     if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
-        timeout --signal=TERM --kill-after=30s 30m \
+        timeout --signal=TERM --kill-after=30s "$(cap 60)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -255,7 +298,7 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
     if ! GPU_ROWS="mixed.solo.owned.cuda.tight,mixed.solo.borrowed.cuda.tight" \
         GPU_DRILL="corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight" \
         GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
-        timeout --signal=TERM --kill-after=30s 10m \
+        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -271,7 +314,7 @@ if [ "$smoke_expected" = true ]; then
     start=$(date +%s.%N)
     # Without GPU_ROWS: a filter of the rows of the synthetic models would leave no smoke row.
     if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
-        timeout --signal=TERM --kill-after=30s 10m \
+        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
         tests/gpu/test_synthetic_models.py; then
         status=1
@@ -316,4 +359,5 @@ if [ "$env_limited" -ne 0 ]; then
     status=1
 fi
 
+finished=true
 exit "$status"

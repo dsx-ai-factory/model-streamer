@@ -5,6 +5,7 @@
     python3 -m unittest tests/gpu/test_env_check.py
 """
 
+import http.client
 import io
 import json
 import os
@@ -41,6 +42,19 @@ class PythonAllows(unittest.TestCase):
         self.assertTrue(env_check.python_allows("==3.10.*", PY310))
         self.assertTrue(env_check.python_allows("~=3.8", PY310))
         self.assertFalse(env_check.python_allows("~=3.11", PY310))
+
+    def test_a_short_version_is_padded_with_zeros_as_pep_440_says(self):
+        """==3.10 is 3.10.0 and no other 3.10.x; the other comparisons treat 3.10.0 and 3.10 as the same."""
+        self.assertFalse(env_check.python_allows("==3.10", (3, 10, 12)))
+        self.assertTrue(env_check.python_allows("==3.10", (3, 10, 0)))
+        self.assertTrue(env_check.python_allows("!=3.10", (3, 10, 12)))
+        self.assertFalse(env_check.python_allows("!=3.10", (3, 10, 0)))
+        self.assertTrue(env_check.python_allows("<=3.10", (3, 10, 0)))
+        self.assertFalse(env_check.python_allows("<=3.10", (3, 10, 1)))
+        self.assertFalse(env_check.python_allows(">3.10", (3, 10, 0)))
+        self.assertTrue(env_check.python_allows(">3.10", (3, 10, 1)))
+        self.assertFalse(env_check.python_allows("<3.10", (3, 10, 0)))
+        self.assertTrue(env_check.python_allows("==3.10.12", (3, 10, 12)))
 
     def test_nothing_and_what_is_not_understood_allow(self):
         self.assertTrue(env_check.python_allows("", PY310))
@@ -138,6 +152,19 @@ class NewestTorch(unittest.TestCase):
         self.assertFalse(limited)
         self.assertIn("not verified", lines[0])
 
+    def test_a_body_cut_short_is_not_verified_and_not_a_failure(self):
+        """http.client.IncompleteRead is an HTTPException, not an OSError: PyPI or a proxy that cuts the response."""
+        response = mock.MagicMock()
+        response.__enter__.side_effect = http.client.IncompleteRead(b"{", 100)
+        with mock.patch.object(env_check.urllib.request, "urlopen", return_value=response):
+            limited, lines = env_check.newest_torch()
+        self.assertFalse(limited)
+        self.assertIn("not verified", lines[0])
+        for error in (http.client.RemoteDisconnected("closed"), http.client.BadStatusLine("x"),
+                      http.client.IncompleteRead(b"", 1)):
+            with mock.patch.object(env_check.urllib.request, "urlopen", side_effect=error):
+                self.assertEqual(env_check.newest_torch()[0], False, repr(error))
+
     def test_a_network_error_is_not_verified_and_not_a_failure(self):
         with mock.patch.object(env_check.urllib.request, "urlopen", side_effect=OSError("no route to host")):
             limited, lines = env_check.newest_torch()
@@ -148,12 +175,29 @@ class NewestTorch(unittest.TestCase):
 
 class CommandLine(unittest.TestCase):
     def test_the_status_is_one_only_when_the_container_limits_torch(self):
-        with mock.patch.object(env_check, "newest_torch", return_value=(True, ["ERROR: x"])), \
-                redirect_stdout(io.StringIO()):
-            self.assertEqual(env_check.main(["newest-torch"]), 1)
-        with mock.patch.object(env_check, "newest_torch", return_value=(False, ["not verified"])), \
-                redirect_stdout(io.StringIO()):
-            self.assertEqual(env_check.main(["newest-torch"]), 0)
+        # Without GPU_RESULTS: the script that runs the unit tests exports it, and main would write its mocked text over
+        # the real env-check.txt of the run.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GPU_RESULTS", None)
+            with mock.patch.object(env_check, "newest_torch", return_value=(True, ["ERROR: x"])), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(env_check.main(["newest-torch"]), env_check.LIMITED_STATUS)
+            with mock.patch.object(env_check, "newest_torch", return_value=(False, ["not verified"])), \
+                    redirect_stdout(io.StringIO()):
+                self.assertEqual(env_check.main(["newest-torch"]), 0)
+
+    def test_the_tests_do_not_write_into_the_results_of_a_run(self):
+        """What the script does when it runs the unit tests with GPU_RESULTS set: the file must stay as it was."""
+        with tempfile.TemporaryDirectory(prefix="env-check-") as directory:
+            real = os.path.join(directory, "env-check.txt")
+            with open(real, "w") as handle:
+                handle.write("ERROR: the real one\n")
+            with mock.patch.dict(os.environ, {"GPU_RESULTS": directory}):
+                result = unittest.TestResult()
+                CommandLine("test_the_status_is_one_only_when_the_container_limits_torch").run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            with open(real) as handle:
+                self.assertEqual(handle.read(), "ERROR: the real one\n")
 
     def test_the_result_is_written_where_the_job_summary_reads_it(self):
         with tempfile.TemporaryDirectory(prefix="env-check-") as directory, \
@@ -163,6 +207,12 @@ class CommandLine(unittest.TestCase):
             env_check.main(["newest-torch"])
             with open(os.path.join(directory, "env-check.txt")) as handle:
                 self.assertEqual(handle.read(), "ERROR: x\nsecond line\n")
+
+    def test_the_limited_status_is_not_one_a_crash_or_a_usage_error_could_have(self):
+        """setup_and_run.sh flags the container only on this status: a traceback (1), a usage error (2) or a timeout
+        (124) is not a verdict."""
+        self.assertEqual(env_check.LIMITED_STATUS, 3)
+        self.assertNotIn(env_check.LIMITED_STATUS, (0, 1, 2, 124))
 
     def test_a_wrong_usage_is_refused(self):
         with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
