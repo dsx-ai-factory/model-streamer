@@ -20,6 +20,5 @@ runai_cc_test(
     srcs = ["client_configuration_test.cc"],
     deps = [
         ":client_configuration",
-        "//utils/temp/env",
     ],
 )

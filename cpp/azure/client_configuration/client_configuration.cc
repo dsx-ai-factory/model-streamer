@@ -14,7 +14,7 @@
 namespace runai::llm::streamer::impl::azure
 {
 
-ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
+ClientConfiguration::ClientConfiguration(unsigned concurrent_readers, unsigned process_group_size)
 {
 #ifdef AZURITE_TESTING
     // Connection string is only available for Azurite/local testing
@@ -69,9 +69,9 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
     // send one.
     const unsigned worker_concurrency = std::max(1U, concurrent_readers);
     LOG(SPAM) << "Streamer worker concurrency: " << worker_concurrency;
-    unsigned process_group_size = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
-    LOG(SPAM) << "Process group size: " << process_group_size;
-    max_concurrency = std::max(default_max_concurrency, nprocs * 2 / (worker_concurrency * process_group_size));
+    const unsigned processes = std::max(1U, process_group_size);
+    LOG(SPAM) << "Process group size: " << processes;
+    max_concurrency = std::max(default_max_concurrency, nprocs * 2 / (worker_concurrency * processes));
     LOG(DEBUG) << "Azure Blob Storage per-client concurrency is set to: " << max_concurrency;
 
     // Note: Using Azure SDK defaults for timeouts and retries

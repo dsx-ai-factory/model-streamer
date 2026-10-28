@@ -1826,7 +1826,7 @@ TEST(Async, QueueDepthIsResolvedPerMount)
     const std::string nfs_dir = dir_one.path;
 
     utils::temp::Env depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("512,nfs=64"));
-    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 1UL);
+    utils::temp::UnsetEnv group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
     utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), std::string("io_uring_buffered"));
 
     // FS_MAX_ENGINES is deliberately NOT set. Engines are grouped by depth and the limit applies
@@ -1876,6 +1876,78 @@ TEST(Async, QueueDepthIsResolvedPerMount)
     // asserts.
     EXPECT_EQ(recorded, (std::vector<unsigned>{ 64, 512 }))
         << "the nfs4 mount is submitted first and takes the nfs entry; the ext4 mount takes the default";
+}
+
+namespace
+{
+
+// The depth the engine was built with, for a streamer whose process count was set through the API.
+// The engine is a mock, so the test does not depend on io_uring.
+unsigned engine_depth_for(unsigned process_group_size)
+{
+    const auto data = utils::random::buffer(8192);
+    utils::temp::File file(data);
+
+    utils::temp::Env depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), 512UL);
+    utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), std::string("io_uring_buffered"));
+
+    std::atomic<unsigned> recorded{ 0 };
+
+    Streamer::Environment environment;
+    environment.availability = [](posix_io::Strategy) { return common::ResponseCode::Success; };
+    environment.engine = [&recorded](posix_io::Strategy, const posix_io::AsyncIoConfig & config)
+        -> std::unique_ptr<posix_io::IoEngine>
+    {
+        recorded = config.depth;
+        posix_io::Limits limits;
+        limits.max_read_bytesize = posix_io::max_read_bytesize();
+        limits.offset_alignment = posix_io::DirectBlockSize;
+        limits.buffer_alignment = posix_io::DirectBlockSize;
+        return std::make_unique<posix_io::MockIoEngine>(config.depth, limits);
+    };
+
+    Streamer streamer(Config(), std::move(environment));
+    EXPECT_EQ(streamer.set_process_group_size(process_group_size), common::ResponseCode::Success);
+
+    std::vector<char> dst(data.size());
+    std::vector<FileRanges> request(1);
+    request[0].path = file.path;
+    request[0].ranges.push_back(ReadRange{ 0, data.size(), dst.data() });
+
+    SubmissionId submission_id = 0;
+    EXPECT_EQ(streamer.async_request(request, common::Device::host(), &submission_id), common::ResponseCode::Success);
+    recv(streamer);
+
+    return recorded.load();
+}
+
+} // namespace
+
+TEST(Async, QueueDepthIsDividedByTheProcessGroupSize)
+{
+    utils::temp::UnsetEnv group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    EXPECT_EQ(engine_depth_for(1), 512u);
+    EXPECT_EQ(engine_depth_for(4), 128u);
+}
+
+TEST(Async, ProcessGroupSizeFromTheEnvironmentWinsOverTheCall)
+{
+    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 2UL);
+
+    EXPECT_EQ(engine_depth_for(8), 256u);
+}
+
+TEST(Async, ProcessGroupSizeIsOneUntilSetAndRejectsZero)
+{
+    utils::temp::UnsetEnv group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    Streamer streamer;
+    EXPECT_EQ(streamer.process_group_size(), 1u);
+    EXPECT_EQ(streamer.set_process_group_size(0), common::ResponseCode::InvalidParameterError);
+    EXPECT_EQ(streamer.process_group_size(), 1u);
+    EXPECT_EQ(streamer.set_process_group_size(8), common::ResponseCode::Success);
+    EXPECT_EQ(streamer.process_group_size(), 8u);
 }
 
 
