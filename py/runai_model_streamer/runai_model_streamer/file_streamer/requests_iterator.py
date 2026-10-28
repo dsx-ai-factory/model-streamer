@@ -29,7 +29,7 @@ RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
 DEFAULT_RING_BUFFERS = 18
 
 RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_MEMORY_LIMIT"
-DEFAULT_DEVICE_MEMORY_LIMIT = 4 * (1 << 30)   # 4 GiB
+DEFAULT_DEVICE_MEMORY_LIMIT = 8 * (1 << 30)   # 8 GiB
 
 # Of what the device has FREE, not of what it has. The ring is transient and the caller is about to
 # fill the rest with the model it is loading.
@@ -335,7 +335,13 @@ class FilesRequestsIteratorWithBuffer:
         if dsts is None:
             # Back to the pool first: the ring would otherwise be one buffer poorer for good, and the
             # message below invites a retry.
-            self.release(request)
+            #
+            # STRAIGHT TO THE POOL, not through release(): a ring whose slots.reuse_needs_event is set
+            # refuses a release without one, and raising there would both lose the slot and replace
+            # the message below with an event-ordering error. No event is owed anyway - nothing was
+            # ever written into this slot, so there is no reader to order the next write against.
+            self._pool.release(request.buffer_index)
+            request.buffer_index = None
             raise RunaiStreamerMemoryLimitException(
                 f"{request.num_ranges} ranges do not fit a {self._slot_size} byte slot. "
                 f"next_request packs to the buffer size, so this means the ring was built from a "
@@ -353,11 +359,12 @@ class FilesRequestsIteratorWithBuffer:
         user_memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
         owned: bool = True,
+        ring_buffers: Optional[int] = None,
     ) -> FilesRequestsIteratorWithBuffer:
         """The HOST ring. A device ring is sized by device_ring_sizing(), which answers a different
         question - how much the device can spare, and whether it can spare enough at all - so it
         builds the iterator directly rather than borrowing this host-shaped limit."""
-        buffer_size, num_buffers = _ring_sizing(memory_mode, files_chunks, user_memory_limit)
+        buffer_size, num_buffers = _ring_sizing(memory_mode, files_chunks, user_memory_limit, ring_buffers)
         return FilesRequestsIteratorWithBuffer(
             buffer_size, num_buffers, files_chunks, direct_block, owned
         )
@@ -368,6 +375,7 @@ class FilesRequestsIteratorWithBuffer:
         memory_limit: Optional[int] = None,
         direct_block: int = DIRECT_IO_BLOCK,
         owned: bool = True,
+        ring_buffers: Optional[int] = None,
     ) -> FilesRequestsIteratorWithBuffer:
         """memory_limit, when given, overrides the environment.
 
@@ -377,7 +385,8 @@ class FilesRequestsIteratorWithBuffer:
             configured = os.getenv(RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME)
             memory_limit = int(configured if configured is not None else DEFAULT_MEMORY_LIMIT_STRING)
         return FilesRequestsIteratorWithBuffer.with_memory_cap(
-            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block, owned
+            _get_memory_mode(memory_limit), files_chunks, memory_limit, direct_block, owned,
+            ring_buffers
         )
 
 class FilesRequestsIterator:
@@ -484,6 +493,7 @@ def _ring_sizing(
     memory_mode: MemoryCapMode,
     files_chunks: List[FileChunks],
     user_memory_limit: Optional[int],
+    ring_buffers: Optional[int] = None,
 ) -> Tuple[int, int]:
     """(buffer_size, num_buffers) for the ring.
 
@@ -523,7 +533,11 @@ def _ring_sizing(
             )
         budget = min(user_memory_limit, total)
 
-    target = _ring_buffers()
+    # The caller's depth when it gave one, else the configured default. A caller that knows its
+    # stream cannot use depth asks for 1: the safetensors header sweep is 17 ranges of 8 bytes, and at
+    # the default depth the span search below gives each range its own buffer, so reading 90 KB of
+    # headers costs 34 round-trips through the C++ layer.
+    target = ring_buffers if ring_buffers else _ring_buffers()
 
     # As large as the depth allows, floored by the largest range. Both terms are <= budget (the limit is
     # validated against largest above, and total >= largest always), so THIS buffer size can never take
@@ -659,9 +673,21 @@ def _max_pads_per_buffer() -> int:
     return max(0, int(os.getenv(RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME, DEFAULT_MAX_PADS_PER_BUFFER)))
 
 
-def _ring_buffers() -> int:
+def _ring_buffers_setting() -> Optional[int]:
+    """The depth somebody asked for, or None when nothing did.
+
+    Told apart from the default because the two are not the same instruction: the default is a
+    starting point a search may move away from, while a number somebody set is the answer."""
+    value = os.getenv(RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME)
+    if value is None:
+        return None
     # clamped at 1 so a hostile 0 cannot produce a ring with no buffers
-    return max(1, int(os.getenv(RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME, DEFAULT_RING_BUFFERS)))
+    return max(1, int(value))
+
+
+def _ring_buffers() -> int:
+    setting = _ring_buffers_setting()
+    return setting if setting is not None else DEFAULT_RING_BUFFERS
 
 
 def _numeric_env(name: str, default, parse):
@@ -696,7 +722,8 @@ def _device_memory_fraction() -> float:
 
 
 def device_ring_sizing(free_bytes: Optional[int],
-                       files_chunks: List[FileChunks]) -> Optional[Tuple[int, int]]:
+                       files_chunks: List[FileChunks],
+                       ring_buffers: Optional[int] = None) -> Optional[Tuple[int, int]]:
     """(buffer_size, num_buffers) for a ring in DEVICE memory, or None to use the host ring instead.
 
     The budget is the configured limit, capped at a fraction of what the device has free. The limit
@@ -719,7 +746,99 @@ def device_ring_sizing(free_bytes: Optional[int],
     budget = device_ring_budget(free_bytes, files_chunks)
     if budget <= 0 or budget < device_ring_floor(files_chunks):
         return None
-    return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
+    return _device_ring_shape(files_chunks, budget, ring_buffers)
+
+
+def _packing_fill(sizes: List[int], buffer_size: int) -> float:
+    """How full the buffers get, packing these ranges in order at this buffer size.
+
+    A range carries ONE destination address, so it cannot span two buffers: a request fills a buffer
+    with consecutive ranges until the next does not fit, and the rest of that buffer is read-ahead
+    nobody uses. Measured 89.9% to 97.3% across the models to hand, so the waste is real but modest.
+
+    Not monotonic in the buffer size, which is why this is searched rather than derived: fill
+    oscillates with how the sizes happen to tile, and the best size was 1.50x the largest range on one
+    model and 4.75x on another."""
+    if buffer_size <= 0:
+        return 0.0
+    buffers, used, current = 0, 0, 0
+    for size in sizes:
+        if current + size > buffer_size:
+            buffers += 1
+            used += current
+            current = 0
+        current += size
+    if current:
+        buffers += 1
+        used += current
+    return used / (buffers * buffer_size) if buffers else 0.0
+
+
+# Enough to find the peak without making sizing itself expensive: the search costs candidates x
+# ranges, and a model can carry a few hundred thousand ranges. The peaks measured are far apart, so a
+# handful of points finds them.
+MAX_PACKING_CANDIDATES = 8
+
+
+def _device_ring_shape(files_chunks: List[FileChunks], budget: int,
+                       ring_buffers: Optional[int] = None) -> Tuple[int, int]:
+    """(buffer_size, num_buffers) for a device ring, chosen by how well the ranges pack.
+
+    The host ring derives its buffer from the depth target (_ring_sizing). Here the achievable sizes
+    are known - budget // N for each depth N the budget can pay for - so the one that wastes least is
+    picked instead. Depth itself was measured flat on a device ring from 2 to 10 buffers at a fixed
+    budget, so there is nothing to trade away by choosing on packing alone.
+
+    Falls back to _ring_sizing when there is nothing to choose between: no ranges, or a budget that
+    affords a single buffer."""
+    largest = _largest_range(files_chunks)
+    sizes = [size for file_chunks in files_chunks for size in file_chunks.sizes if size > 0]
+    if largest <= 0 or not sizes:
+        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
+
+    # A stream the budget already spans recycles nothing, so packing waste is not lost read-ahead -
+    # it is only memory never used. _ring_sizing spends the headroom on slightly larger buffers
+    # instead, and gives a single range a single buffer rather than a ring it cannot overlap with.
+    if sum(sizes) < budget:
+        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget, ring_buffers)
+
+    # The CALLER's depth first, then the environment. A caller that names a depth has a reason the
+    # setting cannot know - the header sweeps ask for 1 because each is one small range per file -
+    # and the host path already honours it, so the two must not disagree.
+    requested = ring_buffers if ring_buffers is not None else _ring_buffers_setting()
+    target = requested if requested is not None else DEFAULT_RING_BUFFERS
+    deepest = min(target, budget // largest)
+    if deepest < 2:
+        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget, ring_buffers)
+
+    # A depth somebody set is used as given. The search below is free to settle on fewer buffers than
+    # the target, which on the default is the point - but it turned an explicit setting into an upper
+    # bound, so asking for 4 could still give 2 and nothing said so. The budget may still shrink it,
+    # since a buffer cannot be smaller than the largest range.
+    if requested is not None:
+        return max(largest, budget // deepest), deepest
+
+    # The achievable buffer sizes are one per depth; sampled when there are more than the cap.
+    depths = list(range(2, deepest + 1))
+    if len(depths) > MAX_PACKING_CANDIDATES:
+        step = (len(depths) - 1) / (MAX_PACKING_CANDIDATES - 1)
+        depths = sorted({depths[round(i * step)] for i in range(MAX_PACKING_CANDIDATES)})
+
+    best = None
+    for depth in depths:
+        buffer_size = max(largest, budget // depth)
+        buffers = min(target, budget // buffer_size)
+        if buffers < 2:
+            continue
+        fill = _packing_fill(sizes, buffer_size)
+        # Ties go to the smaller ring: equal packing for less device memory.
+        rank = (fill, -(buffer_size * buffers))
+        if best is None or rank > best[0]:
+            best = (rank, buffer_size, buffers)
+
+    if best is None:
+        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
+    return best[1], best[2]
 
 
 def device_ring_budget(free_bytes: int, files_chunks: List[FileChunks]) -> int:

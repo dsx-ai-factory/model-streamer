@@ -567,7 +567,7 @@ class TestObjectStorageSkipsTheProbe(unittest.TestCase):
     def test_object_storage_uses_the_default_block_and_does_not_probe(self):
         seen = {}
 
-        def capture(requests, memory_limit, direct_block, owned):
+        def capture(requests, memory_limit, direct_block, owned, ring_buffers=None):
             seen["direct_block"] = direct_block
             seen["owned"] = owned
             raise _Stop()

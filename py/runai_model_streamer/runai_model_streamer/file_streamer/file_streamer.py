@@ -45,7 +45,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-s3_credentials_module = get_s3_credentials_module()
+# Resolved on FIRST USE, not at import. get_s3_credentials_module() already looks the module up
+# lazily, but calling it here undid that: it imports runai_model_streamer_s3, which imports boto3,
+# and building boto3's resource model costs ~160 ms of the ~170 ms this package takes to import -
+# paid by every process, including a local load that never touches S3.
+#
+# _UNRESOLVED rather than None, because None is the answer when the module is not installed and must
+# not send us looking again on every path.
+_UNRESOLVED = object()
+_s3_credentials_module = _UNRESOLVED
+
+
+def s3_credentials_module():
+    global _s3_credentials_module
+    if _s3_credentials_module is _UNRESOLVED:
+        _s3_credentials_module = get_s3_credentials_module()
+    return _s3_credentials_module
 
 class RunaiStreamerInvalidInputException(Exception):
     pass
@@ -134,6 +149,8 @@ class FileStreamer:
         # so responses are demuxed by id rather than assumed to belong to a single current submission.
         self.live_requests: Dict[int, FilesRequest] = {}
         self.outstanding = 0          # responses still owed across ALL live submissions
+        # Here as well as in stream_files, so get_chunks on a streamer that never streamed can report
+        # nothing rather than raise on its way out.
         # The ring, for as long as one is in use. None outside a stream: __exit__ frees it, so a
         # device ring does not hold device memory after the load it was built for.
         self.requests_iterator: Optional[FilesRequestsIteratorWithBuffer] = None
@@ -178,9 +195,11 @@ class FileStreamer:
         #      out-of-context list_files) needs its own set - the resolution flag must NOT suppress that.
         # Nothing is applied when there is nothing to apply (no credentials -> the C++ default/ambient provider
         # chain is used, and the streamer's set-once credentials stay free).
-        if s3_credentials_module and is_s3_path(path):
+        # The PATH is tested first: resolving the module imports boto3, so asking about it for a local
+        # path would pay that cost to answer a question the path has already settled.
+        if is_s3_path(path) and s3_credentials_module():
             if self.s3_session is None:
-                self.s3_session, self.s3_credentials = s3_credentials_module.get_credentials(credentials)
+                self.s3_session, self.s3_credentials = s3_credentials_module().get_credentials(credentials)
             if streamer is not None and self._has_credentials() and streamer is not self._credentialed_streamer:
                 runai_set_credentials(streamer, self.s3_credentials)
                 self._credentialed_streamer = streamer
@@ -233,6 +252,7 @@ class FileStreamer:
             device: Optional[str] = "cpu",
             memory_limit: Optional[int] = None,
             owned: bool = True,
+            ring_buffers: Optional[int] = None,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
@@ -291,7 +311,7 @@ class FileStreamer:
         # which it does not depend on: free memory and the range sizes name no mount.
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
-        sizing = device_ring_sizing(free, file_stream_requests)
+        sizing = device_ring_sizing(free, file_stream_requests, ring_buffers)
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
@@ -350,7 +370,8 @@ class FileStreamer:
             # hands the live slot back on any ring whose memory is already on the target.
             self._device = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
             self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
-                file_stream_requests, memory_limit, direct_block, owned and self.device_str == "cpu"
+                file_stream_requests, memory_limit, direct_block,
+                owned and self.device_str == "cpu", ring_buffers
             )
         # Built from the request list, which is where the file order is defined.
         self.yield_order = yield_order_for(file_stream_requests)
@@ -362,6 +383,9 @@ class FileStreamer:
         # Submissions the library has reported complete. Only to check our own counting - see the
         # release in get_chunks.
         self.reported_done = set()
+        # When each submission's last RESPONSE arrived. Its slot is full from that moment but cannot
+        # be refilled until the last range has been handed over, and the wait between the two is what
+        # coarse recycling costs: one straggler pins the whole slot.
         self.outstanding = 0
 
         self._submit_while_buffers_free()
