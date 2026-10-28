@@ -8,6 +8,7 @@ runai_cc_auto_library(
     deps = [
         "//common/exception",
         "//posix_io/alignment",
+        "//posix_io/completion_mapper",
         "//posix_io/io_engine",
         "//posix_io/io_uring_probe",
         "//common/response_code",

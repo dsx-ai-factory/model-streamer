@@ -413,8 +413,14 @@ TEST(LibaioEngine, Flushing_Nothing_Is_Success)
     LibaioEngine engine(config_with(4));
 
     unsigned issued = 0;
-    EXPECT_EQ(engine.flush(issued), common::ResponseCode::Success);
+    bool deferred = true;   // must be overwritten
+    EXPECT_EQ(engine.flush(issued, deferred), common::ResponseCode::Success);
     EXPECT_EQ(issued, 0);
+
+    // The other half of the contract: zero issued because there was NOTHING TO OFFER, which the
+    // caller must not mistake for the kernel refusing it - that way it gives up while copies drain.
+    EXPECT_FALSE(deferred);
+
     EXPECT_EQ(engine.submit_stats().calls, 0) << "an empty flush should not call io_submit at all";
 }
 

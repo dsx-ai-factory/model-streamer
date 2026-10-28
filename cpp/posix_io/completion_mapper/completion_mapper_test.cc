@@ -129,11 +129,84 @@ TEST(CompletionMapper, Only_Our_Own_Bugs_Are_Unknown_Errors)
     }
 }
 
-// EINTR is unreachable as a completion - libaio surfaces it from the wait, not the result - so there
-// is deliberately no row for it. Asserted so that adding one is a conscious act.
-TEST(CompletionMapper, Eintr_Has_No_Special_Row)
+// An interrupted read has no row here - is_transient() answers that separately. Asserted so that
+// adding a row is a conscious act.
+TEST(CompletionMapper, Interrupted_Reads_Have_No_Row_Here)
 {
     EXPECT_EQ(map_completion(-EINTR, buffered()), common::ResponseCode::FileAccessError);
+    EXPECT_EQ(map_completion(-512, buffered()), common::ResponseCode::FileAccessError);
+}
+
+// --- is_transient ------------------------------------------------------------------------------
+
+// The kernel's restart codes, and EINTR, all mean the read did not happen.
+TEST(CompletionMapper, Interrupted_Results_Are_Transient)
+{
+    for (const long err : { 512L, 513L, 514L, 516L, static_cast<long>(EINTR) })
+    {
+        EXPECT_TRUE(is_transient(-err)) << "errno " << err;
+    }
+}
+
+// Storage failures and our own bugs are not retried.
+//
+// EAGAIN is in this list: as a completion it would need a non-blocking read, which we never ask for.
+TEST(CompletionMapper, Failures_Are_Not_Transient)
+{
+    for (const long err : { EIO, EISDIR, ENOSPC, EFAULT, EBADF, EINVAL, ECANCELED, EAGAIN })
+    {
+        EXPECT_FALSE(is_transient(-err)) << "errno " << err;
+    }
+}
+
+// Being in the kernel's private range is not enough - only the four that say "do it again" count.
+TEST(CompletionMapper, Other_Kernel_Internal_Codes_Are_Not_Transient)
+{
+    EXPECT_FALSE(is_transient(-515));   // ENOIOCTLCMD, between two restart codes
+    EXPECT_FALSE(is_transient(-518));   // EOPENSTALE
+    EXPECT_FALSE(is_transient(-528));   // EJUKEBOX
+    EXPECT_FALSE(is_transient(-529));   // EIOCBQUEUED
+}
+
+// --- submit_can_defer --------------------------------------------------------------------------
+
+// Backpressure: the queue is full and reaping will make room. Both engines already deferred EAGAIN;
+// only io_uring deferred EBUSY, and they are supposed to be indistinguishable to a caller.
+TEST(CompletionMapper, A_Full_Queue_Is_Deferred)
+{
+    EXPECT_TRUE(submit_can_defer(EAGAIN));
+    EXPECT_TRUE(submit_can_defer(EBUSY));
+}
+
+// An interrupted submit accepted nothing either, so the staged array is still right. io_uring ended
+// its engine for this - and an engine ending means the whole mount falls back to the synchronous
+// reader for the life of the streamer.
+TEST(CompletionMapper, An_Interrupted_Submit_Is_Deferred)
+{
+    EXPECT_TRUE(submit_can_defer(EINTR));
+
+    for (const int err : { 512, 513, 514, 516 })
+    {
+        EXPECT_TRUE(submit_can_defer(err)) << "errno " << err;
+    }
+}
+
+// A real failure must still end the engine. Deferring these would stage the same doomed reads for
+// ever instead of reporting them.
+TEST(CompletionMapper, A_Broken_Ring_Is_Not_Deferred)
+{
+    for (const int err : { EIO, EBADF, EINVAL, EFAULT, ENOMEM, EPERM, 515, 518, 528 })
+    {
+        EXPECT_FALSE(submit_can_defer(err)) << "errno " << err;
+    }
+}
+
+// Bytes transferred are never a retry, including a short read - the caller re-stages that from its
+// cursor, and zero is the caller's question too.
+TEST(CompletionMapper, Transferred_Bytes_Are_Not_Transient)
+{
+    EXPECT_FALSE(is_transient(0));
+    EXPECT_FALSE(is_transient(4096));
 }
 
 }; // namespace runai::llm::streamer::posix_io
