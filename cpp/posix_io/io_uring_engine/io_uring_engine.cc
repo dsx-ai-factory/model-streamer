@@ -372,10 +372,9 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued, bool & out_defe
 
     _staged -= out_issued;
 
-    // Accepted nothing while entries are still staged: the same state as a refusal, and the caller
-    // bounds it the same way. Reached only with _staged > 0, because flush returns early when
-    // nothing is staged - so the test is on out_issued alone.
-    out_deferred = (out_issued == 0);
+    // Offered work and had some of it refused, which is what the flag means - the partial case
+    // included, where the kernel took a prefix and left the rest staged for the next flush.
+    out_deferred = (_staged != 0);
 
     return common::ResponseCode::Success;
 }
