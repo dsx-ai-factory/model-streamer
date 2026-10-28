@@ -530,9 +530,10 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // Consecutive turns where the engine refused everything and nothing was in flight to free it.
     // Reset by any progress, so only a refusal that never clears reaches the ceiling.
     //
-    // A COUNT, not a duration: each turn is one submit syscall, so this bounds the spin to a few
-    // milliseconds. A deadline would need the thread to sleep, which would cost throughput on the
-    // path that drains copies.
+    // A COUNT, not a duration. A signal reaches us as the thread returns to userspace, which is when
+    // it is delivered - so the next attempt is already clean. A signal that stays blocked never
+    // clears at all. There is nothing in between for a wait to catch, and each turn is one submit
+    // syscall, so the whole budget is a few milliseconds.
     static constexpr unsigned MaxStalledFlushes = 1024;
     unsigned _stalled_flushes = 0;
 
