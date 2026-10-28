@@ -36,7 +36,81 @@ class SyncWorker : public Worker<unsigned>
     std::atomic<unsigned> & _executed;
 };
 
+// A Worker whose execute() holds its request until the pool stops, then leaves it in flight for drain() to
+// finish - the shape of an async backend worker at shutdown.
+class StoppableWorker : public Worker<unsigned>
+{
+ public:
+    StoppableWorker(std::atomic<unsigned> & executed, std::atomic<unsigned> & drained) :
+        _executed(executed),
+        _drained(drained)
+    {}
+
+    void execute(unsigned &&, std::atomic<bool> & stopped) override
+    {
+        _executed++;
+        while (!stopped)
+        {
+            ::usleep(1000);
+        }
+        _in_flight = true;
+    }
+
+    void drain(std::atomic<bool> &) override
+    {
+        if (_in_flight)
+        {
+            _in_flight = false;
+            _drained++;
+        }
+    }
+
+    bool idle() const override { return !_in_flight; }
+
+ private:
+    std::atomic<unsigned> & _executed;
+    std::atomic<unsigned> & _drained;
+    bool _in_flight = false;   // touched only by this worker's own thread
+};
+
 } // namespace
+
+TEST(PerWorker, StoppedDropsLateRequestsAndDrainsInFlight)
+{
+    for (auto size : { 1U, 2U, 10U, utils::random::number(10, 100), 100U })
+    {
+        std::atomic<unsigned> executed{0};
+        std::atomic<unsigned> drained{0};
+
+        {
+            ThreadPool<unsigned> pool(
+                [&]() -> std::unique_ptr<Worker<unsigned>>
+                {
+                    return std::make_unique<StoppableWorker>(executed, drained);
+                },
+                size);
+
+            const auto count = utils::random::number(5000, 10000);
+            for (unsigned i = 0; i < count; ++i)
+            {
+                pool.push(utils::random::number(1, 100));
+            }
+
+            // every worker is inside its first request, so none can miss the stop by starting late
+            for (int i = 0; i < 10000 && executed < size; ++i)
+            {
+                ::usleep(1000);
+            }
+            ASSERT_EQ(executed, size);
+
+            ::usleep(utils::random::number(10000, 100000));
+        }
+
+        // each worker ran only the request it held when the pool stopped, and drained that one
+        EXPECT_EQ(executed, size);
+        EXPECT_EQ(drained, size);
+    }
+}
 
 TEST(PerWorker, DispatchesEveryRequest)
 {
@@ -143,15 +217,24 @@ TEST(Handle, Stopped)
 {
     for (auto size : { 1U, 2U, 10U, utils::random::number(10, 100), 100U })
     {
+        std::atomic<unsigned> started = 0;
+        std::atomic<unsigned> released = 0;
         std::atomic<unsigned> total = 0;
         const auto count = utils::random::number(5000, 10000);
 
         {
             ThreadPool<unsigned> pool([&](auto _, std::atomic<bool> & stopped)
                 {
+                    // Until the pool stops, every thread is held in its first request, so the first `size`
+                    // entries are those requests and any later one is a request taken after the stop.
+                    const auto index = started++;
                     while (!stopped)
                     {
                         ::usleep(utils::random::number(10000));
+                    }
+                    if (index < size)
+                    {
+                        released++;
                     }
                     total++;
                 }, size);
@@ -161,13 +244,21 @@ TEST(Handle, Stopped)
                 pool.push(utils::random::boolean());
             }
 
-            ::usleep(utils::random::number(100000, 1000000));
+            // wait for every thread to be inside its request, so none can miss the stop by starting late
+            for (int i = 0; i < 10000 && started < size; ++i)
+            {
+                ::usleep(1000);
+            }
+            ASSERT_EQ(started, size);
+
+            ::usleep(utils::random::number(10000, 100000));
 
             EXPECT_EQ(total, 0);
         }
 
-        // verify all threads stopped and each thread performed a single task
+        // verify all threads stopped, and that no request was handled after the stop
 
+        EXPECT_EQ(released, size);
         EXPECT_EQ(total, size);
     }
 }
