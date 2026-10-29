@@ -52,8 +52,13 @@ struct Fixture
 {
     // `start` is the file offset the first range reads from. Non-zero puts the region out of step
     // with the block boundary, which is what makes a direct read need its edges bounced.
+    //
+    // `destination_alignment` places the first range's destination on a multiple of it. A plain
+    // vector lands wherever the allocator put it, so a test asserting that a read fell back cannot
+    // say WHY: the address might have been out of step rather than the offset. Pinning the address
+    // leaves the offset as the only variable.
     explicit Fixture(const std::vector<size_t> & range_sizes, unsigned concurrency = 1, size_t start = 0,
-                     unsigned long queue_depth = 1024UL) :
+                     unsigned long queue_depth = 1024UL, size_t destination_alignment = 0) :
         concurrency(std::string("RUNAI_STREAMER_CONCURRENCY"), static_cast<unsigned long>(concurrency)),
         chunk_bytesize(std::string("RUNAI_STREAMER_FS_CHUNK_BYTESIZE"), static_cast<unsigned long>(ChunkSize)),
         depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), queue_depth),
@@ -64,14 +69,19 @@ struct Fixture
         responder(std::make_shared<common::Responder>(0)),
         data(utils::random::buffer(start + (total == 0 ? 1 : total))),
         file(data),
-        buffer(total == 0 ? 1 : total)
+        buffer((total == 0 ? 1 : total) + destination_alignment)
     {
         responder->increment(sizes.size());
+
+        if (destination_alignment != 0)
+        {
+            pad = (-reinterpret_cast<uintptr_t>(buffer.data())) % destination_alignment;
+        }
 
         FileRanges ranges;
         ranges.path = file.path;
         size_t offset = start;
-        char * dst = buffer.data();
+        char * dst = buffer.data() + pad;
         for (const auto size : sizes)
         {
             ranges.ranges.push_back(ReadRange{ offset, size, dst });
@@ -114,7 +124,8 @@ struct Fixture
 
     std::vector<char> got_at(size_t offset, size_t bytesize) const
     {
-        return std::vector<char>(buffer.begin() + offset, buffer.begin() + offset + bytesize);
+        const auto first = buffer.begin() + pad + offset;
+        return std::vector<char>(first, first + bytesize);
     }
 
     utils::temp::Env concurrency;
@@ -129,6 +140,7 @@ struct Fixture
     std::vector<uint8_t> data;
     utils::temp::File file;
     std::vector<char> buffer;
+    size_t pad = 0;   // bytes skipped at the front of `buffer` to reach destination_alignment
     std::vector<FileRanges> request;
     common::s3::S3ClientWrapper::Params params;   // invalid -> file system
 };
@@ -1377,6 +1389,78 @@ TEST(AsyncIoWorker, An_Engine_That_Cannot_Be_Built_Is_Not_An_Internal_Error)
     EXPECT_TRUE(told) << "the streamer must learn the mount is dead, or it keeps routing here";
 }
 
+// --- staging buffer sizing -------------------------------------------------------------------------
+
+// THE PROPERTY, not the formula: whatever offset the file gives us, the rounded read must fit.
+//
+// A direct read starts at the block below the chunk's offset and ends at the block above its last
+// byte. The head can be anything from 0 to block - 1, and the tail then rounds up from there, so the
+// two together are what the buffer has to cover. Asserting `chunk + 2 * block` instead would only
+// restate the implementation and would pass if both were wrong in the same way.
+//
+// A chunk size that is NOT a block multiple, so the tail rounds as well as the head.
+TEST(StagingBytesize, Holds_The_Rounded_Read_At_Every_Head)
+{
+    constexpr size_t Block = 4096;
+    constexpr size_t Chunk = 8 * Block + 123;
+
+    const size_t capacity = staging_bytesize(Chunk, Block, true /* direct */);
+
+    for (size_t head = 0; head < Block; ++head)
+    {
+        const size_t rounded = ((head + Chunk + Block - 1) / Block) * Block;
+
+        // ASSERT, so a buffer that is short stops at the first head it fails on. EXPECT would print
+        // one line per head below the block size, which is thousands of them for one mistake.
+        ASSERT_LE(rounded, capacity)
+            << "a chunk at head " << head << " would read " << rounded << " bytes into a buffer of "
+            << capacity;
+    }
+}
+
+// A buffered read is issued exactly as asked, so padding it would pin memory nothing can use.
+TEST(StagingBytesize, A_Buffered_Read_Needs_No_Room)
+{
+    EXPECT_EQ(staging_bytesize(8192, 4096, false /* direct */), 8192u);
+}
+
+// The block is a per-mount measurement, so the room has to follow it rather than a fixed number.
+TEST(StagingBytesize, The_Room_Follows_The_Block)
+{
+    const size_t small = staging_bytesize(8192, 512, true /* direct */);
+    const size_t large = staging_bytesize(8192, 65536, true /* direct */);
+
+    EXPECT_GT(large, small) << "a mount with a larger block needs more room, not the same";
+}
+
+// --- reads_through_staging -----------------------------------------------------------------------
+
+// The caller's own memory, so the read goes there and the router must ask whether it is congruent.
+TEST(ReadsThroughStaging, A_Host_Destination_Is_Read_Into_Directly)
+{
+    EXPECT_FALSE(reads_through_staging(common::Device::host()));
+}
+
+// Pinned host memory of ours, copied to the device afterwards. The pointer in the request is device
+// memory this read never touches, so congruence must NOT be asked of it.
+TEST(ReadsThroughStaging, A_Cuda_Destination_Is_Staged)
+{
+    EXPECT_TRUE(reads_through_staging(common::Device::cuda(0)));
+    EXPECT_TRUE(reads_through_staging(common::Device::cuda(3)));
+}
+
+// A type the C header publishes and this rule was never taught. Nothing in the build warns about it
+// (no -Wall), so the only protection is the answer it gives.
+//
+// Staging is the safe one. Reading directly would make the router ask congruence of a pointer the
+// host may not be able to write, and the synchronous reader would then pread into it.
+TEST(ReadsThroughStaging, An_Unknown_Type_Is_Staged)
+{
+    const auto unknown = static_cast<common::DeviceType>(4242);
+
+    EXPECT_TRUE(reads_through_staging(common::Device{ unknown, 0 }));
+}
+
 // --- device destinations -------------------------------------------------------------------------
 
 namespace
@@ -1385,10 +1469,14 @@ namespace
 // A worker with a real DeviceWriter over a MockDevice, so the copy path runs without a driver.
 struct DeviceDriver : Driver
 {
+    // `strategy` is last so the positional calls above it keep working. It defaults to buffered
+    // because most of these tests are about the copy, not the read - the direct ones name it.
     explicit DeviceDriver(std::shared_ptr<device::MockBackend> mock,
                           unsigned depth = Config::default_fs_async_queue_depth,
-                          bool register_buffers = false) :
-        Driver(Strategy::IoUringBuffered, 4096, std::nullopt, depth,
+                          bool register_buffers = false,
+                          Strategy strategy = Strategy::IoUringBuffered,
+                          std::optional<size_t> mount_block = std::nullopt) :
+        Driver(strategy, 4096, mount_block, depth,
                std::make_shared<DeviceWriter>([mock](common::DeviceType) -> DeviceWriter::BackendFactory { return [mock]() { return mock; }; }),
                register_buffers),
         backend(std::move(mock))
@@ -1490,6 +1578,318 @@ TEST(AsyncIoWorkerDevice, Reads_Into_A_Staging_Buffer_And_Copies)
 
     // The bytes went through the staging buffer and arrived, in the right order.
     EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(0, 600));
+}
+
+// A DEVICE READ MUST STAY DIRECT AT AN OFFSET THAT IS NOT A BLOCK MULTIPLE.
+//
+// The destination here is OURS - a pinned staging buffer the library allocates, reuses across files
+// and never hands to the caller. So the read can be placed to suit the file: start at the block
+// below the offset and keep the extra bytes, which is what makes the read legal.
+//
+// The congruence rule the worker applies was written for a destination the CALLER owns, where no
+// such placement is allowed. Applied to a staging buffer it refuses every offset that is not a block
+// multiple - which is nearly all of them - and the file is read buffered instead.
+//
+// 1000 is the offset: inside the first block, so every range of this fixture sits in one chunk whose
+// head is ragged.
+TEST(AsyncIoWorkerDevice, A_Device_Read_At_An_Unaligned_Offset_Is_Still_Direct)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 }, 1 /* concurrency */, 1000 /* start */);
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    const auto ids = driver.engine->staged();
+    ASSERT_FALSE(ids.empty()) << "nothing was staged, so there is no read to judge";
+
+    for (const auto id : ids)
+    {
+        EXPECT_TRUE(driver.engine->request(id).file.direct)
+            << "the read fell back to buffered because the file offset is not a block multiple,"
+            << " although the destination is a staging buffer we place ourselves";
+    }
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+}
+
+// THE COUNTERPART, and the one that would catch a fix that reads the right bytes into the wrong
+// place - or copies the padding to the device instead of the payload.
+//
+// Reading from the block below the offset puts `offset % block` bytes of padding at the front of the
+// staging buffer. The copy to the device must skip exactly those and move only what was asked for.
+// Copying from the buffer's base instead would deliver every range shifted by the head: no error,
+// no short read, just the wrong bytes - and only for files whose offsets are not block multiples.
+TEST(AsyncIoWorkerDevice, A_Device_Read_At_An_Unaligned_Offset_Delivers_The_Right_Bytes)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 }, 1 /* concurrency */, 1000 /* start */);
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    for (const auto & r : responses)
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success);
+    }
+
+    // got_at indexes the DESTINATION, expected_at builds the pattern for a FILE offset, and the
+    // first range reads from 1000 - so these two differ by exactly the head.
+    EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(1000, 600));
+}
+
+// A ROUNDED READ MUST NOT COUNT THE BYTES NOBODY ASKED FOR.
+//
+// bytes_read() is what the caller was delivered, and it is read beside bounced_bytes() to tell
+// whether direct reads are working. A rounded read asks the kernel for whole blocks, so the number it
+// reports covers padding at the tail as well.
+//
+// The offset here is a block boundary, so there is no head and no skip - which is the case that slips
+// through a guard written around the skip. It is also the common one: chunk offsets are multiples of
+// the chunk size, so only the FIRST chunk of a transfer has a head, while the LAST has a ragged tail.
+TEST(AsyncIoWorkerDevice, A_Rounded_Read_Counts_Only_What_Was_Asked_For)
+{
+    constexpr size_t Asked = 600;   // not a block multiple, so the tail is rounded up to 4096
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ Asked }, 1 /* concurrency */, 0 /* start - a block boundary */);
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    driver.issue();
+    driver.engine->complete_all();   // the mock reports the full length it was asked for
+    driver.route();
+    driver.settle();
+
+    EXPECT_EQ(driver.worker_bytes_read(), Asked)
+        << "the padding the rounded read brought back was counted as bytes delivered";
+}
+
+// A CHUNK MUST NOT MOVE INSIDE ITS STAGING BUFFER WHEN THE BLOCK CHANGES UNDER IT.
+//
+// `_block` is not fixed. A worker that could not measure its mount starts at the provisional
+// MaxProbeBlock, and a later submission carrying a measurement lowers it - while chunks of the
+// previous submission are still in flight, because execute() returns once the queue is submitted
+// rather than once it has landed.
+//
+// The skip says where this chunk sits inside its buffer. Recomputing it from the live `_block` on a
+// resumed pass moves the chunk, strands the bytes the first pass already delivered, and the copy then
+// takes whatever was in the buffer instead. Nothing reports it: the read stays legal either way.
+//
+// THE INVARIANT ASSERTED: the staging buffer mirrors the file one byte for one byte, so between two
+// passes the destination must advance by exactly as much as the file offset does. That holds whatever
+// the block is, so the test does not depend on working out either skip by hand.
+//
+// 70000 is the offset because 70000 % 65536 (4464) and 70000 % 4096 (1424) differ - at a smaller
+// offset both blocks would give the same skip and the bug would be invisible.
+TEST(AsyncIoWorkerDevice, A_Block_Adopted_Mid_Chunk_Does_Not_Move_The_Chunk)
+{
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 600 }, 1 /* concurrency */, 70000 /* start */);
+
+    // No mount measurement, so the worker starts at the provisional block; the engine still
+    // advertises 4096, which a read aligned to the larger one also satisfies.
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect, 0 /* mount_block */);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto id = driver.in_flight().front();
+    const auto first = driver.engine->request(id);
+    ASSERT_TRUE(first.file.direct) << "nothing is being tested if the read was not direct";
+
+    // Short, so the chunk has to be re-staged and the second pass must agree with the first.
+    // NOT routed yet: in execute() the adoption in enqueue() runs BEFORE drain_batch picks up an
+    // outstanding completion, so that is the order the bug needs.
+    driver.engine->complete_short(id, 5000);
+
+    // What a later submission measured, lower than the provisional block in force so far.
+    auto next = fixture.workload("", common::Device::cuda(0));
+    next.direct_block = 4096;
+    driver.execute(std::move(next));
+
+    driver.route();
+
+    const auto second = driver.engine->request(id);
+    ASSERT_GT(second.offset, first.offset) << "the second pass did not resume further into the file";
+
+    EXPECT_EQ(static_cast<size_t>(second.buffer - first.buffer), second.offset - first.offset)
+        << "the chunk moved inside its staging buffer when the block changed, so the bytes the first"
+        << " pass delivered are stranded and the copy would read past them";
+}
+
+// THE SAME BUG, CHECKED ON THE BYTES RATHER THAN ON THE ADDRESSES.
+//
+// A_Block_Adopted_Mid_Chunk_Does_Not_Move_The_Chunk asserts that the destination advances with the
+// file offset. That is the mechanism. This one asserts what the caller actually receives, so it holds
+// whatever the mechanism turns out to be - and silent wrong data is the failure this whole area
+// exists to prevent, so it is worth paying for twice.
+//
+// The second submission reads a DIFFERENT file into a DIFFERENT destination. Its only job is to carry
+// the measurement that lowers the block. Reusing the first fixture would re-read the same range into
+// the same place and could repair the damage being tested for.
+//
+// FAILS UNTIL THE COPY SKIPS THE PADDING - the step that makes the host-to-device copy start at
+// staging.data + staging_skip. Written now because this is the test that would have caught the
+// corruption, and it should be in place before the code it judges.
+TEST(AsyncIoWorkerDevice, A_Chunk_Spanning_A_Block_Change_Delivers_The_Right_Bytes)
+{
+    constexpr size_t Start = 70000;   // 70000 % 65536 and 70000 % 4096 differ
+    constexpr size_t Asked = 600;
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ Asked }, 1 /* concurrency */, Start);
+    Fixture carrier({ 100 }, 1 /* concurrency */, 0 /* start */);
+
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect, 0 /* mount_block */);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+    driver.issue();
+
+    const auto id = driver.in_flight().front();
+    ASSERT_TRUE(driver.engine->request(id).file.direct);
+
+    // Short, so the rest of this chunk is read under whatever block is in force by then.
+    driver.engine->complete_short(id, 5000);
+
+    auto next = carrier.workload("", common::Device::cuda(0));
+    next.direct_block = 4096;
+    driver.execute(std::move(next));
+
+    // Bounded, so a chunk that never finishes fails here rather than hanging.
+    for (unsigned turn = 0; turn < 50; ++turn)
+    {
+        driver.issue();
+        if (driver.in_flight().empty())
+        {
+            break;
+        }
+        driver.engine->complete_all();
+        driver.route();
+    }
+
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 1);
+    EXPECT_EQ(responses.front().ret, common::ResponseCode::Success);
+
+    EXPECT_EQ(fixture.got_at(0, Asked), fixture.expected_at(Start, Asked))
+        << "the chunk was assembled from two passes planned under different blocks";
+}
+
+// THE SCOPE OF THE RULE: a HOST destination at the same offset must still fall back.
+//
+// Here the destination is the caller's. We may not read a byte before it or after it, so the read
+// cannot be moved onto a block boundary and the file offset decides: 1000 is not a multiple of 4096,
+// and no aligned read lands where the caller's bytes have to go.
+//
+// The destination is aligned ON PURPOSE. With a plain vector this test would pass whatever the fix
+// did, because an address that is itself out of step also refuses - and once in every 4096 runs it
+// would be congruent by luck and assert the opposite. Aligning it leaves the offset as the only
+// reason, which is the reason the test is about.
+TEST(AsyncIoWorkerDevice, A_Host_Read_At_An_Unaligned_Offset_Falls_Back)
+{
+    Fixture fixture({ 100, 200, 300 }, 1 /* concurrency */, 1000 /* start */, 1024UL /* queue depth */,
+                    4096 /* destination alignment */);
+    Driver driver(Strategy::IoUringDirect, 4096);
+
+    driver.execute(fixture.workload());   // host destination
+
+    const auto ids = driver.engine->staged();
+    ASSERT_FALSE(ids.empty()) << "nothing was staged, so there is no read to judge";
+
+    for (const auto id : ids)
+    {
+        EXPECT_FALSE(driver.engine->request(id).file.direct)
+            << "a caller-owned destination was read directly at an offset no aligned read can serve";
+    }
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+
+    EXPECT_EQ(fixture.got_at(0, 600), fixture.expected_at(1000, 600));
+}
+
+// A ROUNDED READ RUNS PAST THE END OF THE FILE, and the short return that follows is normal.
+//
+// Reading from the block below the offset also means reading to the block above the end. On the last
+// chunk of a file that asks for bytes the file does not have, and the kernel returns only what it
+// has. That is NOT the Eof the worker means - "zero further bytes while bytes were still owed" -
+// because everything owed did arrive. Only the padding was missing, and nobody wanted it.
+//
+// Getting this wrong reports a truncated file for a read that completed, so it fails as a missing
+// tensor rather than as a bug here.
+//
+// The mock reports whatever length it was asked for, so the kernel's bound has to be applied by the
+// test: no completion may report more bytes than the file holds past its offset.
+TEST(AsyncIoWorkerDevice, A_Rounded_Read_Past_The_End_Of_The_File_Still_Succeeds)
+{
+    constexpr size_t Start = 1000;
+    constexpr size_t Total = 600;
+    constexpr size_t FileSize = Start + Total;   // what Fixture writes
+
+    auto mock = std::make_shared<device::MockBackend>();
+    Fixture fixture({ 100, 200, 300 }, 1 /* concurrency */, Start);
+    DeviceDriver driver(mock, Config::default_fs_async_queue_depth, false /* register_buffers */,
+                        Strategy::IoUringDirect);
+
+    driver.execute(fixture.workload("", common::Device::cuda(0)));
+
+    // Bounded, so a chunk that never finishes fails here rather than hanging the suite.
+    for (unsigned turn = 0; turn < 50; ++turn)
+    {
+        driver.issue();
+
+        const auto ids = driver.in_flight();
+        if (ids.empty())
+        {
+            break;
+        }
+
+        for (const auto id : ids)
+        {
+            const auto & request = driver.engine->request(id);
+            const size_t available = FileSize > request.offset ? FileSize - request.offset : 0;
+
+            if (available >= request.bytesize)
+            {
+                driver.engine->complete(id);
+            }
+            else
+            {
+                driver.engine->complete_short(id, available);
+            }
+        }
+
+        driver.route();
+    }
+
+    driver.settle();
+
+    const auto responses = drain_responses(*fixture.responder, 3);
+    for (const auto & r : responses)
+    {
+        EXPECT_EQ(r.ret, common::ResponseCode::Success)
+            << "a read that delivered every owed byte was reported as a short file";
+    }
+
+    EXPECT_EQ(fixture.got_at(0, Total), fixture.expected_at(Start, Total));
 }
 
 

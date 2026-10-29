@@ -110,6 +110,7 @@ common::ResponseCode DeviceWriterClient::take(common::Device device, StagingBuff
         params.buffer_bytesize = _buffers.buffer_bytesize;
         params.slab_bytesize = _buffers.slab_bytesize;
         params.max_buffers = _max_buffers;
+        params.alignment = _buffers.alignment;
 
         _pool = std::make_shared<StagingPool>(_writer->device(channel), params);
     }
@@ -119,16 +120,18 @@ common::ResponseCode DeviceWriterClient::take(common::Device device, StagingBuff
 
 common::ResponseCode DeviceWriterClient::write(common::Device device,
                                                const StagingBuffer & buffer,
+                                               size_t skip,
                                                size_t bytesize,
                                                void * destination,
                                                Completion on_done)
 {
-    return write(device, _pool, buffer, bytesize, destination, std::move(on_done));
+    return write(device, _pool, buffer, skip, bytesize, destination, std::move(on_done));
 }
 
 common::ResponseCode DeviceWriterClient::write(common::Device device,
                                                const std::shared_ptr<StagingPool> & pool,
                                                const StagingBuffer & buffer,
+                                               size_t skip,
                                                size_t bytesize,
                                                void * destination,
                                                Completion on_done)
@@ -169,7 +172,8 @@ common::ResponseCode DeviceWriterClient::write(common::Device device,
         return code != common::ResponseCode::Success ? code : common::ResponseCode::UnknownError;
     }
 
-    return _writer->write(existing->second, std::move(copy), bytesize, destination, std::move(on_done));
+    return _writer->write(existing->second, std::move(copy), skip, bytesize, destination,
+                          std::move(on_done));
 }
 
 StagingPool::Slab DeviceWriterClient::slab_at(unsigned index) const

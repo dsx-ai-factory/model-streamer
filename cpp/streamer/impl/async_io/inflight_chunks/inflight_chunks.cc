@@ -71,7 +71,10 @@ Chunk InflightChunks::pending(posix_io::RequestId id) const
     rest.offset = entry.cursor;
     rest.bytesize = entry.remaining;
 
-    char * const base = entry.staging.valid() ? entry.staging.data : entry.chunk.buffer;
+    // staging_skip is the bytes a rounded direct read put in front of the chunk. It is zero unless
+    // this chunk stages AND reads directly, so the host destination below is unaffected.
+    char * const base = entry.staging.valid() ? entry.staging.data + entry.staging_skip
+                                              : entry.chunk.buffer;
     rest.buffer = base + (entry.cursor - entry.chunk.offset);
     return rest;
 }
@@ -82,6 +85,17 @@ void InflightChunks::set_staging(posix_io::RequestId id, const StagingBuffer & b
     ASSERT(it != _chunks.end()) << "no in-flight chunk for request " << id;
 
     it->second.staging = buffer;
+}
+
+void InflightChunks::set_staging_skip(posix_io::RequestId id, size_t skip)
+{
+    const auto it = _chunks.find(id);
+    ASSERT(it != _chunks.end()) << "no in-flight chunk for request " << id;
+
+    ASSERT(it->second.staging.valid()) << "a skip describes where a chunk sits inside its staging"
+                                          " buffer, and request " << id << " has none";
+
+    it->second.staging_skip = skip;
 }
 
 Chunk InflightChunks::release(posix_io::RequestId id)
@@ -99,8 +113,10 @@ void InflightChunks::set_bounce(posix_io::RequestId id, char * scratch, size_t s
     const auto it = _chunks.find(id);
     ASSERT(it != _chunks.end()) << "no in-flight chunk for request " << id;
 
-    ASSERT(it->second.scratch == nullptr)
-        << "request " << id << " already holds a scratch buffer - a pass was staged without landing";
+    // Both fields, not just the scratch. A rounded pass into a staging buffer records a `wanted` and
+    // no scratch, so testing the pointer alone would leave that shape unguarded.
+    ASSERT(it->second.scratch == nullptr && it->second.scratch_wanted == 0)
+        << "request " << id << " already has a pass recorded - one was staged without landing";
 
     it->second.scratch = scratch;
     it->second.scratch_skip = skip;

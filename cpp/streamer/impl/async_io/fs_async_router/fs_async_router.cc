@@ -110,6 +110,7 @@ std::string directory_of(const std::string & path)
 
 FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & request,
                                             const FsQueueDepth & depth,
+                                            common::Device destination,
                                             const RegisterPolicy & registers)
 {
     Groups out;
@@ -227,7 +228,7 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
 
         // PER FILE, so it cannot be answered from the directory cache above: congruence depends on
         // this file's own offsets and destinations, and two shards in one directory can differ.
-        if (check_direct && !reads_directly(request[i], out.devices[group]))
+        if (check_direct && !reads_directly(request[i], out.devices[group], destination))
         {
             continue;
         }
@@ -238,29 +239,38 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
     return out;
 }
 
-bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device)
+bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device,
+                                   common::Device destination)
 {
-    // THIS MOUNT's block, not the process-wide assumption: testing against a larger block rejects
-    // files the mount would have served. On a mount that accepts 512, testing at 65536 makes
-    // congruence 128 times harder.
-    const auto measured = block_of(device, file.path);
-    const auto block = measured != 0 ? measured : posix_io::direct_block_size();
-
-    for (const auto & range : file.ranges)
+    // CONGRUENCE IS A QUESTION ABOUT THE CALLER'S OWN MEMORY, so it is asked only when the bytes are
+    // going there. A staged read lands in a buffer the worker allocates, aligns and places to suit the
+    // file; the pointer in the request describes memory this read never touches, and asking whether
+    // THAT is congruent answers no for nearly every offset and loses the file.
+    if (!reads_through_staging(destination))
     {
-        // A zero-sized range is never read, so letting one decide the reader for the whole file would
-        // be deciding on a range nobody reads.
-        if (range.size == 0)
-        {
-            continue;
-        }
+        // THIS MOUNT's block, not the process-wide assumption: testing against a larger block rejects
+        // files the mount would have served. On a mount that accepts 512, testing at 65536 makes
+        // congruence 128 times harder.
+        const auto measured = block_of(device, file.path);
+        const auto block = measured != 0 ? measured : posix_io::direct_block_size();
 
-        if (!posix_io::is_congruent(range.offset, range.dst, block))
+        for (const auto & range : file.ranges)
         {
-            // No PART of this range can be read directly, so the worker would open the file buffered.
-            LOG(DEBUG) << "Reading " << file.path << " with the synchronous reader: offset "
-                       << range.offset << " and its destination are not congruent for block " << block;
-            return false;
+            // A zero-sized range is never read, so letting one decide the reader for the whole file
+            // would be deciding on a range nobody reads.
+            if (range.size == 0)
+            {
+                continue;
+            }
+
+            if (!posix_io::is_congruent(range.offset, range.dst, block))
+            {
+                // No PART of this range can be read directly, so the worker would open it buffered.
+                LOG(DEBUG) << "Reading " << file.path << " with the synchronous reader: offset "
+                           << range.offset << " and its destination are not congruent for block "
+                           << block;
+                return false;
+            }
         }
     }
 

@@ -151,7 +151,7 @@ TEST_F(DeviceWriterTest, Write_Copies_And_Returns_The_Buffer)
     std::vector<char> destination(Buffer, 0);
 
     std::atomic<int> reported{-1};
-    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data(),
                            [&](common::ResponseCode code) { reported.store(static_cast<int>(code)); }),
               common::ResponseCode::Success);
 
@@ -187,7 +187,7 @@ TEST_F(DeviceWriterTest, One_Buffer_Is_One_Copy)
         ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
         ASSERT_TRUE(buffer.valid());
         std::memset(buffer.data, static_cast<int>('a' + i), Buffer);
-        ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data() + i * Buffer,
+        ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data() + i * Buffer,
                                [&](common::ResponseCode) { ++done; }),
                   common::ResponseCode::Success);
     }
@@ -215,13 +215,78 @@ TEST_F(DeviceWriterTest, Only_The_Bytes_Read_Are_Copied)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 16, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, 16, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
     ASSERT_TRUE(eventually([&]() { return done.load(); }));
     EXPECT_EQ(destination[15], 0x7f);
     EXPECT_EQ(destination[16], 0) << "nothing past the bytes that were read";
+}
+
+// THE SKIP: a rounded direct read starts at the block below what was asked for, so the bytes it
+// brings back first belong to nobody. They must not reach the device.
+//
+// Filling the buffer with two values and copying from the boundary is what makes a dropped or
+// doubled offset visible - a length-only check would pass with either.
+TEST_F(DeviceWriterTest, A_Skip_Is_Not_Copied)
+{
+    constexpr size_t Skip = 64;
+    constexpr size_t Wanted = 32;
+
+    DeviceWriter writer(lookup());
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+
+    const auto pool = pool_for(writer, channel, 1);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
+    std::memset(buffer.data, 0xAA, Skip);                    // padding nobody asked for
+    std::memset(buffer.data + Skip, 0x55, Buffer - Skip);    // the payload
+
+    std::vector<char> destination(Buffer, 0);
+    std::atomic<bool> done{false};
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Skip, Wanted,
+                           destination.data(), [&](common::ResponseCode) { done.store(true); }),
+              common::ResponseCode::Success);
+
+    ASSERT_TRUE(eventually([&]() { return done.load(); }));
+
+    EXPECT_EQ(destination[0], 0x55) << "the copy started at the buffer's base, not past the padding";
+    EXPECT_EQ(destination[Wanted - 1], 0x55);
+    EXPECT_EQ(destination[Wanted], 0) << "nothing past what was asked for";
+}
+
+// An extent that runs past the end of the buffer is refused whichever part of it is to blame. The
+// length alone was checked once, which left a skip free to point anywhere at all.
+TEST_F(DeviceWriterTest, A_Skip_Past_The_Buffer_Is_Refused)
+{
+    DeviceWriter writer(lookup());
+
+    DeviceWriter::Channel channel = nullptr;
+    ASSERT_EQ(writer.open(common::Device::cuda(0), channel), common::ResponseCode::Success);
+
+    const auto pool = pool_for(writer, channel, 2);
+
+    StagingBuffer first;
+    ASSERT_EQ(pool->try_acquire(first), common::ResponseCode::Success);
+
+    std::vector<char> destination(Buffer, 0);
+
+    // The length fits on its own; only the skip takes it past the end.
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, first), Buffer, 1,
+                           destination.data(), nullptr),
+              common::ResponseCode::InvalidParameterError);
+
+    StagingBuffer second;
+    ASSERT_EQ(pool->try_acquire(second), common::ResponseCode::Success);
+
+    // Both fit on their own; together they do not.
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, second), Buffer / 2,
+                           Buffer / 2 + 1, destination.data(), nullptr),
+              common::ResponseCode::InvalidParameterError);
 }
 
 // A second device is a second stream and a second waiter, so a slow copy on one cannot delay the
@@ -244,7 +309,7 @@ TEST_F(DeviceWriterTest, A_Second_Device_Gets_Its_Own_Stream)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<bool> done{false};
-    ASSERT_EQ(writer.write(second, copy_of(writer, second, pool, buffer), Buffer, destination.data(),
+    ASSERT_EQ(writer.write(second, copy_of(writer, second, pool, buffer), 0 /* skip */, Buffer, destination.data(),
                            [&](common::ResponseCode) { done.store(true); }),
               common::ResponseCode::Success);
 
@@ -326,7 +391,7 @@ TEST_F(DeviceWriterTest, Teardown_Drains_Before_The_Pool_Is_Destroyed)
                 StagingBuffer buffer;
                 ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
                 ASSERT_TRUE(buffer.valid());
-                ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data() + i * Buffer, nullptr),
+                ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data() + i * Buffer, nullptr),
                           common::ResponseCode::Success);
             }
         }   // ~DeviceWriter stops the waiter, so every buffer is back before the pool can go
@@ -361,7 +426,7 @@ TEST_F(DeviceWriterTest, The_Pool_Outlives_A_Reader_That_Drops_It)
 
     std::vector<char> destination(Buffer, 0);
     std::atomic<int> alive{-1};
-    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+    ASSERT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data(),
                            [&](common::ResponseCode) { alive.store(watch.lock() != nullptr ? 1 : 0); }),
               common::ResponseCode::Success);
 
@@ -437,7 +502,7 @@ TEST_F(DeviceWriterTest, Copying_More_Than_The_Buffer_Holds_Is_Refused_And_The_B
 
     std::vector<char> destination(2 * Buffer, 0);
     std::atomic<bool> told{false};
-    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer + 1, destination.data(),
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer + 1, destination.data(),
                            [&](common::ResponseCode) { told.store(true); }),
               common::ResponseCode::InvalidParameterError);
 
@@ -470,7 +535,7 @@ TEST_F(DeviceWriterTest, Write_Without_A_Pool_Or_Event_Is_Refused_Before_Anythin
     orphan.buffer = buffer;
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(writer.write(channel, orphan, Buffer, destination.data(), nullptr),
+    EXPECT_EQ(writer.write(channel, orphan, 0 /* skip */, Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
     EXPECT_EQ(_backend->opened(0)->copies, 0u) << "nothing was enqueued, so no thread can touch it";
 
@@ -494,7 +559,7 @@ TEST_F(DeviceWriterTest, Write_Without_A_Channel_Still_Returns_The_Buffer)
     ASSERT_EQ(pool->try_acquire(buffer), common::ResponseCode::Success);
 
     std::vector<char> destination(Buffer, 0);
-    EXPECT_EQ(writer.write(nullptr, copy_of(writer, channel, pool, buffer), Buffer, destination.data(), nullptr),
+    EXPECT_EQ(writer.write(nullptr, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data(), nullptr),
               common::ResponseCode::InvalidParameterError);
 
     StagingBuffer again;
@@ -582,7 +647,7 @@ TEST_F(DeviceWriterTest, A_Copy_Enqueued_Without_An_Event_Drains_The_Stream)
 
     // The driver's own code, passed through: the stream drained, so the copy has ended and this
     // memory is nobody's any more. Only the branch that CANNOT drain reports DeviceDriverError.
-    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data(),
                            nullptr),
               common::ResponseCode::DeviceTransferError);
 
@@ -621,7 +686,7 @@ TEST_F(DeviceWriterTest, A_Buffer_Is_Retained_When_The_Stream_Cannot_Be_Drained)
     // the failed record, and that code promises the destination is unchanged - while the copy is on
     // the stream here and may still land in it. This is the caller's only signal that its memory is
     // still live.
-    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), Buffer, destination.data(),
+    EXPECT_EQ(writer.write(channel, copy_of(writer, channel, pool, buffer), 0 /* skip */, Buffer, destination.data(),
                            nullptr),
               common::ResponseCode::DeviceDriverError);
 
