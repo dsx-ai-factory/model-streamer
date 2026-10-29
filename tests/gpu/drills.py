@@ -19,7 +19,8 @@ KINDS = ("corrupt", "leak")
 
 
 def parse_drills(text):
-    """{row id: kind} from "KIND:ROW_ID,KIND:ROW_ID"."""
+    """{row id: kind} from "KIND:ROW_ID,KIND:ROW_ID". GPU_DRILL has this form, and so has GPU_FAULT, which injects the
+    same faults without declaring them: a row with such a fault is an ordinary failing row, and has to fail the run."""
     drills = {}
     for item in filter(None, (part.strip() for part in text.split(","))):
         kind, _, row_id = item.partition(":")
@@ -42,6 +43,19 @@ def drill_caught(kind, errors, corrupted_tensor=None, leak_bytes=0):
     if kind == "leak":
         return leak_bytes >= LEAK_DRILL_BYTES and any(error.startswith("GPU memory leak") for error in errors)
     raise ValueError("unknown drill %r" % (kind,))
+
+
+def run_failed(already_failed, ok, drill, caught, unexpected):
+    """Whether the run has failed after a row: it stays failed once it has, and then
+    - an ordinary row fails the run when it is not ok;
+    - a drilled row fails on purpose, so its failure is not the run's: it fails the run when its fault was not caught,
+      or when it has an error that is not the report of its fault.
+    The exit status of the test follows this, and the self-check proves it end to end (see tests/gpu/expect_failure.py)."""
+    if already_failed:
+        return True
+    if drill:
+        return (not caught) or bool(unexpected)
+    return not ok
 
 
 def _is_the_report(kind, error, corrupted_tensor):

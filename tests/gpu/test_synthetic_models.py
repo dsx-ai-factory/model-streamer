@@ -20,6 +20,8 @@ bytes. A tensor is compared by its bytes, never by value, so NaN payloads and ne
                    the rows (the oldest-torch leg has the core rows) then has nothing to run and passes, saying so
     GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
                    and passes only if the fault is reported (see drills.py). Off by default.
+    GPU_FAULT      the same syntax, and the same faults, but not declared: the row is an ordinary failing row, and the
+                   test has to exit with a failure (the self-check runs it that way, to prove that it does)
 """
 
 import gc
@@ -34,7 +36,7 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills, unexpected_errors  # noqa: E402
+from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills, run_failed, unexpected_errors  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
 from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
@@ -93,11 +95,15 @@ def environment(settings):
 class RowRun:
     """One load of one model, and its verdict."""
 
-    def __init__(self, row, fixtures, device, timer, drill=None):
+    def __init__(self, row, fixtures, device, timer, drill=None, fault=None):
+        """drill: a fault that is injected on purpose and has to be reported (GPU_DRILL). fault: a fault that is injected
+        and not declared (GPU_FAULT), so that the row is an ordinary failing one: it has to fail the run. A drill injects
+        its fault too."""
         self.row = row
         self.drill = drill
+        self.fault = drill or fault
         self.leaked = None
-        self.corrupted_tensor = None  # the tensor that the corrupt drill flipped a bit of
+        self.corrupted_tensor = None  # the tensor that the corrupt fault flipped a bit of
         self.expected = fixtures.expected(row.model)
         self.paths = fixtures.paths(row.model)
         self.manifest = fixtures.manifests[row.model]
@@ -141,7 +147,7 @@ class RowRun:
         if tensor.device != self.device:
             self.error("%s: on %s, expected %s" % (name, tensor.device, self.device))
             return
-        if self.drill == "corrupt" and self.corrupted_tensor is None and entry["end"] > entry["start"]:
+        if self.fault == "corrupt" and self.corrupted_tensor is None and entry["end"] > entry["start"]:
             self.corrupted_tensor = name
             as_bytes(tensor)[0] ^= 1
         crc = tensor_crc32(tensor)
@@ -268,20 +274,25 @@ def main():
     gpu_baseline = torch.cuda.memory_allocated(device)
 
     drills = parse_drills(os.environ.get("GPU_DRILL", ""))
-    unknown = sorted(set(drills) - {r.id for r in rows})
-    if unknown:
-        raise RuntimeError("GPU_DRILL names rows that are not selected: %s" % unknown)
+    faults = parse_drills(os.environ.get("GPU_FAULT", ""))
+    for variable, named in (("GPU_DRILL", drills), ("GPU_FAULT", faults)):
+        unknown = sorted(set(named) - {r.id for r in rows})
+        if unknown:
+            raise RuntimeError("%s names rows that are not selected: %s" % (variable, unknown))
     if rank == 0:
         stamp("matrix %s: %d rows, strategy %s" % (os.environ.get("GPU_MATRIX", "core"), len(rows), strategy))
         if drills:
             stamp("DRILL: faults are injected on purpose into %s; the run passes only if all of them are reported" % drills)
+        if faults:
+            stamp("FAULT: faults are injected and not declared into %s; the rows are ordinary failing rows, and the run "
+                  "has to fail" % faults)
     outcomes = []
     failed = False
     try:
         for row in rows:
             dist.barrier(group=control)
             drill = drills.get(row.id)
-            run = RowRun(row, fixtures, device, timer, drill)
+            run = RowRun(row, fixtures, device, timer, drill, faults.get(row.id))
             if rank == 0:
                 stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
                     row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
@@ -297,7 +308,7 @@ def main():
                 raised = True
                 run.error("%s: %s" % (type(error).__name__, error))
             elapsed = time.perf_counter() - started
-            if drill == "leak":
+            if run.fault == "leak":
                 run.leaked = torch.empty(LEAK_DRILL_BYTES, dtype=torch.uint8, device=device)
             release_gpu_memory()
             # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is
@@ -319,7 +330,7 @@ def main():
                 seen = torch.tensor([1 if local else 0])
                 dist.all_reduce(seen, op=dist.ReduceOp.MAX, group=control)  # reported by any rank is reported
                 caught = seen.item() == 1
-            outcome.update({"ok": ok, "seconds": elapsed, "drill": drill, "drill_caught": caught,
+            outcome.update({"ok": ok, "seconds": elapsed, "drill": drill, "drill_caught": caught, "fault": run.fault,
                             "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
             print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
                                                   "%.1fs" % elapsed), flush=True)
@@ -332,18 +343,15 @@ def main():
             # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
             # would otherwise take the results of the rows that already ran with it.
             write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
-            if drill and not caught:
-                failed = True  # the fault went unnoticed: a check does not do its job
-            if drill:
-                # A drilled row fails on purpose, but only with the report of its fault: another error of the row (a wrong
-                # dtype, an exception) is a real problem, which the drill must not hide.
-                unexpected = unexpected_errors(drill, run.errors, run.corrupted_tensor, run.error_count)
-                if unexpected:
-                    failed = True
-                    for message in unexpected:
-                        print("[rank %d]   UNEXPECTED in the drilled row: %s" % (rank, message), flush=True)
+            # A drilled row fails on purpose, but only with the report of its fault: another error of the row (a wrong
+            # dtype, an exception) is a real problem, which the drill must not hide.
+            unexpected = unexpected_errors(drill, run.errors, run.corrupted_tensor, run.error_count) if drill else []
+            for message in unexpected:
+                print("[rank %d]   UNEXPECTED in the drilled row: %s" % (rank, message), flush=True)
+            # What turns the run red; the exit status of this test is this value (the self-check proves it, with a row
+            # that has an injected fault and no drill: the run must fail).
+            failed = run_failed(failed, ok, drill, caught, unexpected)
             if not ok:
-                failed = failed or not drill
                 # A row that only found wrong tensors ended in step on every rank, so the next row can run and
                 # one run reports every failing row. So does a row that raised without distributed streaming,
                 # which has no collectives. After an exception in a distributed row they may be out of step.

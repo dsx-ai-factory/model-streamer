@@ -165,7 +165,7 @@ fi
 echo "== self-test of the harness: the generator, the rows, the drills, the tensor checks, the real model download"
 phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
     python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
-    tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
+    tests/gpu/test_drills.py tests/gpu/test_expect_failure.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
     tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
@@ -303,6 +303,27 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
         tests/gpu/test_synthetic_models.py; then
         status=1
         echo "[$(date +%T)] FAILED run.self_check"
+    fi
+
+    # And the other way round: a row with a fault that is injected and not declared is an ordinary failing row, and the
+    # test has to exit with a failure. This runs the real test, so it proves that its exit status follows its rows, which
+    # no unit test can (a function that decides is worth nothing if the test stops using it). The exit status alone is not
+    # taken as proof, since a crash exits with a failure too: the results must show the row failed with the injected error.
+    echo "== self-check: a row with an injected fault and no drill must fail the run"
+    fault_status=0
+    GPU_ROWS="mixed.solo.owned.cuda.tight" GPU_FAULT="corrupt:mixed.solo.owned.cuda.tight" \
+        GPU_RESULTS="$RESULTS/self-check-fault" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
+        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py || fault_status=$?
+    if [ "$fault_status" -eq 0 ]; then
+        status=1
+        echo "[$(date +%T)] FAILED run.self_check: a row with an injected fault did not fail the run (exit 0): the exit status of the test does not follow its rows"
+    elif python3 tests/gpu/expect_failure.py "$RESULTS/self-check-fault" sync_buffered mixed.solo.owned.cuda.tight crc32; then
+        echo "ok: the run failed (exit $fault_status), as it must"
+    else
+        status=1
+        echo "[$(date +%T)] FAILED run.self_check: the run failed (exit $fault_status) but not because of the injected fault"
     fi
     record "run.self_check" "$start" "$(date +%s.%N)"
 fi

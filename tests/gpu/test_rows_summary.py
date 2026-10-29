@@ -62,6 +62,12 @@ class Summary(unittest.TestCase):
         lines, _ = self.summarize()
         self.assertIn("1 failed", lines[0])
 
+    def test_a_row_with_an_injected_fault_is_not_a_failure_either(self):
+        """The self-check injects a fault without declaring a drill, to prove that a failing row fails the run."""
+        self.write_all([row("a", False, drill=None, fault="corrupt"), row("b", False)], 2)
+        lines, _ = self.summarize()
+        self.assertIn("1 failed", lines[0])
+
     def test_a_row_left_started_names_the_row_where_the_run_ended(self):
         self.write_all([row("a", True), row("b", None)], 5)
         lines, incomplete = self.summarize()

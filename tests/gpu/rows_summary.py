@@ -36,7 +36,8 @@ def summarize(results, smoke, strategies):
             data = json.load(handle)
         rows = data["rows"]
         finished = [r for r in rows if r["ok"] is not None]
-        unexpected = [r["row"] for r in finished if not r["ok"] and not r.get("drill")]
+        # A row with a fault injected on purpose (a drill, or the undeclared fault of the self-check) fails by design.
+        unexpected = [r["row"] for r in finished if not r["ok"] and not r.get("drill") and not r.get("fault")]
         line = "%s: %d of %d rows finished, %d failed" % (os.path.relpath(path, results), len(finished),
                                                            data["expected_rows"], len(unexpected))
         started = [r["row"] for r in rows if r["ok"] is None]

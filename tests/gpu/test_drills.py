@@ -101,6 +101,34 @@ class UnexpectedErrors(unittest.TestCase):
             drills.unexpected_errors("raise", ["x"])
 
 
+class RunFailed(unittest.TestCase):
+    """What turns a run red, row by row. The cases of an ordinary row and of a drilled one are opposites."""
+
+    def test_an_ordinary_row_that_is_not_ok_fails_the_run(self):
+        self.assertTrue(drills.run_failed(False, ok=False, drill=None, caught=None, unexpected=[]))
+
+    def test_an_ordinary_row_that_is_ok_does_not(self):
+        self.assertFalse(drills.run_failed(False, ok=True, drill=None, caught=None, unexpected=[]))
+
+    def test_a_drilled_row_that_failed_as_it_must_does_not(self):
+        self.assertFalse(drills.run_failed(False, ok=False, drill="corrupt", caught=True, unexpected=[]))
+        self.assertFalse(drills.run_failed(False, ok=False, drill="leak", caught=True, unexpected=[]))
+
+    def test_a_drilled_row_whose_fault_was_not_caught_fails_the_run(self):
+        self.assertTrue(drills.run_failed(False, ok=False, drill="corrupt", caught=False, unexpected=[]))
+        self.assertTrue(drills.run_failed(False, ok=True, drill="leak", caught=False, unexpected=[]))
+
+    def test_a_drilled_row_with_another_error_fails_the_run(self):
+        self.assertTrue(drills.run_failed(False, ok=False, drill="corrupt", caught=True, unexpected=["RuntimeError: x"]))
+
+    def test_once_failed_the_run_stays_failed(self):
+        for ok, drill, caught, unexpected in ((True, None, None, []), (False, "leak", True, []), (True, None, None, [])):
+            self.assertTrue(drills.run_failed(True, ok, drill, caught, unexpected))
+
+    def test_a_row_that_is_ok_and_drilled_with_nothing_caught_is_the_drill_not_doing_its_job(self):
+        self.assertTrue(drills.run_failed(False, ok=True, drill="corrupt", caught=False, unexpected=[]))
+
+
 class UnknownKind(unittest.TestCase):
     def test_refused(self):
         with self.assertRaises(ValueError):

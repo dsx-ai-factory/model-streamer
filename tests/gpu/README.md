@@ -12,6 +12,12 @@ demand, and a manual run is never skipped:
 that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows and
 passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`).
 
+The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
+change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds
+with the old image, and the next one, seeing nothing changed since that run, does not rebuild with the new one, so a
+`.devcontainer/` change can go untested by the nightly. That is accepted: the image is built and the wheel tested with it
+by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
+
 ## Where it runs
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
@@ -192,7 +198,14 @@ after it arrived, and `leak` keeps a 32 MiB GPU tensor alive after the row. That
 as what they are (the CRC32 error must name the tensor that was corrupted, and the memory error must show at least
 the 32 MiB that was leaked), and fails if one goes unnoticed. Its results are in `self-check/`.
 
-The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
+A second pass proves the other half, that a failing row fails the run, which a unit test of the deciding function
+(`drills.run_failed`) cannot: that function is worth nothing if the test stops using it. It runs one row with a fault
+injected and not declared (`GPU_FAULT`, the same syntax as `GPU_DRILL`), which makes it an ordinary failing row, and the
+real test must exit with a failure. A failing exit is not taken as proof, since a crash exits with a failure too:
+`expect_failure.py` checks that the results show the row failed on both ranks with the injected CRC32 error. If the test
+exits 0, or fails for another reason, the self-check fails. Its results are in `self-check-fault/`.
+
+The two passes take about 20 seconds together. The workflow turns them on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
 since the last scheduled run that passed (`test_synthetic_models.py`, what it checks with: `tensor_bytes.py`, `drills.py`,
 `gen_models.py` and `matrix.py`, and `phase_timer.py`, `real_model.py`, `setup_and_run.sh` or the workflow itself), so
 nobody has to remember to run it. A drilled row must fail with its own report and no other error: another error in it
