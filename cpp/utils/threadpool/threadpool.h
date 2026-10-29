@@ -63,6 +63,9 @@ struct Worker
 template <typename Request>
 struct ThreadPool
 {
+    // The handler gets the pool's stop flag. The pool sets it before it stops the queue, and cannot interrupt a
+    // handler that is running, so a handler that can block for long must poll the flag and return early.
+    // A request still queued when the pool stops is dropped, and so is one popped after the flag is set.
     using Handler = std::function<void(Request &&, std::atomic<bool> &)>;
     using WorkerFactory = std::function<std::unique_ptr<Worker<Request>>()>;
 
@@ -125,6 +128,14 @@ struct ThreadPool
                 break;
             }
 
+            // `stopped` is set before the deque is stopped, so a request can still be popped in between.
+            // Drop it, as the deque does with everything still queued, instead of handing it to a handler
+            // that is already being told to abort.
+            if (pool.stopped)
+            {
+                break;
+            }
+
             try
             {
                 pool._handler(std::move(request), pool.stopped);
@@ -148,7 +159,12 @@ struct ThreadPool
                 Request request;
                 if (pool._deque.try_pop(/* out */ request))
                 {
-                    worker->execute(std::move(request), pool.stopped);
+                    // Dropped when the pool is stopping (see routine). No break: the worker may still have
+                    // work in flight, which the next turn drains with `stopped` set.
+                    if (!pool.stopped)
+                    {
+                        worker->execute(std::move(request), pool.stopped);
+                    }
                 }
                 else if (!worker->idle())
                 {
@@ -160,7 +176,10 @@ struct ThreadPool
                     {
                         break;
                     }
-                    worker->execute(std::move(request), pool.stopped);
+                    if (!pool.stopped)
+                    {
+                        worker->execute(std::move(request), pool.stopped);
+                    }
                 }
             }
             catch (...)
