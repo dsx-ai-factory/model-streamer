@@ -28,7 +28,8 @@ import urllib.request
 
 PYPI_URL = "https://pypi.org/pypi/torch/json"
 TIMEOUT_SECONDS = 30
-LIMITED_STATUS = 3  # the exit status that says the container limits torch; setup_and_run.sh reads it
+WARNING_PREFIX = "WARNING: "  # a line that main() also prints as an annotation of the run
+LIMITED_STATUS = 3 # the exit status that says the container limits torch; setup_and_run.sh reads it
 
 _STABLE = re.compile(r"^\d+(\.\d+)*$")
 _CLAUSE = re.compile(r"^\s*(>=|<=|==|!=|~=|>|<)\s*([0-9]+(?:\.[0-9]+)*)(\.\*)?\s*$")
@@ -131,9 +132,10 @@ def newest_torch():
         return assess(importlib.metadata.version("torch"), pypi_json, sys.version_info[:3])
     except (KeyError, IndexError, TypeError, AttributeError) as error:
         # PyPI's answer has another shape than this expects (the "releases" key is deprecated, for one). That is not a
-        # problem of the container, and must not turn the leg red with a false "not testing the newest torch".
-        return False, ["PyPI's answer for torch has an unexpected shape (%s: %s): not verified" % (
-            type(error).__name__, error)]
+        # problem of the container, and must not turn the leg red with a false "not testing the newest torch". But the
+        # check is then blind for good, not for a night like a network error: main() makes it an annotation of the run.
+        return False, ["%sPyPI's answer for torch has an unexpected shape (%s: %s): not verified, and the check needs "
+                       "to be updated" % (WARNING_PREFIX, type(error).__name__, error)]
 
 
 def main(argv=None):
@@ -144,6 +146,9 @@ def main(argv=None):
     limited, lines = newest_torch()
     text = "\n".join(lines)
     print(text, flush=True)
+    for line in lines:
+        if line.startswith(WARNING_PREFIX):
+            print("::warning title=The newest torch is not verified::" + line[len(WARNING_PREFIX):], flush=True)
     results = os.environ.get("GPU_RESULTS")
     if results:
         os.makedirs(results, exist_ok=True)

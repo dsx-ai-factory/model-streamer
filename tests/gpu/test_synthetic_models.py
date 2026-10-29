@@ -133,15 +133,19 @@ class RowRun:
         more = self.error_count - len(self.errors)
         return self.errors + (["... and %d more error(s)" % more] if more > 0 else [])
 
-    def check(self, name, tensor):
-        """Name, dtype, shape, device and bytes of one tensor."""
+    def check(self, name, tensor, host_copy=False):
+        """Name, dtype, shape, device and bytes of one tensor. host_copy: the tensor as the streamer yielded it, on the
+        host, checked again after the stream (an owned tensor of a row that copies to the device)."""
         entry = self.expected.get(name)
         if entry is None:
             self.error("unexpected tensor %r" % name)
             return
-        if name in self.seen:
-            self.error("tensor %r yielded twice" % name)
-        self.seen.add(name)
+        device = torch.device("cpu") if host_copy else self.device
+        where = " (the tensor on the host, as yielded, after the stream)" if host_copy else ""
+        if not host_copy:
+            if name in self.seen:
+                self.error("tensor %r yielded twice" % name)
+            self.seen.add(name)
         # The expected dtype comes from the streamer's own table, so this checks that the dtype survives the copy to
         # the device, not that the table is right: that is checked against safetensors in the CPU tests (issue #267).
         want_dtype = safetensors_to_torch_dtype[entry["dtype"]]
@@ -154,16 +158,16 @@ class RowRun:
         if list(tensor.shape) != want_shape:
             self.error("%s: shape %s, expected %s" % (name, list(tensor.shape), want_shape))
             return
-        if tensor.device != self.device:
-            self.error("%s: on %s, expected %s" % (name, tensor.device, self.device))
+        if tensor.device != device:
+            self.error("%s: on %s, expected %s" % (name, tensor.device, device))
             return
-        if self.fault == "corrupt" and self.corrupted_tensor is None and entry["end"] > entry["start"]:
+        if not host_copy and self.fault == "corrupt" and self.corrupted_tensor is None and entry["end"] > entry["start"]:
             self.corrupted_tensor = name
             as_bytes(tensor)[0] ^= 1
         crc = tensor_crc32(tensor)
         if crc != entry["crc32"]:
-            self.error("%s (%s %s, %d bytes): crc32 %08x, expected %08x" % (
-                name, entry["dtype"], entry["shape"], entry["end"] - entry["start"], crc, entry["crc32"]))
+            self.error("%s (%s %s, %d bytes): crc32 %08x, expected %08x%s" % (
+                name, entry["dtype"], entry["shape"], entry["end"] - entry["start"], crc, entry["crc32"], where))
 
     def run(self):
         row = self.row
@@ -199,14 +203,17 @@ class RowRun:
                     except StopIteration:
                         load_seconds += time.perf_counter() - start
                         break
+                    yielded = tensor
                     if row.device == "cpu_to":
                         tensor = tensor.to(self.device)
                     load_seconds += time.perf_counter() - start
                     if row.owned:
-                        # No clone: an owned tensor must stay right while the stream goes on.
+                        # No clone: an owned tensor must stay right while the stream goes on. On a row that copies to
+                        # the device the tensor to keep is the one the streamer yielded, on the host: the copy is
+                        # checked too, but it cannot show that the streamer reused the buffer of the original.
                         if name in held:
                             self.error("tensor %r yielded twice" % name)
-                        held[name] = tensor
+                        held[name] = (tensor, yielded if row.device == "cpu_to" else None)
                     else:
                         # A borrowed tensor is only good until the iteration advances.
                         check_start = time.perf_counter()
@@ -222,8 +229,10 @@ class RowRun:
         if self.timer.announce and held:
             stamp("START %s.verify (%d tensors)" % (tag, len(held)))
         verify_start = time.perf_counter()
-        for name, tensor in held.items():
+        for name, (tensor, on_host) in held.items():
             self.check(name, tensor)
+            if on_host is not None:
+                self.check(name, on_host, host_copy=True)
         verify_seconds += time.perf_counter() - verify_start
         if self.timer.announce and held:
             stamp("END   %s.verify  %.1fs" % (tag, time.perf_counter() - verify_start))

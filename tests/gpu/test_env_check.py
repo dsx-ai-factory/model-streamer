@@ -186,6 +186,18 @@ class CommandLine(unittest.TestCase):
                     redirect_stdout(io.StringIO()):
                 self.assertEqual(env_check.main(["newest-torch"]), 0)
 
+    def test_an_answer_of_an_unexpected_shape_is_an_annotation_and_a_network_error_is_not(self):
+        """A network error is for one night; a shape that this does not know leaves the check blind, so it is said."""
+        response = mock.MagicMock()
+        response.__enter__.return_value = io.BytesIO(json.dumps({"info": {}}).encode())
+        for urlopen, annotated in ((mock.Mock(return_value=response), True),
+                                   (mock.Mock(side_effect=OSError("no route")), False)):
+            with mock.patch.dict(os.environ), mock.patch.object(env_check.urllib.request, "urlopen", urlopen), \
+                    redirect_stdout(io.StringIO()) as out:
+                os.environ.pop("GPU_RESULTS", None)
+                self.assertEqual(env_check.main(["newest-torch"]), 0)
+            self.assertEqual("::warning title=The newest torch is not verified::" in out.getvalue(), annotated)
+
     def test_the_tests_do_not_write_into_the_results_of_a_run(self):
         """What the script does when it runs the unit tests with GPU_RESULTS set: the file must stay as it was."""
         with tempfile.TemporaryDirectory(prefix="env-check-") as directory:

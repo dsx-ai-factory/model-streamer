@@ -157,7 +157,9 @@ N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
 
 After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
 the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until
-the stream ends and check them all then, which tests the ownership guarantee. Rows with `owned=False` check each
+the stream ends and check them all then, which tests the ownership guarantee. (On a row that copies to the device,
+the tensor held is the one the streamer yielded on the host, which is checked again at the end next to its copy.)
+Rows with `owned=False` check each
 tensor when it is yielded. A row that asks for distributed streaming fails if the streamer silently fell back
 to non-distributed.
 

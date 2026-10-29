@@ -83,7 +83,7 @@ phase() {
 
 # stop_stray_workers: kill what a torchrun that was stopped (a timeout) left behind. The workers of a rank that ignored
 # the signal keep their GPU memory and the rendezvous port, and the next run would fail on them and be blamed for it.
-# Reads /proc: the image has no procps.
+# Reads /proc, so that it needs no pkill: a base image is free to leave procps out.
 stop_stray_workers() {
     local file pid cmd
     for file in /proc/[0-9]*/cmdline; do
