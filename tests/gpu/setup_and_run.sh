@@ -165,7 +165,7 @@ fi
 echo "== self-test of the harness: the generator, the rows, the drills, the tensor checks, the real model download"
 phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
     python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
-    tests/gpu/test_drills.py tests/gpu/test_expect_failure.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
+    tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
     tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
@@ -281,49 +281,27 @@ do
     if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
         timeout --signal=TERM --kill-after=30s "$(cap 60)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
-        tests/gpu/test_synthetic_models.py; then
+        tests/gpu/test_synthetic_models.py Rows; then
         status=1
         echo "[$(date +%T)] FAILED run.$strategy"
     fi
     record "run.$strategy" "$start" "$(date +%s.%N)"
 done
 
-# Self-check of the test's own checks: when the test harness changed (the workflow decides), run two rows once more with
-# a fault injected on purpose, a corrupted tensor and a leaked GPU tensor. This pass succeeds only if the CRC32 check and
-# the GPU memory check report them. sync_buffered is enough: the faults do not depend on how the file is read.
+# Self-check of the test's own checks: when the test harness changed (the workflow decides), run the SelfChecks test
+# case, which injects a corrupted tensor and a leaked GPU tensor and asserts that the CRC32 check and the GPU memory
+# check report them, as themselves and with no other error. sync_buffered is enough: the faults do not depend on how the
+# file is read. It is an ordinary test case: its failure is unittest's, like that of a row.
 if [ "${GPU_SELF_CHECK:-false}" = true ]; then
     echo "[$(date +%T)] START run.self_check"
     echo "== self-check: faults injected on purpose, the checks must report them"
     start=$(date +%s.%N)
-    if ! GPU_ROWS="mixed.solo.owned.cuda.tight,mixed.solo.borrowed.cuda.tight" \
-        GPU_DRILL="corrupt:mixed.solo.owned.cuda.tight,leak:mixed.solo.borrowed.cuda.tight" \
-        GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
+    if ! GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
         timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
-        tests/gpu/test_synthetic_models.py; then
+        tests/gpu/test_synthetic_models.py SelfChecks; then
         status=1
         echo "[$(date +%T)] FAILED run.self_check"
-    fi
-
-    # And the other way round: a row with a fault that is injected and not declared is an ordinary failing row, and the
-    # test has to exit with a failure. This runs the real test, so it proves that its exit status follows its rows, which
-    # no unit test can (a function that decides is worth nothing if the test stops using it). The exit status alone is not
-    # taken as proof, since a crash exits with a failure too: the results must show the row failed with the injected error.
-    echo "== self-check: a row with an injected fault and no drill must fail the run"
-    fault_status=0
-    GPU_ROWS="mixed.solo.owned.cuda.tight" GPU_FAULT="corrupt:mixed.solo.owned.cuda.tight" \
-        GPU_RESULTS="$RESULTS/self-check-fault" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
-        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
-        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
-        tests/gpu/test_synthetic_models.py || fault_status=$?
-    if [ "$fault_status" -eq 0 ]; then
-        status=1
-        echo "[$(date +%T)] FAILED run.self_check: a row with an injected fault did not fail the run (exit 0): the exit status of the test does not follow its rows"
-    elif python3 tests/gpu/expect_failure.py "$RESULTS/self-check-fault" sync_buffered mixed.solo.owned.cuda.tight crc32; then
-        echo "ok: the run failed (exit $fault_status), as it must"
-    else
-        status=1
-        echo "[$(date +%T)] FAILED run.self_check: the run failed (exit $fault_status) but not because of the injected fault"
     fi
     record "run.self_check" "$start" "$(date +%s.%N)"
 fi
@@ -337,7 +315,7 @@ if [ "$smoke_expected" = true ]; then
     if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
         timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
         torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
-        tests/gpu/test_synthetic_models.py; then
+        tests/gpu/test_synthetic_models.py Rows; then
         status=1
         echo "[$(date +%T)] FAILED run.real_smoke"
     fi

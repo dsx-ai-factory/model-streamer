@@ -62,9 +62,10 @@ by the repository's own pull request workflow, and a manual run tests the image 
 4. downloads the small real model (see below) and describes it, timing both;
 5. fails if the fixtures are not on a real block device that serves `O_DIRECT` (the streamer reads a file from a mount
    that cannot, such as tmpfs, with its synchronous reader, quietly);
-6. runs `test_synthetic_models.py` under `torchrun` with two ranks, once per filesystem strategy (`sync_buffered`,
-   `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with no `sync_buffered` fallback: a reader the
-   host cannot serve fails the run instead of passing on the synchronous reader;
+6. runs the `Rows` test case of `test_synthetic_models.py` (a `unittest` module) under `torchrun` with two ranks, once
+   per filesystem strategy (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with
+   no `sync_buffered` fallback: a reader the host cannot serve fails the run instead of passing on the synchronous
+   reader;
 7. runs the self-check (newest leg, when asked) and the smoke test;
 8. prints which rows ran, and a table of where the time went.
 
@@ -123,6 +124,11 @@ python3 -m unittest tests/gpu/test_gen_models.py
 ```
 
 ## The test (`test_synthetic_models.py`)
+
+A `unittest` module, run as `torchrun --nproc_per_node=2 tests/gpu/test_synthetic_models.py Rows` (or `SelfChecks`, see
+below). `Rows` loops over the rows with a `subTest` each: a failing row is recorded with its id and errors, and the
+next row runs, so one run reports every failing row, and unittest sets the exit status. The only row that stops the loop
+is one after which a rank raised in a distributed row (see below).
 
 The rows are defined in `matrix.py` (no GPU needed; `test_matrix.py` tests it). A row is one load: a model,
 distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_to`: load to host memory, then
@@ -192,24 +198,19 @@ The results of each row are written as soon as it ends, in `rows-<strategy>-rank
 ## Self-check of the checks
 
 A check that never fails could be silently broken, so the run can prove that the CRC32 check and the GPU memory check
-fire. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs two rows once more (`sync_buffered` only, about 2 minutes)
-with a fault injected on purpose (`GPU_DRILL=KIND:ROW_ID,...`, see `drills.py`): `corrupt` flips a bit of one tensor
-after it arrived, and `leak` keeps a 32 MiB GPU tensor alive after the row. That pass succeeds only if both are reported
-as what they are (the CRC32 error must name the tensor that was corrupted, and the memory error must show at least
-the 32 MiB that was leaked), and fails if one goes unnoticed. Its results are in `self-check/`.
+fire. `test_synthetic_models.py` is a `unittest` module with two test cases, `Rows` (every row, one subtest each, so that
+a failing row does not stop the others) and `SelfChecks`; the exit status is unittest's, so there is no pass/fail logic
+of our own to test. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs `SelfChecks` once (`sync_buffered` only, about 10
+seconds), which injects two faults and asserts, as ordinary tests, that each is reported as what it is and with no other
+error: `corrupt` flips a bit of one tensor after it arrived (the CRC32 error must name that tensor), and `leak` keeps a
+32 MiB GPU tensor alive after the row (the GPU memory error must be there, with at least those 32 MiB held). A fault that
+goes unnoticed fails an assertion, and the run. Its results are in `self-check/`; `drills.py` has what the assertions
+accept, and a row with an injected fault is not counted as a failure in `== rows that ran`.
 
-A second pass proves the other half, that a failing row fails the run, which a unit test of the deciding function
-(`drills.run_failed`) cannot: that function is worth nothing if the test stops using it. It runs one row with a fault
-injected and not declared (`GPU_FAULT`, the same syntax as `GPU_DRILL`), which makes it an ordinary failing row, and the
-real test must exit with a failure. A failing exit is not taken as proof, since a crash exits with a failure too:
-`expect_failure.py` checks that the results show the row failed on both ranks with the injected CRC32 error. If the test
-exits 0, or fails for another reason, the self-check fails. Its results are in `self-check-fault/`.
-
-The two passes take about 20 seconds together. The workflow turns them on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
+The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
 since the last scheduled run that passed (`test_synthetic_models.py`, what it checks with: `tensor_bytes.py`, `drills.py`,
 `gen_models.py` and `matrix.py`, and `phase_timer.py`, `real_model.py`, `setup_and_run.sh` or the workflow itself), so
-nobody has to remember to run it. A drilled row must fail with its own report and no other error: another error in it
-(a wrong dtype, an exception) fails the run.
+nobody has to remember to run it.
 
 The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
 not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file

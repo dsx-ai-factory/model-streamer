@@ -57,16 +57,11 @@ class Summary(unittest.TestCase):
         self.assertFalse(incomplete)
         self.assertIn("2 of 2 rows finished, 1 failed", lines[0])
 
-    def test_a_row_that_failed_on_purpose_is_not_a_failure(self):
-        self.write_all([row("a", False, drill="corrupt", drill_caught=True), row("b", False)], 2)
+    def test_a_row_with_a_fault_injected_on_purpose_is_not_counted_as_a_failure(self):
+        """The self-checks inject faults, and the row has errors by design: only the other row is a failure."""
+        self.write_all([row("a", False, fault="corrupt"), row("b", False)], 2)
         lines, _ = self.summarize()
-        self.assertIn("1 failed", lines[0])
-
-    def test_a_row_with_an_injected_fault_is_not_a_failure_either(self):
-        """The self-check injects a fault without declaring a drill, to prove that a failing row fails the run."""
-        self.write_all([row("a", False, drill=None, fault="corrupt"), row("b", False)], 2)
-        lines, _ = self.summarize()
-        self.assertIn("1 failed", lines[0])
+        self.assertIn("2 of 2 rows finished, 1 failed", lines[0])
 
     def test_a_row_left_started_names_the_row_where_the_run_ended(self):
         self.write_all([row("a", True), row("b", None)], 5)
@@ -108,7 +103,7 @@ class Summary(unittest.TestCase):
     def test_the_smoke_and_self_check_results_need_both_ranks_too(self):
         self.write_all([row("a", True)], 1)
         self.write("rows-default-rank0.json", [row("s", True)], 1, subdirectory="smoke")
-        self.write("rows-sync_buffered-rank1.json", [row("c", False, drill="leak")], 1, subdirectory="self-check")
+        self.write("rows-sync_buffered-rank1.json", [row("c", False, fault="leak")], 1, subdirectory="self-check")
         lines, incomplete = self.summarize(smoke=True)
         self.assertTrue(incomplete)
         missing = [line.split(":")[0] for line in lines if "no results file" in line]
@@ -138,7 +133,7 @@ class Summary(unittest.TestCase):
     def test_results_in_subdirectories_are_listed_with_their_path(self):
         self.write_all([row("a", True)], 1)
         for rank in (0, 1):
-            self.write("rows-sync_buffered-rank%d.json" % rank, [row("c", False, drill="leak")], 1,
+            self.write("rows-sync_buffered-rank%d.json" % rank, [row("c", False, fault="leak")], 1,
                        subdirectory="self-check")
         lines, _ = self.summarize()
         self.assertTrue(any(line.startswith(os.path.join("self-check", "rows-sync_buffered-rank0.json"))

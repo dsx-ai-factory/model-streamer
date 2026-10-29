@@ -1,76 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Fault injection, to show that the checks of the GPU test catch what they are for. No torch, so it is unit tested on
-the CPU (test_drills.py).
+"""What the self-checks of the GPU test (the SelfChecks case of test_synthetic_models.py) look for. No torch, so it is
+unit tested on the CPU (test_drills.py).
 
-GPU_DRILL=corrupt:ROW,leak:ROW makes the test break that row on purpose; the run then passes only if the break is
-reported, and fails if it goes unnoticed.
+A fault is injected on purpose, and the check that is meant to catch it has to report it, as itself:
 
-    corrupt  flips one bit of the first tensor of the row after it arrived: the CRC32 check must report that tensor
-    leak     keeps a 32 MiB GPU tensor alive after the row: the GPU memory check must report it
+    corrupt  one bit of the first tensor of the row is flipped after it arrived: the CRC32 check must report that
+             tensor, with an error of this form (RowRun.check)
+    leak     a 32 MiB GPU tensor is kept alive after the row: the GPU memory check must report it
 
-A rank that fails inside a distributed row is not a drill: the NCCL watchdog aborts the other rank, so there is nothing
-left to report it.
+A rank that fails inside a distributed row is not something to inject: the NCCL watchdog aborts the other rank, so there
+is nothing left to report it.
 """
 
 MIB = 1 << 20
 LEAK_DRILL_BYTES = 32 * MIB
-KINDS = ("corrupt", "leak")
 
 
-def parse_drills(text):
-    """{row id: kind} from "KIND:ROW_ID,KIND:ROW_ID". GPU_DRILL has this form, and so has GPU_FAULT, which injects the
-    same faults without declaring them: a row with such a fault is an ordinary failing row, and has to fail the run."""
-    drills = {}
-    for item in filter(None, (part.strip() for part in text.split(","))):
-        kind, _, row_id = item.partition(":")
-        if kind not in KINDS or not row_id:
-            raise RuntimeError("GPU_DRILL: %r is not KIND:ROW_ID with KIND one of %s" % (item, sorted(KINDS)))
-        drills[row_id] = kind
-    return drills
+def is_crc_error_of(error, tensor):
+    """Whether an error of a row is the CRC32 error of this tensor: it starts with the name and the details in parentheses,
+    and says crc32. (An error of another tensor, or another kind of error of this one, is not.)"""
+    return tensor is not None and error.startswith(tensor + " (") and "crc32" in error
 
 
-def drill_caught(kind, errors, corrupted_tensor=None, leak_bytes=0):
-    """Whether the errors of a drilled row report the fault that was injected, and not some other problem of the row.
-
-    corrupt: an error of the CRC32 check that names the tensor that was corrupted (an error for another tensor is a
-    real failure, not this one).
-    leak: the GPU memory error, with at least as many bytes still allocated as the drill leaked (leak_bytes is the
-    measured excess over the baseline), so that a drill that did nothing cannot be satisfied by a small real leak."""
-    if kind == "corrupt":
-        return corrupted_tensor is not None and any(
-            error.startswith(corrupted_tensor + " (") and "crc32" in error for error in errors)
-    if kind == "leak":
-        return leak_bytes >= LEAK_DRILL_BYTES and any(error.startswith("GPU memory leak") for error in errors)
-    raise ValueError("unknown drill %r" % (kind,))
-
-
-def run_failed(already_failed, ok, drill, caught, unexpected):
-    """Whether the run has failed after a row: it stays failed once it has, and then
-    - an ordinary row fails the run when it is not ok;
-    - a drilled row fails on purpose, so its failure is not the run's: it fails the run when its fault was not caught,
-      or when it has an error that is not the report of its fault.
-    The exit status of the test follows this, and the self-check proves it end to end (see tests/gpu/expect_failure.py)."""
-    if already_failed:
-        return True
-    if drill:
-        return (not caught) or bool(unexpected)
-    return not ok
-
-
-def _is_the_report(kind, error, corrupted_tensor):
-    if kind == "corrupt":
-        return corrupted_tensor is not None and error.startswith(corrupted_tensor + " (") and "crc32" in error
-    if kind == "leak":
-        return error.startswith("GPU memory leak")
-    raise ValueError("unknown drill %r" % (kind,))
-
-
-def unexpected_errors(kind, errors, corrupted_tensor=None, error_count=None):
-    """The errors of a drilled row that are not the report of its fault: the row has another problem, which a drill
-    must not hide. error_count is how many errors the row had in all; the errors beyond those recorded cannot be told
-    apart, and count as unexpected."""
-    unexpected = [error for error in errors if not _is_the_report(kind, error, corrupted_tensor)]
-    if error_count is not None and error_count > len(errors):
-        unexpected.append("... and %d more error(s) that were not recorded" % (error_count - len(errors)))
-    return unexpected
+def is_leak_error(error):
+    """Whether an error of a row is the GPU memory error."""
+    return error.startswith("GPU memory leak")

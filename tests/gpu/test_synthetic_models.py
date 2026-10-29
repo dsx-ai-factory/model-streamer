@@ -3,25 +3,29 @@
 """Load the synthetic models (see gen_models.py), and the small real model (see real_model.py), to real GPUs with the
 model streamer and compare every tensor with what the manifest recorded.
 
-Launched by torchrun with two ranks, one GPU each, once per filesystem strategy:
+A unittest module, launched by torchrun with two ranks, one GPU each, once per filesystem strategy:
 
     RUNAI_STREAMER_FS_STRATEGY=sync_buffered \\
-        torchrun --standalone --nproc_per_node=2 tests/gpu/test_synthetic_models.py
+        torchrun --standalone --nproc_per_node=2 tests/gpu/test_synthetic_models.py Rows
 
-Each row (see matrix.py) is one load: a model, distributed or not, a partition policy, `owned`, a destination
-and a memory limit. After a load, every tensor is checked for name, dtype, shape, device and the CRC32 of its
-bytes. A tensor is compared by its bytes, never by value, so NaN payloads and negative zero compare right.
+Two test cases, chosen on the command line:
 
-    GPU_MATRIX     core (default), full or smoke: which rows to run, see matrix.py
+    Rows         every row of the selected matrix (see matrix.py), one subtest each, so that a failing row does not stop
+                 the others. A row is one load: a model, distributed or not, a partition policy, `owned`, a destination
+                 and a memory limit. After a load, every tensor is checked for name, dtype, shape, device and the CRC32
+                 of its bytes. A tensor is compared by its bytes, never by value, so NaN payloads and negative zero
+                 compare right.
+    SelfChecks   proves that the checks fire: a bit flipped in a tensor must be reported by the CRC32 check, and a GPU
+                 tensor that is kept alive by the leak check.
+
+The exit status is unittest's: a failing row, or a failing self-check, fails the run.
+
+    GPU_MATRIX     core (default), full or smoke: which rows Rows runs, see matrix.py
     GPU_FIXTURES   directory written by gen_models.py and real_model.py (default .gpu-fixtures)
     GPU_RESULTS    where to write timing and results (default test-results/gpu)
     GPU_ROWS       comma-separated row id prefixes: run only the rows whose id starts with one of them. A filter that
                    matches no row fails the run (a typo), unless GPU_ALLOW_EMPTY_ROWS=true: a leg that has only some of
                    the rows (the oldest-torch leg has the core rows) then has nothing to run and passes, saying so
-    GPU_DRILL      comma-separated KIND:ROW_ID, to prove that the checks fire: the run injects a fault into that row
-                   and passes only if the fault is reported (see drills.py). Off by default.
-    GPU_FAULT      the same syntax, and the same faults, but not declared: the row is an ordinary failing row, and the
-                   test has to exit with a failure (the self-check runs it that way, to prove that it does)
 """
 
 import gc
@@ -29,6 +33,7 @@ import json
 import os
 import sys
 import time
+import unittest
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -36,7 +41,7 @@ import torch
 import torch.distributed as dist
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from drills import LEAK_DRILL_BYTES, drill_caught, parse_drills, run_failed, unexpected_errors  # noqa: E402
+from drills import LEAK_DRILL_BYTES, is_crc_error_of, is_leak_error  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
 from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
@@ -54,6 +59,12 @@ MAX_ERRORS_PER_ROW = 40
 CONTROL_MARGIN_SECONDS = 120
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
+
+# The rows of the self-checks: the richest model, loaded to the GPU by each rank on its own, with the tensors held
+# (owned) and not (borrowed).
+SELF_CHECK_CORRUPT_ROW = "mixed.solo.owned.cuda.tight"
+SELF_CHECK_LEAK_ROW = "mixed.solo.borrowed.cuda.tight"
+
 
 class Fixtures:
     """The manifests of the models that the selected rows load."""
@@ -93,17 +104,16 @@ def environment(settings):
 
 
 class RowRun:
-    """One load of one model, and its verdict."""
+    """One load of one model, and its errors."""
 
-    def __init__(self, row, fixtures, device, timer, drill=None, fault=None):
-        """drill: a fault that is injected on purpose and has to be reported (GPU_DRILL). fault: a fault that is injected
-        and not declared (GPU_FAULT), so that the row is an ordinary failing one: it has to fail the run. A drill injects
-        its fault too."""
+    def __init__(self, row, fixtures, device, timer, fault=None):
+        """fault: a fault to inject on purpose, for the self-checks: "corrupt" flips a bit of the first tensor after it
+        arrived, "leak" keeps a 32 MiB GPU tensor alive after the row."""
         self.row = row
-        self.drill = drill
-        self.fault = drill or fault
+        self.fault = fault
         self.leaked = None
         self.corrupted_tensor = None  # the tensor that the corrupt fault flipped a bit of
+        self.gpu_excess = 0  # bytes that the GPU holds after the row, above what it held before the run
         self.expected = fixtures.expected(row.model)
         self.paths = fixtures.paths(row.model)
         self.manifest = fixtures.manifests[row.model]
@@ -246,132 +256,168 @@ def write_results(results_dir, strategy, rank, timer, outcomes, expected_rows):
         json.dump({"strategy": strategy, "expected_rows": expected_rows, "rows": outcomes}, handle, indent=1)
 
 
-def main():
-    if int(os.environ.get("WORLD_SIZE", "0")) != WORLD:
-        raise RuntimeError("Launch with torchrun --nproc_per_node=%d" % WORLD)
-    if not torch.cuda.is_available() or torch.cuda.device_count() < WORLD:
-        raise RuntimeError("%d CUDA GPUs are required; GPU tests must not skip" % WORLD)
-    if not dist.is_nccl_available():
-        raise RuntimeError("NCCL is required")
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    strategy = os.environ.get("RUNAI_STREAMER_FS_STRATEGY", "")
-    results_dir = os.environ.get("GPU_RESULTS", "test-results/gpu")
-    os.makedirs(results_dir, exist_ok=True)
-    streamer_timeout = int(os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS)))
+class Harness:
+    """What the test cases of a run share: the two groups of ranks, the fixtures, the timer and the results of the rows."""
 
-    rows = selected_rows()
-    timer = PhaseTimer(announce=(rank == 0))
-    with timer.phase("init.nccl"):
-        dist.init_process_group("nccl", timeout=timedelta(seconds=DIST_TIMEOUT_SECONDS))
-    with timer.phase("init.manifests"):
-        fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"), sorted({r.model for r in rows}))
-    # The ranks agree on the outcome of a row over a CPU-only group of their own, so the test adds no NCCL traffic
-    # and no GPU work next to the streamer's, and can still report after a distributed row went wrong.
-    control = dist.new_group(backend="gloo", timeout=timedelta(seconds=streamer_timeout + CONTROL_MARGIN_SECONDS))
-    gpu_baseline = torch.cuda.memory_allocated(device)
+    def __init__(self):
+        if int(os.environ.get("WORLD_SIZE", "0")) != WORLD:
+            raise RuntimeError("Launch with torchrun --nproc_per_node=%d" % WORLD)
+        if not torch.cuda.is_available() or torch.cuda.device_count() < WORLD:
+            raise RuntimeError("%d CUDA GPUs are required; GPU tests must not skip" % WORLD)
+        if not dist.is_nccl_available():
+            raise RuntimeError("NCCL is required")
+        self.rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        self.device = torch.device("cuda", local_rank)
+        self.strategy = os.environ.get("RUNAI_STREAMER_FS_STRATEGY", "")
+        self.results_dir = os.environ.get("GPU_RESULTS", "test-results/gpu")
+        os.makedirs(self.results_dir, exist_ok=True)
+        streamer_timeout = int(os.environ.setdefault("RUNAI_STREAMER_DIST_TIMEOUT", str(DIST_TIMEOUT_SECONDS)))
+        self.timer = PhaseTimer(announce=(self.rank == 0))
+        with self.timer.phase("init.nccl"):
+            dist.init_process_group("nccl", timeout=timedelta(seconds=DIST_TIMEOUT_SECONDS))
+        # The ranks agree on the outcome of a row over a CPU-only group of their own, so the test adds no NCCL traffic
+        # and no GPU work next to the streamer's, and can still report after a distributed row went wrong.
+        self.control = dist.new_group(backend="gloo",
+                                      timeout=timedelta(seconds=streamer_timeout + CONTROL_MARGIN_SECONDS))
+        self.gpu_baseline = torch.cuda.memory_allocated(self.device)
+        self.fixtures = None
+        self.outcomes = []
+        self.expected_rows = 0
 
-    drills = parse_drills(os.environ.get("GPU_DRILL", ""))
-    faults = parse_drills(os.environ.get("GPU_FAULT", ""))
-    for variable, named in (("GPU_DRILL", drills), ("GPU_FAULT", faults)):
-        unknown = sorted(set(named) - {r.id for r in rows})
-        if unknown:
-            raise RuntimeError("%s names rows that are not selected: %s" % (variable, unknown))
-    if rank == 0:
-        stamp("matrix %s: %d rows, strategy %s" % (os.environ.get("GPU_MATRIX", "core"), len(rows), strategy))
-        if drills:
-            stamp("DRILL: faults are injected on purpose into %s; the run passes only if all of them are reported" % drills)
-        if faults:
-            stamp("FAULT: faults are injected and not declared into %s; the rows are ordinary failing rows, and the run "
-                  "has to fail" % faults)
-    outcomes = []
-    failed = False
-    try:
-        for row in rows:
-            dist.barrier(group=control)
-            drill = drills.get(row.id)
-            run = RowRun(row, fixtures, device, timer, drill, faults.get(row.id))
-            if rank == 0:
-                stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
-                    row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
-                    row.owned, row.device, row.limit, strategy))
-            outcome = {"row": row.id, "strategy": strategy, "ok": None}
-            outcomes.append(outcome)
-            write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
-            started = time.perf_counter()
-            raised = False
-            try:
-                run.run()
-            except Exception as error:  # a streamer exception is a failure of the row, not of the harness
-                raised = True
-                run.error("%s: %s" % (type(error).__name__, error))
-            elapsed = time.perf_counter() - started
-            if run.fault == "leak":
-                run.leaked = torch.empty(LEAK_DRILL_BYTES, dtype=torch.uint8, device=device)
-            release_gpu_memory()
-            # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is
-            # still allocated is a leak of the streamer or of the test.
-            gpu_allocated = torch.cuda.memory_allocated(device)
-            if not raised and gpu_allocated > gpu_baseline + GPU_LEAK_SLACK:
-                run.error("GPU memory leak: %.1f MiB still allocated after the row, %.1f MiB before the run" % (
-                    gpu_allocated / MIB, gpu_baseline / MIB))
-            # Every rank must agree before the next row, or one rank enters a collective alone and hangs.
-            # The second element is 1 when a rank raised: its collectives may be out of step.
-            flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0])
-            dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=control)
-            ok = flag[0].item() == 0
-            any_raised = flag[1].item() == 1
-            # A drilled row must fail, and with the report that its fault is meant to cause.
-            caught = None
-            if drill:
-                local = drill_caught(drill, run.errors, run.corrupted_tensor, gpu_allocated - gpu_baseline)
-                seen = torch.tensor([1 if local else 0])
-                dist.all_reduce(seen, op=dist.ReduceOp.MAX, group=control)  # reported by any rank is reported
-                caught = seen.item() == 1
-            outcome.update({"ok": ok, "seconds": elapsed, "drill": drill, "drill_caught": caught, "fault": run.fault,
-                            "gpu_allocated_bytes": gpu_allocated, "errors": run.errors_with_total()})
-            print("[rank %d] %s %-26s %-12s %s" % (rank, "PASS" if ok else "FAIL", row.id, strategy,
-                                                  "%.1fs" % elapsed), flush=True)
-            for message in run.errors_with_total():
-                print("[rank %d]   %s" % (rank, message), flush=True)
-            if drill:
-                print("[rank %d] DRILL %s on %s: %s" % (rank, drill, row.id,
-                                                         "REPORTED, as it must be" if caught else "NOT REPORTED"),
-                      flush=True)
-            # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process
-            # would otherwise take the results of the rows that already ran with it.
-            write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
-            # A drilled row fails on purpose, but only with the report of its fault: another error of the row (a wrong
-            # dtype, an exception) is a real problem, which the drill must not hide.
-            unexpected = unexpected_errors(drill, run.errors, run.corrupted_tensor, run.error_count) if drill else []
-            for message in unexpected:
-                print("[rank %d]   UNEXPECTED in the drilled row: %s" % (rank, message), flush=True)
-            # What turns the run red; the exit status of this test is this value (the self-check proves it, with a row
-            # that has an injected fault and no drill: the run must fail).
-            failed = run_failed(failed, ok, drill, caught, unexpected)
-            if not ok:
-                # A row that only found wrong tensors ended in step on every rank, so the next row can run and
-                # one run reports every failing row. So does a row that raised without distributed streaming,
-                # which has no collectives. After an exception in a distributed row they may be out of step.
-                if any_raised and row.dist:
-                    print("[rank %d] a rank raised in row %s: not running the rows after it" % (rank, row.id),
-                          flush=True)
-                    break
-    finally:
-        write_results(results_dir, strategy, rank, timer, outcomes, len(rows))
-        if rank == 0:
-            print(report(timer.records, top=15), flush=True)
+    def load_fixtures(self, models):
+        with self.timer.phase("init.manifests"):
+            self.fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"), models)
+
+    def write(self):
+        write_results(self.results_dir, self.strategy, self.rank, self.timer, self.outcomes, self.expected_rows)
+
+    def row_run(self, row, fault=None):
+        """Load one row on both ranks, check it, and agree on the outcome. Returns (run, any_raised): run.errors are
+        the errors of this rank, and any_raised is True when a rank raised, which may leave the collectives out of step."""
+        dist.barrier(group=self.control)
+        run = RowRun(row, self.fixtures, self.device, self.timer, fault)
+        if self.rank == 0:
+            stamp("ROW %s  model %s  %s  owned=%s  device=%s  limit=%s  strategy=%s" % (
+                row.id, row.model, ("distributed " + row.policy) if row.dist else "not distributed",
+                row.owned, row.device, row.limit, self.strategy))
+        outcome = {"row": row.id, "strategy": self.strategy, "ok": None}
+        self.outcomes.append(outcome)
+        self.write()
+        started = time.perf_counter()
+        raised = False
+        try:
+            run.run()
+        except Exception as error:  # a streamer exception is a failure of the row, not of the harness
+            raised = True
+            run.error("%s: %s" % (type(error).__name__, error))
+        elapsed = time.perf_counter() - started
+        if run.fault == "leak":
+            run.leaked = torch.empty(LEAK_DRILL_BYTES, dtype=torch.uint8, device=self.device)
+        release_gpu_memory()
+        # Everything the row allocated on the GPU is gone by now: tensors held, copies, the streamer's. What is still
+        # allocated is a leak of the streamer or of the test.
+        gpu_allocated = torch.cuda.memory_allocated(self.device)
+        run.gpu_excess = gpu_allocated - self.gpu_baseline
+        if not raised and gpu_allocated > self.gpu_baseline + GPU_LEAK_SLACK:
+            run.error("GPU memory leak: %.1f MiB still allocated after the row, %.1f MiB before the run" % (
+                gpu_allocated / MIB, self.gpu_baseline / MIB))
+        # Every rank must agree before the next row, or one rank enters a collective alone and hangs. The second
+        # element is 1 when a rank raised: its collectives may be out of step.
+        flag = torch.tensor([1 if run.errors else 0, 1 if raised else 0])
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=self.control)
+        ok = flag[0].item() == 0
+        any_raised = flag[1].item() == 1
+        outcome.update({"ok": ok, "seconds": elapsed, "fault": run.fault, "gpu_allocated_bytes": gpu_allocated,
+                        "errors": run.errors_with_total()})
+        print("[rank %d] %s %-26s %-12s %s" % (self.rank, "PASS" if ok else "FAIL", row.id, self.strategy,
+                                              "%.1fs" % elapsed), flush=True)
+        for message in run.errors_with_total():
+            print("[rank %d]   %s" % (self.rank, message), flush=True)
+        # After every row, not only at the end: a hang that the NCCL watchdog turns into a killed process would
+        # otherwise take the results of the rows that already ran with it.
+        self.write()
+        return run, any_raised
+
+    def finish(self):
+        self.write()
+        if self.rank == 0:
+            print(report(self.timer.records, top=15), flush=True)
         if dist.is_initialized():
             dist.destroy_process_group()
-    if not outcomes:
-        status, message = no_rows_outcome(os.environ.get("GPU_ROWS"), os.environ.get("GPU_ALLOW_EMPTY_ROWS") == "true",
-                                          os.environ.get("GPU_MATRIX", "core"))
-        print(message, file=sys.stderr if status else sys.stdout, flush=True)
-        return status
-    return 1 if failed else 0
+
+
+HARNESS = None
+
+
+def setUpModule():
+    global HARNESS
+    HARNESS = Harness()
+
+
+def tearDownModule():
+    if HARNESS is not None:
+        HARNESS.finish()
+
+
+class Rows(unittest.TestCase):
+    """Every row of the selected matrix. A subtest each: a failing row is recorded with its id and errors, and the next
+    row runs, so one run reports every failing row; the exit status is unittest's."""
+
+    def test_every_row(self):
+        rows = selected_rows()
+        HARNESS.expected_rows = len(rows)
+        if not rows:
+            status, message = no_rows_outcome(os.environ.get("GPU_ROWS"),
+                                              os.environ.get("GPU_ALLOW_EMPTY_ROWS") == "true",
+                                              os.environ.get("GPU_MATRIX", "core"))
+            print(message, flush=True)
+            if status:
+                self.fail(message)
+            return
+        if HARNESS.rank == 0:
+            stamp("matrix %s: %d rows, strategy %s" % (os.environ.get("GPU_MATRIX", "core"), len(rows),
+                                                      HARNESS.strategy))
+        HARNESS.load_fixtures(sorted({r.model for r in rows}))
+        for row in rows:
+            run, any_raised = HARNESS.row_run(row)
+            with self.subTest(row=row.id):
+                if run.errors:
+                    self.fail("\n".join(run.errors_with_total()))
+            if any_raised and row.dist:
+                # A row that only found wrong tensors ended in step on every rank, so the next row can run. After an
+                # exception in a distributed row the collectives may be out of step, and the next row could hang.
+                print("[rank %d] a rank raised in row %s: not running the rows after it" % (HARNESS.rank, row.id),
+                      flush=True)
+                self.fail("a rank raised in row %s: the rows after it were not run" % row.id)
+
+
+class SelfChecks(unittest.TestCase):
+    """The checks of Rows must fire: a fault is injected on purpose and has to be reported, as itself and with no other
+    error. A failed assertion here fails the run like any other test: nothing is declared as an expected failure."""
+
+    @classmethod
+    def setUpClass(cls):
+        HARNESS.expected_rows = 2
+        HARNESS.load_fixtures(["mixed"])
+        cls.rows = {row.id: row for row in rows_for("full")}
+
+    def test_a_corrupted_tensor_is_reported_by_the_crc32_check(self):
+        run, _ = HARNESS.row_run(self.rows[SELF_CHECK_CORRUPT_ROW], fault="corrupt")
+        self.assertIsNotNone(run.corrupted_tensor, "no tensor was corrupted: the fault was not injected")
+        other = [e for e in run.errors_with_total() if not is_crc_error_of(e, run.corrupted_tensor)]
+        self.assertEqual(other, [], "the row has errors that are not the report of the corrupted tensor")
+        self.assertTrue(any(is_crc_error_of(e, run.corrupted_tensor) for e in run.errors),
+                        "the CRC32 check did not report %s" % run.corrupted_tensor)
+
+    def test_a_leaked_gpu_tensor_is_reported_by_the_memory_check(self):
+        run, _ = HARNESS.row_run(self.rows[SELF_CHECK_LEAK_ROW], fault="leak")
+        self.assertGreaterEqual(run.gpu_excess, LEAK_DRILL_BYTES, "the leaked tensor is not held: the fault was not injected")
+        other = [e for e in run.errors_with_total() if not is_leak_error(e)]
+        self.assertEqual(other, [], "the row has errors that are not the report of the leak")
+        self.assertTrue(any(is_leak_error(e) for e in run.errors), "the GPU memory check did not report the leak")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()
