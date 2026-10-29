@@ -224,6 +224,14 @@ TEST(DirectBlock, Unusable_Values_Are_REJECTED)
     // Not powers of two.
     EXPECT_THROW(usable_direct_block(3000), common::Exception);
     EXPECT_THROW(usable_direct_block(4097), common::Exception);
+
+    // ABOVE THE PROBE'S MAXIMUM, which the rest of the code is sized for: a worker runs at
+    // MaxProbeBlock until it measures, and a value above it breaks arithmetic that assumes a block is
+    // small beside a chunk. 2^63 is a power of two and passes every other rule here, and the staging
+    // size rounds a chunk up by a block at each end - so it wraps and answers 0, which reaches the
+    // staging pool as a buffer that can hold nothing.
+    EXPECT_THROW(usable_direct_block(MaxProbeBlock * 2), common::Exception);
+    EXPECT_THROW(usable_direct_block(1ul << 63), common::Exception);
 }
 
 // A value that is not a NUMBER is rejected too, and by the same route.

@@ -7,6 +7,7 @@ runai_cc_auto_library(
     name = "fs_async_router",
     deps = [
         "//streamer/impl/device_io/device_writer",
+        "//common/device",
         "//common/exception",
         "//posix_io/alignment",
         "//posix_io/engine_factory",
@@ -27,6 +28,7 @@ runai_cc_test(
     srcs = ["fs_async_router_test.cc"],
     deps = [
         ":fs_async_router",
+        "//common/device",
         "//common/exception",
     ],
 )

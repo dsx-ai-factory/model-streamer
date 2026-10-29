@@ -245,7 +245,7 @@ TEST_F(RealDevice, The_Writer_Client_Copies_To_A_Real_Device)
         written.push_back(utils::random::buffer(Buffer));
         std::memcpy(buffer.data, written.back().data(), Buffer);
 
-        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, static_cast<char *>(target) + round * Buffer,
+        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, 0 /* skip */, Buffer, static_cast<char *>(target) + round * Buffer,
                                [&](common::ResponseCode ret)
                                {
                                    EXPECT_EQ(ret, common::ResponseCode::Success);
@@ -269,6 +269,62 @@ TEST_F(RealDevice, The_Writer_Client_Copies_To_A_Real_Device)
     }
 
     EXPECT_LE(client.buffers(), Window) << "the pool stayed inside the window";
+    EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
+}
+
+// A SKIP ON REAL HARDWARE. The mock copies with memcpy, so it cannot say whether the driver accepts a
+// source address that is not block aligned.
+//
+// It should: the documented requirement for cuMemcpyHtoDAsync is that the memory be PAGE-LOCKED, not
+// that the address be aligned, and `data + skip` is inside the same pinned allocation. Nothing in the
+// vendor documentation states an alignment rule for the source. This is the test that would say so if
+// that reading is wrong - on a host with a driver, it either copies the right bytes or it does not.
+//
+// The skip is deliberately odd and small, so it is aligned to nothing at all.
+TEST_F(RealDevice, A_Skip_Is_Copied_Correctly_By_The_Driver)
+{
+    constexpr size_t Skip = 37;
+
+    auto writer = std::make_shared<DeviceWriter>(device::backend_for);
+
+    DeviceWriterClient::Buffers geometry;
+    geometry.buffer_bytesize = Buffer;
+    geometry.slab_bytesize = Buffer;
+
+    DeviceWriterClient client(writer, geometry, 1 /* window */);
+
+    void * target = nullptr;
+    ASSERT_EQ(_device->device_alloc(Buffer, &target), common::ResponseCode::Success);
+
+    StagingBuffer buffer;
+    ASSERT_EQ(client.take(common::Device::cuda(0), buffer), common::ResponseCode::Success);
+    ASSERT_TRUE(buffer.valid());
+
+    // Distinct values either side of the boundary, so a copy from the wrong place is visible rather
+    // than merely wrong by an amount nobody notices.
+    const auto payload = utils::random::buffer(Buffer - Skip);
+    std::memset(buffer.data, 0xAA, Skip);
+    std::memcpy(buffer.data + Skip, payload.data(), payload.size());
+
+    std::atomic<bool> done{false};
+    ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Skip, payload.size(), target,
+                           [&](common::ResponseCode ret)
+                           {
+                               EXPECT_EQ(ret, common::ResponseCode::Success);
+                               done.store(true);
+                           }),
+              common::ResponseCode::Success);
+
+    for (unsigned i = 0; i < 10000 && !done.load(); ++i)
+    {
+        ::usleep(1000);
+    }
+    ASSERT_TRUE(done.load()) << "the copy never completed";
+
+    const auto landed = read_back(target, payload.size());
+    EXPECT_EQ(std::memcmp(landed.data(), payload.data(), payload.size()), 0)
+        << "the driver did not copy from an unaligned source the way a memcpy does";
+
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
 }
 
@@ -317,7 +373,7 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
     std::memcpy(buffer.data, data.data(), Buffer);
 
     std::atomic<int> reported{-1};
-    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, Buffer, target,
+    ASSERT_EQ(client.write(common::Device::cuda(1), buffer, 0 /* skip */, Buffer, target,
                            [&](common::ResponseCode ret) { reported.store(static_cast<int>(ret)); }),
               common::ResponseCode::Success);
 
@@ -353,8 +409,16 @@ TEST_F(RealDevice, One_Pool_Serves_A_Second_Device)
 TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
 {
     constexpr size_t Total = 4 * Buffer;
+    constexpr unsigned Ranges = 8;
+    constexpr size_t Chunk = Total / Ranges;
 
-    const auto data = utils::random::buffer(Total);
+    // OFF EVERY BLOCK BOUNDARY, which is what a real file looks like: a safetensors header has an
+    // arbitrary length, so the data after it starts at an odd offset and every range inherits that.
+    // Ranges tiling a file from 0 land on multiples of the range size, which are block multiples - so
+    // the rounded read this path exists for would never run, and only a mock engine would ever see it.
+    constexpr size_t Shift = 1000;
+
+    const auto data = utils::random::buffer(Total + Shift);
     utils::temp::File file(data);
 
     void * target = nullptr;
@@ -364,12 +428,10 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
 
     std::vector<FileRanges> request(1);
     request[0].path = file.path;
-    constexpr unsigned Ranges = 8;
     for (unsigned i = 0; i < Ranges; ++i)
     {
         request[0].ranges.push_back(
-            ReadRange{ i * (Total / Ranges), Total / Ranges,
-                       static_cast<char *>(target) + i * (Total / Ranges) });
+            ReadRange{ Shift + i * Chunk, Chunk, static_cast<char *>(target) + i * Chunk });
     }
 
     SubmissionId submission_id = 0;
@@ -400,7 +462,7 @@ TEST_F(RealDevice, A_Submission_Reads_Into_Device_Memory)
     ASSERT_EQ(worst, common::ResponseCode::Success) << "strategy " << streamer.fs_strategy();
 
     const auto landed = read_back(target, Total);
-    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+    EXPECT_EQ(std::memcmp(landed.data(), data.data() + Shift, Total), 0)
         << "the bytes on the device are not the bytes in the file";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
@@ -416,8 +478,12 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
 {
     constexpr size_t Total = 4 * Buffer;
     constexpr unsigned Ranges = 4;
+    constexpr size_t Chunk = Total / Ranges;
 
-    const auto data = utils::random::buffer(Total);
+    // Off every block boundary, for the reason given in A_Submission_Reads_Into_Device_Memory.
+    constexpr size_t Shift = 1000;
+
+    const auto data = utils::random::buffer(Total + Shift);
     utils::temp::File file(data);
 
     void * target = nullptr;
@@ -430,12 +496,12 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
     unsigned num_ranges = Ranges;
 
     std::vector<size_t> offsets(Ranges);
-    std::vector<size_t> sizes(Ranges, Total / Ranges);
+    std::vector<size_t> sizes(Ranges, Chunk);
     std::vector<void *> dsts(Ranges);
     for (unsigned i = 0; i < Ranges; ++i)
     {
-        offsets[i] = i * (Total / Ranges);
-        dsts[i] = static_cast<char *>(target) + offsets[i];
+        offsets[i] = Shift + i * Chunk;
+        dsts[i] = static_cast<char *>(target) + i * Chunk;
     }
 
     RunaiFileStreamerDevice device;
@@ -463,7 +529,7 @@ TEST_F(RealDevice, The_Public_Api_Reads_Into_Device_Memory)
     runai_file_streamer_end(streamer);
 
     const auto landed = read_back(target, Total);
-    EXPECT_EQ(std::memcmp(landed.data(), data.data(), Total), 0)
+    EXPECT_EQ(std::memcmp(landed.data(), data.data() + Shift, Total), 0)
         << "the bytes on the device are not the bytes in the file";
 
     EXPECT_EQ(_device->device_free(target), common::ResponseCode::Success);
@@ -585,7 +651,7 @@ TEST_F(RealDevice, The_Pool_Never_Exceeds_Its_Window)
         ASSERT_LE(client.buffers(), Window) << "the pool grew past its window at round " << round;
 
         ++issued;
-        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, Buffer, target,
+        ASSERT_EQ(client.write(common::Device::cuda(0), buffer, 0 /* skip */, Buffer, target,
                                [&](common::ResponseCode ret)
                                {
                                    EXPECT_EQ(ret, common::ResponseCode::Success);

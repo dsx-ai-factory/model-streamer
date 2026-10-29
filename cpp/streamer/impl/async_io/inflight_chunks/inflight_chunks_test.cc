@@ -195,4 +195,87 @@ TEST(InflightChunks, Several_Chunks_Are_Independent)
     EXPECT_EQ(chunks.pending(a).bytesize, 50);
 }
 
+// --- staging ---------------------------------------------------------------------------------------
+
+namespace
+{
+
+// A staging buffer over memory the test owns, so a destination can be compared against an address.
+StagingBuffer staging_over(std::vector<char> & memory)
+{
+    StagingBuffer buffer;
+    buffer.data = memory.data();
+    buffer.bytesize = memory.size();
+    return buffer;
+}
+
+} // namespace
+
+// A staged chunk reads into the staging buffer rather than into the caller's destination. Without a
+// skip it starts at the front of it, which is what a buffered read does.
+TEST(InflightChunks, A_Staged_Chunk_Reads_Into_Its_Buffer)
+{
+    std::vector<char> destination(1024);
+    std::vector<char> staging(4096);
+    InflightChunks chunks;
+
+    const auto id = chunks.add(chunk_at(1000, 600, destination.data()), 1 /* workload */, 0 /* batch */);
+    chunks.set_staging(id, staging_over(staging));
+
+    EXPECT_EQ(chunks.pending(id).buffer, staging.data());
+}
+
+// THE SKIP: a rounded direct read puts the bytes before the chunk at the front of the buffer, so the
+// chunk's own bytes start after them.
+//
+// 1000 is `offset % block` for a chunk at 1000 on a 4096 mount - the read starts at 0 and the first
+// 1000 bytes it brings back belong to nobody.
+TEST(InflightChunks, A_Skip_Moves_The_Chunk_Down_Its_Staging_Buffer)
+{
+    std::vector<char> destination(1024);
+    std::vector<char> staging(8192);
+    InflightChunks chunks;
+
+    const auto id = chunks.add(chunk_at(1000, 600, destination.data()), 1 /* workload */, 0 /* batch */);
+    chunks.set_staging(id, staging_over(staging));
+    chunks.set_staging_skip(id, 1000);
+
+    EXPECT_EQ(chunks.pending(id).buffer, staging.data() + 1000);
+    EXPECT_EQ(chunks.pending(id).offset, 1000u) << "the FILE offset is the chunk's own, not rounded";
+}
+
+// A resumed pass has to land where the first one left off, or the chunk is assembled out of order.
+TEST(InflightChunks, A_Skip_Holds_Across_A_Short_Read)
+{
+    std::vector<char> destination(1024);
+    std::vector<char> staging(8192);
+    InflightChunks chunks;
+
+    const auto id = chunks.add(chunk_at(1000, 600, destination.data()), 1 /* workload */, 0 /* batch */);
+    chunks.set_staging(id, staging_over(staging));
+    chunks.set_staging_skip(id, 1000);
+
+    ASSERT_EQ(chunks.record(id, 250), Progress::Partial);
+
+    const auto rest = chunks.pending(id);
+    EXPECT_EQ(rest.buffer, staging.data() + 1000 + 250) << "the skip still applies after the cursor";
+    EXPECT_EQ(rest.offset, 1250u);
+    EXPECT_EQ(rest.bytesize, 350u);
+}
+
+// THE HOST PATH MUST NOT MOVE. A chunk with no staging buffer writes into the caller's memory, where
+// there is nothing in front of it and nothing we may put there.
+TEST(InflightChunks, A_Host_Chunk_Has_No_Skip)
+{
+    std::vector<char> destination(1024);
+    InflightChunks chunks;
+
+    const auto id = chunks.add(chunk_at(1000, 600, destination.data()), 1 /* workload */, 0 /* batch */);
+
+    EXPECT_EQ(chunks.pending(id).buffer, destination.data());
+
+    // And a skip cannot be given to one: it describes a position inside a staging buffer.
+    EXPECT_THROW(chunks.set_staging_skip(id, 1000), std::exception);
+}
+
 }; // namespace runai::llm::streamer::impl

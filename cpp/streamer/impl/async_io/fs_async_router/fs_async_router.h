@@ -18,6 +18,7 @@
 #include "posix_io/strategy/strategy.h"
 
 #include "streamer/impl/device_io/device_writer/device_writer.h"
+#include "common/device/device.h"
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
 #include "streamer/impl/config/fs_queue_depth/fs_queue_depth.h"
 #include "streamer/impl/request/request.h"
@@ -82,8 +83,12 @@ class FsAsyncRouter
     // sends its file to the synchronous reader.
     //
     // A null `registers` means every mount registers, which is what a caller that does not care wants.
+    //
+    // `device` is where the submission's bytes are going. NO DEFAULT, for the reason Batch gives for
+    // the same parameter: defaulting to the host would quietly treat a device destination as host
+    // memory, and here that decides which reader serves the file.
     Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
-                  const RegisterPolicy & registers = nullptr);
+                  common::Device destination, const RegisterPolicy & registers = nullptr);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
@@ -106,7 +111,13 @@ class FsAsyncRouter
     // Asked only for libaio, which is asynchronous only with O_DIRECT: a file it cannot read directly
     // is read inline, one at a time, so it belongs on the synchronous reader. The choice must be made
     // here - once a workload is on the async pool the worker cannot hand it back.
-    bool reads_directly(const FileRanges & file, dev_t device);
+    // Whether libaio can serve this file. Asked for that strategy only, because it has no
+    // asynchronous buffered mode to fall back to per file.
+    //
+    // `destination` says where the bytes END UP. For a device it is NOT where the read lands - that
+    // is a staging buffer the worker allocates and places - so the caller's address says nothing
+    // about congruence and is not asked. The mount still has to serve O_DIRECT either way.
+    bool reads_directly(const FileRanges & file, dev_t device, common::Device destination);
 
     size_t block_of(dev_t device, const std::string & path);
 
