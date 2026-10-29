@@ -24,8 +24,10 @@ by the repository's own pull request workflow, and a manual run tests the image 
    in the repository's development image, and uploads the wheel.
 2. **`gpu-tests`**, two legs in parallel on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`:
    two T4s, 12 cores, 48 GB). Each leg runs `setup_and_run.sh` in a clean CUDA container
-   (`nvidia/cuda:12.4.1-base-ubuntu22.04`: Ubuntu 22.04, no Python packages, no toolchain, GPU passthrough, 2 GiB of
-   `/dev/shm` for NCCL and the io_uring seccomp setting). The script installs Python, pip, the PyTorch and numpy of the
+   (`nvidia/cuda:12.6.3-base-ubuntu24.04` with Python 3.12 for the newest torch, which needs Python 3.11 or later;
+   `nvidia/cuda:12.4.1-base-ubuntu22.04` with Python 3.10 for the oldest, since torch 2.0.0 has no wheel for 3.12. No
+   Python packages, no toolchain, GPU passthrough, 2 GiB of `/dev/shm` for NCCL and the io_uring seccomp setting). The
+   script installs Python, pip, the PyTorch and numpy of the
    leg, and the wheel, the way a user would:
 
    | Leg | PyTorch | Rows of the synthetic models |
@@ -37,7 +39,7 @@ by the repository's own pull request workflow, and a manual run tests the image 
    what covers the newest dtypes; the oldest covers the code paths for a torch without `dtype.itemsize`, float8 or
    the unsigned 16/32/64 bit types.
 
-   pip installs the newest torch that the image's Python can use (Python 3.10 on Ubuntu 22.04), so when a torch release
+   pip installs the newest torch that the image's Python can use (Python 3.12 on Ubuntu 24.04), so when a torch release
    stops supporting that Python, the newest leg would quietly test an older one. `env_check.py newest-torch` asks PyPI
    for the newest release and compares: if they differ it fails the leg and says which release needs which Python, and
    that the base container of the leg has to change (`GPU_TEST_IMAGE` in the workflow). **The tests still run, with the

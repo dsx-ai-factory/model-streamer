@@ -107,6 +107,9 @@ python3 --version
 
 install_python_packages() {
     local wheels wheel
+    # Ubuntu 24.04 marks its Python as externally managed (PEP 668) and pip refuses to install into it. The container is
+    # thrown away after the run, so the system Python is the environment (older pip ignores the variable).
+    export PIP_BREAK_SYSTEM_PACKAGES=1
     # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
     timeout --signal=TERM --kill-after=30s "$(cap 45)s" \
         python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return

@@ -154,7 +154,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # Two legs, each on two T4s in a clean container (nvidia/cuda, Ubuntu 22.04, the system Python, pip): the newest
+  # Two legs, each on two T4s in a clean container (nvidia/cuda, the system Python, pip: Ubuntu 24.04 for the newest torch, 22.04 for the oldest): the newest
   # PyTorch with the whole set of rows, which is what covers the newest dtypes, and the oldest PyTorch that the package
   # supports (torch>=2.0) with the core rows. The versions in between are not run.
   gpu-tests:
@@ -176,18 +176,22 @@ jobs:
             newest: true
             torch_spec: torch
             numpy_spec: numpy
+            # Python 3.12: the newest torch needs Python 3.11 or later, which Ubuntu 22.04 does not have
+            image: nvidia/cuda:12.6.3-base-ubuntu24.04
             rows: full
             allow_empty_rows: false
           - name: oldest-torch
             newest: false
             torch_spec: torch==2.0.0
             numpy_spec: numpy<2
+            # Python 3.10: torch 2.0.0 has wheels for Python 3.8 to 3.11 only
+            image: nvidia/cuda:12.4.1-base-ubuntu22.04
             rows: core
             # it has only the core rows: a filter that matches none of them leaves it nothing to run, and is not a typo
             allow_empty_rows: true
     env:
       GPU_BUDGET_MINUTES: 285
-      GPU_TEST_IMAGE: nvidia/cuda:12.4.1-base-ubuntu22.04
+      GPU_TEST_IMAGE: ${{ matrix.image }}
       # Named, so that the last step can remove it: a cancelled or timed-out job kills the docker client, not the
       # container, and a container that goes on holds both GPUs.
       GPU_CONTAINER: gpu-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
