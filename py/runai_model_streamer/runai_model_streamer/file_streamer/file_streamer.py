@@ -287,10 +287,17 @@ class FileStreamer:
         # streams: keep live_requests and outstanding across calls, hang the owning iterator off the
         # FilesRequest instead of off self, release buffers to that owner, and let each iterator live
         # until its last submission drains. Then delete this check.
-        if self.outstanding > 0:
+        #
+        # OUTSTANDING ALONE IS NOT ENOUGH. It counts responses not yet read from the library, and
+        # ordered yield can read every one of them while the generator is still parked on its first
+        # range - nothing outstanding, a whole stream still to hand over. live_requests is what is
+        # still owed to the caller: it empties on a clean end, and the drain clears it on every other
+        # one.
+        if self.live_requests or self.outstanding > 0:
             raise ValueError(
-                f"cannot start a new stream while {self.outstanding} response(s) are outstanding from "
-                f"the previous one - consume or close get_chunks() before calling stream_files again"
+                f"cannot start a new stream while {len(self.live_requests)} submission(s) and "
+                f"{self.outstanding} response(s) are still live from the previous one - consume or "
+                f"close get_chunks() before calling stream_files again"
             )
 
         if not homogeneous_paths([file_stream_request.path for file_stream_request in file_stream_requests]):
