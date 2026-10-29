@@ -49,6 +49,9 @@ LIMITS = ("tight", "deep", "default")
 # holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) cannot have a deep ring that recycles, and
 # many_files (a few tensors of up to 10 MiB among small files, 5 to 11 MB in all) can only for some seeds.
 DEEP_MODELS = ("mixed", "many_tensors")
+# A distributed rank reads only its share of the model, so its ring has to be smaller than that share to be reused:
+# many_tensors (105 MB, 18 buffers of 4 MiB are 75 MB a rank, and a rank reads 52 MB) is not deep when distributed.
+DEEP_DISTRIBUTED_MODELS = ("mixed",)
 
 POLICIES = ((False, None), (True, "spans"), (True, "chunks"), (True, "files"))
 
@@ -73,9 +76,10 @@ def memory_limit(manifest, distributed, level):
     if level == "tight":
         return tight
     if level == "deep":
-        if RING_BUFFERS * largest_tensor >= total:
-            raise ValueError("a ring of %d buffers of %d bytes does not recycle in a model of %d bytes" % (
-                RING_BUFFERS, largest_tensor, total))
+        share = total // ranks  # what one rank reads
+        if RING_BUFFERS * largest_tensor >= share:
+            raise ValueError("a ring of %d buffers of %d bytes does not recycle in the %d bytes that a rank of %d reads" % (
+                RING_BUFFERS, largest_tensor, share, ranks))
         return max(tight, RING_BUFFERS * largest_tensor * ranks)
     raise ValueError("unknown limit %r" % (level,))
 
@@ -85,7 +89,7 @@ def is_valid(model, dist, policy, owned, device, limit):
         return False  # distributed streaming needs a CUDA destination
     if policy == "files" and model == "many_tensors":
         return False  # one file: there is nothing to give each rank
-    if limit == "deep" and model not in DEEP_MODELS:
+    if limit == "deep" and model not in (DEEP_DISTRIBUTED_MODELS if dist else DEEP_MODELS):
         return False
     return True
 

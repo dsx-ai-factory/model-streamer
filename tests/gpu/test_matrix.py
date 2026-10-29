@@ -66,7 +66,7 @@ class Rows(unittest.TestCase):
 
     def test_counts(self):
         counts = {model: sum(1 for r in matrix.full_rows() if r.model == model) for model in matrix.MODEL_NAMES}
-        self.assertEqual(counts, {"mixed": 30, "many_tensors": 24, "giant_tensor": 20, "many_files": 20})
+        self.assertEqual(counts, {"mixed": 30, "many_tensors": 20, "giant_tensor": 20, "many_files": 20})
 
     def test_core_is_part_of_full(self):
         full = {row.id for row in matrix.full_rows()}
@@ -121,16 +121,26 @@ class MemoryLimit(unittest.TestCase):
         for model in matrix.DEEP_MODELS:
             m = manifest(model)
             for distributed in (False, True):
+                if distributed and model not in matrix.DEEP_DISTRIBUTED_MODELS:
+                    continue
                 ranks = 2 if distributed else 1
                 limit = matrix.memory_limit(m, distributed, "deep")
                 buffer_size, buffers = ring(limit // ranks, m)
                 self.assertEqual(buffers, matrix.RING_BUFFERS, (model, distributed))
-                self.assertLess(buffer_size * buffers, m["total_data_bytes"], (model, distributed))
+                # A rank reads its share of the model: the ring has to be smaller than that for a buffer to be reused.
+                self.assertLess(buffer_size * buffers, m["total_data_bytes"] // ranks, (model, distributed))
 
     def test_deep_is_refused_where_nothing_would_be_reused(self):
         for model in set(matrix.MODEL_NAMES) - set(matrix.DEEP_MODELS):
             with self.assertRaises(ValueError):
                 matrix.memory_limit(manifest(model), False, "deep")
+
+    def test_deep_is_refused_for_a_rank_whose_share_is_smaller_than_the_ring(self):
+        """many_tensors recycles a deep ring when one process reads it all, but not when two ranks read half each."""
+        matrix.memory_limit(manifest("many_tensors"), False, "deep")
+        with self.assertRaises(ValueError):
+            matrix.memory_limit(manifest("many_tensors"), True, "deep")
+        self.assertFalse([r.id for r in matrix.full_rows() if r.limit == "deep" and r.dist and r.model != "mixed"])
 
     def test_unknown_level_is_refused(self):
         with self.assertRaises(ValueError):
@@ -163,6 +173,8 @@ class AgainstTheStreamer(unittest.TestCase):
             m = manifest(model)
             for distributed in (False, True):
                 for level in ("tight", "deep"):
+                    if level == "deep" and distributed and model not in matrix.DEEP_DISTRIBUTED_MODELS:
+                        continue
                     per_rank = matrix.memory_limit(m, distributed, level) // (2 if distributed else 1)
                     derived = self.requests_iterator._ring_sizing(
                         self.requests_iterator.MemoryCapMode.limited, self.data_ranges(m), per_rank)

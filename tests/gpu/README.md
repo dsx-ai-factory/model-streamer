@@ -32,7 +32,7 @@ by the repository's own pull request workflow, and a manual run tests the image 
 
    | Leg | PyTorch | Rows of the synthetic models |
    |---|---|---|
-   | `newest-torch` | the newest on PyPI (`torch`) | `full` (94 rows, under each of the four filesystem strategies), plus the self-check |
+   | `newest-torch` | the newest on PyPI (`torch`) | `full` (90 rows, under each of the four filesystem strategies), plus the self-check |
    | `oldest-torch` | the oldest the package supports (`torch==2.0.0`, with `numpy<2`) | `core` (14 rows, under each strategy) |
 
    Both legs also run the smoke test of the small real model. The versions in between are not run. The newest leg is
@@ -140,8 +140,9 @@ distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_
 - `core`: 14 rows, a quick set (the oldest-torch leg runs it). One option at a time on the `mixed` model (borrowed
   tensors, `chunks`, host then `.to()`, the deep and default limits), and one solo and one distributed load of every
   other model.
-- `full` (the newest-torch leg): every valid combination, 94 rows. A distributed row needs `cuda`; the `files` policy
-  needs more than one file; the deep limit needs a model that can use it.
+- `full` (the newest-torch leg): every valid combination, 90 rows. A distributed row needs `cuda`; the `files` policy
+  needs more than one file; the deep limit needs a model that can use it, and when the load is distributed a model
+  whose share of one rank is larger than the ring (`many_tensors` is not: a rank reads 52 MB and a deep ring is 75 MB).
 - `smoke`: three loads of the small real model, with the default memory limit.
 
 The memory limit decides whether the host buffers, the ring the streamer reads into, are reused. With
@@ -152,7 +153,7 @@ N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
   `giant_tensor`, and for `many_files` between two and about seventeen, depending on the seed (the size of its largest
   tensor decides). The model passes through the ring many times, and every buffer is reused.
 - `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
-  once. Only `mixed` and `many_tensors` can have this.
+  once (a rank reads its share of the model, and the ring has to be smaller than that). Only `mixed` and `many_tensors` can have this, and `many_tensors` only when one process loads it.
 - `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
 
 After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and

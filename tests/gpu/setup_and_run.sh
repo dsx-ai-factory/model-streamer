@@ -229,7 +229,7 @@ phase generate_models generate_models
 smoke_expected=false
 if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
     echo "== download the small real model"
-    if phase fetch_real_model timeout --signal=TERM --kill-after=30s "$(cap 30)s" \
+    if phase fetch_real_model timeout --signal=TERM --kill-after=30s "$(cap 35)s" \
         python3 tests/gpu/real_model.py fetch --out "$FIXTURES"; then
         smoke_expected=true
     else
@@ -361,7 +361,7 @@ done
 
 echo "== where the time went"
 python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl "$FIXTURES"/timing-real.jsonl \
-    "$RESULTS"/smoke/timing-*.jsonl | tee "$RESULTS/timing-summary.txt"
+    "$RESULTS"/smoke/timing-*.jsonl | tee "$RESULTS/timing-summary.txt" || true  # a truncated line must not end the script before the verdict below
 
 # A container that limits the newest torch fails the leg, but the tests above did run, with the older torch. Say so at
 # the end of the log, in the file that the job summary shows, and as an annotation on the run, with the verdict of the
