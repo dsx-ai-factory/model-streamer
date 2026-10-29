@@ -152,6 +152,9 @@ jobs:
           name: gpu-test-wheel
           path: py/runai_model_streamer/dist/runai_model_streamer-*.whl
           if-no-files-found: error
+          # A re-run of all jobs builds the wheel again under the same name. (A re-run of the failed jobs only keeps the
+          # wheel of the first attempt, which is why the name has no attempt number.)
+          overwrite: true
           retention-days: 7
 
   # Two legs, each on two T4s in a clean container (nvidia/cuda, the system Python, pip: Ubuntu 24.04 for the newest torch, 22.04 for the oldest): the newest
@@ -223,12 +226,16 @@ jobs:
           GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
           GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
           GPU_ALLOW_EMPTY_ROWS: ${{ matrix.allow_empty_rows }}
+        # bash with pipefail, so that the exit status is the script's and not that of tee. The log is written here, not by
+        # the script: a tee inside the container is killed with the script and can lose its last lines, the verdict.
+        shell: bash
         run: |
+          mkdir -p test-results/gpu
           docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
             --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WHEEL_DIR=wheel \
-            "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh
+            "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh 2>&1 | tee test-results/gpu/run.log
 
       - name: Remove the GPU container if it is still there
         if: always()
@@ -253,7 +260,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-test-results-${{ matrix.name }}
+          name: gpu-test-results-${{ matrix.name }}-${{ github.run_attempt }}
           path: test-results/gpu/
           if-no-files-found: warn
           retention-days: 14

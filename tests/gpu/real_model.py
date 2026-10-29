@@ -18,6 +18,7 @@ Needs only the standard library. Runs under Python 3.8 or later.
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import struct
@@ -81,7 +82,7 @@ def download(url, destination, size, sha256, attempts=DOWNLOAD_ATTEMPTS, max_sec
                 raise RealModelError("sha256 %s, expected %s" % (digest.hexdigest(), sha256))
             os.replace(partial, destination)
             return done
-        except (OSError, RealModelError) as error:
+        except (OSError, http.client.HTTPException, RealModelError) as error:  # IncompleteRead: a cut connection
             last_error = error
             stamp("download attempt %d of %d failed: %s" % (attempt, attempts, error))
             if os.path.exists(partial):

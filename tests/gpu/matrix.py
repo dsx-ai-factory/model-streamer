@@ -38,8 +38,9 @@ Row = namedtuple("Row", "id model dist policy owned device limit")
 
 # How the host ring of read buffers is used. N buffers of B bytes each, where B = max(largest range,
 # budget // 18) and N = min(18, budget // B), with budget = min(limit, size of the model):
-#   tight    the ring has two or three buffers and the model passes through it many times: a buffer is read
-#            while another is consumed, and every buffer is reused
+#   tight    the ring has few buffers (1 for giant_tensor, 2 for mixed, 5 for many_tensors, 2 to about 17 for many_files,
+#            depending on the seed) and the model passes through it many times: a buffer is read while another is
+#            consumed, and every buffer is reused
 #   deep     18 buffers, and the model still passes through them more than once
 #   default  40 GB: a model that small fits in the ring whole and no buffer is ever reused
 LIMITS = ("tight", "deep", "default")

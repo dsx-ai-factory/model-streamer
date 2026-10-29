@@ -6,6 +6,7 @@
 """
 
 import hashlib
+import http.client
 import json
 import os
 import pathlib
@@ -13,7 +14,9 @@ import struct
 import sys
 import tempfile
 import unittest
+import urllib.request
 import zlib
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import real_model  # noqa: E402
@@ -163,6 +166,36 @@ class Download(Fixture):
         got = real_model.download(pathlib.Path(source).as_uri(), os.path.join(self.dir.name, "y.safetensors"),
                                   len(data), hashlib.sha256(data).hexdigest(), attempts=1, max_seconds=600)
         self.assertEqual(got, len(data))
+
+    def test_a_connection_cut_in_the_body_is_retried(self):
+        """http.client raises IncompleteRead, which is not an OSError: it must be retried like any failed attempt."""
+        data = bytes(2 * real_model.CHUNK + 5)
+        real_urlopen = urllib.request.urlopen
+        source = os.path.join(self.dir.name, "cut.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        url = pathlib.Path(source).as_uri()
+        calls = []
+
+        class Cut:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise http.client.IncompleteRead(b"partial", 100)
+
+        def urlopen(*args, **kwargs):
+            calls.append(1)
+            return Cut() if len(calls) == 1 else real_urlopen(*args, **kwargs)
+
+        with mock.patch.object(urllib.request, "urlopen", urlopen), mock.patch.object(real_model.time, "sleep"):
+            got = real_model.download(url, os.path.join(self.dir.name, "z.safetensors"), len(data),
+                                      hashlib.sha256(data).hexdigest(), attempts=2)
+        self.assertEqual(got, len(data))
+        self.assertEqual(len(calls), 2)
 
     def test_a_wrong_size_is_refused(self):
         with self.assertRaises(real_model.RealModelError):

@@ -22,7 +22,8 @@ TORCH_SPEC=${GPU_TORCH_SPEC:-torch}
 NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy}
 export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES"
 mkdir -p "$RESULTS"
-exec > >(tee "$RESULTS/run.log") 2>&1
+# The log is kept by whatever runs this script (the workflow pipes it to tee): a tee started here would be killed with
+# the script, and could lose the last lines, which hold the verdict.
 
 SETUP_TIMING="$RESULTS/timing-setup.jsonl"
 : > "$SETUP_TIMING"
@@ -80,13 +81,29 @@ phase() {
     return "$rc"
 }
 
+# stop_stray_workers: kill what a torchrun that was stopped (a timeout) left behind. The workers of a rank that ignored
+# the signal keep their GPU memory and the rendezvous port, and the next run would fail on them and be blamed for it.
+# Reads /proc: the image has no procps.
+stop_stray_workers() {
+    local file pid cmd
+    for file in /proc/[0-9]*/cmdline; do
+        pid=${file#/proc/}
+        pid=${pid%/cmdline}
+        cmd=$(tr '\0' ' ' < "$file" 2>/dev/null) || continue
+        if [[ "$cmd" == *tests/gpu/test_synthetic_models.py* ]] && [ "$pid" != "$$" ]; then
+            echo "killing a worker left behind (pid $pid): $cmd"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
 echo "== environment"
 date -u
 uname -r
 . /etc/os-release && echo "$PRETTY_NAME"
 echo "seed: $SEED"
 echo "matrix: ${GPU_MATRIX:-core}   torch: $TORCH_SPEC   numpy: $NUMPY_SPEC   self-check: ${GPU_SELF_CHECK:-false}"
-nvidia-smi
+timeout --signal=TERM --kill-after=10s 120s nvidia-smi
 echo "ulimit -n: $(ulimit -n)   ulimit -l: $(ulimit -l)"
 free -g | head -2
 cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true
@@ -125,7 +142,7 @@ install_python_packages() {
 phase install_python_packages install_python_packages
 python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
 
-python3 - <<'PY'
+timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 - <<'PY'
 import torch
 import torch.distributed as dist
 import runai_model_streamer
@@ -234,7 +251,7 @@ check_fixture_storage() {
         *) echo "ERROR: the fixtures are on $source ($fstype), not on a block device; the direct I/O strategies would not be tested" >&2
            return 1 ;;
     esac
-    python3 - "$FIXTURES" <<'PY' || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
+    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 - "$FIXTURES" <<'PY' || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
 import mmap
 import os
 import sys
@@ -288,6 +305,7 @@ do
         status=1
         echo "[$(date +%T)] FAILED run.$strategy"
     fi
+    stop_stray_workers
     record "run.$strategy" "$start" "$(date +%s.%N)"
 done
 
@@ -306,6 +324,7 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
         status=1
         echo "[$(date +%T)] FAILED run.self_check"
     fi
+    stop_stray_workers
     record "run.self_check" "$start" "$(date +%s.%N)"
 fi
 
@@ -322,14 +341,15 @@ if [ "$smoke_expected" = true ]; then
         status=1
         echo "[$(date +%T)] FAILED run.real_smoke"
     fi
+    stop_stray_workers
     record "run.real_smoke" "$start" "$(date +%s.%N)"
 fi
 
 # Which rows ran. A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends
 # that strategy's run: the rows after it never start. They must not hide behind the strategies that did finish.
 echo "== rows that ran"
-python3 tests/gpu/rows_summary.py "$RESULTS" "$smoke_expected" sync_buffered libaio_direct io_uring_direct \
-    io_uring_buffered || status=1
+timeout --signal=TERM --kill-after=10s 120s python3 tests/gpu/rows_summary.py "$RESULTS" "$smoke_expected" \
+    sync_buffered libaio_direct io_uring_direct io_uring_buffered || status=1
 
 # The manifests list every tensor of every model; keep them with the results to debug a failure.
 mkdir -p "$RESULTS/manifests"
