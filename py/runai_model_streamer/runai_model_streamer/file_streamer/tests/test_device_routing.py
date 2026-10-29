@@ -35,7 +35,8 @@ class TestDeviceRouting(unittest.TestCase):
 
     # CUDA because it is a type the C API serves: an invented value would be refused by
     # runai_request, which is a different failure from the one under test.
-    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent)
+    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
+                            current_stream=lambda device: f"stream-of-{device}")
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()

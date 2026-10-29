@@ -30,12 +30,20 @@ class DeviceSupport(NamedTuple):
     # A fresh, unrecorded event. The ring records one per slot and refills the slot only once it has
     # completed - nothing else orders the C++ layer's next write against the caller's stream.
     new_event: Callable[[], Any]
+    # The current stream OF A NAMED DEVICE, which is what the event must be recorded on.
+    #
+    # An event given no stream records on the device that is current, while a clone runs on the
+    # device of the tensor it copies. Those are the same device for a process serving one GPU, which
+    # is how vLLM and SGLang run - but the API takes any device string, and when they differ the
+    # event times the wrong device and the slot is freed under the clones.
+    current_stream: Callable[[str], Any]
 
 
 _SUPPORTED: Dict[str, DeviceSupport] = {
     "cuda": DeviceSupport(
         api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA,
         new_event=torch.cuda.Event,
+        current_stream=torch.cuda.current_stream,
     ),
 }
 
