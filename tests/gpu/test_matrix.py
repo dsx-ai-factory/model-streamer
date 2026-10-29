@@ -195,6 +195,20 @@ class FilterRows(unittest.TestCase):
         self.assertEqual(matrix.filter_rows(matrix.core_rows(), "giant_tensor.dist.chunks"), [])
 
 
+class UnmatchedPrefixes(unittest.TestCase):
+    def test_a_prefix_that_no_row_has_is_named_even_when_another_prefix_selects_rows(self):
+        rows = matrix.core_rows()
+        text = "mixed.solo, mixd.dist,giant_tensor.dist.chunks"
+        self.assertTrue(matrix.filter_rows(rows, text))
+        self.assertEqual(matrix.unmatched_prefixes(rows, text), ["mixd.dist", "giant_tensor.dist.chunks"])
+
+    def test_nothing_is_unmatched_when_every_prefix_selects_rows_or_there_is_none(self):
+        rows = matrix.full_rows()
+        self.assertEqual(matrix.unmatched_prefixes(rows, "mixed.solo,many_files"), [])
+        for text in (None, "", " , "):
+            self.assertEqual(matrix.unmatched_prefixes(rows, text), [], repr(text))
+
+
 class NoRowsOutcome(unittest.TestCase):
     def test_an_empty_selection_without_a_filter_is_a_failure(self):
         for allow in (True, False):

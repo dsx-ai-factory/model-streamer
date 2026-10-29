@@ -43,7 +43,7 @@ import torch.distributed as dist
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drills import LEAK_DRILL_BYTES, is_crc_error_of, is_leak_error  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
-from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for  # noqa: E402
+from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for, unmatched_prefixes  # noqa: E402
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 from tensor_bytes import as_bytes, tensor_crc32  # noqa: E402
 
@@ -368,6 +368,11 @@ class Rows(unittest.TestCase):
     def test_every_row(self):
         rows = selected_rows()
         HARNESS.expected_rows = len(rows)
+        # A leg that has just some of the rows (GPU_ALLOW_EMPTY_ROWS) is given prefixes that it does not all have.
+        unmatched = unmatched_prefixes(rows_for(os.environ.get("GPU_MATRIX", "core")), os.environ.get("GPU_ROWS"))
+        if unmatched and os.environ.get("GPU_ALLOW_EMPTY_ROWS") != "true":
+            self.fail("no row of the %s matrix starts with %s: a typo in the filter?" % (
+                os.environ.get("GPU_MATRIX", "core"), unmatched))
         if not rows:
             status, message = no_rows_outcome(os.environ.get("GPU_ROWS"),
                                               os.environ.get("GPU_ALLOW_EMPTY_ROWS") == "true",

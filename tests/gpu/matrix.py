@@ -177,3 +177,9 @@ def filter_rows(rows, text):
     """The rows whose id starts with one of the prefixes in text; all of them when there is no prefix."""
     prefixes = row_prefixes(text)
     return [row for row in rows if row.id.startswith(prefixes)] if prefixes else list(rows)
+
+
+def unmatched_prefixes(rows, text):
+    """The prefixes in text that no row of rows starts with. Another prefix may still select rows, so the run does not
+    look empty, and a typo in one prefix would go unseen."""
+    return [prefix for prefix in row_prefixes(text) if not any(row.id.startswith(prefix) for row in rows)]
