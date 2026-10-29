@@ -124,9 +124,10 @@ common::ResponseCode MockIoEngine::stage(RequestId id, FileRef file, size_t offs
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode MockIoEngine::flush(unsigned & out_issued)
+common::ResponseCode MockIoEngine::flush(unsigned & out_issued, bool & out_deferred)
 {
     out_issued = 0;
+    out_deferred = false;
 
     if (_flush_result != common::ResponseCode::Success)
     {
@@ -135,7 +136,9 @@ common::ResponseCode MockIoEngine::flush(unsigned & out_issued)
 
     if (_flush_stalled)
     {
-        // Zero progress is backpressure, not an error: the caller must keep calling flush().
+        // Zero progress is backpressure, not an error: the caller must keep calling flush(). Marked
+        // as DEFERRED, which is what a stall is - the engine was offered work and took none.
+        out_deferred = !_staged.empty();
         return common::ResponseCode::Success;
     }
 

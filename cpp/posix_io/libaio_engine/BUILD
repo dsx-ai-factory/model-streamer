@@ -6,6 +6,7 @@ load("//:rules.bzl", "runai_cc_auto_library", "runai_cc_test")
 runai_cc_auto_library(
     name = "libaio_engine",
     deps = [
+        "//posix_io/completion_mapper",
         "//common/exception",
         "//posix_io/alignment",
         "//posix_io/io_engine",
