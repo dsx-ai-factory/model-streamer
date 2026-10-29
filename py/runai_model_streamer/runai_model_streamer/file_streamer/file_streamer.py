@@ -449,6 +449,19 @@ class FileStreamer:
     # layer completes them. The indexes in a response are relative to its own submission and need to be
     # translated to the global index in the chunks list, which is what the response's request does.
     def get_chunks(self) -> Iterator:
+        """ITERATE ON ONE STREAM, for a device destination.
+
+        A clone is enqueued on whatever stream is current at the yield that produced it, and ONE event
+        per slot is recorded when that slot's last range is handed over. Both are the caller's stream
+        on purpose: torch's allocator is stream scoped, so a clone enqueued elsewhere cannot reuse the
+        memory the consumer is freeing.
+
+        So a caller that enqueues some clones inside its own stream and leaves that block before the
+        last range is handed over records the event somewhere those clones are not - and the slot can
+        be refilled while they still read it. Covering that would mean an event per stream per slot,
+        which nothing asks for: a rank loads a model on one stream.
+
+        The DEVICE needs no such care. It is resolved once in stream_files and bound into the ring."""
         if not self.streamer:
             raise ValueError("Streamer not initialized")
 
