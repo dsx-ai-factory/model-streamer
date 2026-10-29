@@ -530,6 +530,7 @@ AsyncIoCounters AsyncIoWorker::counters() const
     counters.bytes_read = _bytes_read.load(std::memory_order_relaxed);
     counters.bounced_bytes = _bounced_bytes.load(std::memory_order_relaxed);
     counters.short_read_restages = _short_read_restages.load(std::memory_order_relaxed);
+    counters.transient_retries = _transient_retries.load(std::memory_order_relaxed);
     counters.achieved_depth = _achieved_depth.load(std::memory_order_relaxed);
     counters.inflight_nanos = _inflight_nanos.load(std::memory_order_relaxed);
     counters.observed_nanos = _observed_nanos.load(std::memory_order_relaxed);
@@ -944,12 +945,49 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     // Flush first: the previous pump may have left a backlog, and issuing it before waiting is what
     // stops it sitting a whole loop iteration longer than it must.
     unsigned issued = 0;
-    const auto flushed = _engine->flush(issued);
+    bool deferred = false;
+    const auto flushed = _engine->flush(issued, deferred);
     if (flushed != common::ResponseCode::Success)
     {
+        // COUNTED EVEN THOUGH THE FLUSH FAILED. An engine can issue reads and still report an error,
+        // and quiesce() waits on this count - so dropping it lets abort_all report ranges whose
+        // destinations the kernel still holds.
+        _issued += issued;
+
         LOG(ERROR) << "Failed to issue staged reads: " << flushed;
         abort_all(flushed);
         return;
+    }
+
+    // A DEFERRAL THAT NOTHING CAN CLEAR.
+    //
+    // Deferring means the kernel took nothing and the staged reads go out next turn. That is safe
+    // while something else can still move: a read in flight will complete and free capacity. With
+    // nothing in flight there is no such event, so only another flush can change anything - and if
+    // the refusal repeats, this turn repeats for ever at full CPU.
+    //
+    // Counted rather than slept on: a turn is one submit syscall, so the whole budget is spent in
+    // milliseconds and the load then fails the way it did before any of this - loudly, naming the
+    // mount. Reset by any progress at all, so a burst that lets reads through never reaches it.
+    if (deferred && issued == 0 && _issued == 0)
+    {
+        if (++_stalled_flushes > MaxStalledFlushes)
+        {
+            // Spent, so the next workload starts with a full budget. The engine is dead and nothing
+            // reaches here again today, but a counter left at its ceiling would trip on the first
+            // stalled turn if that ever changes.
+            _stalled_flushes = 0;
+
+            LOG(ERROR) << "The asynchronous reader for this mount made no progress in "
+                       << MaxStalledFlushes << " attempts: every submission was refused and nothing"
+                       << " is in flight to free it";
+            abort_all(common::ResponseCode::FsAsyncEngineError);
+            return;
+        }
+    }
+    else
+    {
+        _stalled_flushes = 0;
     }
     account_inflight();
     _issued += issued;
@@ -1027,6 +1065,42 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
             if (char * scratch = _chunks.clear_bounce(completion.id))
             {
                 _scratch->give(scratch);
+            }
+
+            // A signal reached this read before it moved anything, so the read did not happen and the
+            // same one is still right. Re-staged exactly as a short read is: the cursor has not
+            // moved, the window credit is still held, and the id is reused.
+            if (posix_io::is_transient(completion.res))
+            {
+                if (_chunks.may_retry_transient(completion.id))
+                {
+                    if (!_transient_reported)
+                    {
+                        _transient_reported = true;
+                        LOG(WARNING) << "A read was interrupted by a signal (errno " << -completion.res
+                                     << ") and is being issued again. This host delivers signals into"
+                                     << " our reads; the count is reported with the other counters";
+                    }
+
+                    _transient_retries.fetch_add(1, std::memory_order_relaxed);
+                    stage_pending(completion.id);
+                    continue;
+                }
+
+                // Out of attempts, so this one really fails - and falls through to map_completion,
+                // which reports the errno it kept receiving rather than a code of our own.
+                //
+                // ONCE, like the warning above. map_completion already logs a line per failed read,
+                // so a line per chunk here would only double it; what this adds is that the failure
+                // came after retrying, which is a fact about the host and not about one chunk.
+                if (!_exhausted_reported)
+                {
+                    _exhausted_reported = true;
+                    LOG(ERROR) << "A read kept being interrupted (errno " << -completion.res
+                               << ") and used all its attempts. Reads that fail from here report the"
+                               << " errno they hit; this host is interrupting them faster than they"
+                               << " can be re-issued";
+                }
             }
 
             // EINVAL on a DIRECT fd is the kernel refusing our alignment - the mount, or this file,

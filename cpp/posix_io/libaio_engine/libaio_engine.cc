@@ -13,6 +13,7 @@
 
 #include "common/exception/exception.h"
 #include "posix_io/alignment/alignment.h"
+#include "posix_io/completion_mapper/completion_mapper.h"
 #include "utils/logging/logging.h"
 
 namespace runai::llm::streamer::posix_io
@@ -232,9 +233,10 @@ common::ResponseCode LibaioEngine::stage(RequestId id, FileRef file, size_t offs
     return common::ResponseCode::Success;
 }
 
-common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
+common::ResponseCode LibaioEngine::flush(unsigned & out_issued, bool & out_deferred)
 {
     out_issued = 0;
+    out_deferred = false;
 
     // Everything staged goes out on this call, SubmitBatch at a time - see that constant for why the
     // batch is one. The loop ends on an empty queue, on backpressure, or on an error, and each pass
@@ -285,11 +287,17 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
             // (design 5.9). A submit thread would make the retry legal - that was one of its
             // attractions - but it bought no throughput, so the constraint stays and so does this.
             //
-            // EINTR is handled the same way, defensively. It is not documented for io_submit, but any
-            // negative return means nothing was accepted, so retrying the untouched array is right
-            // whatever the errno.
-            if (error == EAGAIN || error == EINTR)
+            // An interrupted submit is handled the same way, for the reason this comment already
+            // gave: any negative return means nothing was accepted, so the untouched array is still
+            // right whatever the errno. EBUSY joins it - io_uring deferred that and this did not, so
+            // a saturated queue failed a file here and merely waited there.
+            //
+            // Carried for that one rule rather than because this engine meets it: io_submit does not
+            // document EBUSY, and an error raised for one read arrives as a completion instead, so
+            // the queue cannot be blocked by a head that only this errno refuses.
+            if (submit_can_defer(error))
             {
+                out_deferred = true;
                 LOG(DEBUG) << "io_submit deferred " << _pending.size() << " staged reads: "
                            << std::strerror(error);
                 return common::ResponseCode::Success;
@@ -356,6 +364,13 @@ common::ResponseCode LibaioEngine::flush(unsigned & out_issued)
         // forever, would spin here and never reap - and reaping is what this same thread does next.
         if (issued == 0)
         {
+            // Offered work and took none, which is what a deferral is - the caller bounds how often
+            // it may happen with nothing in flight to free it.
+            //
+            // No test reaches this: it needs a kernel that breaks io_submit's documented contract,
+            // and stage() caps staging at the context depth so the context cannot be over-offered.
+            out_deferred = true;
+
             LOG(WARNING) << "io_submit accepted none of " << batch << " offered without reporting an"
                             " error; leaving " << _pending.size() << " staged for the next flush";
             return common::ResponseCode::Success;
