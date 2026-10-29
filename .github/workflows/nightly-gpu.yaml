@@ -1,0 +1,266 @@
+name: Nightly GPU tests
+
+on:
+  schedule:
+    - cron: '17 0 * * *'   # every night, if the code changed since the last scheduled run (see the changes job)
+  workflow_dispatch:
+    inputs:
+      matrix:
+        description: Which rows the newest-torch leg runs, see tests/gpu/matrix.py (the oldest-torch leg always runs core).
+        required: false
+        default: full
+        type: choice
+        options:
+          - core
+          - full
+      seed:
+        description: Seed of the synthetic models (default is the run id).
+        required: false
+        type: string
+      rows:
+        description: Only the rows whose id starts with one of these comma-separated prefixes (default all). A filter that matches no row of the newest-torch leg fails it (a typo); the oldest-torch leg has only the core rows, and passes when none matches.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+concurrency:
+  group: nightly-gpu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A scheduled run is skipped when nothing that the tests exercise changed since the last scheduled run that
+  # passed, so a failed run is repeated the next night and every commit ends up with a passing run. Manual
+  # runs always run.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      self_check: ${{ steps.decide.outputs.self_check }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the code changed since the last scheduled run
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # self_check: whether the run ends with the self-check of the test's own checks (faults injected on purpose, see
+          # tests/gpu/setup_and_run.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
+          if [ "$EVENT" != schedule ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status success --limit 1 \
+                   --json headSha --jq '.[0].headSha // ""')
+          echo "last successful scheduled run: ${last:-none}; now: $GITHUB_SHA"
+          # No earlier run, or its commit is gone (a force push): run, with the self-check.
+          if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$last" "$GITHUB_SHA" -- cpp py tests/gpu .devcontainer \
+                      .github/workflows/nightly-gpu.yaml ':(exclude)*.md')
+          # The code that the self-check exercises: the test, what it checks with (the bytes and CRC32 of a tensor, the
+          # shapes, the drills, the rows, the generator), and what runs it.
+          harness=$(git diff --name-only "$last" "$GITHUB_SHA" -- tests/gpu/test_synthetic_models.py \
+                      tests/gpu/tensor_bytes.py tests/gpu/drills.py tests/gpu/gen_models.py tests/gpu/matrix.py \
+                      tests/gpu/phase_timer.py tests/gpu/real_model.py tests/gpu/setup_and_run.sh \
+                      .github/workflows/nightly-gpu.yaml)
+          if [ -n "$harness" ]; then
+            echo "the test harness changed since $last, so the self-check runs:"; echo "$harness"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_check=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$changed" ]; then
+            echo "changed since $last:"; echo "$changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "nothing changed since $last: skipping the GPU run"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The wheel of the streamer, built from the commit under test in the repository's development image, on a CPU runner.
+  # The GPU jobs install it into a clean CUDA container, the way a user installs the package.
+  build-wheel:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ARCH: x86_64
+      COMPONENT: streamer
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # An image reference has to be lowercase, and github.repository keeps the case of the owner and the repository
+      # (the other workflows of the repository lowercase it the same way).
+      - name: Name the development image
+        run: |
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "CI_IMAGE=ghcr.io/${repository}/devcontainer:latest" >> "$GITHUB_ENV"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the development image
+        run: docker pull "$CI_IMAGE"
+
+      - name: Start the build container
+        id: container
+        run: |
+          docker run --detach --rm --init --pull never \
+            --name gpu-wheel-build \
+            --security-opt seccomp=unconfined \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env ARCH --env COMPONENT --env PACKAGE_VERSION="0.0.0+dev.${GITHUB_SHA::7}" \
+            --entrypoint sleep \
+            "$CI_IMAGE" infinity
+
+      - name: Build libstreamer
+        run: docker exec gpu-wheel-build make ci-build-cpp
+
+      - name: Build the wheel
+        run: docker exec gpu-wheel-build make ci-build-python
+
+      - name: Stop the build container
+        if: ${{ always() && steps.container.outcome == 'success' }}
+        run: docker stop gpu-wheel-build
+
+      - name: Upload the wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: py/runai_model_streamer/dist/runai_model_streamer-*.whl
+          if-no-files-found: error
+          # A re-run of all jobs builds the wheel again under the same name. (A re-run of the failed jobs only keeps the
+          # wheel of the first attempt, which is why the name has no attempt number.)
+          overwrite: true
+          retention-days: 7
+
+  # Two legs, each on two T4s in a clean container (nvidia/cuda, the system Python, pip: Ubuntu 24.04 for the newest torch, 22.04 for the oldest): the newest
+  # PyTorch with the whole set of rows, which is what covers the newest dtypes, and the oldest PyTorch that the package
+  # supports (torch>=2.0) with the core rows. The versions in between are not run.
+  gpu-tests:
+    name: GPU tests (${{ matrix.name }})
+    needs: [changes, build-wheel]
+    if: needs.changes.outputs.run == 'true'
+    runs-on:
+      group: nv-gpu-amd64-t4-2gpu
+      labels: linux-amd64-gpu-t4-latest-2
+    # A healthy leg takes 40 minutes (newest) or 8 (oldest). The script (tests/gpu/setup_and_run.sh) gives itself a budget of
+    # GPU_BUDGET_MINUTES, which is this timeout less 15 minutes, and cuts every step to what is left of it, so that it
+    # always gets to say which rows ran, whatever the step caps inside it add up to. Raise the two together.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: newest-torch
+            newest: true
+            torch_spec: torch
+            numpy_spec: numpy
+            # Python 3.12: the newest torch needs Python 3.11 or later, which Ubuntu 22.04 does not have
+            image: nvidia/cuda:12.6.3-base-ubuntu24.04
+            rows: full
+            allow_empty_rows: false
+          - name: oldest-torch
+            newest: false
+            torch_spec: torch==2.0.0
+            numpy_spec: numpy<2
+            # Python 3.10: torch 2.0.0 has wheels for Python 3.8 to 3.11 only
+            image: nvidia/cuda:12.4.1-base-ubuntu22.04
+            rows: core
+            # it has only the core rows: a filter that matches none of them leaves it nothing to run, and is not a typo
+            allow_empty_rows: true
+    env:
+      GPU_BUDGET_MINUTES: 285
+      GPU_TEST_IMAGE: ${{ matrix.image }}
+      # Named, so that the last step can remove it: a cancelled or timed-out job kills the docker client, not the
+      # container, and a container that goes on holds both GPUs.
+      GPU_CONTAINER: gpu-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check runner GPUs
+        run: nvidia-smi
+
+      - name: Download the wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: wheel
+
+      - name: Pull the CUDA image
+        run: docker pull "$GPU_TEST_IMAGE"
+
+      - name: Generate synthetic models, stream them to two GPUs and compare
+        env:
+          GPU_SEED: ${{ inputs.seed || github.run_id }}
+          GPU_MATRIX: ${{ matrix.newest && (inputs.matrix || matrix.rows) || matrix.rows }}
+          GPU_ROWS: ${{ inputs.rows }}
+          GPU_SELF_CHECK: ${{ matrix.newest && needs.changes.outputs.self_check || 'false' }}
+          GPU_TORCH_SPEC: ${{ matrix.torch_spec }}
+          GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
+          GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
+          GPU_ALLOW_EMPTY_ROWS: ${{ matrix.allow_empty_rows }}
+        # bash with pipefail, so that the exit status is the script's and not that of tee. The log is written here, not by
+        # the script: a tee inside the container is killed with the script and can lose its last lines, the verdict.
+        shell: bash
+        run: |
+          mkdir -p test-results/gpu
+          docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WHEEL_DIR=wheel \
+            "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh 2>&1 | tee test-results/gpu/run.log
+
+      - name: Remove the GPU container if it is still there
+        if: always()
+        run: docker rm -f "$GPU_CONTAINER" >/dev/null 2>&1 || true
+
+      - name: Show where the time went
+        if: always()
+        run: |
+          if [ -f test-results/gpu/env-check.txt ]; then
+            if grep -q '^ERROR' test-results/gpu/env-check.txt; then
+              title="The ${{ matrix.name }} leg is not testing the newest torch (fix: the base container). Its tests still ran: look at their results separately"
+            else
+              title="Newest torch check (${{ matrix.name }})"
+            fi
+            { echo "### $title"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f test-results/gpu/timing-summary.txt ]; then
+            { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload GPU test logs and timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results-${{ matrix.name }}-${{ github.run_attempt }}
+          path: test-results/gpu/
+          if-no-files-found: warn
+          retention-days: 14

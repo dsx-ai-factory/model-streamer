@@ -1,0 +1,239 @@
+# Real-GPU tests
+
+Streams synthetic safetensors models, and one small real model, to real GPUs with the model streamer and compares
+every tensor with what the manifest recorded. CI otherwise runs on CPU and mock devices only, so this is where a real
+CUDA copy, real NCCL and the real storage path are exercised together.
+
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC. A scheduled run
+is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
+the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
+demand, and a manual run is never skipped:
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...]`. A `rows` filter
+that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows and
+passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`).
+
+The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
+change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds
+with the old image, and the next one, seeing nothing changed since that run, does not rebuild with the new one, so a
+`.devcontainer/` change can go untested by the nightly. That is accepted: the image is built and the wheel tested with it
+by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
+
+## Where it runs
+
+1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
+   in the repository's development image, and uploads the wheel.
+2. **`gpu-tests`**, two legs in parallel on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`:
+   two T4s, 12 cores, 48 GB). Each leg runs `setup_and_run.sh` in a clean CUDA container
+   (`nvidia/cuda:12.6.3-base-ubuntu24.04` with Python 3.12 for the newest torch, which needs Python 3.11 or later;
+   `nvidia/cuda:12.4.1-base-ubuntu22.04` with Python 3.10 for the oldest, since torch 2.0.0 has no wheel for 3.12. No
+   Python packages, no toolchain, GPU passthrough, 2 GiB of `/dev/shm` for NCCL and the io_uring seccomp setting). The
+   script installs Python, pip, the PyTorch and numpy of the
+   leg, and the wheel, the way a user would:
+
+   | Leg | PyTorch | Rows of the synthetic models |
+   |---|---|---|
+   | `newest-torch` | the newest on PyPI (`torch`) | `full` (94 rows, under each of the four filesystem strategies), plus the self-check |
+   | `oldest-torch` | the oldest the package supports (`torch==2.0.0`, with `numpy<2`) | `core` (14 rows, under each strategy) |
+
+   Both legs also run the smoke test of the small real model. The versions in between are not run. The newest leg is
+   what covers the newest dtypes; the oldest covers the code paths for a torch without `dtype.itemsize`, float8 or
+   the unsigned 16/32/64 bit types.
+
+   pip installs the newest torch that the image's Python can use (Python 3.12 on Ubuntu 24.04), so when a torch release
+   stops supporting that Python, the newest leg would quietly test an older one. `env_check.py newest-torch` asks PyPI
+   for the newest release and compares: if they differ it fails the leg and says which release needs which Python, and
+   that the base container of the leg has to change (`GPU_TEST_IMAGE` in the workflow). **The tests still run, with the
+   older torch**, and their results are a separate matter: the environment never explains a failing test, so a leg with
+   this flag is red for one reason if the tests passed (the environment) and for two if some failed (the failing tests,
+   to be looked into regardless, and the environment). The flag is visible in four places: the check's output at the
+   start of the log, a `NOT TESTING THE NEWEST TORCH` line at the end of the log that gives the verdict of the tests,
+   an error annotation on the run, and a section at the top of the job summary. If PyPI cannot be reached the check
+   says it could not verify and does not fail.
+
+## What `setup_and_run.sh` does
+
+1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the wheel, and checks that the
+   streamer is imported from the installed wheel and that two GPUs and NCCL are there;
+2. in the newest leg, checks that the container does not limit the newest torch; in both legs, runs the CPU unit tests
+   (generator, rows, drills, tensor checks, real model download, the environment check);
+3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo; the runner groups'
+   documentation says the NVKS GPU runners run each job in an ephemeral virtual machine, so nothing stays behind for the
+   next job, and the script does not clean up after itself) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
+   hold every dtype that the streamer's own table accepts with the installed PyTorch and that the generator knows (the
+   script prints which ones are left out);
+4. downloads the small real model (see below) and describes it, timing both;
+5. fails if the fixtures are not on a real block device that serves `O_DIRECT` (the streamer reads a file from a mount
+   that cannot, such as tmpfs, with its synchronous reader, quietly);
+6. runs the `Rows` test case of `test_synthetic_models.py` (a `unittest` module) under `torchrun` with two ranks, once
+   per filesystem strategy (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with
+   no `sync_buffered` fallback: a reader the host cannot serve fails the run instead of passing on the synchronous
+   reader;
+7. runs the self-check (newest leg, when asked) and the smoke test;
+8. prints which rows ran, and a table of where the time went.
+
+## The small real model (`real_model.py`)
+
+A smoke test with a real model, with the streamer's default settings (no filesystem strategy chosen, no memory limit):
+`Qwen/Qwen2.5-0.5B` (Apache-2.0, not gated, one 988 MB `model.safetensors`), pinned by revision, size and SHA-256, so
+an upstream change fails the run. It is downloaded from the Hugging Face hub on every run, and the download is timed
+(`real_model.download` in the timing table), to see what it adds to a run. `real_model.py` builds a manifest from the
+bytes of the file (the CRC32 of every tensor), in the format of the synthetic models, so the same checks compare the
+streamed tensors. Three rows (`GPU_MATRIX=smoke`): one solo load to the GPU, one distributed over the two ranks, and
+one to host memory and then `.to()`.
+
+## The models (`gen_models.py`)
+
+| Model | Stress | Shape |
+|---|---|---|
+| `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
+| `many_tensors` | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
+| `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
+| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, a few with a larger tensor | 5 to 11 MB, depending on the seed |
+
+Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
+`--models mixed,many_files` to build only some of them.
+
+Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
+seed. The generator knows 18 dtypes: `F64`, `F32`, `F16`, `BF16`, the float8 types `F8_E4M3`, `F8_E5M2` and `F8_E8M0`,
+`F4`, `C64`, the signed integers `I64` to `I8`, the unsigned `U64` to `U8`, and `BOOL`.
+`--dtypes` narrows them; the test run passes the ones the streamer accepts with the installed PyTorch (a torch
+before 2.8 has no `F4`, before 2.7 or so no `F8_E8M0`, before 2.3 no unsigned 16/32/64 bit types, before 2.1 no float8).
+`F4` packs two 4-bit values into a byte, so the header records its shape in values and the torch tensor
+(`float4_e2m1fn_x2`) has the last dimension halved (`packed_shape` in `gen_models.py`); an F4 tensor therefore has a
+last dimension that is even and no scalar form. The streamer loads such tensors since
+[#234](https://github.com/dsx-ai-factory/model-streamer/issues/234) was fixed, and the checks compare the torch shape
+with `packed_shape` of the manifest's. A copy of the F4 tensor to CUDA is exercised here for the first time.
+The expected dtype of a streamed tensor is taken from the streamer's own dtype table, so this test does not check
+the table itself; [#267](https://github.com/dsx-ai-factory/model-streamer/issues/267) compares it with safetensors
+in the CPU tests. The models hold empty tensors (zero elements): about 2% of the drawn shapes have a zero dimension, and
+the mixed model has two mandatory ones. They were left out while the streamer yielded them on the CPU when a CUDA
+device was requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260), fixed), and a run on GPU
+is what confirms the fix. `EMPTY_TENSORS = False` in `gen_models.py` leaves them out again.
+
+The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed reproduces
+the models exactly under the same numpy version (the manifests record it; to rebuild an old model, install that
+numpy and run the generator with the same seed). The manifest of a model lists, per tensor, the name, dtype,
+shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are
+uploaded with the results (`manifests/`), so a failing tensor can be looked up without regenerating anything.
+
+The generator checks its own output before anything is streamed (headers, offsets, CRC32 read back from disk,
+a few tensors regenerated from the seed, and coverage of all dtypes/ranks/edge sizes), so a failure in the
+streaming test is never a failure of the fixture. It needs only numpy and runs on its own:
+
+```bash
+python3 tests/gpu/gen_models.py generate --out /tmp/fixtures --seed 1 --scale 0.05 --files 300
+python3 -m unittest tests/gpu/test_gen_models.py
+```
+
+## The test (`test_synthetic_models.py`)
+
+A `unittest` module, run as `torchrun --nproc_per_node=2 tests/gpu/test_synthetic_models.py Rows` (or `SelfChecks`, see
+below). `Rows` loops over the rows with a `subTest` each: a failing row is recorded with its id and errors, and the
+next row runs, so one run reports every failing row, and unittest sets the exit status. The only row that stops the loop
+is one after which a rank raised in a distributed row (see below).
+
+The rows are defined in `matrix.py` (no GPU needed; `test_matrix.py` tests it). A row is one load: a model,
+distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_to`: load to host memory, then
+`.to()` each tensor) and a memory limit. Its id says all of it: `mixed.solo.owned.cuda.tight`,
+`many_files.dist.files.owned.cuda.tight`. `GPU_MATRIX` picks the rows:
+
+- `core`: 14 rows, a quick set (the oldest-torch leg runs it). One option at a time on the `mixed` model (borrowed
+  tensors, `chunks`, host then `.to()`, the deep and default limits), and one solo and one distributed load of every
+  other model.
+- `full` (the newest-torch leg): every valid combination, 94 rows. A distributed row needs `cuda`; the `files` policy
+  needs more than one file; the deep limit needs a model that can use it.
+- `smoke`: three loads of the small real model, with the default memory limit.
+
+The memory limit decides whether the host buffers, the ring the streamer reads into, are reused. With
+N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
+
+- `tight`: about a sixteenth of the model, never below twice the largest range (a tensor or a file header) times
+  the ranks sharing the limit (and at least 1 MiB): two buffers for `mixed`, five for `many_tensors`, one for
+  `giant_tensor`, and for `many_files` between two and about seventeen, depending on the seed (the size of its largest
+  tensor decides). The model passes through the ring many times, and every buffer is reused.
+- `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
+  once. Only `mixed` and `many_tensors` can have this.
+- `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
+
+After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
+the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until
+the stream ends and check them all then, which tests the ownership guarantee. (On a row that copies to the device,
+the tensor held is the one the streamer yielded on the host, which is checked again at the end next to its copy.)
+Rows with `owned=False` check each
+tensor when it is yielded. A row that asks for distributed streaming fails if the streamer silently fell back
+to non-distributed.
+
+After every row the test drops its own references, frees the GPU cache and checks that `torch.cuda.memory_allocated()`
+is back to its value before the run (8 MiB of slack). Anything above that is reported as a GPU memory leak and
+fails the row. That counts what the torch allocator holds: memory that the streamer's C++ side allocates itself
+(`cudaMalloc`, pinned memory) is not seen. The ranks agree on the outcome of a row over a separate CPU-only (gloo)
+group, so the test adds no NCCL traffic or GPU work next to the streamer's. Host memory is not checked here; that
+belongs in a longevity test.
+
+Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
+run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
+be out of step.
+
+When a rank fails inside a distributed row, the streamer's NCCL group never completes its next collective, and after
+the streamer's timeout (`RUNAI_STREAMER_DIST_TIMEOUT`, 300 s here) the NCCL watchdog aborts the other rank
+(`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`). The whole `torchrun` of that strategy ends, so the rows after the failing one
+are not run for that strategy; the other strategies still run. A drill on 2026-10-20 showed this (a rank raising
+mid-row ended with `Watchdog caught collective operation timeout` and exit code -6 on the other rank).
+The run is bounded, but it cannot report the row from inside the process, so the results file lists a row as
+started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran` (`rows_summary.py`): for every
+results file how many of the expected rows finished, and in which row the run ended, and it checks that each of the two
+ranks wrote its results file (a rank that died before its first write leaves only the other's). An incomplete strategy
+fails the job.
+
+The time caps are for a hang, and generous: 60 minutes per strategy (about 10 on a healthy runner, 18 on a slow day), 20
+for the self-check and for the smoke test, 45 for installing torch, 30 for the real model (an attempt to download it
+also has a deadline of 10 minutes, so that a connection that trickles data ends), and 15 to 20 for the other setup steps.
+The whole run has a budget as well, `GPU_BUDGET_MINUTES` (285), which is the job's `timeout-minutes` (300) less 15: a
+cap is cut to what is left of the budget less 5 minutes, so the script always gets to say which rows ran, whatever the
+caps add up to, and neither needs adjusting when the other changes (raise the budget with the job's timeout). A leg
+takes about 40 minutes (newest) or 8 (oldest) when healthy.
+A download of the real model that fails, or a failure of the CPU unit tests, fails the run at the end, and the GPU tests
+still run. A step of the setup that fails (the installs, the generation) or fixtures that are not on a block device end
+the script at once, and it says so at the end of the log, with an error annotation: `THE RUN ENDED EARLY`.
+
+The results of each row are written as soon as it ends, in `rows-<strategy>-rank<N>.json`:
+`{"strategy", "expected_rows", "rows": [...]}`.
+
+## Self-check of the checks
+
+A check that never fails could be silently broken, so the run can prove that the CRC32 check and the GPU memory check
+fire. `test_synthetic_models.py` is a `unittest` module with two test cases, `Rows` (every row, one subtest each, so that
+a failing row does not stop the others) and `SelfChecks`; the exit status is unittest's, so there is no pass/fail logic
+of our own to test. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs `SelfChecks` once (`sync_buffered` only, about 10
+seconds), which injects two faults and asserts, as ordinary tests, that each is reported as what it is and with no other
+error: `corrupt` flips a bit of one tensor after it arrived (the CRC32 error must name that tensor), and `leak` keeps a
+32 MiB GPU tensor alive after the row (the GPU memory error must be there, with at least those 32 MiB held). A fault that
+goes unnoticed fails an assertion, and the run. Its results are in `self-check/`; `drills.py` has what the assertions
+accept, and a row with an injected fault is not counted as a failure in `== rows that ran`.
+
+The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
+since the last scheduled run that passed (`test_synthetic_models.py`, what it checks with: `tensor_bytes.py`, `drills.py`,
+`gen_models.py` and `matrix.py`, and `phase_timer.py`, `real_model.py`, `setup_and_run.sh` or the workflow itself), so
+nobody has to remember to run it.
+
+The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
+not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file
+open until its submission ends, and with an asynchronous reader about every file can be open at once, and a rank holds
+about 60 descriptors before it reads anything, so a model with more than about 900 files makes the load fail with
+`File access error` unless the program that loads it raises its own limit
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261): the streamer does not do that for the program).
+That is measured: on the T4 runner a model of 5,000 files failed under every strategy at the container's limit, on master
+(8 of 12 finished rows under each of the asynchronous strategies). If the descriptor code changes, the count
+(`DEFAULT_FILES` in `gen_models.py`) changes with it.
+
+## Timing
+
+Every phase is timed (system and Python package installs, generation, the real model download, setup, load, verify)
+and written to `test-results/gpu/timing-*.jsonl`; the summary table is in the job summary of each leg and in
+`timing-summary.txt`. It is there to find slow parts of the run, not to benchmark the streamer. The impact of the real
+model download is the `real_model.download` row.
+
+## Not covered
+
+The Python path only. The C++ direct-to-GPU path (pinned staging buffers, `register` mode, several devices on
+one streamer) is reached through the C API and its gtests, not through Python.

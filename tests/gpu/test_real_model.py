@@ -1,0 +1,224 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""CPU-only tests of the real model download and its manifest. No network: the source is a local file.
+
+    python3 -m unittest tests/gpu/test_real_model.py
+"""
+
+import hashlib
+import http.client
+import json
+import os
+import pathlib
+import struct
+import sys
+import tempfile
+import unittest
+import urllib.request
+import zlib
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import real_model  # noqa: E402
+
+
+def write_safetensors(path, tensors, metadata=None):
+    """tensors: list of (name, dtype, shape, bytes), written in that order."""
+    header, offset = {}, 0
+    if metadata:
+        header["__metadata__"] = metadata
+    for name, dtype, shape, data in tensors:
+        header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + len(data)]}
+        offset += len(data)
+    encoded = json.dumps(header).encode()
+    encoded += b" " * (-len(encoded) % 8)
+    with open(path, "wb") as handle:
+        handle.write(struct.pack("<Q", len(encoded)) + encoded)
+        for _, _, _, data in tensors:
+            handle.write(data)
+
+
+TENSORS = [
+    ("a.weight", "BF16", [2, 3], bytes(range(12))),
+    ("b.bias", "F32", [2], bytes(range(100, 108))),
+    ("c.empty", "U8", [0], b""),
+    ("d.scalar", "U8", [], b"\x07"),
+]
+
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory(prefix="real-model-")
+        self.addCleanup(self.dir.cleanup)
+        self.source = os.path.join(self.dir.name, "source.safetensors")
+        write_safetensors(self.source, TENSORS, {"format": "pt"})
+        data = pathlib.Path(self.source).read_bytes()
+        self.model = {"repo": "x/y", "revision": "r", "filename": "model.safetensors", "size": len(data),
+                      "sha256": hashlib.sha256(data).hexdigest()}
+        self.url = pathlib.Path(self.source).as_uri()
+        self.out = os.path.join(self.dir.name, "out")
+
+
+class Manifest(Fixture):
+    def test_manifest_describes_every_tensor_with_the_crc_of_its_bytes(self):
+        real_model.fetch(self.out, self.url, self.model)
+        with open(os.path.join(self.out, real_model.MODEL_NAME + ".manifest.json")) as handle:
+            manifest = json.load(handle)
+        (entry,) = manifest["files"]
+        self.assertEqual(entry["path"], "model.safetensors")
+        self.assertEqual(manifest["num_tensors"], 4)
+        self.assertEqual(manifest["total_data_bytes"], 12 + 8 + 0 + 1)
+        self.assertEqual(manifest["largest_tensor_bytes"], 12)
+        self.assertEqual(manifest["dtypes"], ["BF16", "F32", "U8"])
+        by_name = {t["name"]: t for t in entry["tensors"]}
+        for name, dtype, shape, data in TENSORS:
+            tensor = by_name[name]
+            self.assertEqual((tensor["dtype"], tensor["shape"], tensor["end"] - tensor["start"]),
+                             (dtype, shape, len(data)), name)
+            self.assertEqual(tensor["crc32"], zlib.crc32(data), name)
+        self.assertEqual(entry["data_start"], 8 + entry["header_len"])
+        self.assertEqual(entry["metadata"], {"format": "pt"})
+
+    def test_tensors_are_listed_in_file_order_whatever_the_order_of_the_header(self):
+        """A header is a JSON object, and its order is the writer's: here the tensor that is last in the file is first
+        in the header. Without the sort the manifest would list them in header order and refuse the file as holey."""
+        data = bytes(range(30))
+        header = {"last": {"dtype": "U8", "shape": [10], "data_offsets": [20, 30]},
+                  "first": {"dtype": "U8", "shape": [8], "data_offsets": [0, 8]},
+                  "middle": {"dtype": "U8", "shape": [12], "data_offsets": [8, 20]}}
+        encoded = json.dumps(header).encode()
+        path = os.path.join(self.dir.name, "reversed.safetensors")
+        with open(path, "wb") as handle:
+            handle.write(struct.pack("<Q", len(encoded)) + encoded + data)
+        manifest = real_model.build_manifest(self.dir.name, "reversed.safetensors")
+        tensors = manifest["files"][0]["tensors"]
+        self.assertEqual([t["name"] for t in tensors], ["first", "middle", "last"])
+        self.assertEqual([t["start"] for t in tensors], [0, 8, 20])
+        self.assertEqual([t["crc32"] for t in tensors],
+                         [zlib.crc32(data[0:8]), zlib.crc32(data[8:20]), zlib.crc32(data[20:30])])
+
+    def test_an_empty_tensor_is_accepted_wherever_the_header_lists_it(self):
+        """An empty tensor starts where the next one does. Sorted by start alone, the order of two such tensors was the
+        order of the header, and a header that lists the empty one second was refused as a file with a hole."""
+        for names in (("b", "e"), ("e", "b")):
+            offsets = {"b": [0, 3], "e": [0, 0]}
+            header = {name: {"dtype": "U8", "shape": [offsets[name][1]], "data_offsets": offsets[name]}
+                      for name in names}
+            encoded = json.dumps(header).encode()
+            path = os.path.join(self.dir.name, "empty-%s.safetensors" % "".join(names))
+            with open(path, "wb") as handle:
+                handle.write(struct.pack("<Q", len(encoded)) + encoded + bytes(3))
+            manifest = real_model.build_manifest(self.dir.name, os.path.basename(path))
+            self.assertEqual([t["name"] for t in manifest["files"][0]["tensors"]], ["e", "b"], names)
+            self.assertEqual(manifest["total_data_bytes"], 3)
+
+    def test_a_hole_between_tensors_is_refused(self):
+        path = os.path.join(self.dir.name, "hole.safetensors")
+        header = {"a": {"dtype": "U8", "shape": [2], "data_offsets": [0, 2]},
+                  "b": {"dtype": "U8", "shape": [2], "data_offsets": [3, 5]}}
+        encoded = json.dumps(header).encode()
+        with open(path, "wb") as handle:
+            handle.write(struct.pack("<Q", len(encoded)) + encoded + bytes(5))
+        with self.assertRaises(real_model.RealModelError):
+            real_model.build_manifest(self.dir.name, "hole.safetensors")
+
+    def test_bytes_after_the_last_tensor_are_refused(self):
+        with open(self.source, "ab") as handle:
+            handle.write(b"x")
+        with self.assertRaises(real_model.RealModelError):
+            real_model.build_manifest(self.dir.name, "source.safetensors")
+
+
+class Download(Fixture):
+    def test_download_is_timed_and_verified(self):
+        real_model.fetch(self.out, self.url, self.model)
+        with open(os.path.join(self.out, "timing-real.jsonl")) as handle:
+            phases = [json.loads(line)["phase"] for line in handle]
+        self.assertEqual(phases, ["real_model.download", "real_model.manifest"])
+        self.assertEqual(pathlib.Path(self.out, real_model.MODEL_NAME, "model.safetensors").read_bytes(),
+                         pathlib.Path(self.source).read_bytes())
+        self.assertFalse(os.path.exists(os.path.join(self.out, real_model.MODEL_NAME, "model.safetensors.part")))
+
+    def test_a_changed_file_is_refused_and_leaves_nothing_behind(self):
+        self.model["sha256"] = "0" * 64
+        with self.assertRaises(real_model.RealModelError):
+            real_model.download(self.url, os.path.join(self.dir.name, "x.safetensors"), self.model["size"],
+                                self.model["sha256"], attempts=1)
+        self.assertEqual([n for n in os.listdir(self.dir.name) if n.startswith("x.")], [])
+
+    def test_a_download_that_takes_too_long_is_refused_even_if_it_goes_on(self):
+        """The read timeout is per read: a connection that trickles data never trips it, and the deadline does."""
+        data = bytes(3 * real_model.CHUNK + 5)
+        source = os.path.join(self.dir.name, "big.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        with self.assertRaises(real_model.RealModelError) as raised:
+            real_model.download(pathlib.Path(source).as_uri(), os.path.join(self.dir.name, "x.safetensors"), len(data),
+                                hashlib.sha256(data).hexdigest(), attempts=1, max_seconds=-1)
+        self.assertIn("more than", str(raised.exception))
+        self.assertEqual([n for n in os.listdir(self.dir.name) if n.startswith("x.")], [])
+
+    def test_a_download_within_the_deadline_passes(self):
+        data = bytes(2 * real_model.CHUNK + 5)
+        source = os.path.join(self.dir.name, "ok.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        got = real_model.download(pathlib.Path(source).as_uri(), os.path.join(self.dir.name, "y.safetensors"),
+                                  len(data), hashlib.sha256(data).hexdigest(), attempts=1, max_seconds=600)
+        self.assertEqual(got, len(data))
+
+    def test_a_connection_cut_in_the_body_is_retried(self):
+        """http.client raises IncompleteRead, which is not an OSError: it must be retried like any failed attempt."""
+        data = bytes(2 * real_model.CHUNK + 5)
+        real_urlopen = urllib.request.urlopen
+        source = os.path.join(self.dir.name, "cut.bin")
+        with open(source, "wb") as handle:
+            handle.write(data)
+        url = pathlib.Path(source).as_uri()
+        calls = []
+
+        class Cut:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self, size):
+                raise http.client.IncompleteRead(b"partial", 100)
+
+        def urlopen(*args, **kwargs):
+            calls.append(1)
+            return Cut() if len(calls) == 1 else real_urlopen(*args, **kwargs)
+
+        with mock.patch.object(urllib.request, "urlopen", urlopen), mock.patch.object(real_model.time, "sleep"):
+            got = real_model.download(url, os.path.join(self.dir.name, "z.safetensors"), len(data),
+                                      hashlib.sha256(data).hexdigest(), attempts=2)
+        self.assertEqual(got, len(data))
+        self.assertEqual(len(calls), 2)
+
+    def test_a_wrong_size_is_refused(self):
+        with self.assertRaises(real_model.RealModelError):
+            real_model.download(self.url, os.path.join(self.dir.name, "x.safetensors"), self.model["size"] + 1,
+                                self.model["sha256"], attempts=1)
+
+    def test_a_missing_source_is_refused(self):
+        with self.assertRaises(real_model.RealModelError):
+            real_model.download(pathlib.Path(self.dir.name, "nothing").as_uri(),
+                                os.path.join(self.dir.name, "x.safetensors"), 1, "0" * 64, attempts=1)
+
+    def test_the_command_line_reports_a_failure_with_a_nonzero_status(self):
+        self.assertEqual(real_model.main(["fetch", "--out", self.out, "--url",
+                                          pathlib.Path(self.dir.name, "nothing").as_uri()]), 1)
+
+
+class Pin(unittest.TestCase):
+    def test_the_pinned_model_names_a_revision_a_size_and_a_hash(self):
+        self.assertRegex(real_model.MODEL["revision"], r"^[0-9a-f]{40}$")
+        self.assertRegex(real_model.MODEL["sha256"], r"^[0-9a-f]{64}$")
+        self.assertGreater(real_model.MODEL["size"], 0)
+        self.assertIn(real_model.MODEL["revision"], real_model.default_url())
+
+
+if __name__ == "__main__":
+    unittest.main()

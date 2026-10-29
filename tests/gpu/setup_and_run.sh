@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Real-GPU test run, inside a clean CUDA container (nvidia/cuda, Ubuntu, nothing but the system Python) on a host with
+# two GPUs. The streamer is installed from the wheel that the workflow built from this commit, the way a user installs
+# it, with the PyTorch and numpy versions that the workflow asks for (GPU_TORCH_SPEC, GPU_NUMPY_SPEC):
+#   1. set up: system Python and pip, PyTorch, the wheel
+#   2. generate the four synthetic models, with every dtype the streamer accepts here, and check them
+#   3. download the small real model, pinned by revision and SHA-256, and describe it (timed)
+#   4. stream the synthetic models to the GPUs once per filesystem strategy and compare every tensor
+#   5. optionally prove that the checks fire (GPU_SELF_CHECK), then load the real model with the default settings
+# Every step is timed; the table at the end shows where the time went.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+RESULTS=${GPU_RESULTS:-test-results/gpu}
+FIXTURES=${GPU_FIXTURES:-.gpu-fixtures}
+SEED=${GPU_SEED:-$(date +%s)}
+WHEEL_DIR=${GPU_WHEEL_DIR:-wheel}
+TORCH_SPEC=${GPU_TORCH_SPEC:-torch}
+NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy}
+export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES"
+mkdir -p "$RESULTS"
+# The log is kept by whatever runs this script (the workflow pipes it to tee): a tee started here would be killed with
+# the script, and could lose the last lines, which hold the verdict.
+
+SETUP_TIMING="$RESULTS/timing-setup.jsonl"
+: > "$SETUP_TIMING"
+status=0
+
+# Time. Every step that can hang has a cap (cap MINUTES, below), generous: several times what the step takes on a healthy
+# runner. The whole run has a budget, GPU_BUDGET_MINUTES (the workflow's job timeout less 15 minutes), that no step can
+# exceed: a cap is cut to what is left of the budget, less 5 minutes for the report. So the script always gets to say
+# which rows ran, whatever the caps add up to, and they do not need adjusting to fit the job's timeout.
+START_EPOCH=$(date +%s)
+BUDGET_SECONDS=$(( ${GPU_BUDGET_MINUTES:-285} * 60 ))
+REPORT_RESERVE_SECONDS=300
+
+# cap MINUTES: the seconds that a step may take, for timeout: its own cap, or what is left of the budget if that is less
+# (but at least a minute, so that a step is never given none).
+cap() {
+    local want=$(( $1 * 60 )) left
+    left=$(( START_EPOCH + BUDGET_SECONDS - $(date +%s) - REPORT_RESERVE_SECONDS ))
+    if [ "$left" -lt 60 ]; then left=60; fi
+    echo $(( want < left ? want : left ))
+}
+
+# A script that stops before its end (a setup step failed, the fixtures are not on a block device) says so, instead of
+# leaving the log to end on its last step with no report.
+finished=false
+on_exit() {
+    local rc=$?
+    if [ "$finished" != true ]; then
+        echo
+        echo "== THE RUN ENDED EARLY (exit $rc): see the last FAILED or ERROR line above. No rows were run after it, and none is reported."
+        echo "::error title=The GPU test run ended early::The script stopped before it finished (exit $rc): see the last FAILED or ERROR line in the log"
+    fi
+}
+trap on_exit EXIT
+
+# record NAME START END: append the wall time of a phase to the timing file and print it.
+record() {
+    local secs
+    secs=$(awk -v s="$2" -v e="$3" 'BEGIN { printf "%.2f", e - s }')
+    printf '{"phase": "%s", "seconds": %s}\n' "$1" "$secs" >> "$SETUP_TIMING"
+    echo "[$(date +%T)] END   $1  ${secs}s"
+}
+
+# phase NAME COMMAND...: run a command, print START and END lines, and record its wall time.
+phase() {
+    local name=$1; shift
+    local start rc=0
+    echo "[$(date +%T)] START $name"
+    start=$(date +%s.%N)
+    "$@" || rc=$?
+    record "$name" "$start" "$(date +%s.%N)"
+    if [ "$rc" -ne 0 ]; then
+        echo "[$(date +%T)] FAILED $name (exit $rc)"
+    fi
+    return "$rc"
+}
+
+# stop_stray_workers: kill what a torchrun that was stopped (a timeout) left behind. The workers of a rank that ignored
+# the signal keep their GPU memory and the rendezvous port, and the next run would fail on them and be blamed for it.
+# Reads /proc, so that it needs no pkill: a base image is free to leave procps out.
+stop_stray_workers() {
+    local file pid cmd
+    for file in /proc/[0-9]*/cmdline; do
+        pid=${file#/proc/}
+        pid=${pid%/cmdline}
+        cmd=$(tr '\0' ' ' < "$file" 2>/dev/null) || continue
+        if [[ "$cmd" == *tests/gpu/test_synthetic_models.py* ]] && [ "$pid" != "$$" ]; then
+            echo "killing a worker left behind (pid $pid): $cmd"
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
+echo "== environment"
+date -u
+uname -r
+. /etc/os-release && echo "$PRETTY_NAME"
+echo "seed: $SEED"
+echo "matrix: ${GPU_MATRIX:-core}   torch: $TORCH_SPEC   numpy: $NUMPY_SPEC   self-check: ${GPU_SELF_CHECK:-false}"
+timeout --signal=TERM --kill-after=10s 120s nvidia-smi
+echo "ulimit -n: $(ulimit -n)   ulimit -l: $(ulimit -l)"
+free -g | head -2
+cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true
+mkdir -p "$FIXTURES"
+echo "fixtures in $FIXTURES: $(stat -f -c %T "$FIXTURES")"
+df -h "$FIXTURES" | tail -1
+
+# The image has no Python. What is installed is what a user needs: Python, pip and the certificates for HTTPS.
+# phase runs these functions where `set -e` does not apply, so every command ends in `|| return`.
+install_system_packages() {
+    export DEBIAN_FRONTEND=noninteractive
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" apt-get update -qq || return
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+        apt-get install -y -qq --no-install-recommends python3 python3-pip ca-certificates || return
+}
+phase install_system_packages install_system_packages
+python3 --version
+
+install_python_packages() {
+    local wheels wheel
+    # Ubuntu 24.04 marks its Python as externally managed (PEP 668) and pip refuses to install into it. The container is
+    # thrown away after the run, so the system Python is the environment (older pip ignores the variable).
+    export PIP_BREAK_SYSTEM_PACKAGES=1
+    # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
+    timeout --signal=TERM --kill-after=30s "$(cap 45)s" \
+        python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
+    mapfile -t wheels < <(find "$WHEEL_DIR" -name 'runai_model_streamer-*.whl')
+    if [ "${#wheels[@]}" -ne 1 ]; then
+        echo "ERROR: expected one runai_model_streamer wheel in $WHEEL_DIR, found ${#wheels[@]}: ${wheels[*]:-}" >&2
+        return 1
+    fi
+    wheel=${wheels[0]}
+    echo "installing $wheel"
+    timeout --signal=TERM --kill-after=30s "$(cap 15)s" python3 -m pip install --no-cache-dir "$wheel" || return
+}
+phase install_python_packages install_python_packages
+python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
+
+timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 - <<'PY'
+import torch
+import torch.distributed as dist
+import runai_model_streamer
+from runai_model_streamer.libstreamer import STREAMER_LIBRARY
+
+nccl = torch.cuda.nccl.version()
+nccl = ".".join(map(str, nccl)) if isinstance(nccl, tuple) else str(nccl)
+print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; NCCL {nccl}", flush=True)
+print(f"streamer package: {runai_model_streamer.__file__}", flush=True)
+print(f"streamer library: {STREAMER_LIBRARY}", flush=True)
+if "site-packages" not in runai_model_streamer.__file__ and "dist-packages" not in runai_model_streamer.__file__:
+    raise RuntimeError("the streamer was not imported from the installed wheel")
+if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+    raise RuntimeError("GPU tests require two visible CUDA GPUs")
+if not dist.is_nccl_available():
+    raise RuntimeError("GPU tests require an NCCL-enabled PyTorch build")
+for index in range(2):
+    print(f"GPU {index}: {torch.cuda.get_device_name(index)}", flush=True)
+PY
+
+# The newest-torch leg is meant to test the newest PyTorch. pip installs the newest release that this image's Python can
+# use, so when torch stops supporting that Python the leg quietly tests an older one. Flag it: the run goes on and
+# reports what it can, but it fails, and env-check.txt (shown in the job summary) says the base container has to change.
+env_limited=0
+if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
+    echo "== is this container limiting the newest torch?"
+    # Only the check's own verdict (exit status 3) flags the container. A check that cannot reach PyPI says so and
+    # passes; one that crashes or hangs (a cap of its own) is not a verdict, and must not turn into a false flag.
+    check_status=0
+    timeout --signal=TERM --kill-after=10s 180s python3 tests/gpu/env_check.py newest-torch || check_status=$?
+    case "$check_status" in
+        0) ;;
+        3) env_limited=1 ;;
+        *) echo "WARNING: the environment check did not complete (exit $check_status): the newest torch is not verified" ;;
+    esac
+fi
+
+# The CPU unit tests of the harness. A failure fails the run, but the GPU tests still run: their results are worth having.
+# Without GPU_RESULTS, which the tests must not see: it is where the results of this run are written.
+echo "== self-test of the harness: the generator, the rows, the drills, the tensor checks, the real model download"
+phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+    python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
+    tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
+    tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
+
+# The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
+# streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
+# listed here as not covered rather than failing the load of every file that holds it. The generator needs the
+# installed streamer for that table, so it runs after the install. Generation takes under a minute.
+generate_models() {
+    local dtypes
+    dtypes=$(python3 - <<'PY'
+import sys
+sys.path.insert(0, "tests/gpu")
+import gen_models
+from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype
+
+streamer = set(safetensors_to_torch_dtype)
+covered = sorted(streamer & set(gen_models.DTYPES))
+print("streamer dtypes: %s" % " ".join(sorted(streamer)), file=sys.stderr)
+print("not generated:   %s" % (" ".join(sorted(set(gen_models.DTYPES) - streamer)) or "-"), file=sys.stderr)
+unknown = sorted(streamer - set(gen_models.DTYPES) - gen_models.KNOWN_GAPS)
+print("not known to the generator: %s" % (" ".join(unknown) or "-"), file=sys.stderr)
+if unknown:
+    print("ERROR: the streamer accepts %s, which the generator cannot write: add it to DTYPES in tests/gpu/gen_models.py"
+          % " ".join(unknown), file=sys.stderr)
+    sys.exit(1)
+print(",".join(covered))
+PY
+    ) || return
+    rm -rf "$FIXTURES"
+    mkdir -p "$FIXTURES"
+    timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
+        python3 tests/gpu/gen_models.py generate --out "$FIXTURES" --seed "$SEED" --dtypes "$dtypes" \
+        2>&1 | tee "$RESULTS/generate.log"
+    return "${PIPESTATUS[0]}"
+}
+echo "== generate synthetic models"
+phase generate_models generate_models
+
+# The small real model, downloaded on every run: real_model.py times the download and the manifest separately
+# (timing-real.jsonl), to show what the download adds to a run. It only feeds the smoke test, so a download that fails
+# (the hub is slow or down) fails the run at the end, and does not stop the rows of the synthetic models.
+smoke_expected=false
+if [ "${GPU_REAL_SMOKE:-true}" = true ]; then
+    echo "== download the small real model"
+    if phase fetch_real_model timeout --signal=TERM --kill-after=30s "$(cap 30)s" \
+        python3 tests/gpu/real_model.py fetch --out "$FIXTURES"; then
+        smoke_expected=true
+    else
+        status=1
+        echo "ERROR: the real model could not be fetched: the smoke test will not run (the run fails at the end)"
+    fi
+fi
+
+# The direct I/O strategies are only tested if the fixtures are on a real block device that serves O_DIRECT. The
+# streamer reads a file from a mount that cannot (tmpfs, for one) with its synchronous reader, quietly, so on such
+# a storage a direct strategy would pass without ever being used. Fail instead.
+check_fixture_storage() {
+    local source fstype
+    source=$(df --output=source "$FIXTURES" | tail -1) || return
+    fstype=$(stat -f -c %T "$FIXTURES") || return
+    echo "fixtures storage: $source ($fstype)"
+    case "$source" in
+        /dev/*) ;;
+        *) echo "ERROR: the fixtures are on $source ($fstype), not on a block device; the direct I/O strategies would not be tested" >&2
+           return 1 ;;
+    esac
+    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 - "$FIXTURES" <<'PY' || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
+import mmap
+import os
+import sys
+
+path = os.path.join(sys.argv[1], ".direct-io-probe")
+with open(path, "wb") as probe:
+    probe.write(bytes(4096))
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
+    try:
+        if os.preadv(fd, [mmap.mmap(-1, 4096)], 0) != 4096:
+            raise OSError("short O_DIRECT read")
+    finally:
+        os.close(fd)
+finally:
+    os.unlink(path)
+PY
+}
+check_fixture_storage || exit 1
+
+export GPU_MATRIX="${GPU_MATRIX:-core}"
+export PYTHONUNBUFFERED=1
+export OMP_NUM_THREADS=2
+export NCCL_DEBUG=INFO
+# The name of the variable that makes the NCCL watchdog abort the process on a timeout or an error: TORCH_NCCL_* from
+# PyTorch 2.2, NCCL_* before.
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_ASYNC_ERROR_HANDLING=1
+export RUNAI_STREAMER_LOG_TO_STDERR=1
+
+# Each reader alone, with no sync_buffered fallback: a list the host cannot serve is an error in the streamer, so
+# a run under a reader that is not available fails instead of passing on the synchronous reader. (The streamer
+# lists in the Makefile's test_strategies keep sync_buffered last for hosts of any kind.)
+#
+# The time caps are for a hang: a strategy takes about 10 minutes when the runner is healthy (18 on a slow day), and
+# its cap is 60. A cap is cut to what is left of the run's budget (see cap, above), so the caps never need to add up
+# to less than the job's timeout for the script to get to print which rows ran.
+for strategy in \
+    sync_buffered \
+    libaio_direct \
+    io_uring_direct \
+    io_uring_buffered
+do
+    echo "[$(date +%T)] START run.$strategy"
+    echo "== streaming with filesystem strategy: $strategy"
+    start=$(date +%s.%N)
+    if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
+        timeout --signal=TERM --kill-after=30s "$(cap 60)s" \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py Rows; then
+        status=1
+        echo "[$(date +%T)] FAILED run.$strategy"
+    fi
+    stop_stray_workers
+    record "run.$strategy" "$start" "$(date +%s.%N)"
+done
+
+# Self-check of the test's own checks: when the test harness changed (the workflow decides), run the SelfChecks test
+# case, which injects a corrupted tensor and a leaked GPU tensor and asserts that the CRC32 check and the GPU memory
+# check report them, as themselves and with no other error. sync_buffered is enough: the faults do not depend on how the
+# file is read. It is an ordinary test case: its failure is unittest's, like that of a row.
+if [ "${GPU_SELF_CHECK:-false}" = true ]; then
+    echo "[$(date +%T)] START run.self_check"
+    echo "== self-check: faults injected on purpose, the checks must report them"
+    start=$(date +%s.%N)
+    if ! GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
+        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py SelfChecks; then
+        status=1
+        echo "[$(date +%T)] FAILED run.self_check"
+    fi
+    stop_stray_workers
+    record "run.self_check" "$start" "$(date +%s.%N)"
+fi
+
+# The small real model, loaded with the streamer's default settings (no filesystem strategy chosen): what a user runs.
+if [ "$smoke_expected" = true ]; then
+    echo "[$(date +%T)] START run.real_smoke"
+    echo "== smoke test: the small real model, default settings"
+    start=$(date +%s.%N)
+    # Without GPU_ROWS: a filter of the rows of the synthetic models would leave no smoke row.
+    if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
+        timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
+        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        tests/gpu/test_synthetic_models.py Rows; then
+        status=1
+        echo "[$(date +%T)] FAILED run.real_smoke"
+    fi
+    stop_stray_workers
+    record "run.real_smoke" "$start" "$(date +%s.%N)"
+fi
+
+# Which rows ran. A rank that fails inside a distributed row makes the NCCL watchdog abort the other one, which ends
+# that strategy's run: the rows after it never start. They must not hide behind the strategies that did finish.
+echo "== rows that ran"
+timeout --signal=TERM --kill-after=10s 120s python3 tests/gpu/rows_summary.py "$RESULTS" "$smoke_expected" \
+    sync_buffered libaio_direct io_uring_direct io_uring_buffered || status=1
+
+# The manifests list every tensor of every model; keep them with the results to debug a failure.
+mkdir -p "$RESULTS/manifests"
+for m in mixed many_tensors giant_tensor many_files real_smoke; do
+    if [ -f "$FIXTURES/$m.manifest.json" ]; then
+        gzip -c "$FIXTURES/$m.manifest.json" > "$RESULTS/manifests/$m.manifest.json.gz" || true
+    fi
+done
+
+echo "== where the time went"
+python3 tests/gpu/phase_timer.py "$RESULTS"/timing-*.jsonl "$FIXTURES"/timing-gen.jsonl "$FIXTURES"/timing-real.jsonl \
+    "$RESULTS"/smoke/timing-*.jsonl | tee "$RESULTS/timing-summary.txt"
+
+# A container that limits the newest torch fails the leg, but the tests above did run, with the older torch. Say so at
+# the end of the log, in the file that the job summary shows, and as an annotation on the run, with the verdict of the
+# tests. The two are separate problems: the environment never explains a failing test, so failures are to be looked
+# into whatever the environment is, and passing tests are not a test of the newest torch.
+if [ "$env_limited" -ne 0 ]; then
+    torch_version=$(python3 -c "import importlib.metadata as m; print(m.version('torch'))")
+    if [ "$status" -eq 0 ]; then
+        message="The tests ran with torch $torch_version, which is not the newest, and all passed. This leg is red only because of its environment: change the base container so that it can run the newest torch (see env-check.txt)."
+    else
+        message="The tests ran with torch $torch_version, which is not the newest, and some failed (see above). Two separate problems make this leg red: the failing tests, which need to be looked into regardless of the environment, and the environment, which needs a base container that can run the newest torch (see env-check.txt)."
+    fi
+    echo
+    echo "== NOT TESTING THE NEWEST TORCH: $message"
+    printf '\nTests of this leg: %s\n' "$message" >> "$RESULTS/env-check.txt"
+    echo "::error title=The newest-torch leg is not testing the newest torch::$message"
+    status=1
+fi
+
+finished=true
+exit "$status"
