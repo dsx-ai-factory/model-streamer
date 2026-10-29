@@ -7,6 +7,8 @@
 
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <cerrno>
+#include <cstring>
 #include <utility>
 
 #include "common/exception/exception.h"
@@ -24,7 +26,9 @@ File::File(const std::string & path, const Config & config) :
 {
     if (_fd.fd() == -1)
     {
-        LOG(ERROR) << "Failed to access file " << path;
+        // Saved before the log call, which may change errno. Tells EMFILE from ENOENT or EACCES.
+        const int open_errno = errno;
+        LOG(ERROR) << "Failed to access file " << path << " : " << std::strerror(open_errno);
         throw common::Exception(common::ResponseCode::FileAccessError);
     }
 }
