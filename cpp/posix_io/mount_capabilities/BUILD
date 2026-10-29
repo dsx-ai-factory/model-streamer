@@ -11,6 +11,7 @@ runai_cc_auto_library(
         # DirectBlockSize: the probe reads one block at the alignment routing assumes, so it must use
         # the same constant rather than writing 4096 again - a disagreement here would be invisible.
         "//posix_io/alignment",
+        "//utils/fd",
         "//utils/logging",
     ],
 )
@@ -21,6 +22,7 @@ runai_cc_test(
     deps = [
         ":mount_capabilities",
         "//posix_io/alignment",
+        "//utils/fd",
         "//utils/random",
         "//utils/temp/file",
     ],

@@ -11,6 +11,7 @@
 #include <sys/sysmacros.h>
 
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -30,6 +31,7 @@
 #include <string>
 
 #include "common/exception/exception.h"
+#include "utils/fd/fd.h"
 #include "utils/random/random.h"
 #include "utils/temp/file/file.h"
 
@@ -105,6 +107,24 @@ dev_t device_of(const std::string & path)
     return ::stat(path.c_str(), &st) == 0 ? st.st_dev : 0;
 }
 
+// The same ownership ScratchPool uses for its buffers, so an ASSERT between the allocation and the
+// read cannot leak one - a gtest ASSERT returns from the test.
+//
+// Empty when posix_memalign refuses the request. It leaves the pointer untouched on failure, so the
+// null it was built with is what the caller sees.
+using Aligned = std::unique_ptr<char, void (*)(void *)>;
+
+Aligned aligned_bytes(size_t alignment, size_t bytes)
+{
+    void * raw = nullptr;
+    if (::posix_memalign(&raw, alignment, bytes) != 0)
+    {
+        return Aligned(nullptr, &std::free);
+    }
+
+    return Aligned(static_cast<char *>(raw), &std::free);
+}
+
 } // namespace
 
 TEST(MountCapabilities, Regular_File_Agrees_With_The_Filesystem)
@@ -138,9 +158,10 @@ TEST(MountCapabilities, Tmpfs_Is_Memory_Backed)
     }
 
     const std::string path = "/dev/shm/runai_mount_test_" + utils::random::string();
-    const int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
-    ASSERT_GE(fd, 0);
-    ::close(fd);
+    {
+        const utils::Fd created(::open(path.c_str(), O_CREAT | O_RDWR, 0600));
+        ASSERT_GE(created.fd(), 0);
+    }   // the file exists now; the descriptor was only needed to make it
 
     MountCapabilities mounts;
     const auto capability = mounts.of_path(path);
@@ -178,10 +199,9 @@ TEST(MountCapabilities, Of_Fd_Agrees_With_Of_Path)
     const auto by_path = mounts.of_path(file.path);
     EXPECT_EQ(mounts.size(), 1);
 
-    const int fd = ::open(file.path.c_str(), O_RDONLY);
-    ASSERT_GE(fd, 0);
+    const utils::Fd fd(::open(file.path.c_str(), O_RDONLY));
+    ASSERT_GE(fd.fd(), 0);
     const auto by_fd = mounts.of_fd(fd);
-    ::close(fd);
 
     EXPECT_EQ(mounts.size(), 1);
     EXPECT_EQ(by_fd.dev, by_path.dev);
@@ -195,9 +215,10 @@ TEST(MountCapabilities, Distinct_Mounts_Are_Distinct_Entries)
     utils::temp::File regular(utils::random::buffer(64));
 
     const std::string shm = "/dev/shm/runai_mount_test_" + utils::random::string();
-    const int fd = ::open(shm.c_str(), O_CREAT | O_RDWR, 0600);
-    ASSERT_GE(fd, 0);
-    ::close(fd);
+    {
+        const utils::Fd created(::open(shm.c_str(), O_CREAT | O_RDWR, 0600));
+        ASSERT_GE(created.fd(), 0);
+    }   // the file exists now; the descriptor was only needed to make it
 
     // Whether these are two mounts is a fact about the machine, so ask the machine.
     if (device_of(regular.path) == device_of(shm))
@@ -241,8 +262,8 @@ TEST(MountCapabilities, Direct_Support_Matches_A_Real_Aligned_Read)
     utils::temp::File file(data);
 
     bool really_supported = false;
-    int fd = ::open(file.path.c_str(), O_RDONLY | O_DIRECT);
-    if (fd >= 0)
+    const utils::Fd fd(::open(file.path.c_str(), O_RDONLY | O_DIRECT));
+    if (fd.fd() >= 0)
     {
         // ANY rung the mount accepts proves direct reads work here, because that is the question
         // direct_support answers: not "does this one block work" but "can this mount serve direct
@@ -258,15 +279,14 @@ TEST(MountCapabilities, Direct_Support_Matches_A_Real_Aligned_Read)
         // oracle that imported the values it is checking would agree with a wrong implementation.
         for (const size_t block : { size_t(512), size_t(4096), size_t(16384), size_t(65536) })
         {
-            void * buffer = nullptr;
-            if (::posix_memalign(&buffer, block, block) != 0)
+            const auto buffer = aligned_bytes(block, block);
+            if (buffer == nullptr)
             {
                 continue;
             }
 
-            const ssize_t got = ::pread(fd, buffer, block, 0);
+            const ssize_t got = ::pread(fd, buffer.get(), block, 0);
             const bool worked = got >= 0 || errno != EINVAL;
-            ::free(buffer);
 
             if (worked)
             {
@@ -274,8 +294,6 @@ TEST(MountCapabilities, Direct_Support_Matches_A_Real_Aligned_Read)
                 break;
             }
         }
-
-        ::close(fd);
     }
 
     MountCapabilities mounts;
@@ -319,14 +337,13 @@ TEST(MountCapabilities, Direct_Block_Is_The_Smallest_The_Mount_Accepts)
     EXPECT_LE(block, 65536u) << "larger than any rung on the ladder, so it cannot have been measured";
 
     // Asked of the kernel, not of the code under test: the reported block must actually work...
-    int fd = ::open(file.path.c_str(), O_RDONLY | O_DIRECT);
-    ASSERT_GE(fd, 0);
+    const utils::Fd fd(::open(file.path.c_str(), O_RDONLY | O_DIRECT));
+    ASSERT_GE(fd.fd(), 0);
 
-    void * buffer = nullptr;
-    ASSERT_EQ(::posix_memalign(&buffer, block, block), 0);
-    const ssize_t got = ::pread(fd, buffer, block, 0);
+    const auto buffer = aligned_bytes(block, block);
+    ASSERT_NE(buffer, nullptr);
+    const ssize_t got = ::pread(fd, buffer.get(), block, 0);
     EXPECT_TRUE(got >= 0 || errno != EINVAL) << "the reported block " << block << " is refused";
-    ::free(buffer);
 
     // Which property holds depends on WHERE the number came from, so ask the kernel the same
     // question the implementation asks.
@@ -359,17 +376,20 @@ TEST(MountCapabilities, Direct_Block_Is_The_Smallest_The_Mount_Accepts)
 
         for (size_t smaller = 512; smaller < block; smaller <<= 1)
         {
-            void * small = nullptr;
-            ASSERT_EQ(::posix_memalign(&small, smaller, smaller), 0);
-            const ssize_t r = ::pread(fd, small, smaller, 0);
+            // The same question the ladder asked, or this can contradict a correct answer. All three
+            // of the things O_DIRECT constrains must be aligned to `smaller` and not to twice it: at
+            // offset 0, or from a posix_memalign that over-aligned, a mount needing `block` can still
+            // accept the read, and the rung the ladder rightly refused would look workable here.
+            const auto base = aligned_bytes(2 * smaller, 4 * smaller);
+            ASSERT_NE(base, nullptr);
+
+            const ssize_t r = ::pread(fd, base.get() + smaller, smaller,
+                                      static_cast<off_t>(smaller));
             const bool worked = r >= 0 || errno != EINVAL;
-            ::free(small);
 
             EXPECT_FALSE(worked) << smaller << " also works, so " << block << " was not the smallest";
         }
     }
-
-    ::close(fd);
 }
 
 // A probe cannot recognise tmpfs, on any kernel - so statfs magic has to.
@@ -404,23 +424,24 @@ TEST(MountCapabilities, Tmpfs_Can_Never_Be_Probed_For_A_Block)
     }
 
     const std::string path = "/dev/shm/runai_tmpfs_direct_" + utils::random::string();
-    int fd = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
-    ASSERT_GE(fd, 0);
-    const auto data = utils::random::buffer(256 * 1024);
-    ASSERT_EQ(::write(fd, data.data(), data.size()), static_cast<ssize_t>(data.size()));
-    ::close(fd);
+    {
+        const utils::Fd fd(::open(path.c_str(), O_CREAT | O_RDWR, 0600));
+        ASSERT_GE(fd.fd(), 0);
+        const auto data = utils::random::buffer(256 * 1024);
+        ASSERT_EQ(::write(fd, data.data(), data.size()), static_cast<ssize_t>(data.size()));
+    }
 
     // Nothing upstream of the ladder answers here, which is what would leave the ladder deciding.
     EXPECT_FALSE(raw_statx_dio_align(path).answered)
         << "statx now answers on tmpfs, so this reasoning needs revisiting";
 
-    fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    const utils::Fd fd(::open(path.c_str(), O_RDONLY | O_DIRECT));
 
     // ONE tail for both branches. Written as if/else rather than an early return because everything
     // below applies to both, and duplicating it is how the two got out of step: the refused branch
     // unlinked the file before asking of_path about it, and of_path stats the path first, so it threw
     // instead of asserting.
-    if (fd < 0)
+    if (fd.fd() < 0)
     {
         // This kernel refuses at open, so a probe never gets to ask. Recorded, not asserted - the
         // other branch is equally acceptable.
@@ -442,8 +463,6 @@ TEST(MountCapabilities, Tmpfs_Can_Never_Be_Probed_For_A_Block)
                             || ::pread(fd, buffer, 4095, 0) >= 0       // odd length
                             || ::pread(fd, buffer, 4096, 1) >= 0;      // odd offset
 
-        ::close(fd);
-
         EXPECT_TRUE(tolerated)
             << "tmpfs both accepted an O_DIRECT open and enforced alignment on this kernel;"
             << " a probe would now return a meaningful block for it";
@@ -455,6 +474,242 @@ TEST(MountCapabilities, Tmpfs_Can_Never_Be_Probed_For_A_Block)
     EXPECT_TRUE(mounts.of_path(path).memory_backed);
 
     ::unlink(path.c_str());
+}
+
+// The reported block must work where we READ, not only at offset 0.
+//
+// Every chunk after the first starts inside the file, and a direct pass rounds that offset down to
+// the block - so the offsets we issue are block-aligned and nothing more. A mount that enforces its
+// alignment on the file offset refuses them while accepting offset 0, which is aligned to every
+// block. This asks the kernel the harder question directly.
+TEST(MountCapabilities, The_Reported_Block_Works_At_A_Non_Zero_Offset)
+{
+    const auto data = utils::random::buffer(256 * 1024);
+    utils::temp::File file(data);
+
+    MountCapabilities mounts;
+    size_t block = 0;
+    mounts.direct_block(device_of(file.path), file.path, block);
+
+    if (block == 0)
+    {
+        return;   // no direct I/O here, so there is no offset to check
+    }
+
+    const utils::Fd fd(::open(file.path.c_str(), O_RDONLY | O_DIRECT));
+    ASSERT_GE(fd.fd(), 0);
+
+    // Aligned to `block` and NOT to twice it, the way the probe builds its own buffer: an address
+    // aligned to more would let a mount that needs more than `block` accept this read.
+    const auto base = aligned_bytes(2 * block, 4 * block);
+    ASSERT_NE(base, nullptr);
+
+    const ssize_t got = ::pread(fd, base.get() + block, block, static_cast<off_t>(block));
+    const int error = errno;
+
+    EXPECT_TRUE(got >= 0 || error != EINVAL)
+        << "block " << block << " is accepted at offset 0 but refused at offset " << block
+        << ", so every chunk after the first would fail or fall back to buffered reads";
+}
+
+// A file too short to place a rung's read cannot answer for its mount.
+//
+// Each rung is probed at its own offset, so a short file reads at EOF and returns 0 - which is not
+// EINVAL, so the rung would pass without the kernel ever checking the alignment. The size guard
+// skips such a rung and the host page size stands in for the measurement.
+//
+// tmpfs is the only mount here that reaches the ladder: statx reports nothing for it, and (kernel
+// 6.8) it accepts every direct read, so a rung that IS tested always succeeds. That is what makes
+// the pair below sharp. The large file must reach a rung; the short one must not, on the same mount.
+// Both outcomes still allow a kernel that refuses the O_DIRECT open, which reports no block at all.
+TEST(MountCapabilities, A_Short_File_Cannot_Reach_A_Rung)
+{
+    if (!is_tmpfs("/dev/shm"))
+    {
+        GTEST_SKIP() << "/dev/shm is not tmpfs here";
+    }
+
+    const auto write_shm = [](const std::string & path, size_t bytes)
+    {
+        const utils::Fd fd(::open(path.c_str(), O_CREAT | O_RDWR, 0600));
+        if (fd.fd() < 0)
+        {
+            return false;
+        }
+
+        const auto data = utils::random::buffer(bytes);
+        return ::write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size());
+    };
+
+    const std::string large = "/dev/shm/runai_rung_large_" + utils::random::string();
+    const std::string short_file = "/dev/shm/runai_rung_short_" + utils::random::string();
+
+    ASSERT_TRUE(write_shm(large, 256 * 1024));
+    ASSERT_TRUE(write_shm(short_file, 100));
+
+    ASSERT_FALSE(raw_statx_dio_align(large).answered)
+        << "statx now answers on tmpfs, so neither file reaches the ladder";
+
+    // One instance each: direct_block caches by st_dev, and both files are on the same mount.
+    size_t large_block = 0;
+    size_t short_block = 0;
+    MountCapabilities().direct_block(device_of(large), large, large_block);
+    MountCapabilities().direct_block(device_of(short_file), short_file, short_block);
+
+    ::unlink(large.c_str());
+    ::unlink(short_file.c_str());
+
+    if (large_block == 0 && short_block == 0)
+    {
+        RecordProperty("tmpfs_o_direct_open", "refused");
+        return;   // this kernel refuses the open, so no probe ran for either file
+    }
+
+    // An override replaces the measurement, so neither value came from the ladder and the contrast
+    // below would be asserting nothing. Assert what an override promises instead: that the file's
+    // size cannot change it. RUNAI_STREAMER_DIRECT_BLOCK=4096 is a documented workaround, so a
+    // developer may well have it set.
+    if (const size_t forced = direct_block_override(); forced != 0)
+    {
+        EXPECT_EQ(large_block, forced);
+        EXPECT_EQ(short_block, forced) << "an override must stand whatever the file size";
+        return;
+    }
+
+    const auto page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+
+    EXPECT_EQ(large_block, 512u) << "tmpfs accepts every read, so the first rung should answer";
+    EXPECT_EQ(short_block, page)
+        << "100 bytes cannot place any rung's read; reporting " << short_block
+        << " means a rung passed on a file too short to test it";
+}
+
+// The ladder's rules, with the read replaced by an answer a test chooses.
+//
+// The ladder only runs where statx is silent, and the only such mount available here is tmpfs - which
+// accepts every direct read. So the cases below - a mount that needs more than the first rung, and a
+// file too short to reach the rung that would have worked - have no fixture.
+namespace
+{
+
+// A mount that serves direct reads at `needs` and refuses anything smaller.
+//
+// It ignores the offset, so these tests say nothing about it - that is what the offset test below is
+// for.
+std::function<bool(size_t, off_t)> accepts_from(size_t needs)
+{
+    return [needs](size_t candidate, off_t) { return candidate >= needs; };
+}
+
+constexpr off_t Plenty = 1024 * 1024;   // long enough to place every rung
+
+}  // namespace
+
+TEST(LadderDirectBlock, Takes_The_Smallest_Rung_That_Works)
+{
+    const auto decided = ladder_direct_block(Plenty, 4096, accepts_from(512));
+
+    EXPECT_EQ(decided.block, 512u);
+    EXPECT_TRUE(decided.measured);
+}
+
+TEST(LadderDirectBlock, Climbs_Until_A_Rung_Is_Accepted)
+{
+    const auto decided = ladder_direct_block(Plenty, 4096, accepts_from(4096));
+
+    EXPECT_EQ(decided.block, 4096u);
+    EXPECT_TRUE(decided.measured);
+}
+
+// The assumed block must never be one the ladder already DISPROVED.
+//
+// 20 KiB places 512 and 4096 - both refused - but not 16384, which is what this mount needs. Taking
+// the page size alone would answer 4096 here, a rung that was just measured as refused, and every
+// read would then fail with EINVAL.
+TEST(LadderDirectBlock, Never_Assumes_A_Rung_That_Was_Refused)
+{
+    const auto decided = ladder_direct_block(20 * 1024, 4096, accepts_from(16384));
+
+    EXPECT_EQ(decided.block, 16384u) << "the smallest rung the file was too short to rule out";
+    EXPECT_FALSE(decided.measured);
+}
+
+// Nothing could be placed, so the mount was never asked - whatever it would have said.
+TEST(LadderDirectBlock, A_File_Too_Short_For_Any_Rung_Is_Never_Measured)
+{
+    const auto decided = ladder_direct_block(100, 4096, accepts_from(512));
+
+    EXPECT_EQ(decided.block, 4096u) << "the page size is the floor under the smallest rung";
+    EXPECT_FALSE(decided.measured);
+    EXPECT_NE(decided.block, 512u) << "the first rung passed on a file too short to test it";
+}
+
+// A MOUNT THAT CHECKS ONLY THE FILE OFFSET, which is the mount that produced this bug.
+//
+// Offset 0 is a multiple of every block, so a probe there asks such a mount nothing: it accepts the
+// 512 rung although it needs 4096, and every real read afterwards fails. Probing each rung at its own
+// offset is what makes it answer, because 512 is not a multiple of 4096.
+//
+// Only a fake can say this. tmpfs is the one mount these tests can reach, and it accepts every direct
+// read - buffer, length and offset alike - so it cannot refuse a rung for any reason.
+TEST(LadderDirectBlock, A_Rung_Is_Probed_At_Its_Own_Offset)
+{
+    std::vector<off_t> probed;
+
+    const auto decided = ladder_direct_block(Plenty, 4096,
+                                             [&probed](size_t, off_t offset)
+                                             {
+                                                 probed.push_back(offset);
+                                                 return offset % 4096 == 0;
+                                             });
+
+    EXPECT_EQ(decided.block, 4096u) << "the 512 rung was probed at an offset this mount accepts";
+    EXPECT_TRUE(decided.measured);
+
+    // EVERY rung, not just the first. A probe that corrected only the smallest one would still
+    // report 4096 for a mount that needs 16384 - the same bug, one rung up.
+    EXPECT_EQ(probed, (std::vector<off_t>{ 512, 4096 }))
+        << "a rung was probed somewhere other than its own offset";
+}
+
+// The offset above is also what the file must be long enough to hold, so the two rules are one.
+//
+// 768 bytes places a 512-byte read at offset 0, and does NOT place one at offset 512. If the ladder
+// ever probed at 0 again, this file would be long enough and the rung would be tried.
+TEST(LadderDirectBlock, A_File_Long_Enough_Only_At_Offset_Zero_Leaves_The_Rung_Untested)
+{
+    bool asked = false;
+
+    const auto decided = ladder_direct_block(768, 4096,
+                                             [&asked](size_t, off_t)
+                                             {
+                                                 asked = true;
+                                                 return true;
+                                             });
+
+    EXPECT_FALSE(asked) << "a rung was probed in a file too short to place it at its own offset";
+    EXPECT_FALSE(decided.measured);
+    EXPECT_EQ(decided.block, 4096u) << "the page size is the floor under the smallest rung";
+}
+
+// THE EXACT FIT, which is the edge of the rule above. 1024 bytes holds a 512-byte read at offset 512
+// with nothing to spare, so the rung must be tried rather than skipped.
+TEST(LadderDirectBlock, A_File_That_Fits_A_Rung_Exactly_Is_Probed)
+{
+    const auto decided = ladder_direct_block(1024, 4096, accepts_from(512));
+
+    EXPECT_EQ(decided.block, 512u);
+    EXPECT_TRUE(decided.measured) << "a file long enough for the rung was treated as too short";
+}
+
+// Zero is an ANSWER, not a failure: the mount accepts an O_DIRECT open and serves no block we use.
+// direct_block remembers it, so it must come only from rungs that were actually tried.
+TEST(LadderDirectBlock, Every_Rung_Refused_Is_A_Measured_Zero)
+{
+    const auto decided = ladder_direct_block(Plenty, 4096, accepts_from(MaxProbeBlock * 2));
+
+    EXPECT_EQ(decided.block, 0u);
+    EXPECT_TRUE(decided.measured);
 }
 
 // The two answers come from ONE probe, so they cannot disagree: a mount with no usable block serves
