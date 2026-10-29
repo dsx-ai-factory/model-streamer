@@ -6,6 +6,7 @@ import tempfile
 import shutil
 import os
 from unittest.mock import patch
+from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
@@ -301,7 +302,7 @@ class TestRingConcurrency(unittest.TestCase):
 
                 with self.assertRaises(ValueError) as caught:
                     fs.stream_files(request)
-                self.assertIn("outstanding", str(caught.exception))
+                self.assertIn("still live", str(caught.exception))
 
                 # the rejected call must leave the streamer exactly as it was, or the guard would turn
                 # a recoverable mistake into the corruption it exists to prevent
@@ -311,6 +312,45 @@ class TestRingConcurrency(unittest.TestCase):
 
         self.fail(f"no attempt in {self.SETUP_ATTEMPTS} left a response outstanding after one next() "
                   f"- one next() is now always draining the whole submission")
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_streaming_again_is_rejected_with_nothing_outstanding(self):
+        """The guard cannot be keyed on outstanding responses. Ordered yielding can take every
+        response from the library before it hands over the first range, and the generator is then
+        parked with nothing outstanding and a whole stream still owed to the caller. Accepting a new
+        stream there frees the ring under that generator.
+
+        The completion order is the library's, so it is imposed here: responses are collected and
+        then served newest submission first, which puts the range that unblocks the yield last.
+        Keying the guard on outstanding alone fails this."""
+        path, _ = self.write_ranges("parked.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        collected = []
+
+        def reversed_response(streamer, *args, **kwargs):
+            if not collected:
+                for _ in range(8):
+                    collected.append(real_response(streamer, *args, **kwargs))
+                collected.sort(key=lambda response: response[1], reverse=True)
+            return collected.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", reversed_response):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+
+                self.assertEqual(fs.outstanding, 0, "the setup did not park the whole stream")
+                self.assertEqual(len(fs.live_requests), 8, "nothing is owed - nothing to guard")
+
+                with self.assertRaises(ValueError) as caught:
+                    fs.stream_files(request)
+                self.assertIn("still live", str(caught.exception))
+
+                chunks.close()
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
