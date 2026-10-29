@@ -19,6 +19,10 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 
 RANGE_SIZE = 8
 
+# What a real ring records its event on. These tests run on the host, where there is no stream, and
+# FakeCudaEvent.record takes it and ignores it.
+FAKE_STREAM = lambda device: f"stream-of-{device}"
+
 
 class FakeCudaEvent:
     """A torch CUDA event is unavailable on a host-only runner, so these tests build a "device" ring
@@ -27,9 +31,12 @@ class FakeCudaEvent:
     fires."""
 
     recorded = 0
+    # The stream each record() was given, so a test can show WHICH device was timed.
+    streams: list = []
 
-    def record(self) -> None:
+    def record(self, stream=None) -> None:
         FakeCudaEvent.recorded += 1
+        FakeCudaEvent.streams.append(stream)
 
     def query(self) -> bool:
         return True
@@ -47,7 +54,7 @@ class SlowCudaEvent:
     def __init__(self) -> None:
         self._done = False
 
-    def record(self) -> None:
+    def record(self, stream=None) -> None:
         pass
 
     def query(self) -> bool:
@@ -65,6 +72,7 @@ class TestDeviceRingPath(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         FakeCudaEvent.recorded = 0
+        FakeCudaEvent.streams = []
         self.released = []
 
     def tearDown(self):
@@ -108,13 +116,26 @@ class TestDeviceRingPath(unittest.TestCase):
         return got, expected
 
     def test_a_device_ring_yields_the_right_bytes(self):
-        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent))
+        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
         self.assertEqual({i: text for i, text, _ in got}, expected)
+
+    def test_the_event_is_recorded_on_the_ring_s_own_device(self):
+        """WHICH DEVICE THE EVENT TIMES. A clone runs on the device of the tensor it copies, while an
+        event given no stream records on whichever device is current - and it would then clear at
+        once instead of when the clones finish, freeing the slot while they still read it.
+
+        The ring binds its device when it is built, so the stream here is the one device_slots was
+        given. A bare record() records None and fails this."""
+        self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
+
+        self.assertGreater(FakeCudaEvent.recorded, 0, "no event was recorded at all")
+        self.assertEqual(set(FakeCudaEvent.streams), {FAKE_STREAM("cpu")},
+                         "an event was recorded on a stream that is not the ring's device")
 
     def test_the_yielded_tensor_is_a_clone_not_a_view_into_the_slot(self):
         """The point of the clone. Overwriting every slot after the stream must not change a tensor
         the caller is still holding - with a view it would."""
-        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent))
+        got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
         kept = {i: buffer.clone() for i, _, buffer in got}     # what the caller saw, snapshotted
 
         for slot in self.ring._pool._slots:
@@ -126,7 +147,7 @@ class TestDeviceRingPath(unittest.TestCase):
                             f"range {i} changed when its slot was overwritten - it was a view")
 
     def test_every_device_release_carries_an_event(self):
-        self.stream(12, device_slots("cpu", FakeCudaEvent))
+        self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
         self.assertGreater(len(self.released), 0, "no slot was released at all")
         self.assertTrue(all(isinstance(e, FakeCudaEvent) for e in self.released))
         self.assertEqual(FakeCudaEvent.recorded, len(self.released),
@@ -142,7 +163,7 @@ class TestDeviceRingPath(unittest.TestCase):
         last live request into a pending state submits nothing, the response loop ends because
         live_requests is empty, and the stream finishes short - no hang, just missing data."""
         SlowCudaEvent.synchronized = 0
-        got, expected = self.stream(12, device_slots("cpu", SlowCudaEvent))
+        got, expected = self.stream(12, device_slots("cpu", SlowCudaEvent, FAKE_STREAM))
         self.assertEqual({i: text for i, text, _ in got}, expected,
                          "the stream ended short - the blocking fallback was not taken")
         self.assertGreater(SlowCudaEvent.synchronized, 0, "no slot was ever waited on")
@@ -156,7 +177,7 @@ class TestDeviceRingPath(unittest.TestCase):
 
         def build_ring(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 4, 2, chunks, owned=False, slots=device_slots("cpu", SlowCudaEvent)
+                RANGE_SIZE * 4, 2, chunks, owned=False, slots=device_slots("cpu", SlowCudaEvent, FAKE_STREAM)
             )
 
         real_response = file_streamer_module.runai_response
@@ -184,7 +205,7 @@ class TestDeviceRingPath(unittest.TestCase):
 
         def build_ring(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 2, 2, chunks, owned=False, slots=device_slots("cpu", FakeCudaEvent)
+                RANGE_SIZE * 2, 2, chunks, owned=False, slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM)
             )
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring):
