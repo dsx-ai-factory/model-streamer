@@ -9,6 +9,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <vector>
 #include <dlfcn.h>
 
@@ -276,6 +277,129 @@ TEST_F(SimpleFileCacheTest, PathTraversalRejected)
     // "..." (not traversal) should NOT be rejected — will fail with open error instead
     EXPECT_EQ(cache_read("a", "c", "...", buf, 0, 10, error_buf, sizeof(error_buf)), -1);
     EXPECT_EQ(std::string(error_buf).find("path traversal"), std::string::npos);
+}
+
+class CacheProviderEnvTest : public SimpleFileCacheTest
+{
+protected:
+    std::optional<std::string> previous_lib_;
+    std::optional<std::string> previous_enabled_;
+
+    void SetUp() override
+    {
+        SimpleFileCacheTest::SetUp();
+        if (const char* value = getenv(RUNAI_AZURE_CACHE_LIB_ENV))
+        {
+            previous_lib_ = value;
+        }
+        if (const char* value = getenv(RUNAI_AZURE_CACHE_ENABLED_ENV))
+        {
+            previous_enabled_ = value;
+        }
+        unsetenv(RUNAI_AZURE_CACHE_LIB_ENV);
+        unsetenv(RUNAI_AZURE_CACHE_ENABLED_ENV);
+    }
+
+    void TearDown() override
+    {
+        restore_env(RUNAI_AZURE_CACHE_LIB_ENV, previous_lib_);
+        restore_env(RUNAI_AZURE_CACHE_ENABLED_ENV, previous_enabled_);
+        SimpleFileCacheTest::TearDown();
+    }
+
+    static void restore_env(const char* name, const std::optional<std::string>& value)
+    {
+        if (value)
+        {
+            setenv(name, value->c_str(), 1);
+        }
+        else
+        {
+            unsetenv(name);
+        }
+    }
+
+    static constexpr const char* default_path =
+        "/opt/cache-client/usr/local/lib/python3.10/dist-packages/py_dacs_client/libStorageDirect.so";
+};
+
+TEST_F(CacheProviderEnvTest, ExplicitLibraryLoads)
+{
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, so_path_.c_str(), 1);
+    setenv(RUNAI_AZURE_CACHE_ENABLED_ENV, "1", 1);
+    EXPECT_TRUE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, MissingPathIsIgnored)
+{
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, (cache_dir_ / "missing.so").c_str(), 1);
+    if (AzCacheProviderLoader::from_env()->is_enabled())
+    {
+        GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
+    }
+    EXPECT_FALSE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, DirectoryIsIgnored)
+{
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, cache_dir_.c_str(), 1);
+    if (AzCacheProviderLoader::from_env()->is_enabled())
+    {
+        GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
+    }
+    EXPECT_FALSE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, RequiredModeStillFailsWhenPathIsMissing)
+{
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, (cache_dir_ / "missing.so").c_str(), 1);
+    if (AzCacheProviderLoader::from_env()->is_enabled())
+    {
+        GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
+    }
+    setenv(RUNAI_AZURE_CACHE_ENABLED_ENV, "1", 1);
+    EXPECT_THROW(AzCacheProviderLoader::from_env(), std::exception);
+}
+
+TEST_F(CacheProviderEnvTest, DisabledModeDoesNotLoadLibrary)
+{
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, so_path_.c_str(), 1);
+    setenv(RUNAI_AZURE_CACHE_ENABLED_ENV, "0", 1);
+    EXPECT_FALSE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, MissingDefaultIsIgnored)
+{
+    if (fs::exists(default_path))
+    {
+        GTEST_SKIP() << "Default library path is present";
+    }
+    if (AzCacheProviderLoader::from_env()->is_enabled())
+    {
+        GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
+    }
+    EXPECT_FALSE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, DefaultLibraryLoadsWhenPresent)
+{
+    if (!fs::is_regular_file(default_path))
+    {
+        GTEST_SKIP() << "Default library path is absent";
+    }
+    setenv(RUNAI_AZURE_CACHE_ENABLED_ENV, "1", 1);
+    EXPECT_TRUE(AzCacheProviderLoader::from_env()->is_enabled());
+}
+
+TEST_F(CacheProviderEnvTest, EmptyValueUsesDefaultWhenPresent)
+{
+    if (!fs::is_regular_file(default_path))
+    {
+        GTEST_SKIP() << "Default library path is absent";
+    }
+    setenv(RUNAI_AZURE_CACHE_LIB_ENV, "", 1);
+    setenv(RUNAI_AZURE_CACHE_ENABLED_ENV, "1", 1);
+    EXPECT_TRUE(AzCacheProviderLoader::from_env()->is_enabled());
 }
 
 // --- Shared handle tests ---

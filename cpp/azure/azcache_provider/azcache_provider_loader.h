@@ -72,6 +72,8 @@ public:
      * Create a loader from environment variables:
      *   RUNAI_STREAMER_EXPERIMENTAL_AZURE_CACHE_ENABLED: "0", "1", or "auto" (default)
      *   RUNAI_STREAMER_EXPERIMENTAL_AZURE_CACHE_LIB: explicit .so path override
+     *     Default: /opt/cache-client/usr/local/lib/python3.10/dist-packages/py_dacs_client/libStorageDirect.so
+     *     Missing paths and non-regular files are ignored; try package auto-discovery instead.
      *
      * @throws common::Exception if mode=Required and library cannot be loaded.
      */

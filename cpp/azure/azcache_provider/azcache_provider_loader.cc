@@ -26,8 +26,10 @@ namespace
 {
 
 // Known cache provider package/library names for auto-discovery
-constexpr const char* CACHE_PROVIDER_PACKAGE = "py_tachyon_client";
+constexpr const char* CACHE_PROVIDER_PACKAGE = "py_dacs_client";
 constexpr const char* CACHE_PROVIDER_LIB = "libStorageDirect.so";
+constexpr const char* DEFAULT_CACHE_PROVIDER_PATH =
+    "/opt/cache-client/usr/local/lib/python3.10/dist-packages/py_dacs_client/libStorageDirect.so";
 
 /**
  * Use dladdr on a symbol known to live in libstreamerazure.so to locate
@@ -230,7 +232,8 @@ std::shared_ptr<AzCacheProviderLoader> AzCacheProviderLoader::from_env()
         }
     }
 
-    // Parse explicit library path from RUNAI_STREAMER_EXPERIMENTAL_AZURE_CACHE_LIB
+    // Use the ImageVolume path unless an explicit library path is configured.
+    std::string candidate_path = DEFAULT_CACHE_PROVIDER_PATH;
     std::string lib_path;
     if (utils::try_getenv<std::string>(RUNAI_AZURE_CACHE_LIB_ENV, lib_path))
     {
@@ -241,7 +244,21 @@ std::shared_ptr<AzCacheProviderLoader> AzCacheProviderLoader::from_env()
         }
         else
         {
-            config.lib_path = lib_path;
+            candidate_path = lib_path;
+        }
+    }
+
+    if (config.mode != CacheMode::Disabled)
+    {
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(candidate_path, ec))
+        {
+            config.lib_path = candidate_path;
+        }
+        else
+        {
+            LOG(DEBUG) << "AzCacheProvider: ignoring cache library path " << candidate_path
+                       << " — not a regular file" << (ec ? ": " + ec.message() : "");
         }
     }
 
