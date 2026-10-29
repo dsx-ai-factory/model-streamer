@@ -64,6 +64,14 @@ def runai_set_credentials(
             f"Could not set credentials in libstreamer due to: {runai_response_str(error_code)}"
         )
 
+def runai_set_process_group_size(streamer: t_streamer, process_group_size: int) -> None:
+    """The number of streamer processes on this node, between which the node-wide queue depth is divided."""
+    error_code = dll.fn_runai_set_process_group_size(streamer, process_group_size)
+    if error_code != SUCCESS_ERROR_CODE:
+        raise ValueError(
+            f"Could not set process group size in libstreamer due to: {runai_response_str(error_code)}"
+        )
+
 def runai_start() -> t_streamer:
     streamer = t_streamer(0)
     error_code = dll.fn_runai_start(ctypes.byref(streamer))

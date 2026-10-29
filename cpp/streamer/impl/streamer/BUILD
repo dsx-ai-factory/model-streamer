@@ -27,6 +27,7 @@ runai_cc_auto_library(
         "//common/responder",
         "//utils/threadpool",
         "//utils/fdlimit",
+        "//utils/env",
     ],
 )
 

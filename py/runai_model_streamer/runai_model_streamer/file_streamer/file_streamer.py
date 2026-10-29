@@ -8,6 +8,7 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_start,
     runai_end,
     runai_set_credentials,
+    runai_set_process_group_size,
     runai_request,
     runai_response,
     runai_response_str,
@@ -129,6 +130,10 @@ class FileStreamer:
                 runai_set_credentials(streamer, self.s3_credentials)
                 self._credentialed_streamer = streamer
         return path
+
+    def set_process_group_size(self, process_group_size: int) -> None:
+        if self.streamer:
+            runai_set_process_group_size(self.streamer, process_group_size)
 
     def _has_credentials(self) -> bool:
         # True when the resolved credentials carry at least one value (else there is nothing to set)

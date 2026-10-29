@@ -213,6 +213,30 @@ int runai_file_streamer_set_fs_strategy(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
+int runai_file_streamer_set_process_group_size(
+    void * streamer,
+    unsigned process_group_size)
+{
+    try
+    {
+        auto s = static_cast<impl::Streamer *>(streamer);
+        if (s == nullptr)
+        {
+            return static_cast<int>(common::ResponseCode::InvalidParameterError);
+        }
+
+        return static_cast<int>(s->set_process_group_size(process_group_size));
+    }
+    catch (const common::Exception & e)
+    {
+        return static_cast<int>(e.error());
+    }
+    catch(...)
+    {
+    }
+    return static_cast<int>(common::ResponseCode::UnknownError);
+}
+
 int runai_file_streamer_request(
     void * streamer,
     RunaiFileStreamerSubmissionId * out_submission_id,

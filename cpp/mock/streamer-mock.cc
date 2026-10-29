@@ -217,6 +217,13 @@ extern "C" int runai_file_streamer_set_fs_strategy(
     return 0;
 }
 
+extern "C" int runai_file_streamer_set_process_group_size(
+    void * streamer,
+    unsigned process_group_size)
+{
+    return 0;
+}
+
 extern "C" int runai_file_streamer_request(
     void * streamer,
     RunaiFileStreamerSubmissionId * out_submission_id,

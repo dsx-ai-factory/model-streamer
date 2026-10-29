@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -91,6 +92,12 @@ struct Streamer
 
     // Valid only after a FILESYSTEM submission: an object-storage one never resolves a strategy.
     posix_io::Strategy fs_strategy() const;
+
+    // How many streamer processes share this node. The node-wide queue depth and the object-storage
+    // client threads are divided by it. 1 until set; call before the first submission, since an engine
+    // keeps the count it was built with. RUNAI_STREAMER_PROCESS_GROUP_SIZE, when set, wins over the call.
+    common::ResponseCode set_process_group_size(unsigned process_group_size);
+    unsigned process_group_size() const;
 
     // Whether any workload was actually routed to the async pool.
     bool async_pool_used() const;
@@ -187,6 +194,10 @@ struct Streamer
         std::optional<common::s3::Credentials> _credentials;
     };
     std::shared_ptr<CredentialsState> _credentials_state = std::make_shared<CredentialsState>();
+
+    // Shared with the async worker factory, which reads it when an engine is built.
+    std::shared_ptr<std::atomic<unsigned>> _process_group_size;
+    const bool _process_group_size_from_env;
 
     // Declared BEFORE _pools, and that order is load-bearing: the async pool's factory is built from
     // worker_factory() while _pools is constructed.
