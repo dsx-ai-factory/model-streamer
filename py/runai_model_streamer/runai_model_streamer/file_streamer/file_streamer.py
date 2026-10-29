@@ -88,14 +88,20 @@ def alloc_device_slot(slot_size: int, device: str) -> Slot:
     return Slot(buffer, raw.data_ptr() + shift)
 
 
-def device_slots(device: str, new_event: Callable[[], Any]) -> SlotMemory:
+def device_slots(device: str, new_event: Callable[[], Any],
+                 current_stream: Callable[[str], Any]) -> SlotMemory:
     """A ring made of device memory. direct_io=False because nothing reads straight into a device:
     the library fills these by copying out of its own host staging.
 
-    new_event is passed in rather than looked up, so this names no vendor and a test can supply its
-    own. Production takes it from DeviceSupport."""
+    `device` is BOUND into both the allocator and the stream, so the slots and the event that frees
+    them cannot name different devices. Caller resolves it first - "cuda" with no ordinal answers
+    differently each time it is asked.
+
+    new_event and current_stream are passed in rather than looked up, so this names no vendor and a
+    test can supply its own. Production takes both from DeviceSupport."""
     return SlotMemory(partial(alloc_device_slot, device=device), direct_io=False,
-                      label=torch.device(device).type.upper(), new_event=new_event)
+                      label=torch.device(device).type.upper(), new_event=new_event,
+                      current_stream=partial(current_stream, device))
 
 
 def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
@@ -321,16 +327,18 @@ class FileStreamer:
             #
             # owned=False always, and memory_limit unread - see this method's docstring. A device
             # slot is reused, and the pool refuses an owned slot that is released with an event.
+            # Resolved ONCE, before anything uses it. "cuda" with no ordinal means the CURRENT
+            # device, which is not always 0 and can be asked again later with a different answer -
+            # so the slots, the stream their event is recorded on, and the index the library is told
+            # all take this one value rather than re-resolving the caller's spelling.
+            resolved = torch.empty(0, device=self.device_str).device
+
             self.requests_iterator = FilesRequestsIteratorWithBuffer(
                 buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
-                slots=device_slots(self.device_str, support.new_event),
+                slots=device_slots(str(resolved), support.new_event, support.current_stream),
             )
-            # The index torch will ALLOCATE on, not the one the caller spelled: "cuda" with no
-            # ordinal means the CURRENT device, which is not always 0, and the library has to be told
-            # where the slots it writes into actually live. A vendor with no ordinals at all reports
-            # None, and 0 is then the only device there is.
-            ordinal = torch.empty(0, device=self.device_str).device.index
-            self._device = (support.api_type, 0 if ordinal is None else ordinal)
+            # A vendor with no ordinals at all reports None, and 0 is then the only device there is.
+            self._device = (support.api_type, 0 if resolved.index is None else resolved.index)
         else:
             if support is not None:
                 # The BUDGET, not free memory: it is the number that refused the ring, and a limit
@@ -450,6 +458,7 @@ class FileStreamer:
             # - get_chunks() before it is an empty generator, not an error.
             new_event = (self.requests_iterator.slots.new_event if self.live_requests else None)
             device_ring = new_event is not None
+            current_stream = (self.requests_iterator.slots.current_stream if device_ring else None)
 
             while self.live_requests:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
@@ -538,7 +547,11 @@ class FileStreamer:
                         ready_event = None
                         if device_ring:
                             ready_event = new_event()
-                            ready_event.record()
+                            # ON THE RING'S OWN DEVICE, which the ring bound when it was built. An
+                            # event given no stream records on whichever device is current instead,
+                            # and would clear at once rather than when the clones finish - freeing
+                            # the slot while they are still reading it.
+                            ready_event.record(current_stream())
                         # The ring is gone once the context has exited, and a generator can still be
                         # resumed past that point. Nothing to hand the slot back to, and nothing will
                         # write into it again - runai_end joined the workers before it was freed.

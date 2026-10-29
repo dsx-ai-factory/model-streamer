@@ -186,12 +186,25 @@ class SlotMemory(NamedTuple):
     # to build one. It comes from DeviceSupport, which is the one table that knows per-vendor calls.
     new_event: Optional[Callable[[], Any]]
 
+    # The stream current on THIS RING'S DEVICE when the submission retired, which is what its event
+    # is recorded on. None when the ring needs no event.
+    #
+    # Carried BECAUSE AN EVENT DEFAULTS TO THE CURRENT DEVICE. A clone runs on the device of the
+    # tensor it copies, while an event given no stream records on whichever device is current - and
+    # a device named "cuda" with no ordinal is resolved afresh each time it is asked. Binding the
+    # device here settles it once, so the slots, the stream and the index the library is told cannot
+    # name different devices.
+    #
+    # NO DEFAULT, paired with new_event: a ring that needs an event and has no stream would raise
+    # mid-generator, after its I/O is already in flight, rather than where it was built.
+    current_stream: Optional[Callable[[], Any]]
+
     @property
     def reuse_needs_event(self) -> bool:
         return self.new_event is not None
 
 
-HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None)
+HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None, current_stream=None)
 
 
 class FilesRequestsIteratorWithBuffer:

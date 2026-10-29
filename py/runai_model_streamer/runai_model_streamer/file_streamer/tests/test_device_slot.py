@@ -22,6 +22,8 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 # A device ring needs SOME event factory, and these tests never release a slot with an event, so none
 # is ever built. Named rather than written inline, so a reader does not have to prove that.
 UNUSED_EVENT = object
+# The same, for the stream an event would be recorded on.
+UNUSED_STREAM = object
 
 
 class TestAllocDeviceSlot(unittest.TestCase):
@@ -72,7 +74,7 @@ class TestSlotMemory(unittest.TestCase):
         )
 
     def test_a_device_ring_is_made_of_device_memory_and_reserves_no_pads(self):
-        ring = self.ring(slots=device_slots("cpu", UNUSED_EVENT))
+        ring = self.ring(slots=device_slots("cpu", UNUSED_EVENT, UNUSED_STREAM))
         # Pads exist for direct reads, which never land on these slots.
         self.assertEqual(ring._slot_size, 4096)
         for slot in ring._pool._slots:
@@ -87,7 +89,7 @@ class TestSlotMemory(unittest.TestCase):
     def test_one_fact_drives_both_the_pads_and_the_placement(self):
         """direct_io is why pads are reserved AND why ranges are placed congruently, so a ring can
         never reserve pad room it then declines to use, or vice versa."""
-        device = self.ring(slots=device_slots("cpu", UNUSED_EVENT))
+        device = self.ring(slots=device_slots("cpu", UNUSED_EVENT, UNUSED_STREAM))
         host = self.ring()
         self.assertFalse(device._slot_memory.direct_io)
         self.assertTrue(host._slot_memory.direct_io)
@@ -95,7 +97,7 @@ class TestSlotMemory(unittest.TestCase):
     def test_a_device_ring_refuses_a_release_without_an_event(self):
         """The clone out of a device slot is only enqueued, so releasing it as free would let the
         next write land in memory the clone is still reading."""
-        ring = self.ring(slots=device_slots("cpu", UNUSED_EVENT))
+        ring = self.ring(slots=device_slots("cpu", UNUSED_EVENT, UNUSED_STREAM))
         request = ring.next_request()
         with self.assertRaises(ValueError) as raised:
             ring.release(request)
@@ -109,8 +111,8 @@ class TestSlotMemory(unittest.TestCase):
     def test_the_debug_line_names_the_memory_by_device_type(self):
         """Not a fixed "GPU": the label follows the device, so a second vendor reads correctly in the
         ring's log line without anyone editing it. torch.device parses the string without a device."""
-        self.assertEqual(device_slots("cuda:0", UNUSED_EVENT).label, "CUDA")
-        self.assertEqual(device_slots("cpu", UNUSED_EVENT).label, "CPU")
+        self.assertEqual(device_slots("cuda:0", UNUSED_EVENT, UNUSED_STREAM).label, "CUDA")
+        self.assertEqual(device_slots("cpu", UNUSED_EVENT, UNUSED_STREAM).label, "CPU")
         self.assertEqual(HOST_SLOTS.label, "CPU")
 
 
@@ -147,7 +149,7 @@ class TestSlotGoesBackWhenRangesDoNotFit(unittest.TestCase):
         self.assertEqual(len(ring._pool._free), 2, "the slot was not handed back")
 
     def test_a_device_ring_keeps_its_slot_and_says_what_went_wrong(self):
-        self.assert_slot_comes_back(self.ring(slots=device_slots("cpu", UNUSED_EVENT)))
+        self.assert_slot_comes_back(self.ring(slots=device_slots("cpu", UNUSED_EVENT, UNUSED_STREAM)))
 
     def test_a_host_ring_does_the_same(self):
         self.assert_slot_comes_back(self.ring())
