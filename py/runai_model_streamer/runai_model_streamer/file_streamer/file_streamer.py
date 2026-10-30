@@ -476,6 +476,11 @@ class FileStreamer:
         be refilled while they still read it. Covering that would mean an event per stream per slot,
         which nothing asks for: a rank loads a model on one stream.
 
+        ONE STREAM covers stream_files too, not only the iteration. The slots are allocated where
+        stream_files runs, and dropped without a wait when the ring goes. Torch gives a freed block
+        back to the pool of the stream it was allocated on, so clones still running on another stream
+        can find their slot handed to the next allocation there.
+
         The DEVICE needs no such care. It is resolved once in stream_files and bound into the ring."""
         if not self.streamer:
             raise ValueError("Streamer not initialized")
