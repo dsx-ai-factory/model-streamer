@@ -228,9 +228,10 @@ class DistributedStreamer:
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")
                 self.is_distributed = False
-                # Created only to ask the question. Released now, so this rank does not hold a NCCL
-                # communicator it will not use, and has no group left to barrier on at exit.
-                self.distributed_streamer.release_group()
+                # THE GROUP IS KEPT, although this rank will not stream through it. Creating one needs
+                # every rank of the JOB, while this decision is taken per node - so a node that
+                # released would ask for a new group alone on the next read, and block there until the
+                # timeout. __exit__ releases it, where every rank does so together.
 
     def stream_files(
             self,
