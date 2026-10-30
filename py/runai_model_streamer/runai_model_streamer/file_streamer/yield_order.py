@@ -76,6 +76,14 @@ class YieldOrder:
             self._next += 1
         return ready
 
+    def discard_parked(self) -> None:
+        """Drop what is still parked, so a stream that ended early holds no ring slots.
+
+        A parked payload is a VIEW into a slot, and a view outlives the pool it came from: dropping
+        the ring frees nothing a parked view still points at. Only safe once the library has stopped
+        writing into those slots, which is why the caller does this after the drain."""
+        self._parked.clear()
+
 
 class UnorderedYield:
     """Hands every response back as it arrives, which is what the streamer did before ordering.
@@ -90,6 +98,9 @@ class UnorderedYield:
 
     def arrived(self, file_id: int, range_index: int, payload: Any) -> List[Any]:
         return [payload]
+
+    def discard_parked(self) -> None:
+        """Nothing is ever parked here, so there is nothing to drop."""
 
 
 RUNAI_STREAMER_ORDERED_YIELD_ENV_VAR_NAME = "RUNAI_STREAMER_ORDERED_YIELD"

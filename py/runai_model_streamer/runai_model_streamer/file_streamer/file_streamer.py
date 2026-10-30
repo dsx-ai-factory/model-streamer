@@ -14,7 +14,7 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_list_files,
 )
 from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CPU
-from runai_model_streamer.file_streamer.yield_order import yield_order_for
+from runai_model_streamer.file_streamer.yield_order import UnorderedYield, yield_order_for
 from runai_model_streamer.file_streamer.device_support import device_support
 from runai_model_streamer.torch_device.torch_device import device_free_memory
 from runai_model_streamer.file_streamer.requests_iterator import (
@@ -157,6 +157,10 @@ class FileStreamer:
         self.outstanding = 0          # responses still owed across ALL live submissions
         # Here as well as in stream_files, so get_chunks on a streamer that never streamed can report
         # nothing rather than raise on its way out.
+        #
+        # The order comes from a stream's file list, so there is none yet. Unordered parks nothing,
+        # which is what the drain on the way out asks it to drop.
+        self.yield_order = UnorderedYield([])
         # The ring, for as long as one is in use. None outside a stream: __exit__ frees it, so a
         # device ring does not hold device memory after the load it was built for.
         self.requests_iterator: Optional[FilesRequestsIteratorWithBuffer] = None
@@ -191,6 +195,10 @@ class FileStreamer:
         # than kept because a device ring holds up to its whole budget in device memory, and would
         # hold it for the life of this object, competing with the model it has just loaded.
         self.requests_iterator = None
+        # And whatever is parked, which points INTO those slots and would keep them alive after the
+        # ring is dropped. The drain does this too, but it runs when the generator is resumed - a
+        # generator still held and still paused here has not reached it.
+        self.yield_order.discard_parked()
 
     def handle_object_store(self, path: str, streamer, credentials: Optional[S3Credentials] = None) -> str:
         # Two independent concerns, deliberately gated separately so they can't desync:
@@ -606,4 +614,8 @@ class FileStreamer:
         self.live_requests = {}
         self.ranges_not_yielded = {}
         self.reported_done = set()
+        # A parked payload is a VIEW into a ring slot, so these are not only counters: a stream that
+        # ended with ranges still parked would hold those slots after the ring itself is dropped.
+        # Here, because both paths above end with the library no longer writing into them.
+        self.yield_order.discard_parked()
 
