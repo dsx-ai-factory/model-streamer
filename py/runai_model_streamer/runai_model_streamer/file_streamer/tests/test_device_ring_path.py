@@ -19,9 +19,28 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 
 RANGE_SIZE = 8
 
-# What a real ring records its event on. These tests run on the host, where there is no stream, and
-# FakeCudaEvent.record takes it and ignores it.
-FAKE_STREAM = lambda device: f"stream-of-{device}"
+
+class FakeStream:
+    """What a real ring records its event on, and what __exit__ waits for. A torch CUDA stream is
+    unavailable on a host-only runner, so this stands in for one.
+
+    ONE OBJECT PER DEVICE, so a test can say which stream an event was recorded on."""
+
+    _by_device: dict = {}
+    synchronized = 0
+
+    def __init__(self, device) -> None:
+        self.device = device
+
+    def synchronize(self) -> None:
+        FakeStream.synchronized += 1
+
+    @classmethod
+    def of(cls, device) -> "FakeStream":
+        return cls._by_device.setdefault(device, cls(device))
+
+
+FAKE_STREAM = FakeStream.of
 
 
 class FakeCudaEvent:
@@ -213,6 +232,47 @@ class TestDeviceRingPath(unittest.TestCase):
                 with FileStreamer() as fs:
                     fs.stream_files(chunks)
                     list(fs.get_chunks())
+
+    def test_leaving_the_context_waits_for_the_copies_before_dropping_the_ring(self):
+        """A slot is freed into the pool of the stream that ALLOCATED it, which is the one
+        stream_files ran on. A caller that copied out of the ring on another stream would otherwise
+        have a slot handed to the next allocation there while those copies still read it.
+
+        The ORDER is what is asserted, not only the wait: a wait after the ring is dropped is a wait
+        for memory that is already back in the pool."""
+        path, _ = self.write_ranges(12)
+        chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * 12)]
+        held_streamer = []
+        ring_at_wait = []
+        waited_on = []
+
+        def build_ring(*args, **kwargs):
+            return FilesRequestsIteratorWithBuffer(
+                RANGE_SIZE * 4, 2, chunks, owned=False,
+                slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
+            )
+
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
+                patch.object(FakeStream, "synchronize",
+                             lambda stream: (ring_at_wait.append(held_streamer[0].requests_iterator),
+                                             waited_on.append(stream))):
+            with FileStreamer() as fs:
+                held_streamer.append(fs)
+                fs.stream_files(chunks)
+                list(fs.get_chunks())
+
+        self.assertEqual(len(ring_at_wait), 1,
+                         "__exit__ did not wait on the stream the copies were enqueued on")
+        self.assertIsNotNone(ring_at_wait[0], "the ring was already dropped when the wait ran")
+        self.assertIs(waited_on[0], FAKE_STREAM("cpu"),
+                      "the wait was not on the stream the ring recorded its events on")
+
+    def test_a_host_ring_does_not_wait_on_any_stream(self):
+        """Nothing is enqueued out of a host slot: the copy out of it finishes before tensor.to()
+        returns, so there is no stream to wait for and none is recorded."""
+        FakeStream.synchronized = 0
+        self.stream(12, HOST_SLOTS)
+        self.assertEqual(FakeStream.synchronized, 0, "a host ring waited on a stream")
 
     def test_a_host_ring_releases_without_an_event(self):
         got, expected = self.stream(12, HOST_SLOTS)

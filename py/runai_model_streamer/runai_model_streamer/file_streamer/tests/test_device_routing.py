@@ -13,7 +13,7 @@ from runai_model_streamer.file_streamer import file_streamer as file_streamer_mo
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import FileChunks
-from runai_model_streamer.file_streamer.tests.test_device_ring_path import FakeCudaEvent
+from runai_model_streamer.file_streamer.tests.test_device_ring_path import FAKE_STREAM, FakeCudaEvent
 from runai_model_streamer.libstreamer import (
     RUNAI_FILE_STREAMER_DEVICE_CPU,
     RUNAI_FILE_STREAMER_DEVICE_CUDA,
@@ -36,7 +36,7 @@ class TestDeviceRouting(unittest.TestCase):
     # CUDA because it is a type the C API serves: an invented value would be refused by
     # runai_request, which is a different failure from the one under test.
     SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
-                            current_stream=lambda device: f"stream-of-{device}")
+                            current_stream=FAKE_STREAM)
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
