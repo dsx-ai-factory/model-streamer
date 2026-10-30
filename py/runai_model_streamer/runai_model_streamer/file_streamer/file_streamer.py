@@ -192,13 +192,7 @@ class FileStreamer:
             self.streamer = None
             self._credentialed_streamer = None
 
-        # Wait for the copies out of the ring before dropping it. A slot is freed into the pool of the
-        # stream that ALLOCATED it, which is the one stream_files ran on - so a caller that copied on
-        # another stream could have a slot handed to the next allocation while those copies still
-        # read it.
-        if self._clone_stream is not None:
-            self._clone_stream.synchronize()
-            self._clone_stream = None
+        self._wait_for_copies_out_of_the_ring()
 
         # The ring too, and only AFTER runai_end: it has joined the workers, so no range can still be
         # writing into these slots - freeing them before that is a use after free. Dropped rather
@@ -209,6 +203,16 @@ class FileStreamer:
         # ring is dropped. The drain does this too, but it runs when the generator is resumed - a
         # generator still held and still paused here has not reached it.
         self.yield_order.discard_parked()
+
+    def _wait_for_copies_out_of_the_ring(self) -> None:
+        """Before the ring is dropped, wherever that happens.
+
+        A slot is freed into the pool of the stream that ALLOCATED it, which is the one stream_files
+        ran on - so a caller that copied on another stream could have a slot handed to the next
+        allocation while those copies still read it."""
+        if self._clone_stream is not None:
+            self._clone_stream.synchronize()
+            self._clone_stream = None
 
     def handle_object_store(self, path: str, streamer, credentials: Optional[S3Credentials] = None) -> str:
         # Two independent concerns, deliberately gated separately so they can't desync:
@@ -333,6 +337,10 @@ class FileStreamer:
         # two device rings is twice the budget - and the free memory read below would count the
         # previous ring's slots as taken, sizing the next one against a device that is not as full as
         # it looks. Safe here because the guard above proved nothing is in flight.
+        #
+        # IN FLIGHT means in the library. The copies out of the previous ring are only ENQUEUED, and
+        # the guard above cannot see them, so they are waited for here as they are on the way out.
+        self._wait_for_copies_out_of_the_ring()
         self.requests_iterator = None
 
         # A ring in DEVICE memory when the destination is one the C++ layer can write into and it has
