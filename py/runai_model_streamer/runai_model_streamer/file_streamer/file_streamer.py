@@ -167,6 +167,8 @@ class FileStreamer:
         # Where the ring's slots live, as runai_request needs it. Host until stream_files decides
         # otherwise: a wrong value here has the library write device addresses as host memory.
         self._device: Tuple[int, int] = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
+        # The stream the copies out of the ring are enqueued on, so __exit__ can wait for them.
+        self._clone_stream = None
 
     def __enter__(self) -> "FileStreamer":
         self.streamer = runai_start()
@@ -189,6 +191,14 @@ class FileStreamer:
             runai_end(self.streamer)
             self.streamer = None
             self._credentialed_streamer = None
+
+        # Wait for the copies out of the ring before dropping it. A slot is freed into the pool of the
+        # stream that ALLOCATED it, which is the one stream_files ran on - so a caller that copied on
+        # another stream could have a slot handed to the next allocation while those copies still
+        # read it.
+        if self._clone_stream is not None:
+            self._clone_stream.synchronize()
+            self._clone_stream = None
 
         # The ring too, and only AFTER runai_end: it has joined the workers, so no range can still be
         # writing into these slots - freeing them before that is a use after free. Dropped rather
@@ -476,11 +486,6 @@ class FileStreamer:
         be refilled while they still read it. Covering that would mean an event per stream per slot,
         which nothing asks for: a rank loads a model on one stream.
 
-        ONE STREAM covers stream_files too, not only the iteration. The slots are allocated where
-        stream_files runs, and dropped without a wait when the ring goes. Torch gives a freed block
-        back to the pool of the stream it was allocated on, so clones still running on another stream
-        can find their slot handed to the next allocation there.
-
         The DEVICE needs no such care. It is resolved once in stream_files and bound into the ring."""
         if not self.streamer:
             raise ValueError("Streamer not initialized")
@@ -492,6 +497,8 @@ class FileStreamer:
             new_event = (self.requests_iterator.slots.new_event if self.live_requests else None)
             device_ring = new_event is not None
             current_stream = (self.requests_iterator.slots.current_stream if device_ring else None)
+            if device_ring:
+                self._clone_stream = current_stream()
 
             while self.live_requests:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
