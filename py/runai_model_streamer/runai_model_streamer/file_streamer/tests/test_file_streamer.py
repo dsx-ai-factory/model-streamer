@@ -4,7 +4,9 @@
 import unittest
 import tempfile
 import shutil
+import gc
 import os
+import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
@@ -351,6 +353,78 @@ class TestRingConcurrency(unittest.TestCase):
                 self.assertIn("still live", str(caught.exception))
 
                 chunks.close()
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_abandoning_the_generator_drops_what_is_still_parked(self):
+        """A parked payload is a VIEW into a ring slot, so leaving one behind holds that slot after
+        the ring is dropped - gigabytes of it on a device ring, against the model just loaded.
+
+        Responses are served 0, 2, 4, 1, ... so that range 1 arrives and hands over a run while
+        range 4 is still waiting for range 3. The caller then walks away at that yield, which is the
+        only way a stream ends with something parked."""
+        path, _ = self.write_ranges("parked_left.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        served = []
+
+        def out_of_order(streamer, *args, **kwargs):
+            if not served:
+                collected = [real_response(streamer, *args, **kwargs) for _ in range(8)]
+                # Submissions are issued in file order, so their ids ARE the range order here.
+                collected.sort(key=lambda response: response[1])
+                served.extend(collected[i] for i in (0, 2, 4, 1, 3, 5, 6, 7))
+            return served.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", out_of_order):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)                       # range 0
+                next(chunks)                       # range 1, which frees 2 as well - 4 keeps waiting
+                parked = dict(fs.yield_order._parked)
+                self.assertEqual(sorted(parked), [4], "the setup ended with nothing parked")
+                # The consequence, not the bookkeeping: this view is what keeps a slot alive.
+                left_behind = weakref.ref(parked[4][-1])
+
+                chunks.close()                     # resumes the generator at its yield, running the drain
+                self.assertEqual(fs.yield_order._parked, {})
+
+        del parked
+        gc.collect()
+        self.assertIsNone(left_behind(), "the parked view outlived the stream that made it")
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_leaving_the_context_drops_what_is_still_parked(self):
+        """The other way a stream ends with something parked. The drain runs when the generator is
+        RESUMED, and a generator still held and still paused is never resumed - so __exit__ has to
+        drop them itself, after runai_end has joined the workers."""
+        path, _ = self.write_ranges("parked_at_exit.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        served = []
+
+        def out_of_order(streamer, *args, **kwargs):
+            if not served:
+                collected = [real_response(streamer, *args, **kwargs) for _ in range(8)]
+                collected.sort(key=lambda response: response[1])
+                served.extend(collected[i] for i in (0, 2, 4, 1, 3, 5, 6, 7))
+            return served.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", out_of_order):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+                next(chunks)
+                self.assertEqual(sorted(fs.yield_order._parked), [4],
+                                 "the setup ended with nothing parked")
+            # chunks is still referenced and still paused, so its drain has not run
+            self.assertEqual(fs.yield_order._parked, {})
+        chunks.close()
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
