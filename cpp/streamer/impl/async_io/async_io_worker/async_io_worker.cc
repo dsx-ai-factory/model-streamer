@@ -1031,6 +1031,11 @@ void AsyncIoWorker::drain_batch(std::atomic<bool> & stopped)
     // That is every workload's tail, and the gap between the ring's submissions. It costs no
     // throughput, since the spin does reap the moment a completion arrives, but on a node running
     // one process per GPU it is one busy core per process for nothing.
+    //
+    // Reads the engine still holds STAGED are not a reason to skip this, although they leave both
+    // of these empty. A flush that left some staged was refused by the kernel, and what frees it is
+    // reaping - so blocking here waits for the event that lets them go out, while flushing again
+    // would ask the question that was just refused. Room in our own window does not answer it.
     const bool nothing_to_stage = _queue == nullptr || (_queue->empty() && _waiting.empty());
 
     const auto mode = (_issued > 0 && (window_full || nothing_to_stage))
