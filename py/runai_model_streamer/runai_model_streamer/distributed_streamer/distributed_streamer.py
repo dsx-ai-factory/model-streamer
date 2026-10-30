@@ -699,10 +699,8 @@ class _distributedStreamer:
                     dist.broadcast(data_buffer[:current_data_size], global_broadcasting_rank, group=self.distribution_group)
 
                 # yield
-                    for j in range(chunk_count_in_batch):
-                        meta = batch_metadata_tensor[j + 1]
-                        offset, size = meta[3].item(), meta[2].item()
-                        yield meta[0].item(), meta[1].item(), data_buffer[offset : offset + size]
+                    for orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset in batch_metadata_tensor[1 : chunk_count_in_batch + 1].tolist():
+                        yield orig_req_idx, orig_chunk_idx, data_buffer[chunk_offset : chunk_offset + chunk_size]
             else:
                 # receive metadata
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Receiving metadata from rank {global_broadcasting_rank}")
@@ -728,10 +726,8 @@ class _distributedStreamer:
                 dist.broadcast(received_data_buf_view, global_broadcasting_rank, group=self.distribution_group)
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Received data of size {humanize.naturalsize(total_data_size)}")
 
-                for j in range(received_chunk_count_in_batch):
-                    meta = received_metadata_tensor[j + 1]
-                    offset, size = meta[3].item(), meta[2].item()
-                    yield meta[0].item(), meta[1].item(), received_data_buf_view[offset : offset + size]
+                for orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset in received_metadata_tensor[1 : received_chunk_count_in_batch + 1].tolist():
+                    yield orig_req_idx, orig_chunk_idx, received_data_buf_view[chunk_offset : chunk_offset + chunk_size]
 
         if total_broadcast_chunks == 0 and chunks_to_read[0] > 0:
             logger.error(f"[RunAI Streamer][Distributed] Error: rank {self.rank} is missing {chunks_to_read[0]} chunks")
