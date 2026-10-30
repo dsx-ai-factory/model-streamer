@@ -301,6 +301,40 @@ class TestDeviceRingPath(unittest.TestCase):
         self.assertIs(ring_at_wait[0], first_ring,
                       "the wait ran after the previous ring had already been dropped")
 
+    def test_moving_to_another_stream_part_way_through_is_refused(self):
+        """One event per slot can only mark the copies on one stream. A caller that switched would
+        leave the copies on the first stream unwaited for, the slot refilled under them, and the
+        tensors it is holding changed - with nothing raised. So it is raised here instead."""
+        path, _ = self.write_ranges(12)
+        chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * 12)]
+        moved = {"n": 0}
+
+        def wandering_stream(device):
+            """The caller's stream, which changes once the first slot has been released."""
+            return FAKE_STREAM(device if moved["n"] == 0 else "elsewhere")
+
+        def build_ring(*args, **kwargs):
+            ring = FilesRequestsIteratorWithBuffer(
+                RANGE_SIZE * 4, 2, chunks, owned=False,
+                slots=device_slots("cpu", FakeCudaEvent, wandering_stream),
+            )
+            real_release = ring.release
+
+            def move_after_release(request, ready_event=None):
+                moved["n"] += 1
+                return real_release(request, ready_event)
+
+            ring.release = move_after_release
+            return ring
+
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring):
+            with self.assertRaises(ValueError) as caught:
+                with FileStreamer() as fs:
+                    fs.stream_files(chunks)
+                    list(fs.get_chunks())
+
+        self.assertIn("another stream", str(caught.exception))
+
     def test_a_host_ring_does_not_wait_on_any_stream(self):
         """Nothing is enqueued out of a host slot: the copy out of it finishes before tensor.to()
         returns, so there is no stream to wait for and none is recorded."""

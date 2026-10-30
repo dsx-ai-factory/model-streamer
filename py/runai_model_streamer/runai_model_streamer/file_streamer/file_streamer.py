@@ -489,10 +489,10 @@ class FileStreamer:
         on purpose: torch's allocator is stream scoped, so a clone enqueued elsewhere cannot reuse the
         memory the consumer is freeing.
 
-        So a caller that enqueues some clones inside its own stream and leaves that block before the
-        last range is handed over records the event somewhere those clones are not - and the slot can
-        be refilled while they still read it. Covering that would mean an event per stream per slot,
-        which nothing asks for: a rank loads a model on one stream.
+        A caller that moves to another stream part way through is REFUSED. One event marks the
+        copies on one stream, so the slot would be refilled while copies on the first stream still
+        read it - wrong bytes, nothing raised. Covering it instead would mean an event per stream per
+        slot, which nothing asks for: a rank loads a model on one stream.
 
         The DEVICE needs no such care. It is resolved once in stream_files and bound into the ring."""
         if not self.streamer:
@@ -594,12 +594,23 @@ class FileStreamer:
                         # orders the C++ layer's next write against our stream.
                         ready_event = None
                         if device_ring:
+                            stream = current_stream()
+                            # The contract this docstring states, CHECKED rather than trusted. One
+                            # event marks the copies on one stream, so copies left on another are
+                            # never waited for: the slot is refilled while they still read it, and
+                            # the caller's tensors change under it with nothing raised.
+                            if stream != self._clone_stream:
+                                raise ValueError(
+                                    "get_chunks moved to another stream part way through - every "
+                                    "range of one stream must be read on the stream it started on, "
+                                    "because one event per slot can only mark the copies on one"
+                                )
                             ready_event = new_event()
                             # ON THE RING'S OWN DEVICE, which the ring bound when it was built. An
                             # event given no stream records on whichever device is current instead,
                             # and would clear at once rather than when the clones finish - freeing
                             # the slot while they are still reading it.
-                            ready_event.record(current_stream())
+                            ready_event.record(stream)
                         # The ring is gone once the context has exited, and a generator can still be
                         # resumed past that point. Nothing to hand the slot back to, and nothing will
                         # write into it again - runai_end joined the workers before it was freed.
