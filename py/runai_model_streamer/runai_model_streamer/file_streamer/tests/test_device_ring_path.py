@@ -267,6 +267,40 @@ class TestDeviceRingPath(unittest.TestCase):
         self.assertIs(waited_on[0], FAKE_STREAM("cpu"),
                       "the wait was not on the stream the ring recorded its events on")
 
+    def test_a_second_stream_waits_for_the_copies_before_replacing_the_ring(self):
+        """The same hazard at the other place a ring is dropped. stream_files frees the previous ring
+        before sizing the next one, and the guard it relies on reads the LIBRARY - the copies out of
+        that ring are only enqueued, so nothing there can see them."""
+        path, _ = self.write_ranges(12)
+        chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * 12)]
+        held_streamer = []
+        ring_at_wait = []
+
+        def build_ring(*args, **kwargs):
+            return FilesRequestsIteratorWithBuffer(
+                RANGE_SIZE * 4, 2, chunks, owned=False,
+                slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
+            )
+
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
+                patch.object(FakeStream, "synchronize",
+                             lambda _stream: ring_at_wait.append(held_streamer[0].requests_iterator)):
+            with FileStreamer() as fs:
+                held_streamer.append(fs)
+                fs.stream_files(chunks)
+                list(fs.get_chunks())
+                first_ring = fs.requests_iterator
+                fs.stream_files(chunks)                 # the second stream replaces it
+                self.assertIsNot(fs.requests_iterator, first_ring, "the ring was not replaced")
+                list(fs.get_chunks())
+
+        # One wait for the replacement and one on the way out. The first is the one under test, and
+        # the ring it names is the one being replaced.
+        self.assertEqual(len(ring_at_wait), 2,
+                         "stream_files replaced the ring without waiting for its copies")
+        self.assertIs(ring_at_wait[0], first_ring,
+                      "the wait ran after the previous ring had already been dropped")
+
     def test_a_host_ring_does_not_wait_on_any_stream(self):
         """Nothing is enqueued out of a host slot: the copy out of it finishes before tensor.to()
         returns, so there is no stream to wait for and none is recorded."""
