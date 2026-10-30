@@ -213,15 +213,71 @@ class TestDistributedMemoryCheck(unittest.TestCase):
         for job in (job0, job1):
             job.events.create_group.assert_called_once()     # created by the rank that falls back, too
 
-    def test_a_rank_that_falls_back_releases_the_group_it_created(self):
+    def test_a_rank_that_falls_back_keeps_the_group_it_created(self):
+        """It cannot hand the group back on its own. Creating one needs every rank of the JOB, while
+        this node decided by itself - so a rank left without a group would ask for a new one while the
+        ranks that kept theirs never ask again. __exit__ releases it, where every rank does so
+        together."""
         distributed, job = self.decide([self.required - 1, self.required - 1])
         self.assertFalse(distributed)
-        job.events.release_group.assert_called_once_with()
+        job.events.release_group.assert_not_called()
 
     def test_a_rank_that_keeps_distributing_keeps_its_group(self):
         distributed, job = self.decide([self.required, self.required])
         self.assertTrue(distributed)
         job.events.release_group.assert_not_called()
+
+
+class TestASecondReadOnTheSameStreamer(unittest.TestCase):
+    """What the fallback must not cost the NEXT read.
+
+    dist.new_group is a call every rank of the job has to make, members or not. The memory decision is
+    taken per node. Tie the two together and the nodes stop asking for groups the same number of
+    times, so the node that asks alone waits for ranks that are never coming.
+
+    Counted rather than asserted on the release, because the count is what torch actually requires:
+    the real create_distribution_group runs here, so its cache is part of what is under test."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.required = dist_device_bytes_required(4096)
+
+    def two_reads(self, free_by_rank, my_rank, group_ranks, groups_by_ranks):
+        """Two reads on one streamer. Returns the decision and the new_group calls each read made."""
+        job = DistributedJob(free_by_rank, my_rank=my_rank, group_ranks=group_ranks)
+        streamer = DistributedStreamer()
+        streamer.params.max_chunk = 4096
+        streamer.params.my_global_rank = my_rank
+        streamer.params.groups_by_ranks = groups_by_ranks
+        with job.patched(), \
+                patch("torch.distributed.new_group",
+                      side_effect=lambda **kwargs: MagicMock(name="group")) as new_group, \
+                patch("torch.distributed.destroy_process_group"):
+            streamer.set_is_distributed(True, "cuda:1")
+            first = new_group.call_count
+            streamer.set_is_distributed(True, "cuda:1")
+            second = new_group.call_count - first
+        return streamer.is_distributed, first, second
+
+    def test_the_node_that_falls_back_asks_for_no_group_the_other_node_will_not_create(self):
+        # node 0 has room, node 1 does not, so the two nodes reach different decisions
+        free = [10 ** 12, 10 ** 12, 10 ** 12, self.required - 1]
+        nodes = [[0, 1], [2, 3]]
+        kept, kept_first, kept_second = self.two_reads(free, 0, [0, 1], nodes)
+        fell, fell_first, fell_second = self.two_reads(free, 2, [2, 3], nodes)
+
+        self.assertEqual((kept, fell), (True, False), "the two nodes did not decide differently")
+        self.assertEqual(kept_first, fell_first, "the nodes already disagreed on the first read")
+        self.assertEqual(
+            fell_second, kept_second,
+            f"the node that fell back asked for {fell_second} group(s) on the second read while the "
+            f"node that kept streaming asked for {kept_second} - it would wait there until the timeout"
+        )
+        # The number itself, not only that the two agree: both asking again would also "agree", and
+        # would still be one job-wide call per read that the cache exists to avoid.
+        self.assertEqual(fell_second, 0, "a second read rebuilt groups that were already there")
 
 
 class TestReleaseGroup(unittest.TestCase):
