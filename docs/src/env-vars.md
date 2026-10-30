@@ -155,11 +155,13 @@ Positive integer value
 
 ### RUNAI_STREAMER_DEVICE_MEMORY_LIMIT
 
-The largest buffer the streamer builds in device memory when it reads straight into a GPU.
+The device memory the streamer uses for its buffers when it reads straight into a GPU.
 
-The buffer is this limit, capped at a fraction of the memory the target device has free - see
-`RUNAI_STREAMER_DEVICE_MEMORY_FRACTION`. When there is not enough room, the streamer reads into host
-memory and copies to the device instead.
+This is a target, not a maximum. It is raised to two of the largest tensor when the model needs more,
+because a tensor cannot span two buffers. It is capped in every case at a fraction of the memory the
+target device has free - see `RUNAI_STREAMER_DEVICE_MEMORY_FRACTION`, which is the only setting that
+can refuse. When that cap leaves room for fewer than two of the largest tensor, the streamer reads
+into host memory and copies to the device instead.
 
 Unlike `RUNAI_STREAMER_MEMORY_LIMIT`, this setting has no unlimited or minimum mode.
 
@@ -173,7 +175,7 @@ Positive integer value, in bytes
 
 ### RUNAI_STREAMER_DEVICE_MEMORY_FRACTION
 
-The share of a device's free memory the streamer may use for the buffer above.
+The share of a device's free memory the streamer may use for the buffers above.
 
 It leaves the rest for the model being loaded.
 
