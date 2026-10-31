@@ -139,6 +139,22 @@ class TestDeviceRingPath(unittest.TestCase):
                        for _, index, buffer in fs.get_chunks()]
         return got, expected
 
+    def recording_ring(self, chunks, buffer_size=RANGE_SIZE * 4, num_buffers=2):
+        """A device ring that records every release, for a test that builds its own rather than
+        going through stream()."""
+        ring = FilesRequestsIteratorWithBuffer(
+            buffer_size, num_buffers, chunks, owned=False,
+            slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
+        )
+        real_release = ring.release
+
+        def record_release(request, ready_event=None):
+            self.released.append(ready_event)
+            return real_release(request, ready_event)
+
+        ring.release = record_release
+        return ring
+
     def test_a_device_ring_yields_the_right_bytes(self):
         got, expected = self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
         self.assertEqual({i: text for i, text, _ in got}, expected)
@@ -253,10 +269,7 @@ class TestDeviceRingPath(unittest.TestCase):
         waited_on = []
 
         def build_ring(*args, **kwargs):
-            return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 4, 2, chunks, owned=False,
-                slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
-            )
+            return self.recording_ring(chunks)
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
                 patch.object(FakeCudaEvent, "synchronize",
@@ -270,11 +283,38 @@ class TestDeviceRingPath(unittest.TestCase):
         self.assertEqual(len(ring_at_wait), 1,
                          "__exit__ did not wait on the event the copies were recorded against")
         self.assertIsNotNone(ring_at_wait[0], "the ring was already dropped when the wait ran")
-        self.assertNotIn(waited_on[0], self.released,
-                         "the wait was on a slot's own event, which a stream that ends early "
-                         "never records")
-        self.assertGreater(waited_on[0].records, 1,
-                           "one event is re-recorded after every copy; this one was recorded once")
+        self.assertIs(waited_on[0], self.released[-1],
+                      "the wait was not on the event of the LAST slot released, which is the only "
+                      "one recorded after every copy out of the ring")
+
+    def test_a_stream_that_stops_part_way_waits_on_the_stream_instead(self):
+        """A slot that is still TAKEN has no event: a slot is released when its LAST range is handed
+        over. The newest event belongs to an earlier slot, and in stream order it completes before
+        the copies out of the taken one - so waiting on it would prove nothing about them.
+
+        Here the first slot has been released and the second has not, which is the case that tells
+        the two apart."""
+        path, _ = self.write_ranges(12)
+        chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * 12)]
+        waits = []
+
+        def build_ring(*args, **kwargs):
+            return self.recording_ring(chunks)
+
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
+                patch.object(FakeCudaEvent, "synchronize", lambda _event: waits.append("event")), \
+                patch.object(FakeStream, "synchronize", lambda _stream: waits.append("stream")):
+            with FileStreamer() as fs:
+                fs.stream_files(chunks)
+                tensors = fs.get_chunks()
+                for _ in range(5):            # four ranges fill the first slot, the fifth starts the next
+                    next(tensors)
+                self.assertEqual(len(self.released), 1, "the setup released no slot, or released both")
+                tensors.close()
+
+        self.assertEqual(waits, ["stream"],
+                         "the teardown waited on an event that is older than the copies out of the "
+                         "slot that was never released")
 
     def test_a_second_stream_waits_for_the_copies_before_replacing_the_ring(self):
         """The same hazard at the other place a ring is dropped. stream_files frees the previous ring
@@ -286,10 +326,7 @@ class TestDeviceRingPath(unittest.TestCase):
         ring_at_wait = []
 
         def build_ring(*args, **kwargs):
-            return FilesRequestsIteratorWithBuffer(
-                RANGE_SIZE * 4, 2, chunks, owned=False,
-                slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
-            )
+            return self.recording_ring(chunks)
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
                 patch.object(FakeCudaEvent, "synchronize",
