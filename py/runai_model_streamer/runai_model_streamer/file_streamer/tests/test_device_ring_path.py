@@ -27,13 +27,12 @@ class FakeStream:
     ONE OBJECT PER DEVICE, so a test can say which stream an event was recorded on."""
 
     _by_device: dict = {}
-    synchronized = 0
 
     def __init__(self, device) -> None:
         self.device = device
 
     def synchronize(self) -> None:
-        FakeStream.synchronized += 1
+        """Here only so a test can show it is NOT called: the wait is on an event."""
 
     @classmethod
     def of(cls, device) -> "FakeStream":
@@ -53,8 +52,14 @@ class FakeCudaEvent:
     # The stream each record() was given, so a test can show WHICH device was timed.
     streams: list = []
 
+    def __init__(self) -> None:
+        # Its OWN count as well as the class total: the copy event is recorded again and again,
+        # while a slot's event is recorded once.
+        self.records = 0
+
     def record(self, stream=None) -> None:
         FakeCudaEvent.recorded += 1
+        self.records += 1
         FakeCudaEvent.streams.append(stream)
 
     def query(self) -> bool:
@@ -169,8 +174,9 @@ class TestDeviceRingPath(unittest.TestCase):
         self.stream(12, device_slots("cpu", FakeCudaEvent, FAKE_STREAM))
         self.assertGreater(len(self.released), 0, "no slot was released at all")
         self.assertTrue(all(isinstance(e, FakeCudaEvent) for e in self.released))
-        self.assertEqual(FakeCudaEvent.recorded, len(self.released),
-                         "an event must be RECORDED, not just constructed")
+        self.assertTrue(all(event.records == 1 for event in self.released),
+                        "a slot's event is recorded ONCE: the pool sweeps pending slots in release "
+                        "order, which holds only while their events were recorded in that order")
 
     def test_get_chunks_before_stream_files_is_an_empty_generator(self):
         """It asks the ring what it is made of, and there is no ring until stream_files has run."""
@@ -253,19 +259,22 @@ class TestDeviceRingPath(unittest.TestCase):
             )
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
-                patch.object(FakeStream, "synchronize",
-                             lambda stream: (ring_at_wait.append(held_streamer[0].requests_iterator),
-                                             waited_on.append(stream))):
+                patch.object(FakeCudaEvent, "synchronize",
+                             lambda event: (ring_at_wait.append(held_streamer[0].requests_iterator),
+                                            waited_on.append(event))):
             with FileStreamer() as fs:
                 held_streamer.append(fs)
                 fs.stream_files(chunks)
                 list(fs.get_chunks())
 
         self.assertEqual(len(ring_at_wait), 1,
-                         "__exit__ did not wait on the stream the copies were enqueued on")
+                         "__exit__ did not wait on the event the copies were recorded against")
         self.assertIsNotNone(ring_at_wait[0], "the ring was already dropped when the wait ran")
-        self.assertIs(waited_on[0], FAKE_STREAM("cpu"),
-                      "the wait was not on the stream the ring recorded its events on")
+        self.assertNotIn(waited_on[0], self.released,
+                         "the wait was on a slot's own event, which a stream that ends early "
+                         "never records")
+        self.assertGreater(waited_on[0].records, 1,
+                           "one event is re-recorded after every copy; this one was recorded once")
 
     def test_a_second_stream_waits_for_the_copies_before_replacing_the_ring(self):
         """The same hazard at the other place a ring is dropped. stream_files frees the previous ring
@@ -283,8 +292,8 @@ class TestDeviceRingPath(unittest.TestCase):
             )
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
-                patch.object(FakeStream, "synchronize",
-                             lambda _stream: ring_at_wait.append(held_streamer[0].requests_iterator)):
+                patch.object(FakeCudaEvent, "synchronize",
+                             lambda _event: ring_at_wait.append(held_streamer[0].requests_iterator)):
             with FileStreamer() as fs:
                 held_streamer.append(fs)
                 fs.stream_files(chunks)
@@ -335,12 +344,14 @@ class TestDeviceRingPath(unittest.TestCase):
 
         self.assertIn("another stream", str(caught.exception))
 
-    def test_a_host_ring_does_not_wait_on_any_stream(self):
+    def test_a_host_ring_waits_for_nothing(self):
         """Nothing is enqueued out of a host slot: the copy out of it finishes before tensor.to()
-        returns, so there is no stream to wait for and none is recorded."""
-        FakeStream.synchronized = 0
-        self.stream(12, HOST_SLOTS)
-        self.assertEqual(FakeStream.synchronized, 0, "a host ring waited on a stream")
+        returns, so there is no event to record and nothing to wait for."""
+        waits = []
+        with patch.object(FakeCudaEvent, "synchronize", lambda event: waits.append(event)), \
+                patch.object(FakeStream, "synchronize", lambda stream: waits.append(stream)):
+            self.stream(12, HOST_SLOTS)
+        self.assertEqual(waits, [], "a host ring waited on its way out")
 
     def test_a_host_ring_releases_without_an_event(self):
         got, expected = self.stream(12, HOST_SLOTS)
