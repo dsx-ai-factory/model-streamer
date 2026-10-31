@@ -145,9 +145,9 @@ class DistributedStreamer:
     def get_device_free_memory(self, device: str) -> int:
         """Free bytes on this rank's device.
 
-        Raises rather than returning "unknown", because the only caller is about to put this number
-        into an all_reduce: a rank that could not measure would otherwise fail inside the collective
-        while its peers waited on it."""
+        Raises rather than returning "unknown", so the caller cannot put a non number into its
+        reduction by accident. The caller catches this and reduces a sentinel instead - leaving the
+        reduction is what strands the peers."""
         free = device_free_memory(device)
         if free is None:
             raise RuntimeError(
@@ -172,9 +172,31 @@ class DistributedStreamer:
         warmup = torch.zeros(1, dtype=torch.uint8, device=device)
         dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
 
-        free_memory = torch.tensor([self.get_device_free_memory(device)], dtype=torch.int64, device=device)
+        # A RANK THAT CANNOT MEASURE STILL REDUCES, with -1. Raising here instead would leave its
+        # peers in the all_reduce below until the group timeout, and they would wait for a reading
+        # that is never coming. Free memory is never negative, so nothing else produces this value.
+        try:
+            mine = self.get_device_free_memory(device)
+        except Exception as error:
+            logger.warning(
+                "[RunAI Streamer][Distributed] Warning: could not read the free memory on %s: %s",
+                device, error)
+            mine = -1
+
+        free_memory = torch.tensor([mine], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
-        return int(free_memory.item())
+        smallest = int(free_memory.item())
+
+        # TOGETHER, and not as a fallback. A device torch cannot read is a device the caller cannot
+        # load on either, so there is nothing to fall back to - and every rank raises here, at the
+        # same point, rather than one of them leaving the others behind. The rank that failed has
+        # the cause in its own log.
+        if smallest < 0:
+            raise RuntimeError(
+                "a rank of this distribution group could not read the free memory on its device - "
+                "see that rank's log for the cause"
+            )
+        return smallest
 
     def set_is_distributed(self, is_distributed: bool, device: str) -> None:
         # check if distributed streaming should be used
