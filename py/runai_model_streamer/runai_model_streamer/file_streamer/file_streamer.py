@@ -217,10 +217,7 @@ class FileStreamer:
         waiting for that would hold this up for whatever they queued after the last tensor. A slot
         that is still TAKEN has no event, so a stream that stopped part way through falls back to
         the stream - it waits for more than it has to, on a load that is being abandoned anyway."""
-        if self.live_requests:
-            self._clone_event = None
-
-        if self._clone_event is not None:
+        if self._clone_event is not None and not self.live_requests:
             self._clone_event.synchronize()
         elif self._clone_stream is not None:
             self._clone_stream.synchronize()

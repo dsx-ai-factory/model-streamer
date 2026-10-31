@@ -115,22 +115,7 @@ class TestDeviceRingPath(unittest.TestCase):
         chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * count)]
 
         def build_ring(*args, **kwargs):
-            # owned=False for a device ring: its slots are REUSED, because the caller receives
-            # clones. Production derives the same from `owned and device_str == "cpu"`; here the
-            # factory that does so is patched out, so it is stated.
-            ring = FilesRequestsIteratorWithBuffer(
-                buffer_size, num_buffers, chunks,
-                owned=not ring_slots.reuse_needs_event, slots=ring_slots,
-            )
-            real_release = ring.release
-
-            def record_release(request, ready_event=None):
-                self.released.append(ready_event)
-                return real_release(request, ready_event)
-
-            ring.release = record_release
-            self.ring = ring
-            return ring
+            return self.recording_ring(chunks, ring_slots, buffer_size, num_buffers)
 
         with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring):
             with FileStreamer() as fs:
@@ -139,12 +124,15 @@ class TestDeviceRingPath(unittest.TestCase):
                        for _, index, buffer in fs.get_chunks()]
         return got, expected
 
-    def recording_ring(self, chunks, buffer_size=RANGE_SIZE * 4, num_buffers=2):
-        """A device ring that records every release, for a test that builds its own rather than
-        going through stream()."""
+    def recording_ring(self, chunks, slots=None, buffer_size=RANGE_SIZE * 4, num_buffers=2):
+        """A ring that records every release, and the ring itself on self.ring.
+
+        owned follows the slots: a device ring's slots are REUSED, because the caller receives
+        clones. Production derives the same from `owned and device_str == "cpu"`; here the factory
+        that does so is patched out, so it is stated."""
+        slots = slots if slots is not None else device_slots("cpu", FakeCudaEvent, FAKE_STREAM)
         ring = FilesRequestsIteratorWithBuffer(
-            buffer_size, num_buffers, chunks, owned=False,
-            slots=device_slots("cpu", FakeCudaEvent, FAKE_STREAM),
+            buffer_size, num_buffers, chunks, owned=not slots.reuse_needs_event, slots=slots,
         )
         real_release = ring.release
 
@@ -153,6 +141,7 @@ class TestDeviceRingPath(unittest.TestCase):
             return real_release(request, ready_event)
 
         ring.release = record_release
+        self.ring = ring
         return ring
 
     def test_a_device_ring_yields_the_right_bytes(self):
@@ -315,6 +304,34 @@ class TestDeviceRingPath(unittest.TestCase):
         self.assertEqual(waits, ["stream"],
                          "the teardown waited on an event that is older than the copies out of the "
                          "slot that was never released")
+
+    def test_a_generator_still_paused_at_exit_waits_on_the_stream_too(self):
+        """The same fallback, reached the other way. Here the generator is neither closed nor
+        collected, so the drain has not run and live_requests is still what it was - a slot is
+        taken, its copies have no event, and the newest event is older than they are."""
+        path, _ = self.write_ranges(12)
+        chunks = [FileChunks.contiguous(0, path, 0, [RANGE_SIZE] * 12)]
+        waits = []
+
+        def build_ring(*args, **kwargs):
+            return self.recording_ring(chunks)
+
+        with patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build_ring), \
+                patch.object(FakeCudaEvent, "synchronize", lambda _event: waits.append("event")), \
+                patch.object(FakeStream, "synchronize", lambda _stream: waits.append("stream")):
+            with FileStreamer() as fs:
+                fs.stream_files(chunks)
+                tensors = fs.get_chunks()
+                for _ in range(5):
+                    next(tensors)
+                self.assertEqual(len(self.released), 1, "the setup released no slot, or released both")
+                self.assertTrue(fs.live_requests, "the drain ran; this is the other test's case")
+            # tensors is still referenced here on purpose: a generator collected at the end of the
+            # block would have drained, which is what the other test covers.
+            self.assertEqual(waits, ["stream"],
+                             "__exit__ waited on an event older than the copies out of the slot "
+                             "that is still taken")
+            tensors.close()
 
     def test_a_second_stream_waits_for_the_copies_before_replacing_the_ring(self):
         """The same hazard at the other place a ring is dropped. stream_files frees the previous ring
