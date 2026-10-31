@@ -265,8 +265,11 @@ class DistributedStreamer:
         # Gated on whether torch can MEASURE this device, not on whether the streamer can read into
         # it: distributing moves torch tensors, so it has no such limit. mem_get_info is missing for
         # several devices torch otherwise supports, and skipping the check there is right - refusing
-        # would fall back from a device that may well have the room. Asked before create_group, so
-        # every rank of a job enters the collective or none does.
+        # would fall back from a device that may well have the room.
+        #
+        # EVERY RANK TAKES THIS BRANCH OR NONE DOES, which the collectives below need. The ranks of
+        # a distributed job run one kind of device under one backend, so both terms are facts about
+        # the JOB - there is nothing here for the ranks to agree at runtime.
         if self.is_distributed and can_measure_device_memory(device) and dist.get_backend() in ("nccl", "xccl"):
             free_memory = self.get_min_device_free_memory(device)
             required = dist_device_bytes_required(self.params.max_chunk)
