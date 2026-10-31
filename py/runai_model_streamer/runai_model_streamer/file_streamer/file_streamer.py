@@ -167,8 +167,8 @@ class FileStreamer:
         # Where the ring's slots live, as runai_request needs it. Host until stream_files decides
         # otherwise: a wrong value here has the library write device addresses as host memory.
         self._device: Tuple[int, int] = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
-        # The stream the copies out of the ring are enqueued on, and ONE event re-recorded after
-        # each of them, so the ring can be dropped once the last has finished.
+        # The stream the copies out of the ring are enqueued on, and the event of the last slot
+        # released, so the ring can be dropped once the copies out of it have finished.
         self._clone_stream = None
         self._clone_event = None
 
@@ -213,11 +213,18 @@ class FileStreamer:
         ran on - so a caller that copied on another stream could have a slot handed to the next
         allocation while those copies still read it.
 
-        On the EVENT, not the stream: a stream carries the caller's own work too, and waiting for
-        that would hold __exit__ for whatever they queued after the last tensor."""
+        ON THE EVENT where there is one, because a stream carries the caller's own work too and
+        waiting for that would hold this up for whatever they queued after the last tensor. A slot
+        that is still TAKEN has no event, so a stream that stopped part way through falls back to
+        the stream - it waits for more than it has to, on a load that is being abandoned anyway."""
+        if self.live_requests:
+            self._clone_event = None
+
         if self._clone_event is not None:
             self._clone_event.synchronize()
-            self._clone_event = None
+        elif self._clone_stream is not None:
+            self._clone_stream.synchronize()
+        self._clone_event = None
         self._clone_stream = None
 
     def handle_object_store(self, path: str, streamer, credentials: Optional[S3Credentials] = None) -> str:
@@ -513,7 +520,6 @@ class FileStreamer:
             current_stream = (self.requests_iterator.slots.current_stream if device_ring else None)
             if device_ring:
                 self._clone_stream = current_stream()
-                self._clone_event = new_event()
 
             while self.live_requests:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
@@ -574,12 +580,6 @@ class FileStreamer:
                         # order already puts it before whatever they do with the tensor next. It is
                         # also what makes the slot reusable at all - .to() below would return self.
                         ready_tensor = ready_tensor.clone()
-                        # THE SAME EVENT EVERY TIME. Recording it again overwrites what it held, so
-                        # it always marks the last copy enqueued - which is the only one the ring has
-                        # to wait for. One event rather than one per copy, and the slot's own event
-                        # cannot stand in: a slot is only released once its last range is handed
-                        # over, and a stream that ends early has copies out of a slot that never was.
-                        self._clone_event.record(self._clone_stream)
                     elif self.device_str != "cpu":
                         ready_tensor = ready_tensor.to(self.device_str)
                     yield ready_file, ready_index, ready_tensor
@@ -624,6 +624,10 @@ class FileStreamer:
                             # and would clear at once rather than when the clones finish - freeing
                             # the slot while they are still reading it.
                             ready_event.record(stream)
+                            # It serves the teardown as well as the pool. Recorded after this slot's
+                            # last copy, so on a stream that runs to the end the newest one is after
+                            # every copy there is.
+                            self._clone_event = ready_event
                         # The ring is gone once the context has exited, and a generator can still be
                         # resumed past that point. Nothing to hand the slot back to, and nothing will
                         # write into it again - runai_end joined the workers before it was freed.
@@ -655,6 +659,11 @@ class FileStreamer:
         # the pool. Leaving a stale count instead makes the guard reject every later stream_files on
         # this object - a FileStreamer re-entered after a generator outlived its context is bricked.
         self.outstanding = 0
+        # BEFORE live_requests is cleared, which is the only record that a slot was still taken -
+        # and a taken slot's copies have no event of their own. Without this the teardown would wait
+        # on the event of some earlier slot, which completes before those copies.
+        if self.live_requests:
+            self._clone_event = None
         self.live_requests = {}
         self.ranges_not_yielded = {}
         self.reported_done = set()
