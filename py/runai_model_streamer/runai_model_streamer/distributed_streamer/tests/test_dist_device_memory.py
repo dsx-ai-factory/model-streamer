@@ -319,5 +319,61 @@ class TestReleaseGroup(unittest.TestCase):
         self.assertIsNone(worker.distribution_group)
 
 
+class TestARankThatCannotMeasure(unittest.TestCase):
+    """What a failed memory query must NOT do: leave the reduction.
+
+    The peers are already inside it, and they would stay there until the group timeout - waiting for
+    a reading that is never coming. So the rank reduces a sentinel instead, and every rank of the
+    group raises on the far side of it, together."""
+
+    def reduce(self, mine, reduced):
+        """One rank's trip through get_min_device_free_memory.
+
+        `mine` is what its own query does - a value, or an exception to raise. `reduced` is what the
+        group's MIN comes back as."""
+        streamer = DistributedStreamer()
+        streamer.params.max_chunk = 4096
+        streamer.distributed_streamer.create_group = MagicMock(return_value=MagicMock())
+        contributed = []
+        real_tensor = torch.tensor
+
+        def all_reduce(tensor, op=None, group=None):
+            contributed.append(int(tensor.item()))
+            tensor.fill_(reduced)
+
+        with patch("torch.tensor", lambda data, dtype=None, device=None: real_tensor(data, dtype=dtype)), \
+                patch("torch.zeros", lambda *args, **kwargs: real_tensor([0])), \
+                patch("torch.distributed.get_global_rank", return_value=0), \
+                patch("torch.distributed.broadcast"), \
+                patch("torch.distributed.all_reduce", side_effect=all_reduce) as reduction, \
+                patch.object(DistributedStreamer, "get_device_free_memory",
+                             side_effect=mine if isinstance(mine, Exception) else None,
+                             return_value=None if isinstance(mine, Exception) else mine):
+            try:
+                result = streamer.get_min_device_free_memory("cuda:0")
+            except RuntimeError as error:
+                result = error
+        return result, contributed, reduction.call_count
+
+    def test_it_reduces_a_sentinel_instead_of_leaving_its_peers_waiting(self):
+        result, contributed, reductions = self.reduce(mine=RuntimeError("no mem_get_info"), reduced=-1)
+        self.assertEqual(reductions, 1, "the rank left the reduction its peers were waiting in")
+        self.assertEqual(contributed, [-1], "it reduced something a real reading could be")
+        self.assertIsInstance(result, RuntimeError)
+
+    def test_every_rank_of_the_group_raises_not_only_the_one_that_failed(self):
+        """This rank measured its own device without trouble. It learns from the reduction that a
+        peer did not, and fails at the same point rather than streaming on alone."""
+        result, contributed, _ = self.reduce(mine=1 << 40, reduced=-1)
+        self.assertEqual(contributed, [1 << 40], "this rank's own reading did not reach the group")
+        self.assertIsInstance(result, RuntimeError)
+        self.assertIn("could not read the free memory", str(result))
+
+    def test_a_group_that_could_all_measure_gets_its_smallest_reading(self):
+        result, _, _ = self.reduce(mine=1 << 40, reduced=4096)
+        self.assertEqual(result, 4096)
+
+
+
 if __name__ == "__main__":
     unittest.main()
