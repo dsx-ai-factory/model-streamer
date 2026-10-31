@@ -6,6 +6,7 @@ from runai_model_streamer.libstreamer import (
     t_streamer,
     RunaiFileStreamerDevice,
     RUNAI_FILE_STREAMER_DEVICE_CPU,
+    RunaiFileStreamerDeviceType,
 )
 from typing import Callable, Dict, List, Optional, Tuple
 import ctypes
@@ -27,6 +28,7 @@ TIMED_OUT_ERROR_CODE = 16
 # void* destinations). ctypes wraps out-of-range values silently, so runai_request range-checks against
 # these before converting.
 UINT32_LIMIT = 1 << 32
+INT32_LIMIT = 1 << 31
 UINT64_LIMIT = 1 << 64
 
 
@@ -85,6 +87,8 @@ def runai_request(
     range_offsets: List[int],
     range_sizes: List[int],
     range_dsts: List[int],
+    device_type: int = RUNAI_FILE_STREAMER_DEVICE_CPU,
+    device_id: int = 0,
 ) -> int:
     """Multi-request submit. Non-blocking: returns the assigned submission id; use it to demux the
     responses from runai_response. Credentials are streamer-scoped (runai_set_credentials), not passed
@@ -109,6 +113,11 @@ def runai_request(
       - it avoids one memoryview -> address conversion per range on the submit path (~n per submission).
     The cost is that raw addresses keep nothing alive: THE CALLER MUST KEEP THE UNDERLYING BUFFERS ALIVE
     UNTIL runai_end() RETURNS - not merely until the submission's last response has been consumed.
+
+    device_type and device_id say WHERE those addresses live, and one device covers the whole
+    submission - a load that scatters across several GPUs is sent as several submissions. device_id is
+    the CUDA ordinal and is ignored for the host. The default is the host, which is what a host ring
+    passes; a device type the library does not serve is refused with UnsupportedDeviceType.
 
     An object storage read is handed the destination address and the backend fills it asynchronously. A
     request already sent cannot be cancelled, and the client that owns it is destroyed by runai_end();
@@ -168,6 +177,19 @@ def runai_request(
         if min(range_dsts) < 0 or max(range_dsts) >= UINT64_LIMIT:
             raise ValueError("every range destination must be a valid address")
 
+    # Both fields are c_int, which ctypes narrows SILENTLY like every other value checked above:
+    # 2**32 arrives as 0, which is the host, so an unserved device type would be read as CPU instead
+    # of being refused. Checked against the types the library actually serves rather than against
+    # int32, so a value that is merely in range but meaningless is still rejected here.
+    try:
+        RunaiFileStreamerDeviceType(device_type)
+    except ValueError:
+        served = ", ".join(f"RUNAI_FILE_STREAMER_DEVICE_{member.name} ({member.value})"
+                           for member in RunaiFileStreamerDeviceType)
+        raise ValueError(f"device_type must be one of {served}, got {device_type}") from None
+    if not (0 <= device_id < INT32_LIMIT):
+        raise ValueError(f"device_id must fit a signed 32-bit integer, got {device_id}")
+
     c_paths = (ctypes.c_char_p * num_files)(*[path.encode("utf-8") for path in paths])
     c_num_ranges = (ctypes.c_uint32 * num_files)(*num_ranges)
 
@@ -186,10 +208,7 @@ def runai_request(
         c_range_offsets,
         c_range_sizes,
         c_range_dsts,
-        # Always the host. range_dsts point into the ring's numpy buffer (requests_iterator.py,
-        # `self._raw = np.empty(...)`), and the move to the caller's device happens afterwards in
-        # FileStreamer.get_chunks, so the C layer is never asked for anything but CPU.
-        RunaiFileStreamerDevice(RUNAI_FILE_STREAMER_DEVICE_CPU, 0),
+        RunaiFileStreamerDevice(device_type, device_id),
     )
     if error_code != SUCCESS_ERROR_CODE:
         raise ValueError(

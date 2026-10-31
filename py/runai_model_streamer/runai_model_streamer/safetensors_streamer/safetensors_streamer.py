@@ -296,6 +296,17 @@ class SafetensorsStreamer:
         if tensor_names is not None:
             tensor_names = frozenset(tensor_names)
 
+        if is_distributed:
+            # Every rank turns this list's ORDER into FileChunks ids, and the ranks then exchange
+            # tensors by that id without ever comparing their lists. Two ranks that enumerated the
+            # directory differently would hold different files behind one id, and the weights would
+            # be wrong with nothing raised. Callers reach here from glob, which does not sort.
+            #
+            # Not under the ordering flag: the ranks have to agree whether or not the yield is
+            # ordered. A single process reading for itself needs no agreement, so its order is left
+            # exactly as the caller gave it.
+            paths = sorted(paths)
+
         self.files_to_tensors_metadata = {}
         self.total_size = 0
         self.device_str = device
@@ -380,15 +391,15 @@ class SafetensorsStreamer:
             ring = self.file_streamer.ring_info()
             if ring is None:
                 return
-            rank, num_buffers, buffer_size = ring
+            rank, num_buffers, buffer_size, label = ring
             logger.info(
-                f"[RunAI Streamer] Rank {rank}: CPU ring {num_buffers} x "
+                f"[RunAI Streamer] Rank {rank}: {label} ring {num_buffers} x "
                 f"{humanize.naturalsize(buffer_size, binary=True)} = "
                 f"{humanize.naturalsize(num_buffers * buffer_size, binary=True)} "
                 f"for {humanize.naturalsize(self.total_size, binary=True)} in {len(self.files_to_tensors_metadata)} file(s)"
             )
         except Exception:
-            logger.debug("[RunAI Streamer] could not report the CPU ring", exc_info=True)
+            logger.debug("[RunAI Streamer] could not report the ring", exc_info=True)
 
     def get_tensors(self) -> Iterator[torch.tensor]:
         for file_index, ready_chunk_index, buffer in self.file_streamer.get_chunks():

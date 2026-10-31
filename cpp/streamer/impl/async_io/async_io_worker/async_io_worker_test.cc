@@ -1474,10 +1474,18 @@ TEST(AsyncIoWorker, Does_Not_Block_With_Nothing_Issued)
 //
 // Pinned because nothing else would notice it regressing: the same reads are issued and the same
 // bytes arrive either way, and the cost is only a slower run.
-TEST(AsyncIoWorker, Does_Not_Block_While_The_Window_Has_Room)
+TEST(AsyncIoWorker, Blocks_Once_Nothing_Is_Left_To_Stage)
 {
-    // One chunk against a depth of 3 (the floor), so something is in flight and the window is not
-    // full - the case that used to block.
+    // One chunk against a depth of 3 (the floor): the read is issued, the window still has room,
+    // and the queue is now EMPTY. There is nothing to go back and submit, so the only thing left is
+    // the completion - and waiting for it is what this thread should do.
+    //
+    // Not blocking here was a busy loop: try_pop, an empty resume_waiting, a flush that returns at
+    // once and a scan of an empty completion ring, at a full core until the read landed. It cost no
+    // throughput, because the spin reaps the moment the completion arrives, but it burned a core on
+    // every workload's tail - once per process on a node running one process per GPU.
+    //
+    // The window having room is NOT the question. What matters is whether anything can be staged.
     Fixture fixture({ ChunkSize });
     Driver driver(Strategy::IoUringBuffered, 4096, std::nullopt, 1 /* depth -> floors at 3 */);
 
@@ -1485,8 +1493,8 @@ TEST(AsyncIoWorker, Does_Not_Block_While_The_Window_Has_Room)
     driver.issue();
 
     ASSERT_EQ(driver.engine->depth(), 3u) << "this test needs room left in the window";
-    EXPECT_EQ(driver.engine->last_wait_mode(), WaitMode::NonBlocking)
-        << "one read outstanding in a window of three is not a reason to stop submitting";
+    EXPECT_EQ(driver.engine->last_wait_mode(), WaitMode::Block)
+        << "nothing left to stage and a read outstanding - waiting is all there is to do";
 }
 
 // And once the window IS full there is nothing else to do, so blocking is right - and bounded, or a

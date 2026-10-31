@@ -4,8 +4,11 @@
 import unittest
 import tempfile
 import shutil
+import gc
 import os
+import weakref
 from unittest.mock import patch
+from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
@@ -14,7 +17,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
+    RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME,
 )
+from runai_model_streamer.file_streamer.yield_order import UnorderedYield, YieldOrder
 
 
 class TestRingConcurrency(unittest.TestCase):
@@ -23,6 +28,12 @@ class TestRingConcurrency(unittest.TestCase):
     than passing by luck."""
 
     RANGE_SIZE = 8
+
+    # Tries allowed to reach a state the library's completion order decides, not us: one next() does
+    # not consume one response, so a test needing responses still outstanding cannot simply assume
+    # it. Most attempts reach it, so ten makes a spurious failure far rarer than the flake it
+    # removes, while still failing loudly if the state stops being reachable at all.
+    SETUP_ATTEMPTS = 10
 
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -113,6 +124,46 @@ class TestRingConcurrency(unittest.TestCase):
             {index: buffer.numpy().tobytes().decode("utf-8") for index, buffer in held.items()},
             expected,
         )
+
+    # Four ranges per slot and two slots, so the mock's round robin interleaves two submissions. A
+    # slot holding ONE range would make the interleave indistinguishable from order, and the test
+    # would pass with the reordering removed.
+    INTERLEAVING_RING = {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                         RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2",
+                         RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME: "0"}
+
+    def stream_order(self, name):
+        """(range indexes in the order they were yielded, the ordering object that was used).
+
+        The bytes are checked here as well, because an order is only worth asserting if the data
+        behind it is right."""
+        path, expected = self.write_ranges(name, 16)
+        with FileStreamer() as fs:
+            fs.stream_files([FileChunks.contiguous(0, path, 0, [self.RANGE_SIZE] * 16)])
+            got = [(index, buffer.numpy().tobytes().decode("utf-8"))
+                   for _, index, buffer in fs.get_chunks()]
+            order = fs.yield_order
+        self.assertEqual({index: text for index, text in got}, expected,
+                         "the bytes must be right whatever the order")
+        return [index for index, _ in got], order
+
+    @patch.dict(os.environ, INTERLEAVING_RING)
+    def test_ranges_are_yielded_in_file_order_by_default(self):
+        indexes, order = self.stream_order("ordered.bin")
+        # Without this the test would also pass with ordering switched off against a reader that
+        # happens to complete in order, which sync_buffered does.
+        self.assertIsInstance(order, YieldOrder)
+        self.assertEqual(indexes, list(range(16)))
+
+    @patch.dict(os.environ, dict(INTERLEAVING_RING, RUNAI_STREAMER_ORDERED_YIELD="0"))
+    def test_the_flag_turns_ordering_off(self):
+        """Deliberately NOT asserting that the result comes out unsorted. Whether responses
+        interleave belongs to the reader - sync_buffered completes in order - so that assertion
+        fails on a correct build. test_yield_order.py drives known arrival orders instead."""
+        indexes, order = self.stream_order("unordered.bin")
+        self.assertIsInstance(order, UnorderedYield)
+        self.assertEqual(sorted(indexes), list(range(16)),
+                         "every range is yielded exactly once, ordered or not")
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "16",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2"})
@@ -236,22 +287,144 @@ class TestRingConcurrency(unittest.TestCase):
         # much later, so it has to fail here instead - see the comment on stream_files.
         path, _ = self.write_ranges("undrained.txt", 8)
         request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
-        with FileStreamer() as fs:
-            fs.stream_files(request)
-            # bind the generator: an unreferenced one is collected as soon as next() returns, and
-            # closing it runs the drain - which would leave nothing for the guard to catch
-            chunks = fs.get_chunks()
-            next(chunks)                   # submissions live, nothing drained
-            self.assertGreater(fs.outstanding, 0)
 
-            with self.assertRaises(ValueError) as caught:
+        # Responses still outstanding is the SETUP, not the result: one next() pops responses until
+        # the ordered one can be released, so if range 0 completes last it pops them all and there is
+        # nothing left for the guard to catch. Set up again rather than assert it away.
+        for _ in range(self.SETUP_ATTEMPTS):
+            with FileStreamer() as fs:
                 fs.stream_files(request)
-            self.assertIn("outstanding", str(caught.exception))
+                # bind the generator: an unreferenced one is collected as soon as next() returns, and
+                # closing it runs the drain - which would leave nothing for the guard to catch
+                chunks = fs.get_chunks()
+                next(chunks)                   # submissions live, nothing drained
+                if fs.outstanding == 0:
+                    chunks.close()             # a discarded attempt still owns a live generator
+                    continue
 
-            # the rejected call must leave the streamer exactly as it was, or the guard would turn a
-            # recoverable mistake into the corruption it exists to prevent
-            self.assertGreater(fs.outstanding, 0)
-            self.assertGreater(len(fs.live_requests), 0)
+                with self.assertRaises(ValueError) as caught:
+                    fs.stream_files(request)
+                self.assertIn("still live", str(caught.exception))
+
+                # the rejected call must leave the streamer exactly as it was, or the guard would turn
+                # a recoverable mistake into the corruption it exists to prevent
+                self.assertGreater(fs.outstanding, 0)
+                self.assertGreater(len(fs.live_requests), 0)
+                return
+
+        self.fail(f"no attempt in {self.SETUP_ATTEMPTS} left a response outstanding after one next() "
+                  f"- one next() is now always draining the whole submission")
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_streaming_again_is_rejected_with_nothing_outstanding(self):
+        """The guard cannot be keyed on outstanding responses. Ordered yielding can take every
+        response from the library before it hands over the first range, and the generator is then
+        parked with nothing outstanding and a whole stream still owed to the caller. Accepting a new
+        stream there frees the ring under that generator.
+
+        The completion order is the library's, so it is imposed here: responses are collected and
+        then served newest submission first, which puts the range that unblocks the yield last.
+        Keying the guard on outstanding alone fails this."""
+        path, _ = self.write_ranges("parked.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        collected = []
+
+        def reversed_response(streamer, *args, **kwargs):
+            if not collected:
+                for _ in range(8):
+                    collected.append(real_response(streamer, *args, **kwargs))
+                collected.sort(key=lambda response: response[1], reverse=True)
+            return collected.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", reversed_response):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+
+                self.assertEqual(fs.outstanding, 0, "the setup did not park the whole stream")
+                self.assertEqual(len(fs.live_requests), 8, "nothing is owed - nothing to guard")
+
+                with self.assertRaises(ValueError) as caught:
+                    fs.stream_files(request)
+                self.assertIn("still live", str(caught.exception))
+
+                chunks.close()
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_abandoning_the_generator_drops_what_is_still_parked(self):
+        """A parked payload is a VIEW into a ring slot, so leaving one behind holds that slot after
+        the ring is dropped - gigabytes of it on a device ring, against the model just loaded.
+
+        Responses are served 0, 2, 4, 1, ... so that range 1 arrives and hands over a run while
+        range 4 is still waiting for range 3. The caller then walks away at that yield, which is the
+        only way a stream ends with something parked."""
+        path, _ = self.write_ranges("parked_left.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        served = []
+
+        def out_of_order(streamer, *args, **kwargs):
+            if not served:
+                collected = [real_response(streamer, *args, **kwargs) for _ in range(8)]
+                # Submissions are issued in file order, so their ids ARE the range order here.
+                collected.sort(key=lambda response: response[1])
+                served.extend(collected[i] for i in (0, 2, 4, 1, 3, 5, 6, 7))
+            return served.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", out_of_order):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)                       # range 0
+                next(chunks)                       # range 1, which frees 2 as well - 4 keeps waiting
+                parked = dict(fs.yield_order._parked)
+                self.assertEqual(sorted(parked), [4], "the setup ended with nothing parked")
+                # The consequence, not the bookkeeping: this view is what keeps a slot alive.
+                left_behind = weakref.ref(parked[4][-1])
+
+                chunks.close()                     # resumes the generator at its yield, running the drain
+                self.assertEqual(fs.yield_order._parked, {})
+
+        del parked
+        gc.collect()
+        self.assertIsNone(left_behind(), "the parked view outlived the stream that made it")
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
+    def test_leaving_the_context_drops_what_is_still_parked(self):
+        """The other way a stream ends with something parked. The drain runs when the generator is
+        RESUMED, and a generator still held and still paused is never resumed - so __exit__ has to
+        drop them itself, after runai_end has joined the workers."""
+        path, _ = self.write_ranges("parked_at_exit.txt", 8)
+        request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
+
+        real_response = file_streamer_module.runai_response
+        served = []
+
+        def out_of_order(streamer, *args, **kwargs):
+            if not served:
+                collected = [real_response(streamer, *args, **kwargs) for _ in range(8)]
+                collected.sort(key=lambda response: response[1])
+                served.extend(collected[i] for i in (0, 2, 4, 1, 3, 5, 6, 7))
+            return served.pop(0)
+
+        with patch.object(file_streamer_module, "runai_response", out_of_order):
+            with FileStreamer() as fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+                next(chunks)
+                self.assertEqual(sorted(fs.yield_order._parked), [4],
+                                 "the setup ended with nothing parked")
+            # chunks is still referenced and still paused, so its drain has not run
+            self.assertEqual(fs.yield_order._parked, {})
+        chunks.close()
 
     @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: "64",
                              RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "8"})
@@ -283,12 +456,27 @@ class TestRingConcurrency(unittest.TestCase):
         path, expected = self.write_ranges("outlived.txt", 8)
         request = [FileChunks.contiguous(17, path, 0, [self.RANGE_SIZE] * 8)]
 
-        fs = FileStreamer()
-        with fs:
-            fs.stream_files(request)
-            chunks = fs.get_chunks()
-            next(chunks)
-            self.assertGreater(fs.outstanding, 0)
+        # One next() does not consume one response. outstanding is decremented on RECEIPT, before
+        # ordering, so the generator pops responses until the ORDERED one can be released - and if
+        # range 0 completes last it pops them all, leaving the drain nothing to do. That is correct
+        # behaviour, but it is not the state under test, so set up again rather than assert it away.
+        for _ in range(self.SETUP_ATTEMPTS):
+            fs = FileStreamer()
+            with fs:
+                fs.stream_files(request)
+                chunks = fs.get_chunks()
+                next(chunks)
+                # Read inside the context: this is the state __exit__ has to leave behind.
+                outstanding_at_exit = fs.outstanding
+            if outstanding_at_exit > 0:
+                break
+            chunks.close()      # a discarded attempt still owns a live generator
+        else:
+            # Never skip. A precondition that stops holding means the streamer changed, and a test
+            # that skips itself goes green for ever without anyone reading why.
+            self.fail(f"no attempt in {self.SETUP_ATTEMPTS} left a response outstanding at "
+                      f"__exit__ - one next() is now always draining the whole submission")
+
         # the context is gone and the handle with it; the generator is still alive, and closing it now
         # runs the finally against a streamer that no longer exists
         chunks.close()
@@ -493,7 +681,7 @@ class TestObjectStorageSkipsTheProbe(unittest.TestCase):
     def test_object_storage_uses_the_default_block_and_does_not_probe(self):
         seen = {}
 
-        def capture(requests, memory_limit, direct_block, owned):
+        def capture(requests, memory_limit, direct_block, owned, ring_buffers=None):
             seen["direct_block"] = direct_block
             seen["owned"] = owned
             raise _Stop()
