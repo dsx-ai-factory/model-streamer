@@ -88,7 +88,7 @@ one to host memory and then `.to()`.
 | `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names, sizes log-uniform up to 64 MiB | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
 | `many_tensors` | about 100,000 tensors in a mix of sizes: a fifth are 4-byte scalar scales, a few are tiny (1 to 128 elements), 70% are of 1 to 16 KB (norms, biases, blocks of scales), the rest up to 2 MiB; about 100 more of up to 32 MiB, drawn like those of `mixed`; a header of 11 MB, and an embedding of at least twice the header as its largest tensor | 1 file, 1.0 to 1.2 GB depending on the seed (median tensor 2.6 KB) |
 | `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB, among about 50 tensors of the layers of a model (log-uniform up to 64 MiB) and small ones | 2 shards, about 4.5 GB |
-| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, most holding 8 to 40 tensors of up to 2 MiB (about 2.7 MiB a file), a few with one to three tensors of up to 10 MiB | about 1.4 GB, 11,500 tensors |
+| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, most holding 8 to 40 tensors of up to 2 MiB (about 2.7 MiB a file), in some seeds a few files with one to three tensors of up to 10 MiB | about 1.4 GB, 11,500 tensors |
 
 A real model has a header of kilobytes (about 100 bytes a tensor) and tensors of megabytes to gigabytes, so the largest
 tensor of every model is not smaller than its largest header (the streamer reads a header as one range; `matrix.py`
@@ -152,8 +152,9 @@ The memory limit (`RUNAI_STREAMER_MEMORY_LIMIT`, a node total divided between th
 the largest tensor) bounds what the streamer holds of the model at a time. The levels are defined by what a user can
 see of it: the model's size and its largest tensor, not the arrangement of the streamer's buffers.
 
-- `tight`: the smallest limit that the streamer accepts, the largest tensor of the model for each rank: the load gets
-  through the whole model with room for one tensor at a time.
+- `tight`: the largest tensor of the model for each rank, which is the least that the streamer gives a rank (a solo
+  load with less is refused, and the streamer raises the share of a rank to that): the load gets through the whole
+  model with room for one tensor at a time.
 - `roomy`: a quarter of the model, but not less than twice the tight limit: room for several tensors at a time, and
   still far below the model.
 - `default`: the streamer's 40 GB. A model that small fits whole and nothing is reused.

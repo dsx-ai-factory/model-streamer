@@ -517,6 +517,21 @@ def build_header(shard, offsets):
     return raw + b" " * (padded - length)
 
 
+def plan_facts(plan):
+    """What a memory limit is computed from, of a model that has not been written: the shape of its manifest, with the
+    total of the data, the largest tensor and the header length of every file."""
+    sizes, headers = [], []
+    for shard in plan:
+        offsets, position = [], 0
+        for spec in shard.tensors:
+            offsets.append((position, position + nbytes_of(spec)))
+            position += nbytes_of(spec)
+            sizes.append(nbytes_of(spec))
+        headers.append(len(build_header(shard, offsets)))
+    return {"total_data_bytes": sum(sizes), "largest_tensor_bytes": max(sizes or [0]),
+            "files": [{"header_len": header} for header in headers]}
+
+
 def write_shard(path, shard, seed, model):
     offsets = []
     position = 0

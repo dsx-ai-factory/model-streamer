@@ -5,30 +5,30 @@
     python3 -m unittest tests/gpu/test_matrix.py
 """
 
+import copy
+import functools
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gen_models  # noqa: E402
 import matrix  # noqa: E402
 
 MIB = 1 << 20
-
-# The full size models (generated with --scale 1, seed 1, generator version 8): what the memory limit is computed from.
-# Other seeds differ by a few percent in the total and by up to a third in the largest tensor of many_tensors (seeds 2
-# and 3: totals of 1.07 to 1.18 GB, largest tensors of 24 to 33 MB).
-FULL_SIZE = {
-    "mixed": {"total_data_bytes": 1073741829, "largest_tensor_bytes": 65615850, "header_len": 25067},
-    "many_tensors": {"total_data_bytes": 1025496386, "largest_tensor_bytes": 24025088, "header_len": 11257427},
-    "giant_tensor": {"total_data_bytes": 4511756332, "largest_tensor_bytes": 2 ** 31, "header_len": 4088},
-    "many_files": {"total_data_bytes": 1366843426, "largest_tensor_bytes": 2088625, "header_len": 4088},
-}
+SEEDS = (1, 2, 3)  # of the full size models that the limits are computed for
 
 
-def manifest(model):
-    facts = FULL_SIZE[model]
-    return {"total_data_bytes": facts["total_data_bytes"], "largest_tensor_bytes": facts["largest_tensor_bytes"],
-            "files": [{"header_len": facts["header_len"]}]}
+@functools.lru_cache(maxsize=None)
+def _facts(model, seed):
+    gen_models.use_dtypes(gen_models.DTYPE_NAMES)  # other tests narrow them
+    return gen_models.plan_facts(gen_models.make_plan(model, seed, 1.0, gen_models.DEFAULT_FILES))
+
+
+def manifest(model, seed=1):
+    """What memory_limit is computed from, of the full size model of a seed: from the generator's plan, so that nothing
+    is written and a change of the generator is seen here (about 2 seconds for many_tensors)."""
+    return copy.deepcopy(_facts(model, seed))
 
 
 class Rows(unittest.TestCase):
@@ -110,6 +110,34 @@ class MemoryLimit(unittest.TestCase):
                 self.assertLess(roomy, m["total_data_bytes"], (model, distributed))
                 self.assertGreaterEqual(roomy, 2 * matrix.memory_limit(m, distributed, "tight"), (model, distributed))
 
+    def test_the_limits_can_be_set_for_the_full_size_models_of_several_seeds(self):
+        """What the GPU run does for every row, with the models that it generates: a limit that cannot be set for a model
+        (a header larger than the largest tensor, a roomy limit that the model fits in) would fail the row there, so
+        a change of the generator that causes it is found here. The models are planned, not written."""
+        for seed in SEEDS:
+            for model in matrix.MODEL_NAMES:
+                m = manifest(model, seed)
+                for distributed in (False, True):
+                    matrix.memory_limit(m, distributed, "tight")
+                    if model in matrix.ROOMY_MODELS:
+                        roomy = matrix.memory_limit(m, distributed, "roomy")
+                        self.assertLess(roomy, m["total_data_bytes"], (model, seed, distributed))
+
+    def test_the_facts_of_a_plan_are_those_of_the_manifest_that_is_written(self):
+        """plan_facts of a plan is what generate writes: the total, the largest tensor and the header of every file."""
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="plan-facts-") as out:
+            gen_models.use_dtypes(gen_models.DTYPE_NAMES)
+            for model in ("mixed", "many_files"):
+                plan = gen_models.make_plan(model, 5, 0.05, 20)
+                shard_facts = gen_models.plan_facts(plan)
+                written = [gen_models.write_shard(os.path.join(out, "%s-%d" % (model, i)), shard, 5, model)
+                           for i, shard in enumerate(plan)]
+                self.assertEqual(shard_facts["total_data_bytes"],
+                                 sum(e["end"] - e["start"] for f in written for e in f["tensors"]), model)
+                self.assertEqual([f["header_len"] for f in shard_facts["files"]], [f["header_len"] for f in written],
+                                 model)
+
     def test_roomy_is_refused_where_the_model_fits_in_it(self):
         """giant_tensor: twice a 2 GiB tensor, for each of two ranks, is more than the 4.5 GB of the model."""
         with self.assertRaises(ValueError):
@@ -125,9 +153,11 @@ class MemoryLimit(unittest.TestCase):
                 matrix.memory_limit(m, False, level)
 
     def test_every_model_has_a_largest_tensor_that_is_not_below_its_header(self):
-        for model in matrix.MODEL_NAMES:
-            facts = FULL_SIZE[model]
-            self.assertGreaterEqual(facts["largest_tensor_bytes"], facts["header_len"], model)
+        for seed in SEEDS:
+            for model in matrix.MODEL_NAMES:
+                m = manifest(model, seed)
+                self.assertGreaterEqual(m["largest_tensor_bytes"], max(f["header_len"] for f in m["files"]),
+                                        (model, seed))
 
     def test_unknown_level_is_refused(self):
         with self.assertRaises(ValueError):

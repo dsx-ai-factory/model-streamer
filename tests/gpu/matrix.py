@@ -36,8 +36,9 @@ Row = namedtuple("Row", "id model dist policy owned device limit")
 # The host memory limit, RUNAI_STREAMER_MEMORY_LIMIT, which bounds what the streamer holds of the model at a time. The
 # levels are defined by what a user can see of it (the documented contract: a limit is a node total, divided between
 # the ranks of the node, and no rank gets less than the largest tensor), not by how the streamer arranges its buffers:
-#   tight    the smallest limit that the streamer accepts: the largest tensor of the model for each rank. A load has
-#            to get through the whole model with room for one tensor at a time
+#   tight    the largest tensor of the model for each rank, which is the least that the streamer gives a rank (a solo
+#            load with less is refused, and the streamer raises the share of a rank to that): the load has to get
+#            through the whole model with room for one tensor at a time
 #   roomy    a quarter of the model, but not less than twice the tight limit: several tensors at a time, still far
 #            less than the model, so memory has to be reused
 #   default  40 GB: a model that small fits whole and nothing is reused

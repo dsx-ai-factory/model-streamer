@@ -122,6 +122,14 @@ class RowRun:
         self.errors = []
         self.error_count = 0
         self.seen = set()
+        # From the manifest alone, so both ranks get the same limit, or the same refusal, before any collective: a model
+        # that the limit cannot be set for is a failure of the row, not of a rank in the middle of a distributed load.
+        self.limit = None
+        self.limit_error = None
+        try:
+            self.limit = memory_limit(self.manifest, bool(row.dist), row.limit)
+        except ValueError as error:
+            self.limit_error = error
 
     def error(self, message):
         self.error_count += 1
@@ -171,7 +179,7 @@ class RowRun:
 
     def run(self):
         row = self.row
-        limit = memory_limit(self.manifest, bool(row.dist), row.limit)
+        limit = self.limit
         settings = {
             "RUNAI_STREAMER_PARTITION_POLICY": row.policy or "spans",
             "RUNAI_STREAMER_DIST": "auto",
@@ -317,7 +325,10 @@ class Harness:
         started = time.perf_counter()
         raised = False
         try:
-            run.run()
+            if run.limit_error is not None:
+                run.error("the memory limit of the row cannot be set: %s" % run.limit_error)
+            else:
+                run.run()
         except Exception as error:  # a streamer exception is a failure of the row, not of the harness
             raised = True
             run.error("%s: %s" % (type(error).__name__, error))
