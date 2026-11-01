@@ -6,9 +6,11 @@
 Four models, each isolating one kind of stress:
 
     mixed          every dtype, ranks 0-5, edge sizes, odd names, 4 uneven shards with different alignment
-    many_tensors   about 100,000 tiny tensors and a multi-MB header in one file
-    giant_tensor   a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model)
-    many_files     500 small files, some header-only, some holding a single 1-byte tensor
+    many_tensors   about 100,000 tiny tensors, a mix of larger ones and a multi-MB header in one file; its largest
+                   tensor is at least twice the header, as in a real model
+    giant_tensor   a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model), among
+                   tensors of the sizes of a real model's layers
+    many_files     500 files of 8 to 40 small tensors each, some header-only, some holding a single 1-byte tensor
 
 The files are written by hand, not through safetensors.save_file, so the layout is under control: header
 padding (and so the alignment of every tensor start), header-only files (and zero-sized dimensions, see EMPTY_TENSORS).
@@ -50,7 +52,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
-GENERATOR_VERSION = 7
+GENERATOR_VERSION = 8
 
 # Files of the many_files model. The largest real checkpoint surveyed has about 160 files, so 500 is three times that,
 # and below the container's soft limit of 1024 open files: the streamer keeps a file open until its submission ends,
@@ -120,9 +122,15 @@ def use_dtypes(names):
 EDGE_SIZES = (1, 4095, 4096, 4097, 64 * 1024 - 1, 64 * 1024, 64 * 1024 + 1,
               8 * MIB - 1, 8 * MIB, 8 * MIB + 1)
 
-# The mixed model keeps every tensor below this so the memory limit used by the tests can stay small: a tensor
-# must fit in one host buffer, and a distributed rank only gets its share of the limit.
-MIXED_MAX_TENSOR = 24 * MIB
+# The mixed model keeps every tensor below this (6% of its 1 GiB, about what the largest tensor of an 8B model is of
+# the model) so that the memory limit used by the tests, which has to hold a tensor per rank, stays well below the model.
+MIXED_MAX_TENSOR = 64 * MIB
+
+# What a tensor costs in the header of a safetensors file, with some margin: measured on the many_tensors model, about
+# 110 bytes (11.0 MB for 100,101 tensors). The largest tensor of that model is made twice the header, as in a real
+# model, where the header is kilobytes and the largest tensor hundreds of MB.
+HEADER_BYTES_PER_TENSOR = 120
+MANY_TENSORS_MAX_TENSOR = 32 * MIB  # of the mix of larger tensors of the many_tensors model
 
 # The number is part of every seed, so it stays with a model whatever the model is called.
 MODEL_IDS = {"mixed": 1, "many_tensors": 2, "giant_tensor": 3, "many_files": 4}
@@ -376,9 +384,16 @@ def plan_many_tensors(seed, scale):
         elements_count = int(math.exp(rng.uniform(0.0, math.log(128))))
         shape = (elements_count,) if key % 3 else (1 + elements_count % 7, max(1, elements_count // 4))
         tensors.append(TensorSpec(realistic_name(key, used), dtype, shape, "random", key))
-    for extra in range(max(2, int(24 * scale))):
-        key = count + extra
-        tensors.append(TensorSpec("big.%d" % extra, "U8", (4 * MIB,), "random", key))
+    # A mix of larger tensors, drawn like those of the mixed model.
+    extras = max(2, int(100 * scale))
+    for extra in range(extras):
+        tensors.append(random_tensor(rng, count + extra, used, MANY_TENSORS_MAX_TENSOR))
+    # And the embedding: at least twice the header, so that the largest tensor is not smaller than the largest range
+    # of the file the way it would be with only these tiny tensors (the header is what a real model never has bigger).
+    header_estimate = HEADER_BYTES_PER_TENSOR * (count + extras + 1)
+    width = 1024
+    rows = -(-2 * header_estimate // (width * 2))
+    tensors.append(TensorSpec("model.embed_tokens.weight", "BF16", (rows, width), "random", count + extras))
     order = rng.permutation(len(tensors))
     return [ShardPlan("model.safetensors", [tensors[i] for i in order], "odd", {"format": "pt"})]
 
@@ -390,16 +405,22 @@ def plan_giant_tensor(seed, scale):
     used = set()
     key = 0
 
-    def smalls(count):
+    def draw(count, max_bytes):
         nonlocal key
         out = []
         for _ in range(count):
-            out.append(random_tensor(rng, key, used, 64 * 1024))
+            out.append(random_tensor(rng, key, used, max_bytes))
             key += 1
         return out
 
-    first = smalls(3) + [TensorSpec("big.2GiB.u8", "U8", (giant_bytes,), "random", 1000)] + smalls(2)
-    second = [TensorSpec("model.embed_tokens.weight", "BF16", (rows, 8192), "random", 1001)] + smalls(3)
+    # The giant tensors are not alone: around them are the tensors of the layers of a real model (log-uniform sizes
+    # up to 64 MiB, like the mixed model) and small ones (norms, biases).
+    layers = max(4, int(48 * scale))
+    layer_bytes = max(64 * 1024, int(64 * MIB * scale))
+    first = draw(3, 64 * 1024) + [TensorSpec("big.2GiB.u8", "U8", (giant_bytes,), "random", 1000)] + draw(2, 64 * 1024)
+    first += draw(layers // 2, layer_bytes)
+    second = [TensorSpec("model.embed_tokens.weight", "BF16", (rows, 8192), "random", 1001)] + draw(3, 64 * 1024)
+    second += draw(layers - layers // 2, layer_bytes)
     return [
         ShardPlan("model-00001-of-00002.safetensors", first, "aligned", {"format": "pt"}),
         ShardPlan("model-00002-of-00002.safetensors", second, "odd", None),
@@ -425,8 +446,11 @@ def plan_many_files(seed, scale, files):
             tensors.append(TensorSpec("f%05d.single" % index, "U8", (1,), "random", key))
             key += 1
         else:
-            max_bytes = 10 * MIB if kind > 0.995 else 64 * 1024
-            for j in range(int(rng.integers(1, 4))):
+            # A few files hold one to three tensors of up to 10 MiB. The others hold 8 to 40 of up to 512 KiB, about
+            # 1 MiB a file, which makes the model about 380 MB.
+            big = kind > 0.995
+            max_bytes = 10 * MIB if big else 512 * 1024
+            for j in range(int(rng.integers(1, 4)) if big else int(rng.integers(8, 41))):
                 spec = random_tensor(rng, key, set(), max_bytes, name="f%05d.t%d" % (index, j))
                 tensors.append(spec)
                 key += 1

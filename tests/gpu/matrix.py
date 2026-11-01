@@ -10,7 +10,7 @@ A row is one load of one model:
     policy    the partition policy of a distributed row: spans, chunks or files
     owned     the owned argument of stream_files
     device    "cuda": stream to the rank's GPU; "cpu_to": stream to host memory, then copy each tensor with .to()
-    limit     the host memory limit, which decides how the ring of read buffers is used (see memory_limit)
+    limit     the host memory limit: tight, roomy or default (see memory_limit)
 
 Three sets of rows, chosen with GPU_MATRIX:
 
@@ -31,27 +31,22 @@ from real_model import MODEL_NAME as REAL_MODEL  # noqa: E402
 MIB = 1 << 20
 WORLD = 2  # ranks of the test
 
-# The streamer's default number of read buffers (RUNAI_STREAMER_RING_BUFFERS).
-RING_BUFFERS = 18
-
 Row = namedtuple("Row", "id model dist policy owned device limit")
 
-# How the host ring of read buffers is used. N buffers of B bytes each, where B = max(largest range,
-# budget // 18) and N = min(18, budget // B), with budget = min(limit, size of the model):
-#   tight    the ring has few buffers (1 for giant_tensor, 2 for mixed, 5 for many_tensors, 2 to about 17 for many_files,
-#            depending on the seed) and the model passes through it many times: a buffer is read while another is
-#            consumed, and every buffer is reused
-#   deep     18 buffers, and the model still passes through them more than once
-#   default  40 GB: a model that small fits in the ring whole and no buffer is ever reused
-LIMITS = ("tight", "deep", "default")
+# The host memory limit, RUNAI_STREAMER_MEMORY_LIMIT, which bounds what the streamer holds of the model at a time. The
+# levels are defined by what a user can see of it (the documented contract: a limit is a node total, divided between
+# the ranks of the node, and no rank gets less than the largest tensor), not by how the streamer arranges its buffers:
+#   tight    the smallest limit that the streamer accepts: the largest tensor of the model for each rank. A load has
+#            to get through the whole model with room for one tensor at a time
+#   roomy    a quarter of the model, but not less than twice the tight limit: several tensors at a time, still far
+#            less than the model, so memory has to be reused
+#   default  40 GB: a model that small fits whole and nothing is reused
+# A limit below the size of the model cannot hold the model: whatever the streamer does, it has to reuse memory.
+LIMITS = ("tight", "roomy", "default")
 
-# A deep ring needs 18 buffers of the largest tensor to be smaller than the model, or nothing is reused. That
-# holds for these two models; giant_tensor (a 2 GiB tensor in a 4 GiB model) cannot have a deep ring that recycles, and
-# many_files (a few tensors of up to 10 MiB among small files, 5 to 11 MB in all) can only for some seeds.
-DEEP_MODELS = ("mixed", "many_tensors")
-# A distributed rank reads only its share of the model, so its ring has to be smaller than that share to be reused:
-# many_tensors (105 MB, 18 buffers of 4 MiB are 75 MB a rank, and a rank reads 52 MB) is not deep when distributed.
-DEEP_DISTRIBUTED_MODELS = ("mixed",)
+# The models that a roomy limit makes sense for. giant_tensor is the model of a tensor of 2 GiB in 4.5 GB: twice its
+# largest tensor is nearly the whole model, and the row would only repeat the tight one at the cost of minutes.
+ROOMY_MODELS = ("mixed", "many_tensors", "many_files")
 
 POLICIES = ((False, None), (True, "spans"), (True, "chunks"), (True, "files"))
 
@@ -59,28 +54,31 @@ POLICIES = ((False, None), (True, "spans"), (True, "chunks"), (True, "files"))
 def memory_limit(manifest, distributed, level):
     """The value of RUNAI_STREAMER_MEMORY_LIMIT for a row, or None to leave it unset.
 
-    A distributed load divides the limit, a node total, among the ranks, so a rank gets limit / WORLD.
-    tight: about a sixteenth of the model, but never below twice the largest range, times the ranks. A range
-    must fit in one buffer, and twice the largest range leaves room for two buffers, so a buffer can be read
-    while the previous one is consumed. (Where the whole model is smaller than two largest ranges, as in
-    giant_tensor, the ring still has one buffer.) The largest range is a tensor, or a file's header: the
-    streamer reads each header as one range, and many_tensors' is 10 MB.
-    deep: 18 largest tensors per rank, so the ring has all its 18 buffers."""
+    A distributed load divides the limit, a node total, among the ranks, so a rank gets limit / WORLD, and no rank
+    gets less than the largest tensor: the limits are given for the ranks of the load.
+    tight: the largest tensor of the model, for each rank. (A file's header is read as one range too, so it must not be
+    larger than the largest tensor, which gen_models.py sees to: a model that breaks that is refused here.)
+    roomy: a quarter of the model, but not less than twice the tight limit. Refused where that is not below the model,
+    because a limit that the model fits in reuses nothing."""
     if level == "default":
         return None
     ranks = WORLD if distributed else 1
     total = manifest["total_data_bytes"]
     largest_tensor = manifest["largest_tensor_bytes"]
-    largest_range = max([largest_tensor] + [f["header_len"] for f in manifest["files"]])
-    tight = max(total // 16, 2 * largest_range * ranks, MIB)
+    largest_header = max(f["header_len"] for f in manifest["files"])
+    if largest_header > largest_tensor:
+        raise ValueError("the largest header of the model, %d bytes, is larger than its largest tensor, %d bytes: the "
+                         "streamer reads a header as one range, so the limit would have to be sized by it" % (
+                             largest_header, largest_tensor))
+    tight = max(largest_tensor * ranks, MIB)
     if level == "tight":
         return tight
-    if level == "deep":
-        share = total // ranks  # what one rank reads
-        if RING_BUFFERS * largest_tensor >= share:
-            raise ValueError("a ring of %d buffers of %d bytes does not recycle in the %d bytes that a rank of %d reads" % (
-                RING_BUFFERS, largest_tensor, share, ranks))
-        return max(tight, RING_BUFFERS * largest_tensor * ranks)
+    if level == "roomy":
+        roomy = max(total // 4, 2 * tight)
+        if roomy >= total:
+            raise ValueError("a roomy limit of %d bytes is not below the model, %d bytes: nothing would be reused" % (
+                roomy, total))
+        return roomy
     raise ValueError("unknown limit %r" % (level,))
 
 
@@ -89,7 +87,7 @@ def is_valid(model, dist, policy, owned, device, limit):
         return False  # distributed streaming needs a CUDA destination
     if policy == "files" and model == "many_tensors":
         return False  # one file: there is nothing to give each rank
-    if limit == "deep" and model not in (DEEP_DISTRIBUTED_MODELS if dist else DEEP_MODELS):
+    if limit == "roomy" and model not in ROOMY_MODELS:
         return False
     return True
 
@@ -118,7 +116,7 @@ CORE_IDS = (
     "mixed.dist.spans.owned.cuda.tight",
     "mixed.dist.chunks.owned.cuda.tight",
     "mixed.solo.owned.cpu_to.tight",
-    "mixed.solo.owned.cuda.deep",
+    "mixed.solo.owned.cuda.roomy",
     "mixed.solo.owned.cuda.default",
     "many_tensors.solo.owned.cuda.tight",
     "many_tensors.dist.spans.owned.cuda.tight",

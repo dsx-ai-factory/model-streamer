@@ -32,7 +32,7 @@ by the repository's own pull request workflow, and a manual run tests the image 
 
    | Leg | PyTorch | Rows of the synthetic models |
    |---|---|---|
-   | `newest-torch` | the newest on PyPI (`torch`) | `full` (90 rows, under each of the four filesystem strategies), plus the self-check |
+   | `newest-torch` | the newest on PyPI (`torch`) | `full` (104 rows, under each of the four filesystem strategies), plus the self-check |
    | `oldest-torch` | the oldest the package supports (`torch==2.0.0`, with `numpy<2`) | `core` (14 rows, under each strategy) |
 
    Both legs also run the smoke test of the small real model. The versions in between are not run. The newest leg is
@@ -85,10 +85,14 @@ one to host memory and then `.to()`.
 
 | Model | Stress | Shape |
 |---|---|---|
-| `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
-| `many_tensors` | about 100,000 tiny tensors, a header of several MB | 1 file, about 100 MB |
-| `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB | 2 shards, about 4 GiB |
-| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, a few with a larger tensor | 5 to 11 MB, depending on the seed |
+| `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names, sizes log-uniform up to 64 MiB | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
+| `many_tensors` | about 100,000 tiny tensors (1 to 128 elements, so 1 to 512 bytes), a mix of about 100 larger ones (up to 32 MiB, drawn like those of `mixed`), and a header of 11 MB; its largest tensor is an embedding of at least twice the header | 1 file, 170 to 250 MB depending on the seed |
+| `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB, among about 50 tensors of the layers of a model (log-uniform up to 64 MiB) and small ones | 2 shards, about 4.5 GB |
+| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, most holding 8 to 40 tensors of up to 512 KiB (about 1 MiB a file), a few with one to three tensors of up to 10 MiB | about 380 MB, 11,500 tensors |
+
+A real model has a header of kilobytes (about 100 bytes a tensor) and tensors of megabytes to gigabytes, so the largest
+tensor of every model is not smaller than its largest header (the streamer reads a header as one range; `matrix.py`
+refuses a model that breaks this, and `test_gen_models.py` checks it).
 
 Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
 `--models mixed,many_files` to build only some of them.
@@ -138,23 +142,25 @@ distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_
 `many_files.dist.files.owned.cuda.tight`. `GPU_MATRIX` picks the rows:
 
 - `core`: 14 rows, a quick set (the oldest-torch leg runs it). One option at a time on the `mixed` model (borrowed
-  tensors, `chunks`, host then `.to()`, the deep and default limits), and one solo and one distributed load of every
+  tensors, `chunks`, host then `.to()`, the roomy and default limits), and one solo and one distributed load of every
   other model.
-- `full` (the newest-torch leg): every valid combination, 90 rows. A distributed row needs `cuda`; the `files` policy
-  needs more than one file; the deep limit needs a model that can use it, and when the load is distributed a model
-  whose share of one rank is larger than the ring (`many_tensors` is not: a rank reads 52 MB and a deep ring is 75 MB).
+- `full` (the newest-torch leg): every valid combination, 104 rows. A distributed row needs `cuda`; the `files` policy
+  needs more than one file; the roomy limit is for the models that it is below (not `giant_tensor`).
 - `smoke`: three loads of the small real model, with the default memory limit.
 
-The memory limit decides whether the host buffers, the ring the streamer reads into, are reused. With
-N = min(18, limit // B) buffers of B = max(largest range, limit // 18) bytes:
+The memory limit (`RUNAI_STREAMER_MEMORY_LIMIT`, a node total divided between the ranks, with no rank getting less than
+the largest tensor) bounds what the streamer holds of the model at a time. The levels are defined by what a user can
+see of it: the model's size and its largest tensor, not the arrangement of the streamer's buffers.
 
-- `tight`: about a sixteenth of the model, never below twice the largest range (a tensor or a file header) times
-  the ranks sharing the limit (and at least 1 MiB): two buffers for `mixed`, five for `many_tensors`, one for
-  `giant_tensor`, and for `many_files` between two and about seventeen, depending on the seed (the size of its largest
-  tensor decides). The model passes through the ring many times, and every buffer is reused.
-- `deep`: 18 largest tensors per rank, so all 18 buffers exist and the model still passes through them more than
-  once (a rank reads its share of the model, and the ring has to be smaller than that). Only `mixed` and `many_tensors` can have this, and `many_tensors` only when one process loads it.
-- `default`: the streamer's 40 GB. A model that small fits in the ring whole and no buffer is ever reused.
+- `tight`: the smallest limit that the streamer accepts, the largest tensor of the model for each rank: the load gets
+  through the whole model with room for one tensor at a time.
+- `roomy`: a quarter of the model, but not less than twice the tight limit: room for several tensors at a time, and
+  still far below the model.
+- `default`: the streamer's 40 GB. A model that small fits whole and nothing is reused.
+
+A limit below the size of the model cannot hold the model, so whatever the streamer does with it, it has to reuse
+memory: that is what the limits are for. The rows do not claim anything about how many buffers there are, and no test
+reads the streamer's ring sizing; that has its own unit tests in the streamer.
 
 After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
 the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until

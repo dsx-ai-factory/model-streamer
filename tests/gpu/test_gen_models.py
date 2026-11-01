@@ -150,6 +150,36 @@ class GenerateModels(unittest.TestCase):
         self.assertEqual(max(t["end"] - t["start"] for f, t in self.tensors("giant_tensor")),
                          giant_tensor["largest_tensor_bytes"])
 
+    def test_the_largest_tensor_of_a_model_is_not_below_its_largest_header(self):
+        """As in a real model, and what the tight memory limit of matrix.py counts on: the streamer reads a header as one
+        range, so a header larger than every tensor would set the floor of the limit instead of the tensors."""
+        for model in gen.MODEL_NAMES:
+            manifest = self.manifests[model]
+            self.assertGreaterEqual(manifest["largest_tensor_bytes"], max(f["header_len"] for f in manifest["files"]),
+                                    model)
+
+    def test_many_tensors_has_a_mix_and_a_tensor_of_twice_its_header(self):
+        manifest = self.manifests["many_tensors"]
+        sizes = sorted(t["end"] - t["start"] for _, t in self.tensors("many_tensors"))
+        self.assertGreater(sizes[-1], 100 * sizes[len(sizes) // 2], "no mix of larger tensors among the tiny ones")
+        self.assertGreaterEqual(manifest["largest_tensor_bytes"], 2 * manifest["files"][0]["header_len"])
+        self.assertIn("model.embed_tokens.weight", [t["name"] for _, t in self.tensors("many_tensors")])
+
+    def test_giant_tensor_has_the_tensors_of_the_layers_of_a_model_around_it(self):
+        sizes = sorted((t["end"] - t["start"] for _, t in self.tensors("giant_tensor")), reverse=True)
+        self.assertGreaterEqual(len(sizes), 12)  # 58 at full size
+        # the two giant tensors, and then tensors of ordinary sizes: not a model of two tensors and some crumbs
+        self.assertGreater(sizes[2], 0)
+        self.assertGreater(sum(sizes[2:]), 0.01 * sum(sizes[:2]))
+
+    def test_the_files_of_many_files_hold_several_small_tensors(self):
+        counts = [len(f["tensors"]) for f in self.manifests["many_files"]["files"]]
+        self.assertEqual(counts[0], 0)  # the forced header-only file
+        self.assertEqual(counts[1], 1)  # the forced file with a single tensor
+        ordinary = [c for c in counts[2:] if c > 3]
+        self.assertTrue(ordinary)
+        self.assertTrue(all(8 <= c <= 40 for c in ordinary), ordinary)
+
     def test_alignment_classes_all_occur(self):
         starts = [(f["data_start"] + t["start"], t["dtype"]) for f, t in self.tensors("mixed")]
         size = lambda dtype: gen.DTYPES[dtype][0]  # noqa: E731
@@ -184,7 +214,8 @@ class GenerateModels(unittest.TestCase):
     def test_the_regeneration_check_notices_another_seed(self):
         manifest = copy.deepcopy(self.manifests["mixed"])
         manifest["seed"] += 1
-        self.assertEqual(len(gen.check_determinism(manifest)), 3)
+        # Not always all three: a sampled tensor of one byte comes out the same from another seed one time in 256
+        self.assertGreaterEqual(len(gen.check_determinism(manifest)), 2)
 
     def test_the_many_files_model_has_the_default_number_of_files(self):
         """Not the 40 of these tests: what a run generates, below the soft limit of 1024 open files."""

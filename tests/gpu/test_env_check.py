@@ -193,6 +193,7 @@ class CommandLine(unittest.TestCase):
         for urlopen, annotated in ((mock.Mock(return_value=response), True),
                                    (mock.Mock(side_effect=OSError("no route")), False)):
             with mock.patch.dict(os.environ), mock.patch.object(env_check.urllib.request, "urlopen", urlopen), \
+                    mock.patch.object(env_check.importlib.metadata, "version", return_value="2.14.1"), \
                     redirect_stdout(io.StringIO()) as out:
                 os.environ.pop("GPU_RESULTS", None)
                 self.assertEqual(env_check.main(["newest-torch"]), 0)
