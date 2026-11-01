@@ -6,8 +6,8 @@
 Four models, each isolating one kind of stress:
 
     mixed          every dtype, ranks 0-5, edge sizes, odd names, 4 uneven shards with different alignment
-    many_tensors   about 100,000 tiny tensors, a mix of larger ones and a multi-MB header in one file; its largest
-                   tensor is at least twice the header, as in a real model
+    many_tensors   about 100,000 tensors, from 4-byte scalars to a few MB, most of kilobytes, and a multi-MB header
+                   in one file; its largest tensor is at least twice the header, as in a real model
     giant_tensor   a tensor of exactly 2 GiB and one of 2004 MiB (the largest tensor seen in a real model), among
                    tensors of the sizes of a real model's layers
     many_files     500 files of 8 to 40 small tensors each, some header-only, some holding a single 1-byte tensor
@@ -366,6 +366,30 @@ def plan_mixed(seed, scale):
     ]
 
 
+# The sizes of the tensors of the many_tensors model, apart from the fifth that are scalar scales (4 bytes): (share,
+# smallest, largest) in bytes, log-uniform inside. A real model with that many tensors (a mixture of experts, quantized
+# weights) has scalars (input scales), many tensors of kilobytes (norms, biases, blocks of scales), and weights of
+# megabytes, of which only a few are drawn here: a model of that count would not fit.
+MANY_TENSORS_SIZES = (
+    (0.05, 0, 0),                    # 1 to 128 elements
+    (0.90, 1024, 16 * 1024),         # norms, biases, blocks of scales
+    (0.047, 16 * 1024, 256 * 1024),
+    (0.003, 256 * 1024, 2 * MIB),
+)
+
+
+def many_tensors_elements(rng, itemsize):
+    """The number of elements of a tensor of the many_tensors model, drawn from MANY_TENSORS_SIZES."""
+    pick = rng.random()
+    for share, smallest, largest in MANY_TENSORS_SIZES:
+        if pick < share or (share, smallest, largest) == MANY_TENSORS_SIZES[-1]:
+            break
+        pick -= share
+    if largest == 0:
+        return int(math.exp(rng.uniform(0.0, math.log(128))))
+    return max(1, int(math.exp(rng.uniform(math.log(smallest), math.log(largest)))) // itemsize)
+
+
 def plan_many_tensors(seed, scale):
     rng = np.random.default_rng([seed, MODEL_IDS["many_tensors"], 0xFFFF])
     used = set()
@@ -381,7 +405,7 @@ def plan_many_tensors(seed, scale):
             used.add(name)
             tensors.append(TensorSpec(name, "F32", (1,), "random", key))
             continue
-        elements_count = int(math.exp(rng.uniform(0.0, math.log(128))))
+        elements_count = many_tensors_elements(rng, DTYPES[dtype][0])
         shape = (elements_count,) if key % 3 else (1 + elements_count % 7, max(1, elements_count // 4))
         tensors.append(TensorSpec(realistic_name(key, used), dtype, shape, "random", key))
     # A mix of larger tensors, drawn like those of the mixed model.
@@ -446,10 +470,10 @@ def plan_many_files(seed, scale, files):
             tensors.append(TensorSpec("f%05d.single" % index, "U8", (1,), "random", key))
             key += 1
         else:
-            # A few files hold one to three tensors of up to 10 MiB. The others hold 8 to 40 of up to 512 KiB, about
-            # 1 MiB a file, which makes the model about 380 MB.
+            # A few files hold one to three tensors of up to 10 MiB. The others hold 8 to 40 of up to 2 MiB, about
+            # 2.7 MiB a file, which makes the model about 1.4 GB.
             big = kind > 0.995
-            max_bytes = 10 * MIB if big else 512 * 1024
+            max_bytes = 10 * MIB if big else 2 * MIB
             for j in range(int(rng.integers(1, 4)) if big else int(rng.integers(8, 41))):
                 spec = random_tensor(rng, key, set(), max_bytes, name="f%05d.t%d" % (index, j))
                 tensors.append(spec)

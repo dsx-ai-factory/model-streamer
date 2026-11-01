@@ -15,14 +15,13 @@ import matrix  # noqa: E402
 MIB = 1 << 20
 
 # The full size models (generated with --scale 1, seed 1, generator version 8): what the memory limit is computed from.
-# Other seeds differ by tens of percent in the total and the largest tensor of many_tensors and many_files (the
-# models were also generated with seeds 2 and 3: totals of 171 to 252 MB and largest tensors of 24 to 33 MB for
-# many_tensors).
+# Other seeds differ by a few percent in the total and by up to a third in the largest tensor of many_tensors (seeds 2
+# and 3: totals of 1.07 to 1.18 GB, largest tensors of 24 to 33 MB).
 FULL_SIZE = {
     "mixed": {"total_data_bytes": 1073741829, "largest_tensor_bytes": 65615850, "header_len": 25067},
-    "many_tensors": {"total_data_bytes": 252294114, "largest_tensor_bytes": 28617120, "header_len": 11000371},
+    "many_tensors": {"total_data_bytes": 1025496386, "largest_tensor_bytes": 24025088, "header_len": 11257427},
     "giant_tensor": {"total_data_bytes": 4511756332, "largest_tensor_bytes": 2 ** 31, "header_len": 4088},
-    "many_files": {"total_data_bytes": 387627825, "largest_tensor_bytes": 1212960, "header_len": 4088},
+    "many_files": {"total_data_bytes": 1366843426, "largest_tensor_bytes": 2088625, "header_len": 4088},
 }
 
 

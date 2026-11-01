@@ -161,7 +161,10 @@ class GenerateModels(unittest.TestCase):
     def test_many_tensors_has_a_mix_and_a_tensor_of_twice_its_header(self):
         manifest = self.manifests["many_tensors"]
         sizes = sorted(t["end"] - t["start"] for _, t in self.tensors("many_tensors"))
-        self.assertGreater(sizes[-1], 100 * sizes[len(sizes) // 2], "no mix of larger tensors among the tiny ones")
+        self.assertGreater(sizes[-1], 100 * sizes[len(sizes) // 2], "no mix of larger tensors among the small ones")
+        count = len(sizes)
+        self.assertGreater(sum(s < 512 for s in sizes), 0.1 * count, "no tiny tensors (scalars)")
+        self.assertGreater(sum(512 <= s < 32 * 1024 for s in sizes), 0.5 * count, "no tensors of kilobytes")
         self.assertGreaterEqual(manifest["largest_tensor_bytes"], 2 * manifest["files"][0]["header_len"])
         self.assertIn("model.embed_tokens.weight", [t["name"] for _, t in self.tensors("many_tensors")])
 
