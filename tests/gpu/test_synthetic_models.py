@@ -43,7 +43,8 @@ import torch.distributed as dist
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from drills import LEAK_DRILL_BYTES, is_crc_error_of, is_leak_error  # noqa: E402
 from gen_models import packed_shape  # noqa: E402
-from matrix import WORLD, filter_rows, memory_limit, no_rows_outcome, rows_for, unmatched_prefixes  # noqa: E402
+from matrix import (WORLD, filter_rows, gpu_world, memory_limit, no_rows_outcome, rows_for, skipped_rows,  # noqa: E402
+                    unmatched_prefixes)
 from phase_timer import PhaseTimer, dump_jsonl, report, stamp  # noqa: E402
 from tensor_bytes import as_bytes, tensor_crc32  # noqa: E402
 
@@ -260,27 +261,36 @@ def release_gpu_memory():
 
 
 def selected_rows():
-    return filter_rows(rows_for(os.environ.get("GPU_MATRIX", "core")), os.environ.get("GPU_ROWS"))
+    mode = os.environ.get("GPU_MATRIX", "core")
+    return filter_rows(rows_for(mode, gpu_world()), os.environ.get("GPU_ROWS"))
 
 
-def write_results(results_dir, strategy, rank, timer, outcomes, expected_rows):
+def skipped_selected_rows():
+    """The rows that the filter selects and that a run of this many ranks leaves out (the distributed ones, on one GPU)."""
+    return filter_rows(skipped_rows(os.environ.get("GPU_MATRIX", "core"), gpu_world()), os.environ.get("GPU_ROWS"))
+
+
+def write_results(results_dir, strategy, rank, timer, outcomes, expected_rows, world=WORLD, skipped=0):
     """The rows of this run so far. A row is listed with "ok": null from the moment it starts, so that if the process
     is killed in the middle of it (the NCCL watchdog does that when a rank fails inside a distributed row), the file
-    names that row. expected_rows lets a reader see how many rows never started."""
+    names that row. expected_rows lets a reader see how many rows never started; world is the ranks of the run (one
+    results file each), and skipped the distributed rows that a run of one rank leaves out."""
     name = strategy.replace(",", "+") or "default"
     dump_jsonl(timer.records, os.path.join(results_dir, "timing-%s-rank%d.jsonl" % (name, rank)))
     with open(os.path.join(results_dir, "rows-%s-rank%d.json" % (name, rank)), "w") as handle:
-        json.dump({"strategy": strategy, "expected_rows": expected_rows, "rows": outcomes}, handle, indent=1)
+        json.dump({"strategy": strategy, "expected_rows": expected_rows, "world": world, "skipped_rows": skipped,
+                   "rows": outcomes}, handle, indent=1)
 
 
 class Harness:
-    """What the test cases of a run share: the two groups of ranks, the fixtures, the timer and the results of the rows."""
+    """What the test cases of a run share: the groups of ranks, the fixtures, the timer and the results of the rows."""
 
     def __init__(self):
-        if int(os.environ.get("WORLD_SIZE", "0")) != WORLD:
-            raise RuntimeError("Launch with torchrun --nproc_per_node=%d" % WORLD)
-        if not torch.cuda.is_available() or torch.cuda.device_count() < WORLD:
-            raise RuntimeError("%d CUDA GPUs are required; GPU tests must not skip" % WORLD)
+        self.world = gpu_world()
+        if int(os.environ.get("WORLD_SIZE", "0")) != self.world:
+            raise RuntimeError("Launch with torchrun --nproc_per_node=%d" % self.world)
+        if not torch.cuda.is_available() or torch.cuda.device_count() < self.world:
+            raise RuntimeError("%d CUDA GPUs are required; GPU tests must not skip" % self.world)
         if not dist.is_nccl_available():
             raise RuntimeError("NCCL is required")
         self.rank = int(os.environ["RANK"])
@@ -302,13 +312,15 @@ class Harness:
         self.fixtures = None
         self.outcomes = []
         self.expected_rows = 0
+        self.skipped_rows = 0
 
     def load_fixtures(self, models):
         with self.timer.phase("init.manifests"):
             self.fixtures = Fixtures(os.environ.get("GPU_FIXTURES", ".gpu-fixtures"), models)
 
     def write(self):
-        write_results(self.results_dir, self.strategy, self.rank, self.timer, self.outcomes, self.expected_rows)
+        write_results(self.results_dir, self.strategy, self.rank, self.timer, self.outcomes, self.expected_rows,
+                      self.world, self.skipped_rows)
 
     def row_run(self, row, fault=None):
         """Load one row on both ranks, check it, and agree on the outcome. Returns (run, any_raised): run.errors are
@@ -388,11 +400,17 @@ class Rows(unittest.TestCase):
     def test_every_row(self):
         rows = selected_rows()
         HARNESS.expected_rows = len(rows)
+        HARNESS.skipped_rows = len(skipped_selected_rows())
         # A leg that has just some of the rows (GPU_ALLOW_EMPTY_ROWS) is given prefixes that it does not all have.
         unmatched = unmatched_prefixes(rows_for(os.environ.get("GPU_MATRIX", "core")), os.environ.get("GPU_ROWS"))
         if unmatched and os.environ.get("GPU_ALLOW_EMPTY_ROWS") != "true":
             self.fail("no row of the %s matrix starts with %s: a typo in the filter?" % (
                 os.environ.get("GPU_MATRIX", "core"), unmatched))
+        if HARNESS.skipped_rows and HARNESS.rank == 0:
+            stamp("ONE GPU: %d distributed rows are not run, they need two GPUs" % HARNESS.skipped_rows)
+        if not rows and HARNESS.skipped_rows:
+            self.fail("every row selected is a distributed row, which needs two GPUs (%d rows): nothing to run on one" %
+                      HARNESS.skipped_rows)
         if not rows:
             status, message = no_rows_outcome(os.environ.get("GPU_ROWS"),
                                               os.environ.get("GPU_ALLOW_EMPTY_ROWS") == "true",

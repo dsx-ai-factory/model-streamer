@@ -22,7 +22,8 @@ import os
 import re
 import sys
 
-RANKS = 2  # the ranks of the test (matrix.WORLD; test_rows_summary.py checks that they agree)
+RANKS = 2  # the ranks of a run that does not say (matrix.WORLD; test_rows_summary.py checks that they agree). A results
+#            file says how many ranks its run had ("world"): one on a single GPU
 _FILE = re.compile(r"^rows-(?P<name>.+)-rank(?P<rank>\d+)\.json$")
 
 
@@ -30,10 +31,15 @@ def summarize(results, smoke, strategies):
     """(lines, incomplete)."""
     lines = []
     incomplete = False
+    worlds = {}  # (directory, run) -> the ranks that the run was launched with, which each have a results file
+    skipped = 0
     paths = sorted(glob.glob(os.path.join(results, "**", "rows-*-rank*.json"), recursive=True))
     for path in paths:
         with open(path) as handle:
             data = json.load(handle)
+        found = _FILE.match(os.path.basename(path))
+        worlds[(os.path.dirname(path), found.group("name"))] = data.get("world", RANKS)
+        skipped = max(skipped, data.get("skipped_rows", 0))
         rows = data["rows"]
         finished = [r for r in rows if r["ok"] is not None]
         # A row with a fault injected on purpose (the self-checks) has errors by design.
@@ -54,7 +60,7 @@ def summarize(results, smoke, strategies):
         found = _FILE.match(os.path.basename(path))
         ranks_of.setdefault((os.path.dirname(path), found.group("name")), set()).add(int(found.group("rank")))
     for (directory, name), ranks in sorted(ranks_of.items()):
-        missing = sorted(set(range(RANKS)) - ranks)
+        missing = sorted(set(range(worlds[(directory, name)])) - ranks)
         if missing:
             incomplete = True
             lines.append("%s: no results file of rank %s  <-- INCOMPLETE" % (
@@ -67,6 +73,9 @@ def summarize(results, smoke, strategies):
     if smoke and not glob.glob(os.path.join(results, "smoke", "rows-*-rank*.json")):
         incomplete = True
         lines.append("smoke: no results at all  <-- INCOMPLETE")
+    if skipped:
+        # Not a failure: a run on one GPU is what was asked for. But it must not be taken for a run of every row.
+        lines.append("ONE GPU: %d distributed rows were not run (they need two GPUs)" % skipped)
     return lines, incomplete
 
 

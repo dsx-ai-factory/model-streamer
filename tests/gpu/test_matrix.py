@@ -10,6 +10,7 @@ import functools
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gen_models  # noqa: E402
@@ -162,6 +163,46 @@ class MemoryLimit(unittest.TestCase):
     def test_unknown_level_is_refused(self):
         with self.assertRaises(ValueError):
             matrix.memory_limit(manifest("mixed"), False, "huge")
+
+
+class OneGpu(unittest.TestCase):
+    def test_the_world_is_two_unless_it_is_one(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("GPU_WORLD", None)
+            self.assertEqual(matrix.gpu_world(), matrix.WORLD)
+            os.environ["GPU_WORLD"] = "1"
+            self.assertEqual(matrix.gpu_world(), 1)
+        self.assertEqual(matrix.gpu_world(""), matrix.WORLD)
+        self.assertEqual(matrix.gpu_world("2"), 2)
+        self.assertEqual(matrix.gpu_world("1"), 1)
+        for text in ("0", "3", "two", "1.0"):
+            with self.assertRaises(ValueError):
+                matrix.gpu_world(text)
+
+    def test_two_ranks_run_every_row(self):
+        for mode in ("core", "full", "smoke"):
+            self.assertEqual(matrix.rows_for(mode, 2), matrix.rows_for(mode), mode)
+            self.assertEqual(matrix.skipped_rows(mode, 2), [], mode)
+
+    def test_one_rank_runs_the_rows_that_are_not_distributed_and_leaves_out_the_others(self):
+        for mode in ("core", "full", "smoke"):
+            run, skipped = matrix.rows_for(mode, 1), matrix.skipped_rows(mode, 1)
+            self.assertTrue(run, mode)
+            self.assertTrue(all(not row.dist for row in run), mode)
+            self.assertTrue(all(row.dist for row in skipped), mode)
+            self.assertEqual(len(run) + len(skipped), len(matrix.rows_for(mode)), mode)
+
+    def test_the_counts_of_one_gpu(self):
+        self.assertEqual((len(matrix.rows_for("full", 1)), len(matrix.skipped_rows("full", 1))), (44, 60))
+        self.assertEqual((len(matrix.rows_for("core", 1)), len(matrix.skipped_rows("core", 1))), (8, 6))
+        self.assertEqual((len(matrix.rows_for("smoke", 1)), len(matrix.skipped_rows("smoke", 1))), (2, 1))
+
+    def test_every_model_and_every_limit_still_has_a_row_on_one_gpu(self):
+        rows = matrix.rows_for("full", 1)
+        for model in matrix.MODEL_NAMES:
+            self.assertTrue(any(r.model == model for r in rows), model)
+        for limit in matrix.LIMITS:
+            self.assertTrue(any(r.limit == limit for r in rows), limit)
 
 
 class FilterRows(unittest.TestCase):

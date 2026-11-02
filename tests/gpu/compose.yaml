@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The container of a real-GPU test run, for a machine of your own: tests/gpu/run_local.sh sets the variables and runs
+#
+#     docker compose -f tests/gpu/compose.yaml run --rm tests
+#
+# The workflow runs the same container with `docker run` (the same image, flags and mounts), see nightly-gpu.yaml. A
+# variable that is listed under environment without a value is passed on when it is set where compose runs, and is
+# absent from the container when it is not (setup_and_run.sh then uses its default).
+name: runai-gpu-tests
+
+services:
+  tests:
+    image: ${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}
+    working_dir: /workspace
+    shm_size: 2g                      # NCCL
+    security_opt:
+      - seccomp=unconfined            # io_uring
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all              # CUDA_VISIBLE_DEVICES, below, is what chooses the GPUs
+              capabilities: [gpu]
+    volumes:
+      - ${GPU_REPO:-../..}:/workspace
+      # The wheel of the streamer: a directory with exactly one wheel in it, mounted where setup_and_run.sh looks.
+      - ${GPU_WHEEL_HOST_DIR:?set GPU_WHEEL_HOST_DIR to a directory (with one wheel in it, or empty with GPU_STREAMER_SPEC)}:/wheel:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES
+      - GPU_WORLD
+      - GPU_SEED
+      - GPU_MATRIX
+      - GPU_ROWS
+      - GPU_SELF_CHECK
+      - GPU_TORCH_SPEC
+      - GPU_NUMPY_SPEC
+      - GPU_STREAMER_SPEC
+      - GPU_EXPECT_NEWEST_TORCH
+      - GPU_ALLOW_EMPTY_ROWS
+      - GPU_BUDGET_MINUTES
+    command: ["bash", "tests/gpu/setup_and_run.sh"]

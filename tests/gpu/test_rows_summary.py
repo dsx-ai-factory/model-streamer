@@ -36,6 +36,11 @@ class Summary(unittest.TestCase):
         with open(os.path.join(directory, name), "w") as handle:
             json.dump({"strategy": "x", "expected_rows": expected, "rows": rows}, handle)
 
+    def write_world(self, name, rows, expected, world, skipped):
+        with open(os.path.join(self.dir.name, name), "w") as handle:
+            json.dump({"strategy": "x", "expected_rows": expected, "world": world, "skipped_rows": skipped,
+                       "rows": rows}, handle)
+
     def write_all(self, rows, expected):
         for strategy in STRATEGIES:
             for rank in (0, 1):
@@ -109,6 +114,25 @@ class Summary(unittest.TestCase):
         missing = [line.split(":")[0] for line in lines if "no results file" in line]
         self.assertEqual(missing, [os.path.join("self-check", "rows-sync_buffered-rank*.json"),
                                    os.path.join("smoke", "rows-default-rank*.json")])
+
+    def test_a_run_of_one_rank_needs_one_results_file_and_says_what_it_left_out(self):
+        for strategy in STRATEGIES:
+            self.write_world("rows-%s-rank0.json" % strategy, [row("a", True)], 1, world=1, skipped=60)
+        lines, incomplete = self.summarize()
+        self.assertFalse(incomplete, lines)
+        self.assertIn("ONE GPU: 60 distributed rows were not run", lines[-1])
+
+    def test_a_run_of_one_rank_that_has_no_results_file_is_still_incomplete(self):
+        self.write_world("rows-sync_buffered-rank0.json", [row("a", True)], 1, world=1, skipped=0)
+        lines, incomplete = self.summarize()
+        self.assertTrue(incomplete)
+        self.assertIn("libaio_direct: no results at all", lines[-1])
+
+    def test_a_run_of_two_ranks_still_needs_both_files_when_the_file_says_so(self):
+        for strategy in STRATEGIES:
+            self.write_world("rows-%s-rank0.json" % strategy, [row("a", True)], 1, world=2, skipped=0)
+        _, incomplete = self.summarize()
+        self.assertTrue(incomplete)
 
     def test_the_ranks_are_those_of_the_test(self):
         import matrix

@@ -50,10 +50,44 @@ by the repository's own pull request workflow, and a manual run tests the image 
    an error annotation on the run, and a section at the top of the job summary. If PyPI cannot be reached the check
    says it could not verify and does not fail.
 
+## Running it on a machine of your own
+
+`run_local.sh` runs the same container as CI (`compose.yaml`: the same image, `/dev/shm`, seccomp setting and mounts) on a
+machine with NVIDIA GPUs. It needs Docker with the compose plugin and the NVIDIA container toolkit, and about 9 GB of
+disk for the models, on a filesystem that serves `O_DIRECT` (not a tmpfs).
+
+```bash
+# a wheel that you built (a file, or a glob that matches exactly one), on every GPU that the machine has, at most two
+tests/gpu/run_local.sh --wheel ~/dist/runai_model_streamer-*.whl
+
+# a released version, on one GPU, the rows that mention mixed
+tests/gpu/run_local.sh --streamer-spec 'runai-model-streamer==0.17.0' --gpus 1 --rows mixed
+
+# the oldest torch, every row, the self-checks too
+tests/gpu/run_local.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.0.0' --numpy-spec 'numpy<2' \
+    --image nvidia/cuda:12.4.1-base-ubuntu22.04
+```
+
+- The streamer comes from one place: `--wheel`, or `--streamer-spec` (a requirement specifier that pip installs: a version,
+  a range, or just the name). The wheel is copied alone into a temporary directory that is mounted read-only at `/wheel`,
+  where `setup_and_run.sh` looks for it. The workflow mounts its wheel the same way, so a run here and a run in CI differ in
+  the machine and nothing else.
+- `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, and the distributed rows stream between two
+  ranks over NCCL, so they are left out. Everything else runs: the four models, every dtype, `owned` and borrowed
+  tensors, both destinations, the three limits, the four filesystem strategies, the CRC32 checks, the leak check, the
+  self-checks and the smoke test (44 of the 104 rows of `full`, 8 of the 14 of `core`). The log and the summary say how
+  many distributed rows were not run (`ONE GPU: N distributed rows ...`), so a run of one GPU is not taken for a run of
+  all the rows. Selecting only distributed rows on one GPU fails. CI never sets `GPU_WORLD`, so it still fails when a
+  GPU is missing.
+- `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout. The container runs as root,
+  so the script gives what it wrote back to you at the end. The models are generated on every run, from the seed
+  (`--seed`, printed at the start).
+
 ## What `setup_and_run.sh` does
 
-1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the wheel, and checks that the
-   streamer is imported from the installed wheel and that two GPUs and NCCL are there;
+1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the streamer (the wheel in
+   `/wheel`, or `GPU_STREAMER_SPEC`), and checks that the streamer is imported from the installed package and that the
+   GPUs (two, or one with `GPU_WORLD=1`) and NCCL are there;
 2. in the newest leg, checks that the container does not limit the newest torch; in both legs, runs the CPU unit tests
    (generator, rows, drills, tensor checks, real model download, the environment check);
 3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo; the runner groups'

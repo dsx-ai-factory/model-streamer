@@ -207,11 +207,13 @@ jobs:
       - name: Check runner GPUs
         run: nvidia-smi
 
+      # Outside the checkout, and mounted read-only at /wheel in the container: the same way as a run on a machine of your
+      # own (tests/gpu/run_local.sh, with --wheel).
       - name: Download the wheel
         uses: actions/download-artifact@v4
         with:
           name: gpu-test-wheel
-          path: wheel
+          path: ${{ runner.temp }}/wheel
 
       - name: Pull the CUDA image
         run: docker pull "$GPU_TEST_IMAGE"
@@ -232,9 +234,9 @@ jobs:
         run: |
           mkdir -p test-results/gpu
           docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
-            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --volume "$GITHUB_WORKSPACE:/workspace" --volume "$RUNNER_TEMP/wheel:/wheel:ro" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
-            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WHEEL_DIR=wheel \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh 2>&1 | tee test-results/gpu/run.log
 
       - name: Remove the GPU container if it is still there

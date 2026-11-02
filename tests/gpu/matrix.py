@@ -148,14 +148,35 @@ def smoke_rows():
                 "default") for dist, policy, owned, device in SMOKE_ROWS]
 
 
-def rows_for(mode):
+def gpu_world(text=None):
+    """The ranks of a run, from GPU_WORLD: WORLD (two GPUs, every row, the default and what CI runs) or 1 (one GPU: the
+    rows that load without a second rank, see rows_for)."""
+    if text is None:
+        text = os.environ.get("GPU_WORLD")
+    if text in (None, ""):
+        return WORLD
+    if text not in ("1", str(WORLD)):
+        raise ValueError("GPU_WORLD must be 1 or %d, not %r" % (WORLD, text))
+    return int(text)
+
+
+def rows_for(mode, world=WORLD):
+    """The rows of a mode. With one rank (world 1) the distributed rows are left out: they stream over NCCL between
+    two ranks on two GPUs, and two ranks cannot share one GPU. See skipped_rows."""
     if mode == "core":
-        return core_rows()
-    if mode == "full":
-        return full_rows()
-    if mode == "smoke":
-        return smoke_rows()
-    raise ValueError("GPU_MATRIX must be core, full or smoke, not %r" % (mode,))
+        rows = core_rows()
+    elif mode == "full":
+        rows = full_rows()
+    elif mode == "smoke":
+        rows = smoke_rows()
+    else:
+        raise ValueError("GPU_MATRIX must be core, full or smoke, not %r" % (mode,))
+    return rows if world >= WORLD else [row for row in rows if not row.dist]
+
+
+def skipped_rows(mode, world=WORLD):
+    """The rows of a mode that a run of this many ranks leaves out."""
+    return [row for row in rows_for(mode) if row not in rows_for(mode, world)]
 
 
 def row_prefixes(text):

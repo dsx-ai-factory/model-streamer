@@ -3,8 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Real-GPU test run, inside a clean CUDA container (nvidia/cuda, Ubuntu, nothing but the system Python) on a host with
-# two GPUs. The streamer is installed from the wheel that the workflow built from this commit, the way a user installs
-# it, with the PyTorch and numpy versions that the workflow asks for (GPU_TORCH_SPEC, GPU_NUMPY_SPEC):
+# two GPUs (GPU_WORLD=1 runs on one: the distributed rows are left out, and the run says how many). The streamer is
+# installed from the wheel in GPU_WHEEL_DIR (/wheel, mounted: what the workflow built from this commit), the way a
+# user installs it, or from a requirement specifier (GPU_STREAMER_SPEC, a released version, for a run on a machine of
+# your own), with the PyTorch and numpy versions that are asked for (GPU_TORCH_SPEC, GPU_NUMPY_SPEC):
 #   1. set up: system Python and pip, PyTorch, the wheel
 #   2. generate the four synthetic models, with every dtype the streamer accepts here, and check them
 #   3. download the small real model, pinned by revision and SHA-256, and describe it (timed)
@@ -17,10 +19,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 RESULTS=${GPU_RESULTS:-test-results/gpu}
 FIXTURES=${GPU_FIXTURES:-.gpu-fixtures}
 SEED=${GPU_SEED:-$(date +%s)}
-WHEEL_DIR=${GPU_WHEEL_DIR:-wheel}
+WHEEL_DIR=${GPU_WHEEL_DIR:-/wheel}
+STREAMER_SPEC=${GPU_STREAMER_SPEC:-}
 TORCH_SPEC=${GPU_TORCH_SPEC:-torch}
 NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy}
-export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES"
+WORLD=${GPU_WORLD:-2}
+case "$WORLD" in
+    1|2) ;;
+    *) echo "ERROR: GPU_WORLD must be 1 or 2, not '$WORLD'" >&2; exit 2 ;;
+esac
+export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES" GPU_WORLD="$WORLD"
 mkdir -p "$RESULTS"
 # The log is kept by whatever runs this script (the workflow pipes it to tee): a tee started here would be killed with
 # the script, and could lose the last lines, which hold the verdict.
@@ -103,6 +111,10 @@ uname -r
 . /etc/os-release && echo "$PRETTY_NAME"
 echo "seed: $SEED"
 echo "matrix: ${GPU_MATRIX:-core}   torch: $TORCH_SPEC   numpy: $NUMPY_SPEC   self-check: ${GPU_SELF_CHECK:-false}"
+echo "gpus: $WORLD   streamer: ${STREAMER_SPEC:-the wheel in $WHEEL_DIR}"
+if [ "$WORLD" -lt 2 ]; then
+    echo "== ONE GPU: the distributed rows are not run, they need two GPUs; the summary says how many"
+fi
 timeout --signal=TERM --kill-after=10s 120s nvidia-smi
 echo "ulimit -n: $(ulimit -n)   ulimit -l: $(ulimit -l)"
 free -g | head -2
@@ -130,6 +142,12 @@ install_python_packages() {
     # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
     timeout --signal=TERM --kill-after=30s "$(cap 45)s" \
         python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
+    if [ -n "$STREAMER_SPEC" ]; then
+        echo "installing the streamer from the requirement specifier: $STREAMER_SPEC"
+        timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+            python3 -m pip install --no-cache-dir "$STREAMER_SPEC" || return
+        return 0
+    fi
     mapfile -t wheels < <(find "$WHEEL_DIR" -name 'runai_model_streamer-*.whl')
     if [ "${#wheels[@]}" -ne 1 ]; then
         echo "ERROR: expected one runai_model_streamer wheel in $WHEEL_DIR, found ${#wheels[@]}: ${wheels[*]:-}" >&2
@@ -143,6 +161,8 @@ phase install_python_packages install_python_packages
 python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
 
 timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 - <<'PY'
+import os
+
 import torch
 import torch.distributed as dist
 import runai_model_streamer
@@ -155,11 +175,12 @@ print(f"streamer package: {runai_model_streamer.__file__}", flush=True)
 print(f"streamer library: {STREAMER_LIBRARY}", flush=True)
 if "site-packages" not in runai_model_streamer.__file__ and "dist-packages" not in runai_model_streamer.__file__:
     raise RuntimeError("the streamer was not imported from the installed wheel")
-if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-    raise RuntimeError("GPU tests require two visible CUDA GPUs")
+world = int(os.environ["GPU_WORLD"])
+if not torch.cuda.is_available() or torch.cuda.device_count() < world:
+    raise RuntimeError(f"GPU tests require {world} visible CUDA GPUs")
 if not dist.is_nccl_available():
     raise RuntimeError("GPU tests require an NCCL-enabled PyTorch build")
-for index in range(2):
+for index in range(world):
     print(f"GPU {index}: {torch.cuda.get_device_name(index)}", flush=True)
 PY
 
@@ -186,7 +207,7 @@ echo "== self-test of the harness: the generator, the rows, the drills, the tens
 phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
     python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
     tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
-    tests/gpu/test_real_model.py tests/gpu/test_env_check.py || status=1
+    tests/gpu/test_real_model.py tests/gpu/test_env_check.py tests/gpu/test_run_local.py || status=1
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
 # streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is
@@ -300,7 +321,7 @@ do
     start=$(date +%s.%N)
     if ! RUNAI_STREAMER_FS_STRATEGY="$strategy" \
         timeout --signal=TERM --kill-after=30s "$(cap 60)s" \
-        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        torchrun --standalone --nnodes=1 --nproc_per_node="$WORLD" --max_restarts=0 \
         tests/gpu/test_synthetic_models.py Rows; then
         status=1
         echo "[$(date +%T)] FAILED run.$strategy"
@@ -319,7 +340,7 @@ if [ "${GPU_SELF_CHECK:-false}" = true ]; then
     start=$(date +%s.%N)
     if ! GPU_RESULTS="$RESULTS/self-check" RUNAI_STREAMER_FS_STRATEGY=sync_buffered \
         timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
-        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        torchrun --standalone --nnodes=1 --nproc_per_node="$WORLD" --max_restarts=0 \
         tests/gpu/test_synthetic_models.py SelfChecks; then
         status=1
         echo "[$(date +%T)] FAILED run.self_check"
@@ -336,7 +357,7 @@ if [ "$smoke_expected" = true ]; then
     # Without GPU_ROWS: a filter of the rows of the synthetic models would leave no smoke row.
     if ! GPU_MATRIX=smoke GPU_RESULTS="$RESULTS/smoke" env -u RUNAI_STREAMER_FS_STRATEGY -u GPU_ROWS \
         timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
-        torchrun --standalone --nnodes=1 --nproc_per_node=2 --max_restarts=0 \
+        torchrun --standalone --nnodes=1 --nproc_per_node="$WORLD" --max_restarts=0 \
         tests/gpu/test_synthetic_models.py Rows; then
         status=1
         echo "[$(date +%T)] FAILED run.real_smoke"
