@@ -49,11 +49,11 @@ Use these sections, in this order. Omit a section that would be empty, except Kn
 
 ## Write each part
 
-**Introduction.** One paragraph. Open with the headline in bold, then name the next three or four themes in bold, and end with a measured result when there is one, with what it was measured on. A patch release opens by saying it is a patch release for the version before it. Do not put counts here; they belong in Contributors.
+**Introduction.** One paragraph. Open with the headline in bold, then name the next three or four themes in bold, and end with a measured result when there is one, with what it was measured on. A patch release opens with one sentence that says it is a patch release for the version before it, then gives the headline in bold. Do not put counts here; they belong in Contributors.
 
-**Summary.** The heading is `### Theme: Detail & Detail`. The paragraph has the capability as its subject, takes three to five sentences, and links at most four PRs. Name a mechanism, such as `io_uring`, only where the reader must act on it.
+**Summary.** The heading is `### Theme: Detail & Detail`, or `### Theme: Detail, Detail & Detail` for three. The paragraph has the capability as its subject, takes three to five sentences, and links at most four PRs. Name a mechanism, such as `io_uring`, only where the reader must act on it.
 
-**Features & Improvements.** One bullet per change, led by a bold feature name in Title Case, then a past-tense sentence that says what the user gets, then the PR link: `- **Ring Buffer:** Replaced the … (#167).` Use *Added*, *Fixed*, *Replaced*, *Reworked*, *Removed*. Say what changed for the user, not which function changed.
+**Features & Improvements.** One bullet per change, led by a bold feature name in Title Case, then a past-tense sentence that says what the user gets, then the PR link: `- **Ring Buffer:** Replaced the … (#167).` Use *Added*, *Fixed*, *Replaced*, *Reworked*, *Removed*. Say what changed for the user, not which function changed. Close the text with the API it reaches, such as *Reaches the Python API.* or *Reaches the Python and C APIs.*, before the PR link.
 
 **Upgrade Notes.** Describe what changes and who is affected, then give the action as a quote that starts `> **Migrate:**`. Include every changed default, every environment variable whose meaning changed, every C API signature change, every change to what a yielded tensor is, and every changed wheel tag.
 
