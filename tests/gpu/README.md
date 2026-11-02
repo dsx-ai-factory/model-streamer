@@ -250,8 +250,9 @@ called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel`
 `GPU_*` variables listed under `environment` (they are how `run.sh` hands over its options); and a `command` that is the
 entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
 set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`, and
-`PYTHONPATH` with `tests/gpu/harness`; see the top of `setup_and_run.sh`), source
-`harness/common.sh` and `harness/suites.sh`, set the container up, then
+`PYTHONPATH` with `tests/gpu/harness`; see the top of `setup_and_run.sh`), remove what an earlier run left in the results
+directory (`bash tests/gpu/harness/clean_results.sh "$RESULTS" $(ls tests/gpu/suites)`: without it `summarize.py` counts the
+files of the earlier run as this one's), source `harness/common.sh` and `harness/suites.sh`, set the container up, then
 
 ```bash
 select_suites || exit 2
@@ -276,7 +277,7 @@ so that the suites, the caps, the budget, the results and the verdict are the sa
 | `GPU_SEED` | the seed of what is generated (default the time) |
 | `GPU_EXPECT_NEWEST_TORCH` | `true` checks that the container does not limit the newest torch (the newest-torch leg) |
 | `GPU_BUDGET_MINUTES` | the budget of the whole run (285: the job's timeout less 15 minutes) |
-| `GPU_RESULTS`, `GPU_FIXTURES` | the base directories (`test-results/gpu`, `.gpu-fixtures`); a suite gets its own under them |
+| `GPU_RESULTS`, `GPU_FIXTURES` | the base directories (`test-results/gpu`, `.gpu-fixtures`) that the entry reads if they are set where it runs (compose.yaml does not forward them: they are for an environment of your own); a suite gets its own under them, and these two names are what it sees |
 | `GPU_MATRIX`, `GPU_ROWS`, `GPU_SELF_CHECK`, `GPU_ALLOW_EMPTY_ROWS`, `GPU_REAL_SMOKE` | the streaming suite's, see its README |
 
 ## Time

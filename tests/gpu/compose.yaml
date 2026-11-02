@@ -55,6 +55,7 @@ services:
       - GPU_ROWS
       - GPU_SELF_CHECK
       - GPU_ALLOW_EMPTY_ROWS
+      - GPU_REAL_SMOKE
       # Of the object-storage service below, which the streamer and the harness reach through these (test keys of a
       # service that lives as long as the run)
       - AWS_ENDPOINT_URL=http://seaweedfs:9000

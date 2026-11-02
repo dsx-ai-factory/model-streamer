@@ -7,9 +7,11 @@ No docker and no GPU: the machine's GPUs are given by GPU_LOCAL_GPU_COUNT.
 """
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "run.sh")
@@ -24,7 +26,10 @@ class Run(unittest.TestCase):
             handle.write(b"not a wheel")
 
     def run_script(self, *args, gpus="2", **env):
-        environment = dict(os.environ, GPU_LOCAL_GPU_COUNT=gpus, TMPDIR=self.dir.name)
+        # Not the environment of whatever runs this test: in the container of a run it holds that run's own GPU_SUITES, GPU_ROWS,
+        # GPU_STREAMER_SPEC ..., which are what these tests set for themselves.
+        inherited = {k: v for k, v in os.environ.items() if not k.startswith("GPU_") and k != "CUDA_VISIBLE_DEVICES"}
+        environment = dict(inherited, GPU_LOCAL_GPU_COUNT=gpus, TMPDIR=self.dir.name)
         environment.update(env)
         done = subprocess.run(["bash", SCRIPT, "--dry-run", *args], env=environment, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, universal_newlines=True)
@@ -134,6 +139,32 @@ class Run(unittest.TestCase):
         status, output = self.run_script("--wheel", self.wheel, "--compose-file", os.path.join(self.dir.name, "none.yaml"))
         self.assertEqual(status, 2)
         self.assertIn("was not found", output)
+
+    def test_the_container_has_every_variable_that_run_sh_hands_on(self):
+        """run.sh hands its options over as GPU_* variables, which reach the container only if compose.yaml lists them (or
+        uses them itself, in an image or a mount): one that is not listed is an option that does nothing."""
+        with open(os.path.join(HERE, "compose.yaml")) as handle:
+            compose = handle.read()
+        listed = set(re.findall(r"^\s+- ([A-Z][A-Z0-9_]*)(?:=.*)?$", compose, flags=re.M))
+        used = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)[:?-]", compose))
+        handed = set()
+        for args in (("--wheel", self.wheel, "--rows", "x", "--self-check", "--torch-spec", "t", "--numpy-spec", "n",
+                      "--s3-spec", "s", "--image", "i", "--seed", "1"),
+                     ("--streamer-spec", "runai-model-streamer")):
+            status, output = self.run_script(*args)
+            self.assertEqual(status, 0, output)
+            handed.update(self.settings(output))
+        handed -= {"GPU_LOCAL_GPU_COUNT"}  # of the tests of run.sh
+        missing = sorted(name for name in handed if name not in listed and name not in used)
+        self.assertEqual(missing, [], "run.sh hands these on, and compose.yaml does not pass them to the container")
+
+    def test_a_variable_of_the_run_that_runs_these_tests_does_not_change_them(self):
+        with mock.patch.dict(os.environ, {"GPU_SUITES": "object_storage", "GPU_ROWS": "x", "GPU_STREAMER_SPEC": "y"}):
+            status, output = self.run_script("--wheel", self.wheel)
+        found = self.settings(output)
+        self.assertEqual((status, found["GPU_SUITES"]), (0, "streaming"), output)
+        self.assertNotIn("GPU_ROWS", found)
+        self.assertNotIn("GPU_STREAMER_SPEC", found)
 
     def test_the_s3_plugin_specifier_is_handed_on(self):
         status, output = self.run_script("--streamer-spec", "runai-model-streamer==0.17.0", "--s3-spec",

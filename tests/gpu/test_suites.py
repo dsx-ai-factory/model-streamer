@@ -168,7 +168,9 @@ class Runner(unittest.TestCase):
             exit "$status"
         """ % {"repo": REPO, "results": self.results, "fixtures": os.path.join(self.dir.name, "fixtures"),
                "harness": HARNESS, "suites": self.suites})
-        environment = dict(os.environ, GPU_SUITES=suites)
+        # Not the GPU_* variables of whatever runs this test (the container of a run has its own GPU_SUITES, GPU_ROWS ...)
+        environment = {k: v for k, v in os.environ.items() if not k.startswith("GPU_")}
+        environment["GPU_SUITES"] = suites
         environment.update(env or {})
         done = subprocess.run(["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               universal_newlines=True, env=environment)

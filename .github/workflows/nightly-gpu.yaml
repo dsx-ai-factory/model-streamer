@@ -244,11 +244,17 @@ jobs:
         run: docker pull "$GPU_TEST_IMAGE"
 
       # tests/gpu/run.sh runs the container through docker compose (the environment of tests/gpu/compose.yaml, and the services
-      # of the suites). The plugin is part of recent docker installs; a runner that has none gets a pinned release, with its
-      # checksum.
+      # of the suites). The plugin is part of recent docker installs; a runner that has none, or one older than 2.20 (which
+      # compose.yaml needs: depends_on with required: false), gets a pinned release, with its checksum.
       - name: Check docker compose
         run: |
-          if docker compose version; then exit 0; fi
+          required=2.20.0
+          have=$(docker compose version --short 2>/dev/null | tr -d 'v' || true)
+          if [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -n 1)" = "$required" ]; then
+            echo "docker compose $have"
+            exit 0
+          fi
+          echo "docker compose '${have:-none}' is not at least $required: installing the pinned release"
           version=v2.36.2
           sha256=9040bd35b2cc0783ce6c5de491de7e52e24d4137dbfc5de8a524f718fc23556c
           mkdir -p "$HOME/.docker/cli-plugins"
