@@ -174,15 +174,25 @@ fi
 stop_services() {
     "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
+# The container runs as root, so what it wrote into the checkout is root's: give it back (best effort).
+give_back_files() {
+    [ "$chown_back" -eq 1 ] && [ "$(id -u)" -ne 0 ] || return 0
+    for path in "$repo/test-results" "$repo/.gpu-fixtures"; do
+        [ -e "$path" ] || continue
+        docker run --rm -v "$path:/data" --entrypoint chown "${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}" \
+            -R "$(id -u):$(id -g)" /data >/dev/null 2>&1 || true
+    done
+}
 runner=""
 on_signal() {
     # bash runs a trap only when the foreground command ends: the run is in the background, and waited for, so that a
     # signal to this script stops the run at once and not when the tests end by themselves.
     [ -z "$runner" ] || kill -TERM "$runner" 2>/dev/null || true
     stop_services
+    give_back_files
     exit 130
 }
-trap on_signal INT TERM
+trap on_signal INT TERM HUP
 
 status=0
 # -T: no pseudo-terminal. CI has none (compose would refuse), and the output is a log, not a screen.
@@ -192,14 +202,6 @@ wait "$runner" || status=$?
 runner=""
 
 stop_services
-
-# The container runs as root, so what it wrote into the checkout is root's: give it back (best effort).
-if [ "$chown_back" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
-    for path in "$repo/test-results" "$repo/.gpu-fixtures"; do
-        [ -e "$path" ] || continue
-        docker run --rm -v "$path:/data" --entrypoint chown "${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}" \
-            -R "$(id -u):$(id -g)" /data >/dev/null 2>&1 || true
-    done
-fi
+give_back_files
 echo "run.sh: results are in $repo/test-results/gpu"
 exit "$status"
