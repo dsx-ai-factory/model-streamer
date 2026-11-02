@@ -13,10 +13,12 @@ Release notes answer one question for someone who runs Model Streamer: what chan
 
 ## Gather the facts
 
-1. **Get the range.** List the commits between the previous tag and this one: `git log --no-merges <previous>..<tag>`. Map each commit to its PR with `gh api repos/dsx-ai-factory/model-streamer/commits/<sha>/pulls`. Many CI commits have no PR number in their title. A commit with no PR at all is listed by its commit link.
+Write the notes before the tag exists, from the release candidate: `<candidate>` below is the tip of `release/X.Y`, or the tag once it is cut. Checks that need the published wheels come after the release.
+
+1. **Get the range.** List the commits between the previous tag and the candidate: `git log --no-merges <previous>..<candidate>`. Map each commit to its PR with `gh api repos/dsx-ai-factory/model-streamer/commits/<sha>/pulls`. Many CI commits have no PR number in their title. A commit with no PR at all is listed by its commit link.
 2. **Handle cherry-picks.** A patch release is cut from `release/X.Y` and its PRs are backports with new numbers. Link the PR in the tag, and add `from #N` for the original, which holds the discussion and the measurements. Credit the author of the original change, not whoever opened the backport.
-3. **Check every claim against the tag, not `master`.** A variable, default or API belongs in the notes only if it is in the tagged tree: `git grep -n <name> <tag> -- <path>`. Read defaults from the code and from `docs/src/env-vars.md` at the tag, not from the PR text. The ring buffer PR says 4 buffers; the tag says 18.
-4. **Check what was published.** Read the wheel filenames for each version at `https://pypi.org/pypi/runai-model-streamer/<version>/json` and the release assets. A changed `manylinux` tag is an Upgrade Note: 0.17.0 was tagged `manylinux_2_30`, 0.17.1 `manylinux_2_28`.
+3. **Check every claim against the candidate, not `master`.** A variable, default or API belongs in the notes only if it is in the released tree: `git grep -n <name> <candidate> -- <path>`. Read defaults from the code and from `docs/src/env-vars.md` at the candidate, not from the PR text. The ring buffer PR says 4 buffers; the tag says 18.
+4. **Check what will be published.** Read the wheel tag the build produces from `PLATFORM` in the `py/*/Makefile` files. A changed `manylinux` tag is an Upgrade Note: 0.17.0 was tagged `manylinux_2_30`, 0.17.1 `manylinux_2_28`.
 5. **Read the PR description.** Its test results and "not in this PR" lines say what is verified. A PR that says its documentation follows later can describe a default that changed afterwards.
 6. **Say which API a change reaches.** Write Python API, C API or both. GPU destinations reached only the C API in 0.17.0, and a reader who uses vLLM would otherwise assume they apply to them.
 7. **Compute the counts.** Take the number of PRs and contributors from the range you listed. A contributor is a first-time contributor only if they have no merged PR before the previous release: `gh pr list --repo dsx-ai-factory/model-streamer --author <login> --state merged --search "merged:<YYYY-MM-DD"`, with the previous release's date.
@@ -57,7 +59,7 @@ Use these sections, in this order. Omit a section that would be empty, except Kn
 
 **Upgrade Notes.** Describe what changes and who is affected, then give the action as a quote that starts `> **Migrate:**`. Include every changed default, every environment variable whose meaning changed, every C API signature change, every change to what a yielded tensor is, and every changed wheel tag.
 
-**Known Issues.** A known issue is a defect: something that fails or misbehaves today in a supported setup. Take them from the open GitHub issues. Give each one a `####` title, the symptom, the cause when it is known, and a `**Workaround:**` line when one exists. Things Model Streamer does not support by design belong in the docs.
+**Known Issues.** A known issue is a defect: something that fails or misbehaves today in a supported setup. Take them from the open GitHub issues. Give each one a `####` title, the symptom, the cause when it is known, and a `**Workaround:**` line when one exists. Give a workaround only after tracing it through the code at the candidate: a variable that is checked after the call that fails is not a workaround. Things Model Streamer does not support by design belong in the docs.
 
 **Contributors.** State the counts, thank everyone, and give each first-time contributor one line that says what they did.
 
@@ -75,11 +77,16 @@ In a Markdown file in the repository, `#123` and `@name` do not turn into links.
 
 ## Before you publish
 
-- Every number is traced to a source, and every variable, default and API is in the tag.
-- Every default was read from the code at the tag, not from a PR.
-- The wheel tags match the published filenames.
+- Every number is traced to a source, and every variable, default and API is in the release candidate.
+- Every default was read from the code at the candidate, not from a PR.
+- The wheel tag in the notes matches `PLATFORM` in the `py/*/Makefile` files.
 - Each change says which API it reaches.
 - Nothing that is a limitation by design is in Known Issues.
 - Upgrade Notes cover every changed default, variable, signature and wheel tag.
 - Every link resolves, and the counts match the range.
 - The order follows the headline, then user impact.
+
+## After the release is published
+
+- Compare the wheel filenames of each of the four packages at `https://pypi.org/pypi/<package>/<version>/json`, and the release assets, with the notes. A mismatch is fixed in the GitHub release body first, then in the file on `master` and `release/X.Y`.
+- Set the release body from the file, as in [Where they live](#where-they-live).
