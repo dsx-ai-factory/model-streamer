@@ -99,8 +99,10 @@ where the verdict is. The wheel is downloaded outside the checkout and mounted r
 
 `run.sh` runs the environment of `compose.yaml` (the clean CUDA container, with its image, `/dev/shm`, seccomp setting and
 mounts) and the services that the selected suites need. The workflow runs it too, so a run on your machine and a run in
-CI are the same thing apart from the machine. It needs Docker with the compose plugin and the NVIDIA container toolkit,
-and about 9 GB of disk for the models of the streaming suite, on a filesystem that serves `O_DIRECT` (not a tmpfs).
+CI are the same thing apart from the machine. It needs Docker with the compose plugin (2.20 or later: `compose.yaml` uses
+`depends_on` with `required: false`; `run.sh` checks), the NVIDIA container toolkit and an NVIDIA GPU (the environment
+refuses to run without one), and about 9 GB of disk for the models of the streaming suite, on a filesystem that serves
+`O_DIRECT` (not a tmpfs).
 
 ```bash
 # a wheel that you built (a file, or a glob that matches exactly one), on every GPU that the machine has, at most two
@@ -125,12 +127,15 @@ tests/gpu/run.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.
 - `--suites a,b` picks the suites (default `streaming`). A suite that needs services has a compose profile of its own name
   (`object_storage` starts `seaweedfs`): a service with a profile starts only when the profile is asked for, and `run.sh`
   asks for the profile of every selected suite (a suite without services has none, which compose does not mind). The
-  services go with the run: `run.sh` ends with `docker compose down --volumes`.
+  services go with the run: `run.sh` ends with `docker compose down --volumes`, also when it is interrupted (Ctrl-C).
 - `--gpus N` is the GPUs to use: with a number given, the machine must have that many, or the run fails (CI always gives
   it). `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, so a suite leaves out what needs two, and
   says how much (the streaming suite: the 60 distributed rows of the 104).
-- `--compose-file PATH` runs another environment (see "Environments"); `--project NAME` names the compose project, to
-  clean up after it (`docker compose -p NAME down`); `--no-chown` leaves the files that the container wrote as they are.
+- `--compose-file PATH` runs another environment (see "Environments"); `--no-chown` leaves the files that the container
+  wrote as they are. `--project NAME` names the compose project, to clean up after a run that was killed (CI does it with
+  the project's labels). By hand, every compose command needs the variables of `compose.yaml`, and `down` needs the profile
+  of the services that it is to remove:
+  `GPU_WHEEL_HOST_DIR=/tmp GPU_REPO=$PWD docker compose -p NAME -f tests/gpu/compose.yaml --profile object_storage down --volumes`.
 - `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout; each run removes the results
   of the earlier one first (`harness/clean_results.sh`: the results files, the summaries and the directories of the suites,
   not `run.log`), so a run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the
@@ -221,8 +226,10 @@ model: a feature of the streamer that needs a service, a failure mode, a configu
 2. `suites/<name>/suite.sh`: the description, `suite_run` (`run_unittest basic 15 tests/gpu/suites/<name>/test_<something>.py`),
    and `suite_expect` (`echo "results-basic-rank0.json"`). Add `suite_prepare` for what the tests need first.
 3. `suites/<name>/README.md`: what it tests and what it needs, like the two that are there.
-4. If it needs a service, put it in `compose.yaml` with `profiles: [<name>]`, the name of the suite (see `seaweedfs`):
-   `run.sh` starts the profile of every suite that is selected, and `tests` waits for the service's healthcheck.
+4. If it needs a service, put it in `compose.yaml` with `profiles: [<name>]`, the name of the suite, and a healthcheck, and
+   list it under `tests.depends_on` with `condition: service_healthy` and `required: false` (see `seaweedfs`): `run.sh`
+   starts the profile of every suite that is selected, and compose starts only `tests` and what it depends on, so a
+   service that is not listed there never starts. `test_suites.py` checks it.
 5. CPU unit tests for helper code that the suite has (`suite_unit_tests`), if it has any.
 6. Run it: `tests/gpu/run.sh --suites <name> ...`; and `python3 -m unittest tests/gpu/test_suites.py`, which checks
    the contract of every suite: a `suite.sh` that is valid bash and describes the suite and defines `suite_run` and `suite_expect`,
@@ -249,8 +256,11 @@ run it with `tests/gpu/run.sh --compose-file my-compose.yaml ...`. What the comp
 called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel` (`GPU_REPO`, `GPU_WHEEL_HOST_DIR`); the
 `GPU_*` variables listed under `environment` (they are how `run.sh` hands over its options); and a `command` that is the
 entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
-set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`, and
-`PYTHONPATH` with `tests/gpu/harness`; see the top of `setup_and_run.sh`), remove what an earlier run left in the results
+set the variables (`WORLD` and `GPU_WORLD`, the same number: the first is what `common.sh` launches with, the second what the
+library reads; `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`,
+and `PYTHONPATH` with `tests/gpu/harness`), and the environment that every suite runs under (NCCL's error handling,
+unbuffered output, the streamer's log on stderr: copy the exports of `setup_and_run.sh` before `run_suites`), remove what
+an earlier run left in the results
 directory (`bash tests/gpu/harness/clean_results.sh "$RESULTS" $(ls tests/gpu/suites)`: without it `summarize.py` counts the
 files of the earlier run as this one's), source `harness/common.sh` and `harness/suites.sh`, set the container up, then
 
@@ -273,7 +283,7 @@ so that the suites, the caps, the budget, the results and the verdict are the sa
 | `GPU_TORCH_SPEC`, `GPU_NUMPY_SPEC` | what to install (default the newest torch, any numpy) |
 | `GPU_STREAMER_SPEC` | install the streamer from a requirement specifier instead of the wheel in `/wheel` |
 | `GPU_S3_SPEC` | the S3 plugin to install when there is no wheel of it (the object_storage suite) |
-| `GPU_DEVICE` | `cpu` for a run of the object_storage suite on a machine without a GPU (default `cuda:0`, and a missing GPU is a failure) |
+| `GPU_DEVICE` | where the object_storage suite streams to: `cuda:0` (default, and a missing GPU is a failure), or `cpu` when the suite's test is run by hand outside the environment, on a machine without a GPU |
 | `GPU_SEED` | the seed of what is generated (default the time) |
 | `GPU_EXPECT_NEWEST_TORCH` | `true` checks that the container does not limit the newest torch (the newest-torch leg) |
 | `GPU_BUDGET_MINUTES` | the budget of the whole run (285: the job's timeout less 15 minutes) |

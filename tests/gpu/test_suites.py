@@ -56,6 +56,24 @@ def declared(name):
     return found
 
 
+def compose_services(text):
+    """name -> the text of each service under `services:` of compose.yaml, which is written with two spaces a level."""
+    services, name, in_services = {}, None, False
+    for line in text.splitlines():
+        if line.startswith("services:"):
+            in_services = True
+            continue
+        if in_services and line and not line.startswith((" ", "#")):
+            break
+        found = re.match(r"^  ([a-z][\w-]*):\s*$", line)
+        if in_services and found:
+            name = found.group(1)
+            services[name] = []
+        elif name:
+            services[name].append(line)
+    return {key: "\n".join(value) + "\n" for key, value in services.items()}
+
+
 class Contract(unittest.TestCase):
     """What a suite is. Every directory under tests/gpu/suites/ is checked, so a new suite is checked from its first day."""
 
@@ -100,6 +118,23 @@ class Contract(unittest.TestCase):
         self.assertTrue(profiles, "compose.yaml has no profile: the object_storage suite has no service")
         self.assertLessEqual(profiles, set(suite_names()), "a profile of compose.yaml is not the name of a suite")
         self.assertIn("object_storage", profiles)
+
+    def test_every_service_of_a_suite_has_a_healthcheck_and_is_something_that_tests_depends_on(self):
+        """compose starts only `tests` and what it depends on: a service with a profile that `tests` does not list never
+        starts, and one without a healthcheck is started, and not waited for."""
+        with open(os.path.join(HERE, "compose.yaml")) as handle:
+            services = compose_services(handle.read())
+        self.assertIn("tests", services)
+        profiled = [name for name, block in services.items() if re.search(r"^\s+profiles:", block, flags=re.M)]
+        self.assertTrue(profiled)
+        for name in profiled:
+            self.assertIn("healthcheck:", services[name], "%s has no healthcheck for tests to wait for" % name)
+            depends = re.search(r"^    depends_on:\n((?:      .*\n?)+)", services["tests"], flags=re.M)
+            self.assertIsNotNone(depends, "tests has no depends_on")
+            block = depends.group(1)
+            self.assertRegex(block, r"(?m)^      %s:\s*$" % re.escape(name), "tests does not depend on %s" % name)
+            self.assertIn("service_healthy", block)
+            self.assertIn("required: false", block, "without it a run without the profile fails")
 
     def test_the_harness_does_not_know_the_suites_and_a_suite_does_not_know_another(self):
         for base, _, files in os.walk(HARNESS):

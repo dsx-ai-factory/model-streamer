@@ -34,8 +34,9 @@ not see each other's objects. The tests are an ordinary `unittest` module of one
   without one, `GPU_S3_SPEC` (`--s3-spec`) or else the newest on PyPI, with a warning that it may not be the version
   of the streamer under test.
 - **boto3**, the client that puts the objects: installed by `suite_prepare` (it is not a dependency of the streamer).
-- **A GPU**: the tests stream to `cuda:0`, and fail when there is none, like every GPU test. `GPU_DEVICE=cpu` says that a run is
-  meant to be on the CPU (the object storage is what is tested, so a machine without a GPU can do it).
+- **A GPU**: the tests stream to `cuda:0`, and fail when there is none, like every GPU test. `GPU_DEVICE=cpu` makes them stream
+  to the CPU, for running the test module by hand (see below) on a machine without a GPU: the environment itself
+  (`run.sh`, `setup_and_run.sh`) refuses to run without one.
 
 ## Running it
 
@@ -52,13 +53,21 @@ tests/gpu/run.sh --suites object_storage --wheel dist/runai_model_streamer-*.whl
 tests/gpu/run.sh --suites streaming,object_storage --wheel ... --wheel ...
 ```
 
-By hand, with the service up (`docker compose -f tests/gpu/compose.yaml --profile object_storage up -d --wait seaweedfs`)
-and the streamer, its S3 plugin and boto3 installed, in a container that is on the compose network:
+By hand (to work on the tests without a GPU, with `GPU_DEVICE=cpu`): start the service, run the test module in a container on
+the compose network that has the streamer, its S3 plugin and boto3 installed, and remove the service. Every compose command
+needs `GPU_WHEEL_HOST_DIR` and `GPU_REPO` set (the compose file reads them), and the profile of the service:
 
 ```bash
-PYTHONPATH=tests/gpu/harness AWS_ENDPOINT_URL=http://seaweedfs:9000 AWS_ACCESS_KEY_ID=testkey \
-AWS_SECRET_ACCESS_KEY=testsecret RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
-python3 -m gpu_harness.run_unittest --suite object_storage --run basic tests/gpu/suites/object_storage/test_object_storage.py
+export GPU_WHEEL_HOST_DIR=/tmp GPU_REPO=$PWD
+docker compose -p os-try -f tests/gpu/compose.yaml --profile object_storage up -d --wait seaweedfs
+
+docker run --rm --network os-try_default -v "$PWD:/workspace" -w /workspace \
+  -e PYTHONPATH=tests/gpu/harness -e GPU_DEVICE=cpu -e AWS_ENDPOINT_URL=http://seaweedfs:9000 \
+  -e AWS_ACCESS_KEY_ID=testkey -e AWS_SECRET_ACCESS_KEY=testsecret -e RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 \
+  IMAGE-WITH-THE-STREAMER-AND-BOTO3 \
+  python3 -m gpu_harness.run_unittest --suite object_storage --run basic tests/gpu/suites/object_storage/test_object_storage.py
+
+docker compose -p os-try -f tests/gpu/compose.yaml --profile object_storage down --volumes
 ```
 
 ## In CI

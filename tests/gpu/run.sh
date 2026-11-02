@@ -152,13 +152,30 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "docker was not found"
 docker compose version >/dev/null 2>&1 || die "the docker compose plugin was not found"
+# compose.yaml needs docker compose 2.20 or later (depends_on with required: false).
+compose_version=$(docker compose version --short 2>/dev/null | tr -d 'v' || true)
+compose_major=${compose_version%%.*}
+compose_rest=${compose_version#*.}
+compose_minor=${compose_rest%%.*}
+case "$compose_major$compose_minor" in
+    *[!0-9]*|"") die "could not read the version of docker compose ('$compose_version'): 2.20 or later is needed" ;;
+esac
+if [ "$compose_major" -lt 2 ] || { [ "$compose_major" -eq 2 ] && [ "$compose_minor" -lt 20 ]; }; then
+    die "docker compose $compose_version is too old: 2.20 or later is needed (depends_on with required: false)"
+fi
+
+# The services of the suites (object storage) go with the run, and so does the network that they made: also when the run is
+# interrupted.
+stop_services() {
+    "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+trap 'stop_services; exit 130' INT TERM
 
 status=0
 # -T: no pseudo-terminal. CI has none (compose would refuse), and the output is a log, not a screen.
 "${compose[@]}" run --rm -T tests || status=$?
 
-# The services of the suites (object storage) go with the run, and so does the network that they made.
-"${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+stop_services
 
 # The container runs as root, so what it wrote into the checkout is root's: give it back (best effort).
 if [ "$chown_back" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
