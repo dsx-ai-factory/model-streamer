@@ -154,7 +154,7 @@ the results directory, `GPU_FIXTURES` a directory of its own for what it generat
 | `suite_unit_tests=(tests/gpu/suites/NAME/test_x.py ...)` | CPU-only tests of the suite's own code, run first; a failure fails the run, and the suite still runs |
 | `suite_prepare()` | once, before the tests: fixtures, services to wait for. A failure skips the suite's tests and fails the run. It runs where `set -e` does not apply: end every command with `|| return` |
 | `suite_run()` | the tests (required), built from the steps below |
-| `suite_expect()` | prints the result files that the suite must have written, as globs relative to its results directory: a suite that did not run, or a run that wrote nothing, is missed instead of being green |
+| `suite_expect()` | prints the result files that the suite must have written, as globs relative to its results directory (required: a suite that did not run, or a run that wrote nothing, is missed instead of being green) |
 | `suite_collect()`, `suite_timing()` | keep artifacts for debugging, and name extra timing files |
 
 The steps that `suite_run` is made of (`harness/common.sh`). Each prints START and END, records its time, is cut off by its
@@ -239,7 +239,8 @@ run it with `tests/gpu/run_local.sh --compose-file my-compose.yaml ...`. What th
 called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel` (`GPU_REPO`, `GPU_WHEEL_HOST_DIR`); the
 `GPU_*` variables listed under `environment` (they are how `run_local.sh` hands over its options); and a `command` that is the
 entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
-set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `PYTHONPATH` with `tests/gpu/harness`), source
+set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`, and
+`PYTHONPATH` with `tests/gpu/harness`; see the top of `setup_and_run.sh`), source
 `harness/common.sh` and `harness/suites.sh`, set the container up, then
 
 ```bash

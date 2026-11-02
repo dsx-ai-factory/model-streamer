@@ -46,6 +46,7 @@ services:
       - GPU_NUMPY_SPEC
       - GPU_STREAMER_SPEC
       - GPU_S3_SPEC
+      - GPU_DEVICE
       - GPU_EXPECT_NEWEST_TORCH
       - GPU_BUDGET_MINUTES
       # Of the streaming suite

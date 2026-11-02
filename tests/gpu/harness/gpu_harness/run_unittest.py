@@ -96,12 +96,22 @@ class Recorder:
     def close(self, case):
         """The test has ended: if no result was recorded for it (only subtests failed, or it ended in a way that unittest
         does not report), record one now."""
-        entry = next(c for c in reversed(self.cases) if c["case"] == case)
-        if entry["ok"] is None:
+        if self.entry(case)["ok"] is None:
             self.finish(case, True)
 
+    def entry(self, case):
+        """The case that started. A failure or a skip in setUpClass, tearDownClass or setUpModule is reported by unittest
+        without any test having started (against a holder, named like "setUpClass (module.Class)"): it is a case of its
+        own, added when it is reported, and it fails the run."""
+        for found in reversed(self.cases):
+            if found["case"] == case:
+                return found
+        created = {"case": case, "ok": None}
+        self.cases.append(created)
+        return created
+
     def finish(self, case, ok, error=None, note=None):
-        entry = next(c for c in reversed(self.cases) if c["case"] == case)
+        entry = self.entry(case)
         seconds = time.perf_counter() - self._started.pop(case, time.perf_counter())
         errors = list(self._subtest_errors.pop(case, [])) + ([error] if error else [])
         entry.update({"ok": ok and not errors, "seconds": seconds})

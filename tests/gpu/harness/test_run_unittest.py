@@ -105,6 +105,54 @@ class RunUnittest(unittest.TestCase):
         self.assertFalse(case["ok"])
         self.assertIn("row='b'", case["errors"][0])
 
+    def test_an_error_in_setUpClass_is_a_failed_case_with_the_real_error(self):
+        """unittest reports it without any test having started: it used to crash the recorder and hide the error."""
+        path = self.module("setup", """
+            import unittest
+            class T(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise ConnectionError("the service is down")
+                def test_a(self): pass
+                def test_b(self): pass
+            """)
+        status, output = self.run_tests(path)
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("StopIteration", output)
+        data = self.results_file()
+        self.assertEqual(data["expected_cases"], 2)
+        self.assertEqual([c["ok"] for c in data["cases"]], [False])
+        self.assertIn("setUpClass", data["cases"][0]["case"])
+        self.assertIn("the service is down", data["cases"][0]["errors"][0])
+
+    def test_a_skip_in_setUpClass_fails_the_run_unless_it_is_allowed(self):
+        path = self.module("setupskip", """
+            import unittest
+            class T(unittest.TestCase):
+                @classmethod
+                def setUpClass(cls): raise unittest.SkipTest("no service")
+                def test_a(self): pass
+            """)
+        status, output = self.run_tests(path)
+        self.assertEqual(status, 1, output)
+        self.assertNotIn("StopIteration", output)
+        self.assertFalse(self.results_file()["cases"][0]["ok"])
+
+    def test_an_error_in_tearDownClass_fails_the_run_after_the_tests_passed(self):
+        path = self.module("teardown", """
+            import unittest
+            class T(unittest.TestCase):
+                @classmethod
+                def tearDownClass(cls): raise RuntimeError("cleanup failed")
+                def test_a(self): pass
+            """)
+        status, output = self.run_tests(path)
+        self.assertEqual(status, 1, output)
+        cases = {c["case"].split(".")[-1]: c for c in self.results_file()["cases"]}
+        self.assertTrue(cases["test_a"]["ok"])
+        failed = [c for c in cases.values() if c["ok"] is False]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("cleanup failed", failed[0]["errors"][0])
+
     def test_a_module_that_has_no_test_fails_the_run(self):
         path = self.module("empty", """
             import unittest

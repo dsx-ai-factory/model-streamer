@@ -136,7 +136,9 @@ if [ "${GPU_EXPECT_NEWEST_TORCH:-false}" = true ]; then
     # Only the check's own verdict (exit status 3) flags the container. A check that cannot reach PyPI says so and
     # passes; one that crashes or hangs (a cap of its own) is not a verdict, and must not turn into a false flag.
     check_status=0
-    timeout --signal=TERM --kill-after=10s 180s python3 tests/gpu/harness/env_check.py newest-torch || check_status=$?
+    # GPU_RESULTS is where the check writes env-check.txt, which the job summary shows (it was unset above: a suite's to set).
+    GPU_RESULTS="$RESULTS" timeout --signal=TERM --kill-after=10s 180s python3 tests/gpu/harness/env_check.py newest-torch \
+        || check_status=$?
     case "$check_status" in
         0) ;;
         3) env_limited=1 ;;

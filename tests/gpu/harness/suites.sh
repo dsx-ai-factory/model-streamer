@@ -8,7 +8,8 @@
 #   run_suites                   each suite: its unit tests, its preparation, its tests, its artifacts
 #   report_suites                the summary of what ran (summarize.py), and where the time went
 #
-# A suite is a directory with a suite.sh, which this sources and which defines (all but suite_run are optional):
+# A suite is a directory with a suite.sh, which this sources and which defines (suite_run and suite_expect are required of
+# every suite by tests/gpu/test_suites.py; the runner itself runs a suite without suite_expect, and would not miss its results):
 #
 #   suite_description="one line"             what the suite tests
 #   suite_services=(object-storage)           compose profiles that the suite needs (run_local.sh starts them, see compose.yaml)

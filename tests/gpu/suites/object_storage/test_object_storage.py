@@ -39,8 +39,11 @@ class ObjectStorage(unittest.TestCase):
     def setUpClass(cls):
         cls.store = ObjectStore.from_environment()
         cls.store.wait_until_ready(seconds=30)
-        # The GPU of the job. A machine without one can run this suite too, on the CPU: the object storage is what is tested.
-        cls.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # The GPU of the job. No GPU is a failure, like everywhere in these tests; GPU_DEVICE=cpu says that the run is meant to
+        # be on the CPU (the object storage is what is tested, and a machine without a GPU can do that).
+        cls.device = os.environ.get("GPU_DEVICE", "cuda:0")
+        if cls.device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError("no CUDA GPU is visible: set GPU_DEVICE=cpu to run this suite on the CPU")
 
     def setUp(self):
         self.prefix = self.store.new_prefix(self._testMethodName)
@@ -93,15 +96,16 @@ class ObjectStorage(unittest.TestCase):
             self.assertEqual(got.read(), handle.read())
 
     def test_streaming_an_object_that_is_not_there_is_an_error(self):
-        """Not an empty model, and not a hang: the error is raised, whichever call it comes from."""
-        with self.assertRaises(Exception):
+        """Not an empty model, and not a hang: the error is raised, whichever call it comes from. A ValueError of the streamer
+        that says the file could not be accessed: a missing plugin or a wrong endpoint would not say that."""
+        with self.assertRaisesRegex(ValueError, "File access error"):
             with SafetensorsStreamer() as streamer:
                 streamer.stream_file(self.store.uri(self.prefix + "no-such-model.safetensors"), device=self.device)
                 list(streamer.get_tensors())
 
     def test_a_file_that_is_not_safetensors_is_an_error(self):
         self.store.put_bytes(self.prefix + "garbage.safetensors", b"this is not a safetensors file" * 10)
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(ValueError, "Corrupted File"):
             with SafetensorsStreamer() as streamer:
                 streamer.stream_file(self.store.uri(self.prefix + "garbage.safetensors"), device=self.device)
                 list(streamer.get_tensors())

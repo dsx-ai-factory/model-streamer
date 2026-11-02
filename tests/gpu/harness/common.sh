@@ -6,7 +6,9 @@
 # root of the checkout, after it has set the variables that this reads:
 #
 #   RESULTS          the results directory         SETUP_TIMING   the file of the timings of the phases (under RESULTS)
-#   WORLD            the GPUs (ranks) of the run   GPU_BUDGET_MINUTES (optional)  the budget of the whole run
+#   FIXTURES         the base directory of what    WORLD          the GPUs (ranks) of the run
+#                    the suites generate           WHEEL_DIR      where the wheels are (/wheel), for a suite that installs from them
+#   GPU_SEED         the seed of what is generated GPU_BUDGET_MINUTES (optional)  the budget of the whole run
 #
 # For a suite (see tests/gpu/README.md, "Adding a test"), these are what a suite.sh may use:
 #

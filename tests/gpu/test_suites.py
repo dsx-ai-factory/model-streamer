@@ -81,6 +81,8 @@ class Contract(unittest.TestCase):
             found = declared(name)
             self.assertTrue(found["description"], name + ": suite_description is empty")
             self.assertIn("suite_run", found["functions"], name)
+            # Without it a suite whose tests wrote nothing (a script that exits 0 and does not run its tests) is green.
+            self.assertIn("suite_expect", found["functions"], name + ": suite_expect says what the suite must have written")
             self.assertLess(len(found["description"]), 160, name + ": a description is one line")
 
     def test_the_unit_tests_that_a_suite_names_exist_and_are_its_own(self):

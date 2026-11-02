@@ -34,6 +34,8 @@ not see each other's objects. The tests are an ordinary `unittest` module of one
   without one, `GPU_S3_SPEC` (`--s3-spec`) or else the newest on PyPI, with a warning that it may not be the version
   of the streamer under test.
 - **boto3**, the client that puts the objects: installed by `suite_prepare` (it is not a dependency of the streamer).
+- **A GPU**: the tests stream to `cuda:0`, and fail when there is none, like every GPU test. `GPU_DEVICE=cpu` says that a run is
+  meant to be on the CPU (the object storage is what is tested, so a machine without a GPU can do it).
 
 ## Running it
 
