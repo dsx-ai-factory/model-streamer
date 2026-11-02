@@ -45,7 +45,7 @@ The variables of the suite:
 | `GPU_ROWS` | comma-separated row id prefixes: run only the rows whose id starts with one of them. A prefix that matches no row fails the run (a typo), unless `GPU_ALLOW_EMPTY_ROWS=true`: a leg that has only some of the rows (the oldest-torch leg has the core rows) then has nothing to run and passes, saying so |
 | `GPU_SELF_CHECK` | `true` also runs the self-check |
 | `GPU_REAL_SMOKE` | `false` leaves out the download of the real model and the smoke test |
-| `GPU_SEED` | the seed of the models (the harness sets it: default the workflow run id) |
+| `GPU_SEED` | the seed of the models (the harness sets it: default the time; the workflow passes the run id) |
 | `GPU_FIXTURES` | where the models are written (the harness gives the suite a directory of its own) |
 
 ## The small real model (`real_model.py`)

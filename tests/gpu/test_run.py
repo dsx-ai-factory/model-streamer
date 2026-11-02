@@ -176,6 +176,26 @@ class Run(unittest.TestCase):
         for name in ("GPU_STREAMER_SPEC", "GPU_ROWS", "GPU_S3_SPEC", "GPU_TORCH_SPEC", "GPU_NUMPY_SPEC", "GPU_TEST_IMAGE"):
             self.assertNotIn(name, found, name)
 
+    def test_a_wheel_in_a_directory_with_a_space_is_found(self):
+        spaced = os.path.join(self.dir.name, "my dir")
+        os.makedirs(spaced)
+        wheel = os.path.join(spaced, "runai_model_streamer-1-py3-none-any.whl")
+        open(wheel, "w").close()
+        status, output = self.run_script("--wheel", wheel)
+        self.assertEqual(status, 0, output)
+
+    def test_a_suite_named_twice_runs_once_and_no_suite_is_an_error(self):
+        status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming,streaming")
+        self.assertEqual((status, self.settings(output)["GPU_SUITES"]), (0, "streaming"), output)
+        self.assertEqual(output.count("--profile streaming"), 1, output)
+        status, output = self.run_script("--wheel", self.wheel, "--suites", "")
+        self.assertEqual(status, 2, output)
+
+    def test_a_seed_that_is_not_a_number_is_refused(self):
+        status, output = self.run_script("--wheel", self.wheel, "--seed", "abc")
+        self.assertEqual(status, 2, output)
+        self.assertIn("--seed", output)
+
     def test_variables_that_have_no_option_pass_through(self):
         status, output = self.run_script("--wheel", self.wheel, GPU_REAL_SMOKE="false", GPU_BUDGET_MINUTES="120")
         found = self.settings(output)

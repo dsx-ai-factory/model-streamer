@@ -87,11 +87,15 @@ case "$matrix" in core|full|smoke) ;; *) die "--matrix must be core, full or smo
 # The suites. A suite that needs services has a compose profile of its own name: that profile starts them.
 profiles=()
 IFS=',' read -r -a suite_list <<< "$suites"
-for suite in "${suite_list[@]}"; do
+for suite in ${suite_list[@]+"${suite_list[@]}"}; do
     suite=${suite// /}
     [ -f "$here/suites/$suite/suite.sh" ] || die "there is no suite '$suite' (the suites are: $(ls "$here/suites" | tr '\n' ' '))"
+    case " ${profiles[*]-} " in *" $suite "*) continue ;; esac   # a suite that is named twice runs once
     profiles+=("$suite")
 done
+[ "${#profiles[@]}" -gt 0 ] || die "--suites names no suite"
+suites=$(IFS=,; echo "${profiles[*]}")
+case "$seed" in *[!0-9]*) die "--seed must be a number, not '$seed'" ;; esac
 
 # The GPUs. GPU_LOCAL_GPU_COUNT is for the tests of this script, which run without a GPU.
 if [ -n "${GPU_LOCAL_GPU_COUNT:-}" ]; then
@@ -119,8 +123,11 @@ else
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gpu-wheel.XXXXXX")"
     mounted="$tmp_dir"
     for wheel in ${wheels[@]+"${wheels[@]}"}; do
-        # shellcheck disable=SC2206  # a glob on purpose
-        matches=( $wheel )
+        # A glob on purpose, in the file name only: no word splitting, so that a directory with a space in it works.
+        old_ifs=$IFS; IFS=
+        # shellcheck disable=SC2206
+        matches=( "$(dirname "$wheel")"/$(basename "$wheel") )
+        IFS=$old_ifs
         [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ] || die "--wheel must name exactly one file, '$wheel' matches ${#matches[@]}"
         case "${matches[0]}" in *.whl) ;; *) die "--wheel must be a .whl file: ${matches[0]}" ;; esac
         cp "${matches[0]}" "$tmp_dir/"

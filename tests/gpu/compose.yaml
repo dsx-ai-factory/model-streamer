@@ -62,6 +62,7 @@ services:
       - AWS_ACCESS_KEY_ID=testkey
       - AWS_SECRET_ACCESS_KEY=testsecret
       - RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0
+      - AWS_EC2_METADATA_DISABLED=true   # an S3-compatible endpoint: without it the client asks EC2 for a region (about 5 s)
       - GPU_OBJECT_BUCKET=test-bucket
     depends_on:
       seaweedfs:
