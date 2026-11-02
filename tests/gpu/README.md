@@ -71,7 +71,7 @@ by the repository's own pull request workflow, and a manual run tests the image 
 
    | Leg | PyTorch | Streaming rows |
    |---|---|---|
-   | `newest-torch` | the newest on PyPI (`torch`) | `full` (104 rows, under each of the four filesystem strategies), plus the self-check |
+   | `newest-torch` | the newest on PyPI (`torch`) | `full` (104 rows, under each of the four filesystem strategies), plus the self-check on a manual run or when the harness changed |
    | `oldest-torch` | the oldest the package supports (`torch==2.0.0`, with `numpy<2`) | `core` (14 rows, under each strategy) |
 
    Both legs also run the smoke test of the small real model. The versions in between are not run. The newest leg is

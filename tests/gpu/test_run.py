@@ -166,6 +166,29 @@ class Run(unittest.TestCase):
         self.assertNotIn("GPU_ROWS", found)
         self.assertNotIn("GPU_STREAMER_SPEC", found)
 
+    def test_an_exported_variable_does_not_override_an_option_that_was_not_given(self):
+        """run_script puts these in the environment that run.sh starts with, as a developer's shell would: run.sh must not hand
+        them on, or --wheel would be installed over by a streamer spec exported days ago."""
+        status, output = self.run_script("--wheel", self.wheel, GPU_STREAMER_SPEC="runai-model-streamer==0.1", GPU_ROWS="zz",
+                                         GPU_S3_SPEC="s", GPU_TORCH_SPEC="t", GPU_NUMPY_SPEC="n", GPU_TEST_IMAGE="i")
+        self.assertEqual(status, 0, output)
+        found = self.settings(output)
+        for name in ("GPU_STREAMER_SPEC", "GPU_ROWS", "GPU_S3_SPEC", "GPU_TORCH_SPEC", "GPU_NUMPY_SPEC", "GPU_TEST_IMAGE"):
+            self.assertNotIn(name, found, name)
+
+    def test_variables_that_have_no_option_pass_through(self):
+        status, output = self.run_script("--wheel", self.wheel, GPU_REAL_SMOKE="false", GPU_BUDGET_MINUTES="120")
+        found = self.settings(output)
+        self.assertEqual((found["GPU_REAL_SMOKE"], found["GPU_BUDGET_MINUTES"]), ("false", "120"))
+
+    def test_help_ends_with_the_options_and_not_with_code(self):
+        done = subprocess.run(["bash", SCRIPT, "--help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True)
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("--wheel PATH", done.stdout)
+        self.assertNotIn("set -euo pipefail", done.stdout)
+        self.assertNotIn("here=", done.stdout)
+
     def test_the_s3_plugin_specifier_is_handed_on(self):
         status, output = self.run_script("--streamer-spec", "runai-model-streamer==0.17.0", "--s3-spec",
                                          "runai-model-streamer-s3==0.17.0")

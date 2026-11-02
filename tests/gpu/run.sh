@@ -63,10 +63,15 @@ while [ $# -gt 0 ]; do
         --image) [ $# -ge 2 ] || die "--image needs an image"; image=$2; shift 2 ;;
         --no-chown) chown_back=0; shift ;;
         --dry-run) dry_run=1; shift ;;
-        -h|--help) sed -n '5,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR >= 5 { if (/^#/) print; else exit }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
+
+# What an option sets is what a run gets: a variable of the same name that happens to be exported in your shell (a spec of
+# the streamer from another day, a row filter) must not override the option that was not given. (The variables that have no
+# option, GPU_REAL_SMOKE, GPU_DEVICE, GPU_BUDGET_MINUTES, GPU_EXPECT_NEWEST_TORCH and GPU_ALLOW_EMPTY_ROWS, pass through.)
+unset GPU_STREAMER_SPEC GPU_S3_SPEC GPU_ROWS GPU_TORCH_SPEC GPU_NUMPY_SPEC GPU_TEST_IMAGE
 
 # The streamer comes from one place: wheels (listed, or in a directory), or a specifier.
 sources=0
