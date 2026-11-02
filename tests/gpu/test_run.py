@@ -251,7 +251,7 @@ class Run(unittest.TestCase):
             handle.write(b"x")
         status, output = self.run_script("--wheel", os.path.join(self.dir.name, "runai_model_streamer-*.whl"))
         self.assertEqual(status, 2)
-        self.assertIn("matches 2", output)
+        self.assertIn("more than one", output)
 
     def test_a_file_that_is_not_a_wheel_is_refused(self):
         other = os.path.join(self.dir.name, "streamer.tar.gz")

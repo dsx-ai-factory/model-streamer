@@ -7,7 +7,7 @@
 #
 #   tests/gpu/run.sh (--wheel PATH ... | --wheel-dir DIR | --streamer-spec SPEC) [options]
 #
-#   --wheel PATH            a wheel of the streamer to test: a file, or a glob that matches exactly one. Repeat it for
+#   --wheel PATH            a wheel of the streamer to test: a file, or a glob in the file name that matches exactly one. Repeat it for
 #                           more than one wheel (the object_storage suite also wants the one of the S3 plugin). They are
 #                           copied into a temporary directory that the container mounts
 #   --wheel-dir DIR         a directory that holds the wheels, mounted as it is (what CI downloads the artifact into)
@@ -128,7 +128,7 @@ else
         # shellcheck disable=SC2206
         matches=( "$(dirname "$wheel")"/$(basename "$wheel") )
         IFS=$old_ifs
-        [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ] || die "--wheel must name exactly one file, '$wheel' matches ${#matches[@]}"
+        [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ] || die "--wheel must name exactly one file, '$wheel' does not (no file, or more than one)"
         case "${matches[0]}" in *.whl) ;; *) die "--wheel must be a .whl file: ${matches[0]}" ;; esac
         cp "${matches[0]}" "$tmp_dir/"
         streamer="${streamer:+$streamer, }the wheel $(basename "${matches[0]}")"

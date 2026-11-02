@@ -105,7 +105,7 @@ refuses to run without one), and about 9 GB of disk for the models of the stream
 `O_DIRECT` (not a tmpfs).
 
 ```bash
-# a wheel that you built (a file, or a glob that matches exactly one), on every GPU that the machine has, at most two
+# a wheel that you built (a file, or a glob in the file name that matches exactly one), on every GPU that the machine has, at most two
 tests/gpu/run.sh --wheel ~/dist/runai_model_streamer-*.whl
 
 # a released version, on one GPU, the streaming rows that mention mixed
