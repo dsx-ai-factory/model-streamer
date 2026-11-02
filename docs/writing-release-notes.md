@@ -55,7 +55,7 @@ Use these sections, in this order. Omit a section that would be empty, except Kn
 
 **Summary.** The heading is `### Theme: Detail & Detail`, or `### Theme: Detail, Detail & Detail` for three. The paragraph has the capability as its subject, takes three to five sentences, and links at most four PRs. Name a mechanism, such as `io_uring`, only where the reader must act on it.
 
-**Features & Improvements.** One bullet per change, led by a bold feature name in Title Case, then a past-tense sentence that says what the user gets, then the PR link: `- **Ring Buffer:** Replaced the … (#167).` Use *Added*, *Fixed*, *Replaced*, *Reworked*, *Removed*. Say what changed for the user, not which function changed. Close the text with the API it reaches, such as *Reaches the Python API.* or *Reaches the Python and C APIs.*, before the PR link.
+**Features & Improvements.** One bullet per change, led by a bold feature name in Title Case, then a past-tense sentence that says what the user gets, then the PR link: `- **Ring Buffer:** Replaced the … ([#167](https://github.com/dsx-ai-factory/model-streamer/pull/167)).` Use *Added*, *Fixed*, *Replaced*, *Reworked*, *Removed*. Say what changed for the user, not which function changed. Close the text with the API it reaches, such as *Reaches the Python API.* or *Reaches the Python and C APIs.*, before the PR link.
 
 **Upgrade Notes.** Describe what changes and who is affected, then give the action as a quote that starts `> **Migrate:**`. Include every changed default, every environment variable whose meaning changed, every C API signature change, every change to what a yielded tensor is, and every changed wheel tag.
 
