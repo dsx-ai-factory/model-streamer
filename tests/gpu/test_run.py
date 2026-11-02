@@ -159,8 +159,8 @@ class Run(unittest.TestCase):
         self.assertEqual(missing, [], "run.sh hands these on, and compose.yaml does not pass them to the container")
 
     def test_a_variable_of_the_run_that_runs_these_tests_does_not_change_them(self):
-        with mock.patch.dict(os.environ, {"GPU_SUITES": "object_storage", "GPU_ROWS": "x", "GPU_STREAMER_SPEC": "y"}):
-            status, output = self.run_script("--wheel", self.wheel)
+        status, output = self.run_script("--wheel", self.wheel, GPU_SUITES="object_storage", GPU_ROWS="x",
+                                         GPU_STREAMER_SPEC="y", GPU_COMPOSE_FILE="/nonexistent.yaml")
         found = self.settings(output)
         self.assertEqual((status, found["GPU_SUITES"]), (0, "streaming"), output)
         self.assertNotIn("GPU_ROWS", found)

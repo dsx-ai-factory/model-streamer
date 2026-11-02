@@ -41,8 +41,8 @@ repo="$(cd "$here/../.." && pwd)"
 
 die() { echo "run.sh: $*" >&2; exit 2; }
 
-wheels=() wheel_dir="" spec="" suites="${GPU_SUITES:-streaming}" gpus="" matrix="core" rows="" torch_spec="" numpy_spec=""
-s3_spec="" seed="" self_check="false" image="" compose_file="${GPU_COMPOSE_FILE:-$here/compose.yaml}" project=""
+wheels=() wheel_dir="" spec="" suites="streaming" gpus="" matrix="core" rows="" torch_spec="" numpy_spec=""
+s3_spec="" seed="" self_check="false" image="" compose_file="$here/compose.yaml" project=""
 chown_back=1 dry_run=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -174,11 +174,22 @@ fi
 stop_services() {
     "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
 }
-trap 'stop_services; exit 130' INT TERM
+runner=""
+on_signal() {
+    # bash runs a trap only when the foreground command ends: the run is in the background, and waited for, so that a
+    # signal to this script stops the run at once and not when the tests end by themselves.
+    [ -z "$runner" ] || kill -TERM "$runner" 2>/dev/null || true
+    stop_services
+    exit 130
+}
+trap on_signal INT TERM
 
 status=0
 # -T: no pseudo-terminal. CI has none (compose would refuse), and the output is a log, not a screen.
-"${compose[@]}" run --rm -T tests || status=$?
+"${compose[@]}" run --rm -T tests &
+runner=$!
+wait "$runner" || status=$?
+runner=""
 
 stop_services
 
