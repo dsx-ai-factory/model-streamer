@@ -49,7 +49,7 @@ Use these sections, in this order. Omit a section that would be empty, except Kn
 
 ## Write each part
 
-**Introduction.** One paragraph: "Model Streamer X.Y.Z spans N merged PRs from N contributors since the previous release." A patch release says it is a patch release for the version before it. Then name the headline in bold, then the next three or four themes in bold, and end with a measured result when there is one, with what it was measured on.
+**Introduction.** One paragraph. Open with the headline in bold, then name the next three or four themes in bold, and end with a measured result when there is one, with what it was measured on. A patch release opens by saying it is a patch release for the version before it. Do not put counts here; they belong in Contributors.
 
 **Summary.** The heading is `### Theme: Detail & Detail`. The paragraph has the capability as its subject, takes three to five sentences, and links at most four PRs. Name a mechanism, such as `io_uring`, only where the reader must act on it.
 
