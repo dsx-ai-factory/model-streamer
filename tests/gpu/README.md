@@ -16,7 +16,7 @@ tests/gpu/
   README.md                 this file
   compose.yaml              the default environment: `tests` (a clean CUDA container) and the services of the suites
   setup_and_run.sh          the entry of that environment: sets the container up, runs the suites, reports
-  run_local.sh              runs the environment on a machine of your own
+  run.sh                    runs the environment, with the services of the selected suites: on your machine, and in CI
   harness/
     common.sh               time caps, the budget, timed steps, what to say when the script ends early
     suites.sh               finds the suites, runs them (prepare, run, expect, collect), reports
@@ -29,14 +29,14 @@ tests/gpu/
   suites/
     streaming/              the streamer loads models to the GPUs, byte for byte (the default suite)
     object_storage/         the streamer reads object storage: an example of a suite that is not about a model
-  test_run_local.py         CPU unit tests of run_local.sh
+  test_run.py               CPU unit tests of run.sh
   test_suites.py            CPU unit tests of the runner, and of what every suite must be
 ```
 
 | Suite | What it tests | Needs | CI |
 |---|---|---|---|
 | [`streaming`](suites/streaming/README.md) | the streamer loads synthetic models and a small real model to the GPUs, under every filesystem strategy, memory limit and option, and every tensor is compared with its manifest | 2 GPUs (1 runs what needs one) | nightly |
-| [`object_storage`](suites/object_storage/README.md) | features of the streamer on object storage (stream, list, pull, errors) against a SeaweedFS service | the object-storage service, the S3 plugin of the streamer | not yet |
+| [`object_storage`](suites/object_storage/README.md) | features of the streamer on object storage (stream, list, pull, errors) against a SeaweedFS service | the `seaweedfs` service, the S3 plugin of the streamer | manual runs (`suites=object_storage`) |
 
 ## Where it runs
 
@@ -44,8 +44,10 @@ The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs eve
 is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
 the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
 demand, and a manual run is never skipped:
-`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]` (`matrix`
-and `rows` are the streaming suite's). A `rows` filter that matches no row of the newest-torch leg fails it, as a typo would;
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]
+[-f suites=streaming,object_storage]` (`matrix` and `rows` are the streaming suite's; `suites` defaults to `streaming`, and
+a run that asks for `object_storage` also builds the S3 plugin and starts the SeaweedFS service, in the newest-torch leg).
+A `rows` filter that matches no row of the newest-torch leg fails it, as a typo would;
 the oldest-torch leg has only the core rows and passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`). `gpus=1`
 (default 2, and always 2 on the schedule) runs on one GPU of the runner and leaves out what needs two, which the log and
 the summary say.
@@ -57,9 +59,11 @@ with the old image, and the next one, seeing nothing changed since that run, doe
 by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
-   in the repository's development image, and uploads the wheel.
+   in the repository's development image, and uploads the wheel (and, for a run that asks for the `object_storage` suite,
+   the wheel of the S3 plugin, built the same way with `COMPONENT=s3`, in the same artifact).
 2. **`gpu-tests`**, two legs in parallel on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`:
-   two T4s, 12 cores, 48 GB). Each leg runs `setup_and_run.sh` in a clean CUDA container
+   two T4s, 12 cores, 48 GB). Each leg downloads the wheels, makes sure that the docker compose plugin is there (a pinned
+   release is installed if the runner has none), and runs `tests/gpu/run.sh`, which runs `setup_and_run.sh` in a clean CUDA container
    (`nvidia/cuda:12.6.3-base-ubuntu24.04` with Python 3.12 for the newest torch, which needs Python 3.11 or later;
    `nvidia/cuda:12.4.1-base-ubuntu22.04` with Python 3.10 for the oldest, since torch 2.0.0 has no wheel for 3.12. No
    Python packages, no toolchain, GPU passthrough, 2 GiB of `/dev/shm` for NCCL and the io_uring seccomp setting). The
@@ -88,42 +92,45 @@ by the repository's own pull request workflow, and a manual run tests the image 
 
 The NVKS GPU runners run each job in an ephemeral virtual machine (the runner groups' documentation), so nothing stays
 behind for the next job, and the scripts do not clean up after themselves. The log is written by the workflow
-(`docker run ... | tee`), not by a `tee` inside the container, which is killed with the script and can lose the last lines,
+(`tests/gpu/run.sh ... | tee`), not by a `tee` inside the container, which is killed with the script and can lose the last lines,
 where the verdict is. The wheel is downloaded outside the checkout and mounted read-only at `/wheel`.
 
-## Running it on a machine of your own
+## Running it: `run.sh`
 
-`run_local.sh` runs the same container as CI (`compose.yaml`: the same image, `/dev/shm`, seccomp setting and mounts) on a
-machine with NVIDIA GPUs, and starts the services that the selected suites need. It needs Docker with the compose plugin
-and the NVIDIA container toolkit, and about 9 GB of disk for the models of the streaming suite, on a filesystem that serves
-`O_DIRECT` (not a tmpfs).
+`run.sh` runs the environment of `compose.yaml` (the clean CUDA container, with its image, `/dev/shm`, seccomp setting and
+mounts) and the services that the selected suites need. The workflow runs it too, so a run on your machine and a run in
+CI are the same thing apart from the machine. It needs Docker with the compose plugin and the NVIDIA container toolkit,
+and about 9 GB of disk for the models of the streaming suite, on a filesystem that serves `O_DIRECT` (not a tmpfs).
 
 ```bash
 # a wheel that you built (a file, or a glob that matches exactly one), on every GPU that the machine has, at most two
-tests/gpu/run_local.sh --wheel ~/dist/runai_model_streamer-*.whl
+tests/gpu/run.sh --wheel ~/dist/runai_model_streamer-*.whl
 
 # a released version, on one GPU, the streaming rows that mention mixed
-tests/gpu/run_local.sh --streamer-spec 'runai-model-streamer==0.17.0' --gpus 1 --rows mixed
+tests/gpu/run.sh --streamer-spec 'runai-model-streamer==0.17.0' --gpus 1 --rows mixed
 
 # the object storage suite (it starts the SeaweedFS service, and removes it at the end)
-tests/gpu/run_local.sh --suites object_storage --streamer-spec 'runai-model-streamer==0.17.0' \
+tests/gpu/run.sh --suites object_storage --streamer-spec 'runai-model-streamer==0.17.0' \
     --s3-spec 'runai-model-streamer-s3==0.17.0'
 
 # the oldest torch, every streaming row, the self-checks too
-tests/gpu/run_local.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.0.0' --numpy-spec 'numpy<2' \
+tests/gpu/run.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.0.0' --numpy-spec 'numpy<2' \
     --image nvidia/cuda:12.4.1-base-ubuntu22.04
 ```
 
-- The streamer comes from one place: `--wheel` (repeat it for more than one wheel), or `--streamer-spec` (a requirement
-  specifier that pip installs: a version, a range, or just the name). The wheels are copied alone into a temporary
-  directory that is mounted read-only at `/wheel`, where `setup_and_run.sh` looks for them. The workflow mounts its wheel
-  the same way, so a run here and a run in CI differ in the machine and nothing else.
-- `--suites a,b` picks the suites (default `streaming`). The services that they need (`suite_services` in their `suite.sh`)
-  are compose profiles that `run_local.sh` switches on.
-- `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, so a suite leaves out what needs two, and
-  says how much (the streaming suite: the 60 distributed rows of the 104). CI never sets `GPU_WORLD`, so it still fails
-  when a GPU is missing.
-- `--compose-file PATH` runs another environment (see "Environments").
+- The streamer comes from one place: `--wheel` (repeat it for more than one wheel), `--wheel-dir DIR` (a directory of
+  wheels, mounted as it is: what CI downloads the artifact into), or `--streamer-spec` (a requirement specifier that pip
+  installs: a version, a range, or just the name). `--wheel` copies the files alone into a temporary directory. Either way
+  the directory is mounted read-only at `/wheel`, where `setup_and_run.sh` looks for the wheels.
+- `--suites a,b` picks the suites (default `streaming`). A suite that needs services has a compose profile of its own name
+  (`object_storage` starts `seaweedfs`): a service with a profile starts only when the profile is asked for, and `run.sh`
+  asks for the profile of every selected suite (a suite without services has none, which compose does not mind). The
+  services go with the run: `run.sh` ends with `docker compose down --volumes`.
+- `--gpus N` is the GPUs to use: with a number given, the machine must have that many, or the run fails (CI always gives
+  it). `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, so a suite leaves out what needs two, and
+  says how much (the streaming suite: the 60 distributed rows of the 104).
+- `--compose-file PATH` runs another environment (see "Environments"); `--project NAME` names the compose project, to
+  clean up after it (`docker compose -p NAME down`); `--no-chown` leaves the files that the container wrote as they are.
 - `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout; each run removes the results
   of the earlier one first (`harness/clean_results.sh`: the results files, the summaries and the directories of the suites,
   not `run.log`), so a run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the
@@ -150,7 +157,6 @@ the results directory, `GPU_FIXTURES` a directory of its own for what it generat
 | In `suite.sh` | |
 |---|---|
 | `suite_description="..."` | one line: what it tests (required) |
-| `suite_services=(object-storage)` | compose profiles that it needs: `run_local.sh` starts them, `compose.yaml` defines them |
 | `suite_unit_tests=(tests/gpu/suites/NAME/test_x.py ...)` | CPU-only tests of the suite's own code, run first; a failure fails the run, and the suite still runs |
 | `suite_prepare()` | once, before the tests: fixtures, services to wait for. A failure skips the suite's tests and fails the run. It runs where `set -e` does not apply: end every command with `|| return` |
 | `suite_run()` | the tests (required), built from the steps below |
@@ -212,14 +218,18 @@ model: a feature of the streamer that needs a service, a failure mode, a configu
    writing them again (`ObjectStore`, `small_model`, `tensor_crc32`). Add the harness to the path with the three lines that
    the other tests start with. If the ranks of the test have to work together, use a `Session` and `run_torchrun` instead
    (see the streaming suite's `test_synthetic_models.py`).
-2. `suites/<name>/suite.sh`: the description, the services if any, `suite_run` (`run_unittest basic 15 tests/gpu/suites/<name>/test_<something>.py`),
+2. `suites/<name>/suite.sh`: the description, `suite_run` (`run_unittest basic 15 tests/gpu/suites/<name>/test_<something>.py`),
    and `suite_expect` (`echo "results-basic-rank0.json"`). Add `suite_prepare` for what the tests need first.
 3. `suites/<name>/README.md`: what it tests and what it needs, like the two that are there.
-4. If it needs a service, a profile in `compose.yaml` (see `seaweedfs`), named in `suite_services`.
+4. If it needs a service, put it in `compose.yaml` with `profiles: [<name>]`, the name of the suite (see `seaweedfs`):
+   `run.sh` starts the profile of every suite that is selected, and `tests` waits for the service's healthcheck.
 5. CPU unit tests for helper code that the suite has (`suite_unit_tests`), if it has any.
-6. Run it: `tests/gpu/run_local.sh --suites <name> ...`; and `python3 -m unittest tests/gpu/test_suites.py`, which checks
-   the contract of every suite: a `suite.sh` that is valid bash and describes the suite and defines `suite_run`, a README, a test,
-   unit tests and services that exist, no suite that knows another, no harness file that knows a suite.
+6. Run it: `tests/gpu/run.sh --suites <name> ...`; and `python3 -m unittest tests/gpu/test_suites.py`, which checks
+   the contract of every suite: a `suite.sh` that is valid bash and describes the suite and defines `suite_run` and `suite_expect`,
+   a README, a test, unit tests that exist, profiles that are named after suites, no suite that knows another, no harness
+   file that knows a suite.
+7. To run it in CI (the workflow's `suites` input), the job has to build and give it what it needs: see how the S3 plugin wheel
+   is built and uploaded next to the streamer's in `nightly-gpu.yaml`.
 
 What a suite must not do: reach into another suite, or into the harness's internals (use `gpu_harness`); skip when it cannot
 run (a missing GPU or service is a failure: say how to get it); write results anywhere but `GPU_RESULTS`; take a time that
@@ -232,12 +242,12 @@ image): see below. A new environment still runs the same suites.
 
 An environment is a compose file with a service named `tests`, which runs an *entry*: a script that sets the container up and then
 runs the suites. `compose.yaml` is the default one: `tests` is a clean CUDA container, and its entry, `setup_and_run.sh`,
-installs Python, torch and the streamer; the services of the suites (`seaweedfs`) are compose profiles.
+installs Python, torch and the streamer; the services of a suite (`seaweedfs`) have a compose profile of the suite's name.
 
 To run in another environment, copy `compose.yaml`, change what differs (the image, the services, the command), and
-run it with `tests/gpu/run_local.sh --compose-file my-compose.yaml ...`. What the compose file has to keep: the service
+run it with `tests/gpu/run.sh --compose-file my-compose.yaml ...`. What the compose file has to keep: the service
 called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel` (`GPU_REPO`, `GPU_WHEEL_HOST_DIR`); the
-`GPU_*` variables listed under `environment` (they are how `run_local.sh` hands over its options); and a `command` that is the
+`GPU_*` variables listed under `environment` (they are how `run.sh` hands over its options); and a `command` that is the
 entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
 set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`, and
 `PYTHONPATH` with `tests/gpu/harness`; see the top of `setup_and_run.sh`), source
@@ -261,7 +271,8 @@ so that the suites, the caps, the budget, the results and the verdict are the sa
 | `GPU_WORLD` | `2` (default) or `1`: the GPUs of the run |
 | `GPU_TORCH_SPEC`, `GPU_NUMPY_SPEC` | what to install (default the newest torch, any numpy) |
 | `GPU_STREAMER_SPEC` | install the streamer from a requirement specifier instead of the wheel in `/wheel` |
-| `GPU_S3_SPEC` | the S3 plugin to install when there is no wheel of it (the object-storage suite) |
+| `GPU_S3_SPEC` | the S3 plugin to install when there is no wheel of it (the object_storage suite) |
+| `GPU_DEVICE` | `cpu` for a run of the object_storage suite on a machine without a GPU (default `cuda:0`, and a missing GPU is a failure) |
 | `GPU_SEED` | the seed of what is generated (default the time) |
 | `GPU_EXPECT_NEWEST_TORCH` | `true` checks that the container does not limit the newest torch (the newest-torch leg) |
 | `GPU_BUDGET_MINUTES` | the budget of the whole run (285: the job's timeout less 15 minutes) |

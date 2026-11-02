@@ -2,23 +2,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Run the real-GPU tests on a machine of your own, in the same clean CUDA container as CI (tests/gpu/compose.yaml).
+# Run the real-GPU tests: the environment of tests/gpu/compose.yaml (a clean CUDA container, and the services that the
+# selected suites need), on a machine of your own or in CI. The workflow runs this too, with every setting explicit.
 #
-#   tests/gpu/run_local.sh (--wheel PATH ... | --streamer-spec SPEC) [options]
+#   tests/gpu/run.sh (--wheel PATH ... | --wheel-dir DIR | --streamer-spec SPEC) [options]
 #
 #   --wheel PATH            a wheel of the streamer to test: a file, or a glob that matches exactly one. Repeat it for
-#                           more than one wheel (the object-storage suite also wants the one of the S3 plugin)
+#                           more than one wheel (the object_storage suite also wants the one of the S3 plugin). They are
+#                           copied into a temporary directory that the container mounts
+#   --wheel-dir DIR         a directory that holds the wheels, mounted as it is (what CI downloads the artifact into)
 #   --streamer-spec SPEC    a requirement specifier of the streamer instead, installed with pip (a released version:
 #                           'runai-model-streamer==0.17.0', 'runai-model-streamer>=0.16', or just the name)
-#   --suites NAME[,NAME...] the suites to run (tests/gpu/suites/, default streaming). The services that they need start
-#                           with the environment (suite_services of their suite.sh: compose profiles)
-#   --gpus N                1 or 2 (default: the GPUs that the machine has, at most 2). One GPU runs what needs one rank:
-#                           a suite leaves out what needs two, and the summary says how much
+#   --suites NAME[,NAME...] the suites to run (tests/gpu/suites/, default streaming). A suite that needs services has a
+#                           compose profile of its own name, which starts them (compose.yaml)
+#   --gpus N                1 or 2 (default: the GPUs that the machine has, at most 2). With a number given, the machine
+#                           must have that many, or this fails. One GPU runs what needs one rank: a suite leaves out what
+#                           needs two, and the summary says how much
 #   --compose-file PATH     the environment, another compose file than tests/gpu/compose.yaml (see the README)
+#   --project NAME          the compose project (default runai-gpu-tests): what to `docker compose -p NAME down` afterwards
 #   --torch-spec SPEC, --numpy-spec SPEC   the PyTorch and numpy to install (default: the newest torch, any numpy)
 #   --s3-spec SPEC          the S3 plugin to install when there is no wheel of it (default: the newest on PyPI)
 #   --seed N                the seed of the models (default: the time)
 #   --image IMAGE           the CUDA image (default nvidia/cuda:12.6.3-base-ubuntu24.04, Python 3.12)
+#   --no-chown              do not give what the container wrote back to you (CI does not need it)
 #   --dry-run               print what would run and stop
 #
 # Of the streaming suite:
@@ -33,17 +39,20 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 
-die() { echo "run_local.sh: $*" >&2; exit 2; }
+die() { echo "run.sh: $*" >&2; exit 2; }
 
-wheels=() spec="" suites="${GPU_SUITES:-streaming}" gpus="" matrix="core" rows="" torch_spec="" numpy_spec="" s3_spec=""
-seed="" self_check="false" image="" compose_file="${GPU_COMPOSE_FILE:-$here/compose.yaml}" dry_run=0
+wheels=() wheel_dir="" spec="" suites="${GPU_SUITES:-streaming}" gpus="" matrix="core" rows="" torch_spec="" numpy_spec=""
+s3_spec="" seed="" self_check="false" image="" compose_file="${GPU_COMPOSE_FILE:-$here/compose.yaml}" project=""
+chown_back=1 dry_run=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --wheel) [ $# -ge 2 ] || die "--wheel needs a path"; wheels+=("$2"); shift 2 ;;
+        --wheel-dir) [ $# -ge 2 ] || die "--wheel-dir needs a directory"; wheel_dir=$2; shift 2 ;;
         --streamer-spec) [ $# -ge 2 ] || die "--streamer-spec needs a specifier"; spec=$2; shift 2 ;;
         --suites) [ $# -ge 2 ] || die "--suites needs names"; suites=$2; shift 2 ;;
         --gpus) [ $# -ge 2 ] || die "--gpus needs 1 or 2"; gpus=$2; shift 2 ;;
         --compose-file) [ $# -ge 2 ] || die "--compose-file needs a path"; compose_file=$2; shift 2 ;;
+        --project) [ $# -ge 2 ] || die "--project needs a name"; project=$2; shift 2 ;;
         --matrix) [ $# -ge 2 ] || die "--matrix needs core, full or smoke"; matrix=$2; shift 2 ;;
         --rows) [ $# -ge 2 ] || die "--rows needs prefixes"; rows=$2; shift 2 ;;
         --torch-spec) [ $# -ge 2 ] || die "--torch-spec needs a specifier"; torch_spec=$2; shift 2 ;;
@@ -52,28 +61,31 @@ while [ $# -gt 0 ]; do
         --seed) [ $# -ge 2 ] || die "--seed needs a number"; seed=$2; shift 2 ;;
         --self-check) self_check="true"; shift ;;
         --image) [ $# -ge 2 ] || die "--image needs an image"; image=$2; shift 2 ;;
+        --no-chown) chown_back=0; shift ;;
         --dry-run) dry_run=1; shift ;;
-        -h|--help) sed -n '5,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '5,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option $1 (see --help)" ;;
     esac
 done
 
-# The streamer comes from one place: wheels, or a specifier.
-if [ "${#wheels[@]}" -gt 0 ] && [ -n "$spec" ]; then die "give --wheel or --streamer-spec, not both"; fi
-if [ "${#wheels[@]}" -eq 0 ] && [ -z "$spec" ]; then die "give --wheel PATH or --streamer-spec SPEC: the streamer to test"; fi
+# The streamer comes from one place: wheels (listed, or in a directory), or a specifier.
+sources=0
+[ "${#wheels[@]}" -gt 0 ] && sources=$((sources + 1))
+[ -n "$wheel_dir" ] && sources=$((sources + 1))
+[ -n "$spec" ] && sources=$((sources + 1))
+if [ "$sources" -gt 1 ]; then die "give one of --wheel, --wheel-dir and --streamer-spec, not more"; fi
+if [ "$sources" -eq 0 ]; then die "give --wheel PATH, --wheel-dir DIR or --streamer-spec SPEC: the streamer to test"; fi
+if [ -n "$wheel_dir" ] && [ ! -d "$wheel_dir" ]; then die "--wheel-dir $wheel_dir is not a directory"; fi
 case "$matrix" in core|full|smoke) ;; *) die "--matrix must be core, full or smoke, not '$matrix'" ;; esac
 [ -f "$compose_file" ] || die "the compose file $compose_file was not found"
 
-# The suites, and the services (compose profiles) that they need: what a suite.sh says, which is only definitions.
+# The suites. A suite that needs services has a compose profile of its own name: that profile starts them.
 profiles=()
 IFS=',' read -r -a suite_list <<< "$suites"
 for suite in "${suite_list[@]}"; do
     suite=${suite// /}
     [ -f "$here/suites/$suite/suite.sh" ] || die "there is no suite '$suite' (the suites are: $(ls "$here/suites" | tr '\n' ' '))"
-    while IFS= read -r profile; do
-        [ -n "$profile" ] || continue
-        case " ${profiles[*]-} " in *" $profile "*) ;; *) profiles+=("$profile") ;; esac
-    done < <(bash -c 'source "$1"; printf "%s\n" ${suite_services[@]+"${suite_services[@]}"}' _ "$here/suites/$suite/suite.sh")
+    profiles+=("$suite")
 done
 
 # The GPUs. GPU_LOCAL_GPU_COUNT is for the tests of this script, which run without a GPU.
@@ -89,22 +101,30 @@ case "$gpus" in 1|2) ;; *) die "--gpus must be 1 or 2, not '$gpus'" ;; esac
 [ "$gpus" -le "$available" ] || die "--gpus $gpus was asked for, and the machine has $available"
 if [ "$gpus" -eq 1 ]; then devices="0"; else devices="0,1"; fi
 
-# The wheel directory that the container mounts: the wheels, or an empty directory for a specifier.
-wheel_dir="$(mktemp -d "${TMPDIR:-/tmp}/gpu-wheel.XXXXXX")"
-cleanup() { rm -rf "$wheel_dir"; }
+# The directory of wheels that the container mounts: the wheels that were given, the directory that was given, or an
+# empty directory for a specifier.
+tmp_dir=""
+cleanup() { [ -z "$tmp_dir" ] || rm -rf "$tmp_dir"; }
 trap cleanup EXIT
 streamer=""
-for wheel in ${wheels[@]+"${wheels[@]}"}; do
-    # shellcheck disable=SC2206  # a glob on purpose
-    matches=( $wheel )
-    [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ] || die "--wheel must name exactly one file, '$wheel' matches ${#matches[@]}"
-    case "${matches[0]}" in *.whl) ;; *) die "--wheel must be a .whl file: ${matches[0]}" ;; esac
-    cp "${matches[0]}" "$wheel_dir/"
-    streamer="${streamer:+$streamer, }the wheel $(basename "${matches[0]}")"
-done
-[ -n "$spec" ] && streamer="pip install '$spec'"
+if [ -n "$wheel_dir" ]; then
+    mounted="$(cd "$wheel_dir" && pwd)"
+    streamer="the wheels in $mounted"
+else
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gpu-wheel.XXXXXX")"
+    mounted="$tmp_dir"
+    for wheel in ${wheels[@]+"${wheels[@]}"}; do
+        # shellcheck disable=SC2206  # a glob on purpose
+        matches=( $wheel )
+        [ "${#matches[@]}" -eq 1 ] && [ -f "${matches[0]}" ] || die "--wheel must name exactly one file, '$wheel' matches ${#matches[@]}"
+        case "${matches[0]}" in *.whl) ;; *) die "--wheel must be a .whl file: ${matches[0]}" ;; esac
+        cp "${matches[0]}" "$tmp_dir/"
+        streamer="${streamer:+$streamer, }the wheel $(basename "${matches[0]}")"
+    done
+    [ -n "$spec" ] && streamer="pip install '$spec'"
+fi
 
-export GPU_WHEEL_HOST_DIR="$wheel_dir" GPU_SUITES="$suites"
+export GPU_WHEEL_HOST_DIR="$mounted" GPU_SUITES="$suites"
 export GPU_WORLD="$gpus" CUDA_VISIBLE_DEVICES="$devices" GPU_MATRIX="$matrix" GPU_SELF_CHECK="$self_check"
 export GPU_SEED="${seed:-$(date +%s)}"
 [ -n "$rows" ] && export GPU_ROWS="$rows"
@@ -115,20 +135,17 @@ export GPU_SEED="${seed:-$(date +%s)}"
 [ -n "$image" ] && export GPU_TEST_IMAGE="$image"
 export GPU_REPO="$repo"
 
-profile_args=()
-for profile in ${profiles[@]+"${profiles[@]}"}; do
-    profile_args+=(--profile "$profile")
+compose=(docker compose -f "$compose_file")
+[ -n "$project" ] && compose=(docker compose -p "$project" -f "$compose_file")
+for profile in "${profiles[@]}"; do
+    compose+=(--profile "$profile")
 done
-compose=(docker compose -f "$compose_file" ${profile_args[@]+"${profile_args[@]}"})
-echo "run_local.sh: suites $suites, ${gpus} GPU(s) (CUDA_VISIBLE_DEVICES=$devices), seed $GPU_SEED, streamer: $streamer"
-if [ "${#profiles[@]}" -gt 0 ]; then
-    echo "run_local.sh: services of the suites: ${profiles[*]}"
-fi
+echo "run.sh: suites $suites, ${gpus} GPU(s) (CUDA_VISIBLE_DEVICES=$devices), seed $GPU_SEED, streamer: $streamer"
 if [ "$gpus" -eq 1 ]; then
-    echo "run_local.sh: one GPU: what needs two is not run, and the summary says how much"
+    echo "run.sh: one GPU: what needs two is not run, and the summary says how much"
 fi
 if [ "$dry_run" -eq 1 ]; then
-    echo "run_local.sh: would run: ${compose[*]} run --rm tests"
+    echo "run.sh: would run: ${compose[*]} run --rm -T tests"
     env | grep -E '^(GPU_|CUDA_VISIBLE_DEVICES)' | sort | sed 's/^/  /'
     exit 0
 fi
@@ -137,20 +154,19 @@ command -v docker >/dev/null 2>&1 || die "docker was not found"
 docker compose version >/dev/null 2>&1 || die "the docker compose plugin was not found"
 
 status=0
-"${compose[@]}" run --rm tests || status=$?
+# -T: no pseudo-terminal. CI has none (compose would refuse), and the output is a log, not a screen.
+"${compose[@]}" run --rm -T tests || status=$?
 
 # The services of the suites (object storage) go with the run, and so does the network that they made.
-if [ "${#profiles[@]}" -gt 0 ]; then
-    "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-fi
+"${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
 
 # The container runs as root, so what it wrote into the checkout is root's: give it back (best effort).
-if [ "$(id -u)" -ne 0 ]; then
+if [ "$chown_back" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
     for path in "$repo/test-results" "$repo/.gpu-fixtures"; do
         [ -e "$path" ] || continue
         docker run --rm -v "$path:/data" --entrypoint chown "${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}" \
             -R "$(id -u):$(id -g)" /data >/dev/null 2>&1 || true
     done
 fi
-echo "run_local.sh: results are in $repo/test-results/gpu"
+echo "run.sh: results are in $repo/test-results/gpu"
 exit "$status"

@@ -6,7 +6,7 @@
 # example of a suite that is not about the content of a model: tests/gpu/suites/object_storage/README.md.
 
 suite_description="the streamer reads from object storage (a SeaweedFS service): stream, list and pull, end to end"
-suite_services=(object-storage)
+# Its service, seaweedfs, is in compose.yaml under the profile object_storage (the name of the suite): run.sh starts it.
 
 # The streamer reads object storage through a plugin of its own, a second package (runai-model-streamer-s3) that is built
 # apart from the streamer (COMPONENT=s3 of the Makefile): from a wheel of it in GPU_WHEEL_DIR (/wheel) next to that of the

@@ -30,7 +30,7 @@ def suite_names():
 
 def declared(name):
     """What suite.sh of a suite defines, by sourcing it (it only defines variables and functions): the description, the
-    names of its functions, its services and its unit tests."""
+    names of its functions and its unit tests."""
     script = textwrap.dedent("""
         set -u
         source "%s/suite.sh"
@@ -38,22 +38,19 @@ def declared(name):
         for f in suite_prepare suite_run suite_expect suite_collect suite_timing; do
             if declare -F "$f" >/dev/null; then echo "function=$f"; fi
         done
-        for s in ${suite_services[@]+"${suite_services[@]}"}; do echo "service=$s"; done
         for t in ${suite_unit_tests[@]+"${suite_unit_tests[@]}"}; do echo "unit_test=$t"; done
     """ % os.path.join(SUITES, name))
     done = subprocess.run(["bash", "-c", script], cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           universal_newlines=True)
     if done.returncode != 0:
         raise AssertionError("suite.sh of %s does not source: %s" % (name, done.stderr))
-    found = {"description": "", "functions": [], "services": [], "unit_tests": []}
+    found = {"description": "", "functions": [], "unit_tests": []}
     for line in done.stdout.splitlines():
         key, _, value = line.partition("=")
         if key == "description":
             found["description"] = value
         elif key == "function":
             found["functions"].append(value)
-        elif key == "service":
-            found["services"].append(value)
         elif key == "unit_test":
             found["unit_tests"].append(value)
     return found
@@ -92,14 +89,17 @@ class Contract(unittest.TestCase):
                 self.assertTrue(path.startswith("tests/gpu/suites/%s/" % name), "%s names a test that is not its own: %s" % (
                     name, path))
 
-    def test_the_services_that_a_suite_needs_are_profiles_of_the_default_environment(self):
+    def test_every_profile_of_the_default_environment_is_the_name_of_a_suite(self):
+        """The services of a suite have a profile of the suite's name, which run.sh switches on for the suites that are
+        selected: a profile with another name would never start."""
         with open(os.path.join(HERE, "compose.yaml")) as handle:
             compose = handle.read()
-        profiles = set(re.findall(r"profiles:\s*\[([^\]]*)\]", compose))
-        known = {p.strip() for group in profiles for p in group.split(",") if p.strip()}
-        for name in suite_names():
-            for service in declared(name)["services"]:
-                self.assertIn(service, known, "%s needs %s, which compose.yaml has no profile of" % (name, service))
+        profiles = set()
+        for group in re.findall(r"profiles:\s*\[([^\]]*)\]", compose):
+            profiles.update(p.strip() for p in group.split(",") if p.strip())
+        self.assertTrue(profiles, "compose.yaml has no profile: the object_storage suite has no service")
+        self.assertLessEqual(profiles, set(suite_names()), "a profile of compose.yaml is not the name of a suite")
+        self.assertIn("object_storage", profiles)
 
     def test_the_harness_does_not_know_the_suites_and_a_suite_does_not_know_another(self):
         for base, _, files in os.walk(HARNESS):

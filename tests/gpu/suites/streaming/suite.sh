@@ -6,7 +6,6 @@
 # tests/gpu/suites/streaming/README.md.
 
 suite_description="the streamer loads synthetic models and a small real model to the GPUs, byte for byte"
-suite_services=()
 suite_unit_tests=(
     tests/gpu/suites/streaming/test_gen_models.py
     tests/gpu/suites/streaming/test_matrix.py

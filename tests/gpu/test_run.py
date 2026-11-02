@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CPU-only tests of run_local.sh, with --dry-run: what it refuses, and the settings that it hands to the container.
+"""CPU-only tests of run.sh, with --dry-run: what it refuses, and the settings that it hands to the container.
 No docker and no GPU: the machine's GPUs are given by GPU_LOCAL_GPU_COUNT.
 
-    python3 -m unittest tests/gpu/test_run_local.py
+    python3 -m unittest tests/gpu/test_run.py
 """
 
 import os
@@ -12,12 +12,12 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, "run_local.sh")
+SCRIPT = os.path.join(HERE, "run.sh")
 
 
-class RunLocal(unittest.TestCase):
+class Run(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.TemporaryDirectory(prefix="run-local-")
+        self.dir = tempfile.TemporaryDirectory(prefix="run-")
         self.addCleanup(self.dir.cleanup)
         self.wheel = os.path.join(self.dir.name, "runai_model_streamer-0.0.0-py3-none-any.whl")
         with open(self.wheel, "wb") as handle:
@@ -64,17 +64,50 @@ class RunLocal(unittest.TestCase):
         self.assertEqual((found["GPU_WORLD"], found["CUDA_VISIBLE_DEVICES"]), ("1", "0"))
         self.assertIn("one GPU: what needs two is not run", output)
 
-    def test_the_suites_that_are_asked_for_are_handed_on_with_the_services_that_they_need(self):
+    def test_every_suite_that_is_asked_for_is_a_profile_of_its_own_name(self):
         status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming,object_storage")
         self.assertEqual(status, 0, output)
         self.assertEqual(self.settings(output)["GPU_SUITES"], "streaming,object_storage")
-        self.assertIn("services of the suites: object-storage", output)
-        self.assertIn("--profile object-storage run --rm tests", output)
+        self.assertIn("--profile streaming --profile object_storage run --rm -T tests", output)
+        status, output = self.run_script("--wheel", self.wheel)
+        self.assertIn("--profile streaming run --rm -T tests", output)
+        self.assertNotIn("object_storage", output.replace("GPU_SUITES", ""))
 
-    def test_a_suite_with_no_service_asks_for_no_profile(self):
-        status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming")
+    def test_a_wheel_directory_is_mounted_as_it_is(self):
+        directory = os.path.join(self.dir.name, "downloaded")
+        os.makedirs(directory)
+        status, output = self.run_script("--wheel-dir", directory)
         self.assertEqual(status, 0, output)
-        self.assertNotIn("--profile", output)
+        self.assertEqual(os.path.realpath(self.settings(output)["GPU_WHEEL_HOST_DIR"]), os.path.realpath(directory))
+        self.assertIn("the wheels in", output)
+        status, output = self.run_script("--wheel-dir", os.path.join(self.dir.name, "missing"))
+        self.assertEqual(status, 2)
+        self.assertIn("is not a directory", output)
+
+    def test_the_streamer_comes_from_one_of_wheels_a_directory_or_a_specifier(self):
+        directory = os.path.join(self.dir.name, "d")
+        os.makedirs(directory)
+        status, output = self.run_script("--wheel", self.wheel, "--wheel-dir", directory)
+        self.assertEqual((status, "not more" in output), (2, True), output)
+        status, output = self.run_script("--wheel-dir", directory, "--streamer-spec", "runai-model-streamer")
+        self.assertEqual((status, "not more" in output), (2, True), output)
+
+    def test_the_compose_project_is_named_for_the_cleanup_that_ci_does(self):
+        status, output = self.run_script("--wheel", self.wheel, "--project", "gpu-tests-newest-1-1")
+        self.assertEqual(status, 0, output)
+        self.assertIn("docker compose -p gpu-tests-newest-1-1 -f", output)
+        status, output = self.run_script("--wheel", self.wheel)
+        self.assertNotIn(" -p ", output)
+
+    def test_no_chown_is_an_option_of_ci_and_changes_nothing_that_is_handed_on(self):
+        status, output = self.run_script("--wheel", self.wheel, "--no-chown", "--gpus", "2")
+        self.assertEqual(status, 0, output)
+
+    def test_a_number_of_gpus_that_ci_gives_is_not_adapted_to_the_machine(self):
+        """CI gives --gpus 2 explicitly, so that a runner with one GPU fails the job instead of running a subset."""
+        status, output = self.run_script("--wheel", self.wheel, "--gpus", "2", gpus="1")
+        self.assertEqual(status, 2)
+        self.assertIn("the machine has 1", output)
 
     def test_a_suite_that_does_not_exist_is_refused_with_the_ones_that_do(self):
         status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming,typo")
@@ -97,7 +130,7 @@ class RunLocal(unittest.TestCase):
             handle.write("services:\n  tests:\n    image: x\n")
         status, output = self.run_script("--wheel", self.wheel, "--compose-file", other)
         self.assertEqual(status, 0, output)
-        self.assertIn("docker compose -f %s run --rm tests" % other, output)
+        self.assertIn("docker compose -f %s --profile streaming run --rm -T tests" % other, output)
         status, output = self.run_script("--wheel", self.wheel, "--compose-file", os.path.join(self.dir.name, "none.yaml"))
         self.assertEqual(status, 2)
         self.assertIn("was not found", output)
@@ -131,7 +164,7 @@ class RunLocal(unittest.TestCase):
 
     def test_the_streamer_comes_from_exactly_one_place(self):
         status, output = self.run_script("--wheel", self.wheel, "--streamer-spec", "runai-model-streamer")
-        self.assertEqual((status, "not both" in output), (2, True), output)
+        self.assertEqual((status, "not more" in output), (2, True), output)
         status, output = self.run_script()
         self.assertEqual((status, "the streamer to test" in output), (2, True), output)
 

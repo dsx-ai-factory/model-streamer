@@ -12,7 +12,7 @@ run_unittest; the results of every test are in the results files like those of a
     pull        pull_files downloads the files of a prefix
     missing     streaming an object that is not there is an error, not an empty model
 
-By hand, with the service running (tests/gpu/run_local.sh --suites object_storage does all of this):
+By hand, with the service running (tests/gpu/run.sh --suites object_storage does all of this):
 
     python3 -m gpu_harness.run_unittest --suite object_storage --run basic tests/gpu/suites/object_storage/test_object_storage.py
 """

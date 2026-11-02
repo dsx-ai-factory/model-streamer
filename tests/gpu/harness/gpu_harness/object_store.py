@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The object storage that the environment provides (the `seaweedfs` service of tests/gpu/compose.yaml, started with the
-`object-storage` profile), for a test that needs objects: to put some there, to read them back, and to look at what the
+`object_storage` profile), for a test that needs objects: to put some there, to read them back, and to look at what the
 streamer left. The streamer reaches the same service by itself, through the environment (AWS_ENDPOINT_URL and the keys),
 which is also where this takes its settings from:
 
@@ -38,7 +38,7 @@ class ObjectStore:
         if not endpoint:
             raise ObjectStoreNotAvailable(
                 "AWS_ENDPOINT_URL is not set: this environment has no object storage. Start the service with the "
-                "object-storage profile of tests/gpu/compose.yaml (tests/gpu/run_local.sh --suites object_storage does)")
+                "object_storage profile of tests/gpu/compose.yaml (tests/gpu/run.sh --suites object_storage does)")
         return cls(endpoint, os.environ.get("GPU_OBJECT_BUCKET", DEFAULT_BUCKET), os.environ.get("AWS_ACCESS_KEY_ID"),
                    os.environ.get("AWS_SECRET_ACCESS_KEY"))
 

@@ -1,18 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# The default environment of the real-GPU tests, for a machine of your own: tests/gpu/run_local.sh sets the variables and runs
+# The default environment of the real-GPU tests, on a machine of your own and in CI: tests/gpu/run.sh sets the variables and runs
 #
-#     docker compose -f tests/gpu/compose.yaml [--profile NAME] run --rm tests
+#     docker compose -f tests/gpu/compose.yaml [--profile NAME] run --rm -T tests
 #
-# The workflow runs the container of `tests` with `docker run` (the same image, flags and mounts), see nightly-gpu.yaml.
+# The workflow runs it through run.sh too (nightly-gpu.yaml), with every setting explicit.
 #
 # What an environment is: a compose file with a service called `tests`, which runs an entry (a script) that sets the container
 # up and then runs the suites (tests/gpu/README.md, "Environments"). This file is the default one: `tests` is a clean CUDA
 # container, and its entry installs Python, torch and the streamer. An environment of another kind (another image, a
-# toolchain, other services) is another compose file, which run_local.sh takes with --compose-file; copy this one and change
-# what differs. The services of a suite are profiles: a profile starts only when it is asked for, and run_local.sh asks for
-# those that the selected suites need (suite_services in their suite.sh).
+# toolchain, other services) is another compose file, which run.sh takes with --compose-file; copy this one and change
+# what differs. The services of a suite have a profile of the suite's name: a service with a profile starts only when the
+# profile is asked for, and run.sh asks for the profile of every selected suite (a suite without services has none, which
+# compose does not mind).
 #
 # A variable that is listed under environment without a value is passed on when it is set where compose runs, and is absent
 # from the container when it is not (the entry then uses its default).
@@ -68,9 +69,10 @@ services:
     command: ["bash", "tests/gpu/setup_and_run.sh"]
 
   # Object storage, S3 compatible: SeaweedFS in its single-process mode, with one bucket and one pair of keys
-  # (harness/seaweedfs-s3.json). Starts with the object-storage profile; the data lives in the container, and goes with it.
+  # (harness/seaweedfs-s3.json). Starts with the object_storage profile, which run.sh switches on for the suite of that
+  # name; the data lives in the container, and goes with it.
   seaweedfs:
-    profiles: [object-storage]
+    profiles: [object_storage]
     image: chrislusf/seaweedfs:4.47
     command: ["mini", "-dir=/data", "-bucket=test-bucket", "-s3.port=9000", "-s3.config=/etc/seaweedfs/s3.json"]
     volumes:

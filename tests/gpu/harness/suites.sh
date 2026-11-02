@@ -12,7 +12,6 @@
 # every suite by tests/gpu/test_suites.py; the runner itself runs a suite without suite_expect, and would not miss its results):
 #
 #   suite_description="one line"             what the suite tests
-#   suite_services=(object-storage)           compose profiles that the suite needs (run_local.sh starts them, see compose.yaml)
 #   suite_unit_tests=(tests/gpu/suites/NAME/test_x.py ...)   CPU-only tests of the suite's own code, run before it
 #   suite_prepare()   once, before the tests: fixtures, services to wait for. A failure skips the suite's tests (and the
 #                     run fails). Run by `phase`, so bash's `set -e` does not apply: end every command with `|| return`
@@ -53,7 +52,6 @@ select_suites() {
 forget_suite() {
     unset -f suite_prepare suite_run suite_expect suite_collect suite_timing
     unset suite_description
-    suite_services=()
     suite_unit_tests=()
 }
 

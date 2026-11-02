@@ -69,7 +69,7 @@ class ObjectStoreTests(unittest.TestCase):
             os.environ.pop("AWS_ENDPOINT_URL", None)
             with self.assertRaises(object_store.ObjectStoreNotAvailable) as raised:
                 object_store.ObjectStore.from_environment()
-        self.assertIn("object-storage profile", str(raised.exception))
+        self.assertIn("object_storage profile", str(raised.exception))
 
     def test_the_settings_come_from_the_environment(self):
         with mock.patch.dict(os.environ, {"AWS_ENDPOINT_URL": "http://x:9000", "GPU_OBJECT_BUCKET": "b",
