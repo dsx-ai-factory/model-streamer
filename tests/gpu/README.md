@@ -80,8 +80,10 @@ tests/gpu/run_local.sh --wheel PATH --matrix full --self-check --torch-spec 'tor
   many distributed rows were not run (`ONE GPU: N distributed rows ...`), so a run of one GPU is not taken for a run of
   all the rows. Selecting only distributed rows on one GPU fails. CI never sets `GPU_WORLD`, so it still fails when a
   GPU is missing.
-- `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout. The container runs as root,
-  so the script gives what it wrote back to you at the end. The models are generated on every run, from the seed
+- `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout; each run removes the results
+  of the earlier one first (`clean_results.sh`: the results files, the summaries and the manifests, not `run.log`), so a
+  run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the script gives what it
+  wrote back to you at the end, and Python does not write `__pycache__` into the checkout. The models are generated on every run, from the seed
   (`--seed`, printed at the start).
 
 ## What `setup_and_run.sh` does

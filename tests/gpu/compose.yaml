@@ -29,6 +29,7 @@ services:
       # The wheel of the streamer: a directory with exactly one wheel in it, mounted where setup_and_run.sh looks.
       - ${GPU_WHEEL_HOST_DIR:?set GPU_WHEEL_HOST_DIR to a directory (with one wheel in it, or empty with GPU_STREAMER_SPEC)}:/wheel:ro
     environment:
+      - PYTHONDONTWRITEBYTECODE=1     # the container is root: no root-owned __pycache__ in your checkout
       - CUDA_VISIBLE_DEVICES
       - GPU_WORLD
       - GPU_SEED

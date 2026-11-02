@@ -30,6 +30,8 @@ case "$WORLD" in
 esac
 export GPU_RESULTS="$RESULTS" GPU_FIXTURES="$FIXTURES" GPU_WORLD="$WORLD"
 mkdir -p "$RESULTS"
+# What an earlier run left here would be read as results of this one (rows_summary.py reads every file under it).
+bash tests/gpu/clean_results.sh "$RESULTS"
 # The log is kept by whatever runs this script (the workflow pipes it to tee): a tee started here would be killed with
 # the script, and could lose the last lines, which hold the verdict.
 
@@ -207,7 +209,7 @@ echo "== self-test of the harness: the generator, the rows, the drills, the tens
 phase generator_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
     python3 -m unittest tests/gpu/test_gen_models.py tests/gpu/test_matrix.py \
     tests/gpu/test_drills.py tests/gpu/test_rows_summary.py tests/gpu/test_tensor_bytes.py \
-    tests/gpu/test_real_model.py tests/gpu/test_env_check.py tests/gpu/test_run_local.py || status=1
+    tests/gpu/test_real_model.py tests/gpu/test_env_check.py tests/gpu/test_run_local.py tests/gpu/test_clean_results.py || status=1
 
 # The models hold every dtype that the streamer accepts with the installed PyTorch and that the generator knows. The
 # streamer's own table decides, so the test follows it when it gains a dtype, and a dtype that this PyTorch lacks is

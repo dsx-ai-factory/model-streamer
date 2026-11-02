@@ -247,7 +247,7 @@ jobs:
           docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --volume "$RUNNER_TEMP/wheel:/wheel:ro" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
-            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WORLD --env CUDA_VISIBLE_DEVICES \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WORLD --env CUDA_VISIBLE_DEVICES --env PYTHONDONTWRITEBYTECODE=1 \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh 2>&1 | tee test-results/gpu/run.log
 
       - name: Remove the GPU container if it is still there
