@@ -1,25 +1,60 @@
 # Real-GPU tests
 
-Streams synthetic safetensors models, and one small real model, to real GPUs with the model streamer and compares
-every tensor with what the manifest recorded. CI otherwise runs on CPU and mock devices only, so this is where a real
-CUDA copy, real NCCL and the real storage path are exercised together.
+End-to-end tests of the model streamer on real GPUs. CI otherwise runs on CPU and mock devices only, so this is where a real
+CUDA copy, real NCCL, the real storage path and the services that the streamer talks to are exercised together.
+
+The code is in three parts, and a test is only ever in the last:
+
+| Part | What it is | Where |
+|---|---|---|
+| **Environment** | the containers that a run happens in: a clean CUDA container, and the services that a suite needs (object storage) | `compose.yaml`, `setup_and_run.sh` |
+| **Harness** | what every test shares: sets the container up, runs the suites with time caps and a budget, writes and reads results, reports the verdict. Contains no test of the streamer | `harness/` |
+| **Suites** | the tests: one directory per kind of test, each with its own README | `suites/<name>/` |
+
+```
+tests/gpu/
+  README.md                 this file
+  compose.yaml              the default environment: `tests` (a clean CUDA container) and the services of the suites
+  setup_and_run.sh          the entry of that environment: sets the container up, runs the suites, reports
+  run_local.sh              runs the environment on a machine of your own
+  harness/
+    common.sh               time caps, the budget, timed steps, what to say when the script ends early
+    suites.sh               finds the suites, runs them (prepare, run, expect, collect), reports
+    summarize.py            reads the results files: which cases ran, which failed, where a run ended
+    clean_results.sh        removes what an earlier run left in the results directory
+    env_check.py            checks that the container does not limit the newest torch
+    seaweedfs-s3.json       the keys of the object storage service
+    gpu_harness/            the python library of the suites (see "What the harness gives a suite")
+    test_*.py               CPU unit tests of the harness
+  suites/
+    streaming/              the streamer loads models to the GPUs, byte for byte (the default suite)
+    object_storage/         the streamer reads object storage: an example of a suite that is not about a model
+  test_run_local.py         CPU unit tests of run_local.sh
+  test_suites.py            CPU unit tests of the runner, and of what every suite must be
+```
+
+| Suite | What it tests | Needs | CI |
+|---|---|---|---|
+| [`streaming`](suites/streaming/README.md) | the streamer loads synthetic models and a small real model to the GPUs, under every filesystem strategy, memory limit and option, and every tensor is compared with its manifest | 2 GPUs (1 runs what needs one) | nightly |
+| [`object_storage`](suites/object_storage/README.md) | features of the streamer on object storage (stream, list, pull, errors) against a SeaweedFS service | the object-storage service, the S3 plugin of the streamer | not yet |
+
+## Where it runs
 
 The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC. A scheduled run
 is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
 the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
 demand, and a manual run is never skipped:
-`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]`. A `rows`
-filter that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows
-and passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`). `gpus=1` (default 2, and always 2 on the
-schedule) runs on one GPU of the runner and leaves out the distributed rows, which the log and the summary say.
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]` (`matrix`
+and `rows` are the streaming suite's). A `rows` filter that matches no row of the newest-torch leg fails it, as a typo would;
+the oldest-torch leg has only the core rows and passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`). `gpus=1`
+(default 2, and always 2 on the schedule) runs on one GPU of the runner and leaves out what needs two, which the log and
+the summary say.
 
 The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
 change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds
 with the old image, and the next one, seeing nothing changed since that run, does not rebuild with the new one, so a
 `.devcontainer/` change can go untested by the nightly. That is accepted: the image is built and the wheel tested with it
 by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
-
-## Where it runs
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
    in the repository's development image, and uploads the wheel.
@@ -28,10 +63,9 @@ by the repository's own pull request workflow, and a manual run tests the image 
    (`nvidia/cuda:12.6.3-base-ubuntu24.04` with Python 3.12 for the newest torch, which needs Python 3.11 or later;
    `nvidia/cuda:12.4.1-base-ubuntu22.04` with Python 3.10 for the oldest, since torch 2.0.0 has no wheel for 3.12. No
    Python packages, no toolchain, GPU passthrough, 2 GiB of `/dev/shm` for NCCL and the io_uring seccomp setting). The
-   script installs Python, pip, the PyTorch and numpy of the
-   leg, and the wheel, the way a user would:
+   script installs Python, pip, the PyTorch and numpy of the leg, and the wheel, the way a user would:
 
-   | Leg | PyTorch | Rows of the synthetic models |
+   | Leg | PyTorch | Streaming rows |
    |---|---|---|
    | `newest-torch` | the newest on PyPI (`torch`) | `full` (104 rows, under each of the four filesystem strategies), plus the self-check |
    | `oldest-torch` | the oldest the package supports (`torch==2.0.0`, with `numpy<2`) | `core` (14 rows, under each strategy) |
@@ -41,242 +75,209 @@ by the repository's own pull request workflow, and a manual run tests the image 
    the unsigned 16/32/64 bit types.
 
    pip installs the newest torch that the image's Python can use (Python 3.12 on Ubuntu 24.04), so when a torch release
-   stops supporting that Python, the newest leg would quietly test an older one. `env_check.py newest-torch` asks PyPI
-   for the newest release and compares: if they differ it fails the leg and says which release needs which Python, and
+   stops supporting that Python, the newest leg would quietly test an older one. `harness/env_check.py newest-torch` asks
+   PyPI for the newest release and compares: if they differ it fails the leg and says which release needs which Python, and
    that the base container of the leg has to change (`GPU_TEST_IMAGE` in the workflow). **The tests still run, with the
    older torch**, and their results are a separate matter: the environment never explains a failing test, so a leg with
    this flag is red for one reason if the tests passed (the environment) and for two if some failed (the failing tests,
    to be looked into regardless, and the environment). The flag is visible in four places: the check's output at the
    start of the log, a `NOT TESTING THE NEWEST TORCH` line at the end of the log that gives the verdict of the tests,
    an error annotation on the run, and a section at the top of the job summary. If PyPI cannot be reached the check
-   says it could not verify and does not fail.
+   says it could not verify and does not fail. If PyPI's answer has a shape the check does not know, it is blind and says
+   so in a warning annotation (not a failure).
+
+The NVKS GPU runners run each job in an ephemeral virtual machine (the runner groups' documentation), so nothing stays
+behind for the next job, and the scripts do not clean up after themselves. The log is written by the workflow
+(`docker run ... | tee`), not by a `tee` inside the container, which is killed with the script and can lose the last lines,
+where the verdict is. The wheel is downloaded outside the checkout and mounted read-only at `/wheel`.
 
 ## Running it on a machine of your own
 
 `run_local.sh` runs the same container as CI (`compose.yaml`: the same image, `/dev/shm`, seccomp setting and mounts) on a
-machine with NVIDIA GPUs. It needs Docker with the compose plugin and the NVIDIA container toolkit, and about 9 GB of
-disk for the models, on a filesystem that serves `O_DIRECT` (not a tmpfs).
+machine with NVIDIA GPUs, and starts the services that the selected suites need. It needs Docker with the compose plugin
+and the NVIDIA container toolkit, and about 9 GB of disk for the models of the streaming suite, on a filesystem that serves
+`O_DIRECT` (not a tmpfs).
 
 ```bash
 # a wheel that you built (a file, or a glob that matches exactly one), on every GPU that the machine has, at most two
 tests/gpu/run_local.sh --wheel ~/dist/runai_model_streamer-*.whl
 
-# a released version, on one GPU, the rows that mention mixed
+# a released version, on one GPU, the streaming rows that mention mixed
 tests/gpu/run_local.sh --streamer-spec 'runai-model-streamer==0.17.0' --gpus 1 --rows mixed
 
-# the oldest torch, every row, the self-checks too
+# the object storage suite (it starts the SeaweedFS service, and removes it at the end)
+tests/gpu/run_local.sh --suites object_storage --streamer-spec 'runai-model-streamer==0.17.0' \
+    --s3-spec 'runai-model-streamer-s3==0.17.0'
+
+# the oldest torch, every streaming row, the self-checks too
 tests/gpu/run_local.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.0.0' --numpy-spec 'numpy<2' \
     --image nvidia/cuda:12.4.1-base-ubuntu22.04
 ```
 
-- The streamer comes from one place: `--wheel`, or `--streamer-spec` (a requirement specifier that pip installs: a version,
-  a range, or just the name). The wheel is copied alone into a temporary directory that is mounted read-only at `/wheel`,
-  where `setup_and_run.sh` looks for it. The workflow mounts its wheel the same way, so a run here and a run in CI differ in
-  the machine and nothing else.
-- `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, and the distributed rows stream between two
-  ranks over NCCL, so they are left out. Everything else runs: the four models, every dtype, `owned` and borrowed
-  tensors, both destinations, the three limits, the four filesystem strategies, the CRC32 checks, the leak check, the
-  self-checks and the smoke test (44 of the 104 rows of `full`, 8 of the 14 of `core`). The log and the summary say how
-  many distributed rows were not run (`ONE GPU: N distributed rows ...`), so a run of one GPU is not taken for a run of
-  all the rows. Selecting only distributed rows on one GPU fails. CI never sets `GPU_WORLD`, so it still fails when a
-  GPU is missing.
+- The streamer comes from one place: `--wheel` (repeat it for more than one wheel), or `--streamer-spec` (a requirement
+  specifier that pip installs: a version, a range, or just the name). The wheels are copied alone into a temporary
+  directory that is mounted read-only at `/wheel`, where `setup_and_run.sh` looks for them. The workflow mounts its wheel
+  the same way, so a run here and a run in CI differ in the machine and nothing else.
+- `--suites a,b` picks the suites (default `streaming`). The services that they need (`suite_services` in their `suite.sh`)
+  are compose profiles that `run_local.sh` switches on.
+- `--gpus 1` runs on one GPU (`GPU_WORLD=1`): two ranks cannot share a GPU, so a suite leaves out what needs two, and
+  says how much (the streaming suite: the 60 distributed rows of the 104). CI never sets `GPU_WORLD`, so it still fails
+  when a GPU is missing.
+- `--compose-file PATH` runs another environment (see "Environments").
 - `--dry-run` prints what would run. The results are in `test-results/gpu/` of the checkout; each run removes the results
-  of the earlier one first (`clean_results.sh`: the results files, the summaries and the manifests, not `run.log`), so a
-  run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the script gives what it
-  wrote back to you at the end, and Python does not write `__pycache__` into the checkout. The models are generated on every run, from the seed
-  (`--seed`, printed at the start).
+  of the earlier one first (`harness/clean_results.sh`: the results files, the summaries and the directories of the suites,
+  not `run.log`), so a run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the
+  script gives what it wrote back to you at the end, and Python does not write `__pycache__` into the checkout.
 
 ## What `setup_and_run.sh` does
 
 1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the streamer (the wheel in
    `/wheel`, or `GPU_STREAMER_SPEC`), and checks that the streamer is imported from the installed package and that the
    GPUs (two, or one with `GPU_WORLD=1`) and NCCL are there;
-2. in the newest leg, checks that the container does not limit the newest torch; in both legs, runs the CPU unit tests
-   (generator, rows, drills, tensor checks, real model download, the environment check);
-3. generates four synthetic models into `.gpu-fixtures/` (in the workspace, not in the repo; the runner groups'
-   documentation says the NVKS GPU runners run each job in an ephemeral virtual machine, so nothing stays behind for the
-   next job, and the script does not clean up after itself) and verifies them. The generator reads the streamer's dtype table, so it runs after the install. The models
-   hold every dtype that the streamer's own table accepts with the installed PyTorch and that the generator knows (the
-   script prints which ones are left out);
-4. downloads the small real model (see below) and describes it, timing both;
-5. fails if the fixtures are not on a real block device that serves `O_DIRECT` (the streamer reads a file from a mount
-   that cannot, such as tmpfs, with its synchronous reader, quietly);
-6. runs the `Rows` test case of `test_synthetic_models.py` (a `unittest` module) under `torchrun` with two ranks, once
-   per filesystem strategy (`sync_buffered`, `libaio_direct`, `io_uring_direct`, `io_uring_buffered`), each alone with
-   no `sync_buffered` fallback: a reader the host cannot serve fails the run instead of passing on the synchronous
-   reader;
-7. runs the self-check (newest leg, when asked) and the smoke test;
-8. prints which rows ran, and a table of where the time went.
+2. in the newest leg, checks that the container does not limit the newest torch;
+3. runs the CPU unit tests of the harness (the unit tests of a suite run with the suite);
+4. runs the suites that `GPU_SUITES` selects, one after the other (`harness/suites.sh`): for each, its unit tests, its
+   `suite_prepare`, its `suite_run`, and then collects what it expects, its artifacts and its timings;
+5. prints which cases ran (`harness/summarize.py`), a table of where the time went, and the verdict. The exit status is 0
+   only if everything passed and every result that a suite expected is there.
 
-## The small real model (`real_model.py`)
+## What the harness gives a suite
 
-A smoke test with a real model, with the streamer's default settings (no filesystem strategy chosen, no memory limit):
-`Qwen/Qwen2.5-0.5B` (Apache-2.0, not gated, one 988 MB `model.safetensors`), pinned by revision, size and SHA-256, so
-an upstream change fails the run. It is downloaded from the Hugging Face hub on every run, and the download is timed
-(`real_model.download` in the timing table), to see what it adds to a run. `real_model.py` builds a manifest from the
-bytes of the file (the CRC32 of every tensor), in the format of the synthetic models, so the same checks compare the
-streamed tensors. Three rows (`GPU_MATRIX=smoke`): one solo load to the GPU, one distributed over the two ranks, and
-one to host memory and then `.to()`.
+A suite is a directory under `suites/` with a `suite.sh`. The runner sources it, from the root of the checkout, and calls the
+functions that it defines. While they run, `GPU_SUITE` is the name of the suite, `GPU_RESULTS` a directory of its own under
+the results directory, `GPU_FIXTURES` a directory of its own for what it generates, and `WORLD` the GPUs of the run.
 
-## The models (`gen_models.py`)
+| In `suite.sh` | |
+|---|---|
+| `suite_description="..."` | one line: what it tests (required) |
+| `suite_services=(object-storage)` | compose profiles that it needs: `run_local.sh` starts them, `compose.yaml` defines them |
+| `suite_unit_tests=(tests/gpu/suites/NAME/test_x.py ...)` | CPU-only tests of the suite's own code, run first; a failure fails the run, and the suite still runs |
+| `suite_prepare()` | once, before the tests: fixtures, services to wait for. A failure skips the suite's tests and fails the run. It runs where `set -e` does not apply: end every command with `|| return` |
+| `suite_run()` | the tests (required), built from the steps below |
+| `suite_expect()` | prints the result files that the suite must have written, as globs relative to its results directory: a suite that did not run, or a run that wrote nothing, is missed instead of being green |
+| `suite_collect()`, `suite_timing()` | keep artifacts for debugging, and name extra timing files |
 
-| Model | Stress | Shape |
-|---|---|---|
-| `mixed` | every dtype, ranks 0-5, sizes at the 4 KiB / 64 KiB / 8 MiB boundaries, odd names, sizes log-uniform up to 64 MiB | 4 uneven shards, about 1 GiB, headers padded differently so tensor starts are aligned, unaligned and misaligned for their dtype |
-| `many_tensors` | about 100,000 tensors in a mix of sizes: a fifth are 4-byte scalar scales, a few are tiny (1 to 128 elements), 70% are of 1 to 16 KB (norms, biases, blocks of scales), the rest up to 2 MiB; about 100 more of up to 32 MiB, drawn like those of `mixed`; a header of 11 MB, and an embedding of at least twice the header as its largest tensor | 1 file, 1.0 to 1.2 GB depending on the seed (median tensor 2.6 KB) |
-| `giant_tensor` | a tensor of exactly 2 GiB and one of 2004 MiB, among about 50 tensors of the layers of a model (log-uniform up to 64 MiB) and small ones | 2 shards, about 4.5 GB |
-| `many_files` | 500 files, some header-only, some holding a single 1-byte tensor, most holding 8 to 40 tensors of up to 2 MiB (about 2.7 MiB a file), in some seeds a few files with one to three tensors of up to 10 MiB | about 1.4 GB, 11,500 tensors |
+The steps that `suite_run` is made of (`harness/common.sh`). Each prints START and END, records its time, is cut off by its
+cap (generous, and cut to what is left of the budget, so the run always gets to say what ran), and fails the run if it fails
+while the other steps still run:
 
-A real model has a header of kilobytes (about 100 bytes a tensor) and tensors of megabytes to gigabytes, so the largest
-tensor of every model is not smaller than its largest header (the streamer reads a header as one range; `matrix.py`
-refuses a model that breaks this, and `test_gen_models.py` checks it).
+| Step | |
+|---|---|
+| `run_unittest NAME MINUTES TEST...` | ordinary unittest modules in one process (`python3 -m gpu_harness.run_unittest`); every test is a case in the results. The way to run a test of a feature |
+| `run_torchrun NAME MINUTES SCRIPT [ARG...]` | a script under `torchrun` with `WORLD` ranks, one GPU each, for a test whose ranks work together (the streaming suite's `Rows`) |
+| `run_step NAME MINUTES COMMAND...` | any command; `VAR=value run_step ...` or `run_step ... env -u VAR ...` for its environment |
+| `phase NAME COMMAND...` | a timed preparation, for `suite_prepare` |
 
-Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.json`. The generator takes
-`--models mixed,many_files` to build only some of them.
+The Python library (`harness/gpu_harness`, on `PYTHONPATH`; it imports nothing from a suite):
 
-Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
-seed. The generator knows 18 dtypes: `F64`, `F32`, `F16`, `BF16`, the float8 types `F8_E4M3`, `F8_E5M2` and `F8_E8M0`,
-`F4`, `C64`, the signed integers `I64` to `I8`, the unsigned `U64` to `U8`, and `BOOL`.
-`--dtypes` narrows them; the test run passes the ones the streamer accepts with the installed PyTorch (a torch
-before 2.8 has no `F4`, before 2.7 or so no `F8_E8M0`, before 2.3 no unsigned 16/32/64 bit types, before 2.1 no float8).
-`F4` packs two 4-bit values into a byte, so the header records its shape in values and the torch tensor
-(`float4_e2m1fn_x2`) has the last dimension halved (`packed_shape` in `gen_models.py`); an F4 tensor therefore has a
-last dimension that is even and no scalar form. The streamer loads such tensors since
-[#234](https://github.com/dsx-ai-factory/model-streamer/issues/234) was fixed, and the checks compare the torch shape
-with `packed_shape` of the manifest's. A copy of the F4 tensor to CUDA is exercised here for the first time.
-The expected dtype of a streamed tensor is taken from the streamer's own dtype table, so this test does not check
-the table itself; [#267](https://github.com/dsx-ai-factory/model-streamer/issues/267) compares it with safetensors
-in the CPU tests. The models hold empty tensors (zero elements): about 2% of the drawn shapes have a zero dimension, and
-the mixed model has two mandatory ones. They were left out while the streamer yielded them on the CPU when a CUDA
-device was requested ([#260](https://github.com/dsx-ai-factory/model-streamer/issues/260), fixed), and a run on GPU
-is what confirms the fix. `EMPTY_TENSORS = False` in `gen_models.py` leaves them out again.
+| Module | |
+|---|---|
+| `run_unittest` | runs unittest modules and writes their results; a skipped test is a failure (a GPU test that cannot run is not a pass) |
+| `session` | `Session`: for tests whose ranks work together: checks the ranks and GPUs, starts the NCCL group and a CPU-only group on which the ranks agree on a case's outcome, writes the results after every case |
+| `results`, `world` | the results files, and `gpu_world()` (`GPU_WORLD`) |
+| `object_store` | `ObjectStore`: a client of the object storage of the environment |
+| `safetensors_file` | writes a small safetensors file, for a test that needs a file and not a model |
+| `tensors` | the bytes of a tensor and their CRC32 (a tensor is compared by its bytes, never by value) |
+| `phase_timer` | timing of the phases |
 
-The seed is printed at the start of every run (`GPU_SEED`, default the workflow run id), and a seed reproduces
-the models exactly under the same numpy version (the manifests record it; to rebuild an old model, install that
-numpy and run the generator with the same seed). The manifest of a model lists, per tensor, the name, dtype,
-shape, file position and CRC32 of the bytes, computed while the data was generated. The gzipped manifests are
-uploaded with the results (`manifests/`), so a failing tensor can be looked up without regenerating anything.
+### Results
 
-The generator checks its own output before anything is streamed (headers, offsets, CRC32 read back from disk,
-a few tensors regenerated from the seed, and coverage of all dtypes/ranks/edge sizes), so a failure in the
-streaming test is never a failure of the fixture. It needs only numpy and runs on its own:
+Every suite writes the same files, so that one summary reads them all: `results-<run>-rank<N>.json` under the suite's results
+directory, one per rank of a run (`gpu_harness/results.py`):
 
-```bash
-python3 tests/gpu/gen_models.py generate --out /tmp/fixtures --seed 1 --scale 0.05 --files 300
-python3 -m unittest tests/gpu/test_gen_models.py
+```json
+{"suite": "streaming", "run": "sync_buffered", "world": 2, "expected_cases": 104,
+ "skipped_cases": 0, "skipped_note": "",
+ "cases": [{"case": "mixed.solo.owned.cuda.tight", "ok": true, "seconds": 1.2}, ...]}
 ```
 
-## The test (`test_synthetic_models.py`)
+A case is written with `"ok": null` from the moment it starts, so that a process that is killed in the middle of it (the NCCL
+watchdog does that when a rank fails inside a distributed case) leaves a file that names the case. `harness/summarize.py`
+prints, per file, how many of the expected cases finished and failed and where the run ended, and fails the run if a
+file is incomplete, if a rank of the run has no file, or if an expected result is not there at all. A suite that left cases
+out on purpose says so (`skipped_note`), and the line is printed at the end, so a run on one GPU is not taken for a full one.
 
-A `unittest` module, run as `torchrun --nproc_per_node=2 tests/gpu/test_synthetic_models.py Rows` (or `SelfChecks`, see
-below). `Rows` loops over the rows with a `subTest` each: a failing row is recorded with its id and errors, and the
-next row runs, so one run reports every failing row, and unittest sets the exit status. The only row that stops the loop
-is one after which a rank raised in a distributed row (see below).
+## Adding a test
 
-The rows are defined in `matrix.py` (no GPU needed; `test_matrix.py` tests it). A row is one load: a model,
-distributed or not, a partition policy, `owned`, a destination (`cuda`, or `cpu_to`: load to host memory, then
-`.to()` each tensor) and a memory limit. Its id says all of it: `mixed.solo.owned.cuda.tight`,
-`many_files.dist.files.owned.cuda.tight`. `GPU_MATRIX` picks the rows:
+Decide what you are adding:
 
-- `core`: 14 rows, a quick set (the oldest-torch leg runs it). One option at a time on the `mixed` model (borrowed
-  tensors, `chunks`, host then `.to()`, the roomy and default limits), and one solo and one distributed load of every
-  other model.
-- `full` (the newest-torch leg): every valid combination, 104 rows. A distributed row needs `cuda`; the `files` policy
-  needs more than one file; the roomy limit is for the models that it is below (not `giant_tensor`).
-- `smoke`: three loads of the small real model, with the default memory limit.
+**A new case in an existing suite** (a row, a model, a limit; a test of another feature of object storage): add it in that suite,
+following its README. Nothing else changes.
 
-The memory limit (`RUNAI_STREAMER_MEMORY_LIMIT`, a node total divided between the ranks, with no rank getting less than
-the largest tensor) bounds what the streamer holds of the model at a time. The levels are defined by what a user can
-see of it: the model's size and its largest tensor, not the arrangement of the streamer's buffers.
+**A new kind of test: a new suite.** One that looks at something else, end to end, and not necessarily at the content of a
+model: a feature of the streamer that needs a service, a failure mode, a configuration. Copy `suites/object_storage`:
 
-- `tight`: the largest tensor of the model for each rank, which is the least that the streamer gives a rank (a solo
-  load with less is refused, and the streamer raises the share of a rank to that): the load gets through the whole
-  model with room for one tensor at a time.
-- `roomy`: a quarter of the model, but not less than twice the tight limit: room for several tensors at a time, and
-  still far below the model.
-- `default`: the streamer's 40 GB. A model that small fits whole and nothing is reused.
+1. `suites/<name>/test_<something>.py`: an ordinary `unittest` module (one process: no ranks, no `torchrun`). Put what the
+   tests share (a client, a prefix of its own, cleanup) in `setUpClass` and `setUp`, and use the harness's helpers instead of
+   writing them again (`ObjectStore`, `small_model`, `tensor_crc32`). Add the harness to the path with the three lines that
+   the other tests start with. If the ranks of the test have to work together, use a `Session` and `run_torchrun` instead
+   (see the streaming suite's `test_synthetic_models.py`).
+2. `suites/<name>/suite.sh`: the description, the services if any, `suite_run` (`run_unittest basic 15 tests/gpu/suites/<name>/test_<something>.py`),
+   and `suite_expect` (`echo "results-basic-rank0.json"`). Add `suite_prepare` for what the tests need first.
+3. `suites/<name>/README.md`: what it tests and what it needs, like the two that are there.
+4. If it needs a service, a profile in `compose.yaml` (see `seaweedfs`), named in `suite_services`.
+5. CPU unit tests for helper code that the suite has (`suite_unit_tests`), if it has any.
+6. Run it: `tests/gpu/run_local.sh --suites <name> ...`; and `python3 -m unittest tests/gpu/test_suites.py`, which checks
+   the contract of every suite: a `suite.sh` that is valid bash and describes the suite and defines `suite_run`, a README, a test,
+   unit tests and services that exist, no suite that knows another, no harness file that knows a suite.
 
-A limit below the size of the model cannot hold the model, so whatever the streamer does with it, it has to reuse
-memory: that is what the limits are for. The rows do not claim anything about how many buffers there are, and no test
-reads the streamer's ring sizing; that has its own unit tests in the streamer.
+What a suite must not do: reach into another suite, or into the harness's internals (use `gpu_harness`); skip when it cannot
+run (a missing GPU or service is a failure: say how to get it); write results anywhere but `GPU_RESULTS`; take a time that
+is not capped (use the steps).
 
-After a load the test checks, for every tensor: name (no missing, extra or duplicate), dtype, shape, device and
-the CRC32 of its bytes copied back from the GPU. Rows with `owned=True` hold every tensor without cloning until
-the stream ends and check them all then, which tests the ownership guarantee. (On a row that copies to the device,
-the tensor held is the one the streamer yielded on the host, which is checked again at the end next to its copy.)
-Rows with `owned=False` check each
-tensor when it is yielded. A row that asks for distributed streaming fails if the streamer silently fell back
-to non-distributed.
+**A new environment**, for tests that need another kind of container (a toolchain for C++ tests, other services, another
+image): see below. A new environment still runs the same suites.
 
-After every row the test drops its own references, frees the GPU cache and checks that `torch.cuda.memory_allocated()`
-is back to its value before the run (8 MiB of slack). Anything above that is reported as a GPU memory leak and
-fails the row. That counts what the torch allocator holds: memory that the streamer's C++ side allocates itself
-(`cudaMalloc`, pinned memory) is not seen. The ranks agree on the outcome of a row over a separate CPU-only (gloo)
-group, so the test adds no NCCL traffic or GPU work next to the streamer's. Host memory is not checked here; that
-belongs in a longevity test.
+## Environments
 
-Missing GPUs or NCCL fail the job; nothing skips. A row that found wrong tensors does not stop the run, so one
-run reports every failing row. A distributed row in which a rank raised does stop it, since the collectives may
-be out of step.
+An environment is a compose file with a service named `tests`, which runs an *entry*: a script that sets the container up and then
+runs the suites. `compose.yaml` is the default one: `tests` is a clean CUDA container, and its entry, `setup_and_run.sh`,
+installs Python, torch and the streamer; the services of the suites (`seaweedfs`) are compose profiles.
 
-When a rank fails inside a distributed row, the streamer's NCCL group never completes its next collective, and after
-the streamer's timeout (`RUNAI_STREAMER_DIST_TIMEOUT`, 300 s here) the NCCL watchdog aborts the other rank
-(`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`). The whole `torchrun` of that strategy ends, so the rows after the failing one
-are not run for that strategy; the other strategies still run. A drill on 2026-10-20 showed this (a rank raising
-mid-row ended with `Watchdog caught collective operation timeout` and exit code -6 on the other rank).
-The run is bounded, but it cannot report the row from inside the process, so the results file lists a row as
-started (`"ok": null`) before it runs, and `setup_and_run.sh` prints `== rows that ran` (`rows_summary.py`): for every
-results file how many of the expected rows finished, and in which row the run ended, and it checks that each of the two
-ranks wrote its results file (a rank that died before its first write leaves only the other's). An incomplete strategy
-fails the job.
+To run in another environment, copy `compose.yaml`, change what differs (the image, the services, the command), and
+run it with `tests/gpu/run_local.sh --compose-file my-compose.yaml ...`. What the compose file has to keep: the service
+called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel` (`GPU_REPO`, `GPU_WHEEL_HOST_DIR`); the
+`GPU_*` variables listed under `environment` (they are how `run_local.sh` hands over its options); and a `command` that is the
+entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
+set the variables (`WORLD`, `RESULTS`, `FIXTURES`, `GPU_SEED`, `PYTHONPATH` with `tests/gpu/harness`), source
+`harness/common.sh` and `harness/suites.sh`, set the container up, then
 
-The time caps are for a hang, and generous: 60 minutes per strategy (about 10 on a healthy runner, 18 on a slow day), 20
-for the self-check and for the smoke test, 45 for installing torch, 30 for the real model (an attempt to download it
-also has a deadline of 10 minutes, so that a connection that trickles data ends), and 15 to 20 for the other setup steps.
-The whole run has a budget as well, `GPU_BUDGET_MINUTES` (285), which is the job's `timeout-minutes` (300) less 15: a
-cap is cut to what is left of the budget less 5 minutes, so the script always gets to say which rows ran, whatever the
-caps add up to, and neither needs adjusting when the other changes (raise the budget with the job's timeout). A leg
-takes about 40 minutes (newest) or 8 (oldest) when healthy.
-A download of the real model that fails, or a failure of the CPU unit tests, fails the run at the end, and the GPU tests
-still run. A step of the setup that fails (the installs, the generation) or fixtures that are not on a block device end
-the script at once, and it says so at the end of the log, with an error annotation: `THE RUN ENDED EARLY`.
+```bash
+select_suites || exit 2
+run_suites
+report_suites
+finished=true
+exit "$status"
+```
 
-The results of each row are written as soon as it ends, in `rows-<strategy>-rank<N>.json`:
-`{"strategy", "expected_rows", "rows": [...]}`.
+so that the suites, the caps, the budget, the results and the verdict are the same in every environment.
 
-## Self-check of the checks
+## Variables
 
-A check that never fails could be silently broken, so the run can prove that the CRC32 check and the GPU memory check
-fire. `test_synthetic_models.py` is a `unittest` module with two test cases, `Rows` (every row, one subtest each, so that
-a failing row does not stop the others) and `SelfChecks`; the exit status is unittest's, so there is no pass/fail logic
-of our own to test. With `GPU_SELF_CHECK=true`, `setup_and_run.sh` runs `SelfChecks` once (`sync_buffered` only, about 10
-seconds), which injects two faults and asserts, as ordinary tests, that each is reported as what it is and with no other
-error: `corrupt` flips a bit of one tensor after it arrived (the CRC32 error must name that tensor), and `leak` keeps a
-32 MiB GPU tensor alive after the row (the GPU memory error must be there, with at least those 32 MiB held). A fault that
-goes unnoticed fails an assertion, and the run. Its results are in `self-check/`; `drills.py` has what the assertions
-accept, and a row with an injected fault is not counted as a failure in `== rows that ran`.
+| Variable | Meaning |
+|---|---|
+| `GPU_SUITES` | the suites to run, comma-separated (default `streaming`) |
+| `GPU_WORLD` | `2` (default) or `1`: the GPUs of the run |
+| `GPU_TORCH_SPEC`, `GPU_NUMPY_SPEC` | what to install (default the newest torch, any numpy) |
+| `GPU_STREAMER_SPEC` | install the streamer from a requirement specifier instead of the wheel in `/wheel` |
+| `GPU_S3_SPEC` | the S3 plugin to install when there is no wheel of it (the object-storage suite) |
+| `GPU_SEED` | the seed of what is generated (default the time) |
+| `GPU_EXPECT_NEWEST_TORCH` | `true` checks that the container does not limit the newest torch (the newest-torch leg) |
+| `GPU_BUDGET_MINUTES` | the budget of the whole run (285: the job's timeout less 15 minutes) |
+| `GPU_RESULTS`, `GPU_FIXTURES` | the base directories (`test-results/gpu`, `.gpu-fixtures`); a suite gets its own under them |
+| `GPU_MATRIX`, `GPU_ROWS`, `GPU_SELF_CHECK`, `GPU_ALLOW_EMPTY_ROWS`, `GPU_REAL_SMOKE` | the streaming suite's, see its README |
 
-The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the harness changed
-since the last scheduled run that passed (`test_synthetic_models.py`, what it checks with: `tensor_bytes.py`, `drills.py`,
-`gen_models.py` and `matrix.py`, and `phase_timer.py`, `real_model.py`, `setup_and_run.sh` or the workflow itself), so
-nobody has to remember to run it.
+## Time
 
-The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
-not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file
-open until its submission ends, and with an asynchronous reader about every file can be open at once, and a rank holds
-about 60 descriptors before it reads anything, so a model with more than about 900 files makes the load fail with
-`File access error` unless the program that loads it raises its own limit
-([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261): the streamer does not do that for the program).
-That is measured: on the T4 runner a model of 5,000 files failed under every strategy at the container's limit, on master
-(8 of 12 finished rows under each of the asynchronous strategies). If the descriptor code changes, the count
-(`DEFAULT_FILES` in `gen_models.py`) changes with it.
-
-## Timing
-
-Every phase is timed (system and Python package installs, generation, the real model download, setup, load, verify)
-and written to `test-results/gpu/timing-*.jsonl`; the summary table is in the job summary of each leg and in
-`timing-summary.txt`. It is there to find slow parts of the run, not to benchmark the streamer. The impact of the real
-model download is the `real_model.download` row.
+Every step is timed (system and Python package installs, generation, the real model download, setup, load, verify, each
+test) and written to `timing-*.jsonl` next to the results; the summary table is in the job summary of each leg and in
+`timing-summary.txt`. It is there to find slow parts of the run, not to benchmark the streamer. Every step that can hang has
+a cap, generous, several times what the step takes on a healthy runner. The whole run has a budget, `GPU_BUDGET_MINUTES`
+(285), which is the job's `timeout-minutes` (300) less 15: a cap is cut to what is left of the budget less 5 minutes, so the
+script always gets to say what ran, whatever the caps add up to, and neither needs adjusting when the other changes (raise
+the budget with the job's timeout). A setup step that fails (the installs) ends the script at once, and it says so at the
+end of the log, with an error annotation: `THE RUN ENDED EARLY`. A suite that fails to prepare, a failing step, or a failing
+unit test fails the run at the end, and the other suites and steps still run: their results are worth having.
 
 ## Not covered
 

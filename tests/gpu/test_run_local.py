@@ -46,7 +46,9 @@ class RunLocal(unittest.TestCase):
         self.assertEqual((found["GPU_WORLD"], found["CUDA_VISIBLE_DEVICES"]), ("2", "0,1"))
         self.assertEqual((found["GPU_MATRIX"], found["GPU_SEED"], found["GPU_SELF_CHECK"]), ("full", "7", "false"))
         self.assertNotIn("GPU_STREAMER_SPEC", found)
-        self.assertNotIn("ONE GPU", output.upper().replace("ONE GPU(S)", ""))
+        self.assertEqual(found["GPU_SUITES"], "streaming")
+        self.assertNotIn("one GPU:", output)
+        self.assertNotIn("services of the suites", output)
 
     def test_the_wheel_is_copied_alone_into_the_directory_that_is_mounted(self):
         status, output = self.run_script("--wheel", self.wheel)
@@ -55,12 +57,56 @@ class RunLocal(unittest.TestCase):
         self.assertIn("the wheel runai_model_streamer-0.0.0-py3-none-any.whl", output)
         self.assertIn("GPU_WHEEL_HOST_DIR=", output)
 
-    def test_one_gpu_says_that_the_distributed_rows_are_not_run(self):
+    def test_one_gpu_says_that_what_needs_two_is_not_run(self):
         status, output = self.run_script("--wheel", self.wheel, "--gpus", "1")
         self.assertEqual(status, 0, output)
         found = self.settings(output)
         self.assertEqual((found["GPU_WORLD"], found["CUDA_VISIBLE_DEVICES"]), ("1", "0"))
-        self.assertIn("the distributed rows are not run", output)
+        self.assertIn("one GPU: what needs two is not run", output)
+
+    def test_the_suites_that_are_asked_for_are_handed_on_with_the_services_that_they_need(self):
+        status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming,object_storage")
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.settings(output)["GPU_SUITES"], "streaming,object_storage")
+        self.assertIn("services of the suites: object-storage", output)
+        self.assertIn("--profile object-storage run --rm tests", output)
+
+    def test_a_suite_with_no_service_asks_for_no_profile(self):
+        status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming")
+        self.assertEqual(status, 0, output)
+        self.assertNotIn("--profile", output)
+
+    def test_a_suite_that_does_not_exist_is_refused_with_the_ones_that_do(self):
+        status, output = self.run_script("--wheel", self.wheel, "--suites", "streaming,typo")
+        self.assertEqual(status, 2)
+        self.assertIn("there is no suite 'typo'", output)
+        self.assertIn("streaming", output)
+
+    def test_more_than_one_wheel_goes_into_the_directory_that_is_mounted(self):
+        plugin = os.path.join(self.dir.name, "runai_model_streamer_s3-0.0.0-py3-none-any.whl")
+        with open(plugin, "wb") as handle:
+            handle.write(b"x")
+        status, output = self.run_script("--wheel", self.wheel, "--wheel", plugin)
+        self.assertEqual(status, 0, output)
+        self.assertIn("the wheel runai_model_streamer-0.0.0-py3-none-any.whl, the wheel "
+                      "runai_model_streamer_s3-0.0.0-py3-none-any.whl", output)
+
+    def test_another_environment_is_another_compose_file(self):
+        other = os.path.join(self.dir.name, "other.yaml")
+        with open(other, "w") as handle:
+            handle.write("services:\n  tests:\n    image: x\n")
+        status, output = self.run_script("--wheel", self.wheel, "--compose-file", other)
+        self.assertEqual(status, 0, output)
+        self.assertIn("docker compose -f %s run --rm tests" % other, output)
+        status, output = self.run_script("--wheel", self.wheel, "--compose-file", os.path.join(self.dir.name, "none.yaml"))
+        self.assertEqual(status, 2)
+        self.assertIn("was not found", output)
+
+    def test_the_s3_plugin_specifier_is_handed_on(self):
+        status, output = self.run_script("--streamer-spec", "runai-model-streamer==0.17.0", "--s3-spec",
+                                         "runai-model-streamer-s3==0.17.0")
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.settings(output)["GPU_S3_SPEC"], "runai-model-streamer-s3==0.17.0")
 
     def test_the_default_is_the_gpus_that_the_machine_has_up_to_two(self):
         for available, expected in (("1", "1"), ("2", "2"), ("8", "2")):

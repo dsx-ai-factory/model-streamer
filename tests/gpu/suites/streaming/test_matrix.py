@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of the rows and memory limits of the GPU test.
 
-    python3 -m unittest tests/gpu/test_matrix.py
+    python3 -m unittest tests/gpu/suites/streaming/test_matrix.py
 """
 
 import copy

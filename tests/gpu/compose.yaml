@@ -1,13 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# The container of a real-GPU test run, for a machine of your own: tests/gpu/run_local.sh sets the variables and runs
+# The default environment of the real-GPU tests, for a machine of your own: tests/gpu/run_local.sh sets the variables and runs
 #
-#     docker compose -f tests/gpu/compose.yaml run --rm tests
+#     docker compose -f tests/gpu/compose.yaml [--profile NAME] run --rm tests
 #
-# The workflow runs the same container with `docker run` (the same image, flags and mounts), see nightly-gpu.yaml. A
-# variable that is listed under environment without a value is passed on when it is set where compose runs, and is
-# absent from the container when it is not (setup_and_run.sh then uses its default).
+# The workflow runs the container of `tests` with `docker run` (the same image, flags and mounts), see nightly-gpu.yaml.
+#
+# What an environment is: a compose file with a service called `tests`, which runs an entry (a script) that sets the container
+# up and then runs the suites (tests/gpu/README.md, "Environments"). This file is the default one: `tests` is a clean CUDA
+# container, and its entry installs Python, torch and the streamer. An environment of another kind (another image, a
+# toolchain, other services) is another compose file, which run_local.sh takes with --compose-file; copy this one and change
+# what differs. The services of a suite are profiles: a profile starts only when it is asked for, and run_local.sh asks for
+# those that the selected suites need (suite_services in their suite.sh).
+#
+# A variable that is listed under environment without a value is passed on when it is set where compose runs, and is absent
+# from the container when it is not (the entry then uses its default).
 name: runai-gpu-tests
 
 services:
@@ -32,14 +40,43 @@ services:
       - PYTHONDONTWRITEBYTECODE=1     # the container is root: no root-owned __pycache__ in your checkout
       - CUDA_VISIBLE_DEVICES
       - GPU_WORLD
+      - GPU_SUITES
       - GPU_SEED
-      - GPU_MATRIX
-      - GPU_ROWS
-      - GPU_SELF_CHECK
       - GPU_TORCH_SPEC
       - GPU_NUMPY_SPEC
       - GPU_STREAMER_SPEC
+      - GPU_S3_SPEC
       - GPU_EXPECT_NEWEST_TORCH
-      - GPU_ALLOW_EMPTY_ROWS
       - GPU_BUDGET_MINUTES
+      # Of the streaming suite
+      - GPU_MATRIX
+      - GPU_ROWS
+      - GPU_SELF_CHECK
+      - GPU_ALLOW_EMPTY_ROWS
+      # Of the object-storage service below, which the streamer and the harness reach through these (test keys of a
+      # service that lives as long as the run)
+      - AWS_ENDPOINT_URL=http://seaweedfs:9000
+      - AWS_ACCESS_KEY_ID=testkey
+      - AWS_SECRET_ACCESS_KEY=testsecret
+      - RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0
+      - GPU_OBJECT_BUCKET=test-bucket
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+        required: false               # only when its profile is on
     command: ["bash", "tests/gpu/setup_and_run.sh"]
+
+  # Object storage, S3 compatible: SeaweedFS in its single-process mode, with one bucket and one pair of keys
+  # (harness/seaweedfs-s3.json). Starts with the object-storage profile; the data lives in the container, and goes with it.
+  seaweedfs:
+    profiles: [object-storage]
+    image: chrislusf/seaweedfs:4.47
+    command: ["mini", "-dir=/data", "-bucket=test-bucket", "-s3.port=9000", "-s3.config=/etc/seaweedfs/s3.json"]
+    volumes:
+      - ./harness/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # the master answers, and the S3 port is open
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/status && nc -z localhost 9000"]
+      interval: 2s
+      timeout: 5s
+      retries: 60

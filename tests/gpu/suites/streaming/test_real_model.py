@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of the real model download and its manifest. No network: the source is a local file.
 
-    python3 -m unittest tests/gpu/test_real_model.py
+    python3 -m unittest tests/gpu/suites/streaming/test_real_model.py
 """
 
 import hashlib

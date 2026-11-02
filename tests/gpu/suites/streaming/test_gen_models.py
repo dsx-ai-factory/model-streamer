@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of the fixture generator. They need no GPU and no streamer, only numpy.
 
-    python3 -m unittest tests/gpu/test_gen_models.py
+    python3 -m unittest tests/gpu/suites/streaming/test_gen_models.py
 """
 
 import copy

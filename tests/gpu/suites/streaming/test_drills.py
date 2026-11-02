@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of what the self-checks of the GPU test accept as the report of an injected fault.
 
-    python3 -m unittest tests/gpu/test_drills.py
+    python3 -m unittest tests/gpu/suites/streaming/test_drills.py
 """
 
 import os

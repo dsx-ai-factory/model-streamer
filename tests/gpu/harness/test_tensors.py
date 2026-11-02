@@ -3,7 +3,7 @@
 """Tests of the byte view and the CRC32 that the GPU test compares tensors by, on CPU tensors (they need torch, no GPU).
 They are skipped where torch is not installed; the GPU job installs it before it runs them.
 
-    python3 -m unittest tests/gpu/test_tensor_bytes.py
+    python3 -m unittest tests/gpu/harness/test_tensors.py
 """
 
 import os
@@ -19,7 +19,7 @@ except ImportError:  # a machine without torch: nothing to test here
     torch = None
 
 if torch is not None:
-    import tensor_bytes  # noqa: E402
+    from gpu_harness import tensors as tensor_bytes  # noqa: E402
 
 
 @unittest.skipIf(torch is None, "torch is not installed")

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of the environment check of the newest-torch leg. No network: PyPI's answer is made up here.
 
-    python3 -m unittest tests/gpu/test_env_check.py
+    python3 -m unittest tests/gpu/harness/test_env_check.py
 """
 
 import http.client

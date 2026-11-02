@@ -27,8 +27,8 @@ import time
 import urllib.request
 import zlib
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from phase_timer import PhaseTimer, dump_jsonl, stamp  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "harness"))  # gpu_harness
+from gpu_harness.phase_timer import PhaseTimer, dump_jsonl, stamp  # noqa: E402
 
 MIB = 1 << 20
 CHUNK = 8 * MIB

@@ -49,8 +49,8 @@ from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "harness"))  # gpu_harness
+from gpu_harness.phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
 GENERATOR_VERSION = 8
 

@@ -24,12 +24,15 @@ import os
 import sys
 from collections import namedtuple
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "..", "harness"))  # gpu_harness: what every suite shares
 from gen_models import MODEL_NAMES  # noqa: E402
+from gpu_harness.world import DEFAULT_WORLD, gpu_world  # noqa: E402,F401  (gpu_world: for the callers of this module)
 from real_model import MODEL_NAME as REAL_MODEL  # noqa: E402
 
 MIB = 1 << 20
-WORLD = 2  # ranks of the test
+WORLD = DEFAULT_WORLD  # the ranks of a distributed row, and of a run that has every row
 
 Row = namedtuple("Row", "id model dist policy owned device limit")
 
@@ -146,18 +149,6 @@ SMOKE_ROWS = (
 def smoke_rows():
     return [Row(row_id(REAL_MODEL, dist, policy, owned, device, "default"), REAL_MODEL, dist, policy, owned, device,
                 "default") for dist, policy, owned, device in SMOKE_ROWS]
-
-
-def gpu_world(text=None):
-    """The ranks of a run, from GPU_WORLD: WORLD (two GPUs, every row, the default and what CI runs) or 1 (one GPU: the
-    rows that load without a second rank, see rows_for)."""
-    if text is None:
-        text = os.environ.get("GPU_WORLD")
-    if text in (None, ""):
-        return WORLD
-    if text not in ("1", str(WORLD)):
-        raise ValueError("GPU_WORLD must be 1 or %d, not %r" % (WORLD, text))
-    return int(text)
 
 
 def rows_for(mode, world=WORLD):

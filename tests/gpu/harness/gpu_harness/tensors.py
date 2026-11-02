@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The bytes of a tensor, for the checks of the GPU test: a flat uint8 view, and its CRC32. Needs torch, no GPU: the
-unit tests (test_tensor_bytes.py) run them on CPU tensors.
+"""The bytes of a tensor, for the checks of the GPU tests: a flat uint8 view, and its CRC32. Needs torch, no GPU: the
+unit tests (harness/test_tensors.py) run them on CPU tensors.
 
 A tensor is compared by its bytes, never by value, so NaN payloads and negative zero compare right."""
 
