@@ -8,9 +8,10 @@ The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs eve
 is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
 the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
 demand, and a manual run is never skipped:
-`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...]`. A `rows` filter
-that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows and
-passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`).
+`gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]`. A `rows`
+filter that matches no row of the newest-torch leg fails it, as a typo would; the oldest-torch leg has only the core rows
+and passes, saying that it has nothing to run (`GPU_ALLOW_EMPTY_ROWS`). `gpus=1` (default 2, and always 2 on the
+schedule) runs on one GPU of the runner and leaves out the distributed rows, which the log and the summary say.
 
 The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
 change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds

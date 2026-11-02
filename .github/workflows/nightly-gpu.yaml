@@ -21,6 +21,14 @@ on:
         description: Only the rows whose id starts with one of these comma-separated prefixes (default all). A filter that matches no row of the newest-torch leg fails it (a typo); the oldest-torch leg has only the core rows, and passes when none matches.
         required: false
         type: string
+      gpus:
+        description: GPUs that the test uses. 2 runs every row (what the nightly runs). 1 runs on one GPU of the runner, and leaves out the distributed rows (they need two ranks), which the log says.
+        required: false
+        default: '2'
+        type: choice
+        options:
+          - '2'
+          - '1'
 
 permissions:
   contents: read
@@ -228,6 +236,9 @@ jobs:
           GPU_NUMPY_SPEC: ${{ matrix.numpy_spec }}
           GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
           GPU_ALLOW_EMPTY_ROWS: ${{ matrix.allow_empty_rows }}
+          # Two GPUs unless a manual run asks for one (a scheduled run has no inputs, so it is always two).
+          GPU_WORLD: ${{ inputs.gpus || '2' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.gpus == '1' && '0' || '0,1' }}
         # bash with pipefail, so that the exit status is the script's and not that of tee. The log is written here, not by
         # the script: a tee inside the container is killed with the script and can lose its last lines, the verdict.
         shell: bash
@@ -236,7 +247,7 @@ jobs:
           docker run --rm --name "$GPU_CONTAINER" --gpus all --shm-size=2g --security-opt seccomp=unconfined \
             --volume "$GITHUB_WORKSPACE:/workspace" --volume "$RUNNER_TEMP/wheel:/wheel:ro" --workdir /workspace \
             --env GPU_SEED --env GPU_MATRIX --env GPU_ROWS --env GPU_SELF_CHECK \
-            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES \
+            --env GPU_TORCH_SPEC --env GPU_NUMPY_SPEC --env GPU_EXPECT_NEWEST_TORCH --env GPU_ALLOW_EMPTY_ROWS --env GPU_BUDGET_MINUTES --env GPU_WORLD --env CUDA_VISIBLE_DEVICES \
             "$GPU_TEST_IMAGE" bash tests/gpu/setup_and_run.sh 2>&1 | tee test-results/gpu/run.log
 
       - name: Remove the GPU container if it is still there
