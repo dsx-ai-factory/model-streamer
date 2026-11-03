@@ -354,8 +354,8 @@ Unset — cache is auto-enabled when a compatible cache provider package is inst
 
 Enables distributed streaming for multiple devices
 
-`auto` enables distributed streaming only when the distributed backend that serves the target device is `nccl`.
-A group initialized with a device-prefixed backend such as `cuda:nccl,cpu:gloo` qualifies for CUDA devices.
+`auto` enables distributed streaming only when the distributed backend that serves the target device is `nccl` (CUDA) or `xccl` (XPU).
+A group initialized with a device-prefixed backend such as `cuda:nccl,cpu:gloo` or `xpu:xccl,cpu:gloo` qualifies for its CUDA or XPU devices.
 For a CPU device that group uses `gloo`, so distributed streaming then needs `RUNAI_STREAMER_DIST=1`.
 
 ### Values accepted
