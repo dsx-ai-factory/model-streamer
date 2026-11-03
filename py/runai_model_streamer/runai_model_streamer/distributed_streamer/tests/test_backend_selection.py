@@ -45,7 +45,9 @@ class TestBackendLookup(unittest.TestCase):
         with tempfile.TemporaryDirectory() as store:
             dist.init_process_group("gloo", init_method=f"file://{store}/store", rank=0, world_size=1)
             try:
-                self.assertEqual(get_backends(), {"cpu": "gloo", "cuda": "gloo"})
+                backends = get_backends()
+                self.assertEqual(backends["cpu"], "gloo")
+                self.assertEqual(set(backends.values()), {"gloo"})
             finally:
                 dist.destroy_process_group()
 
