@@ -374,6 +374,38 @@ class TestARankThatCannotMeasure(unittest.TestCase):
         self.assertEqual(result, 4096)
 
 
+class TestTheXcclBackend(unittest.TestCase):
+    """Intel's backend, on a host with no XPU. Nothing here needs the hardware: the device is a
+    string torch parses, and the backend is whichever one the test says it is."""
+
+    @contextlib.contextmanager
+    def decide(self, device):
+        """set_is_distributed under xccl, with the memory reading mocked. RUNAI_STREAMER_DIST is
+        cleared so the default `auto` runs - a backend allowed only under "1" proves nothing."""
+        streamer = DistributedStreamer()
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("runai_model_streamer.distributed_streamer.distributed_streamer."
+                      "can_measure_device_memory", return_value=True), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.get_world_size", return_value=2), \
+                patch("torch.distributed.get_backend", return_value="xccl"), \
+                patch.object(DistributedStreamer, "get_min_device_free_memory",
+                             return_value=1 << 40) as reduce_free:
+            streamer.set_is_distributed(True, device)
+            yield streamer, reduce_free
+
+    def test_xccl_on_an_xpu_reaches_the_memory_check(self):
+        """Both terms of the gate at once: xccl survives auto mode, and the check runs for it."""
+        with self.decide("xpu:0") as (streamer, reduce_free):
+            reduce_free.assert_called_once_with("xpu:0")
+            self.assertTrue(streamer.is_distributed)
+
+    def test_xccl_on_a_device_that_is_not_an_xpu_falls_back(self):
+        """A backend and a device that do not match, as nccl on a CPU already is."""
+        with self.decide("cuda:0") as (streamer, reduce_free):
+            self.assertFalse(streamer.is_distributed)
+            reduce_free.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
