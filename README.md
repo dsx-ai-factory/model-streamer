@@ -25,7 +25,7 @@ applications, including inference services.
 Model Streamer supplies the checkpoint-loading part of a PyTorch application.
 `SafetensorsStreamer` supplies named PyTorch tensors while the native engine
 continues storage reads. With the default CPU destination, the application
-transfers tensors to CUDA, as shown below, and uses them for model execution.
+transfers tensors to the selected CUDA or XPU device, as shown below, and uses them for model execution.
 
 ## Features
 
@@ -43,7 +43,7 @@ transfers tensors to CUDA, as shown below, and uses them for model execution.
 
 The native engine uses multiple threads to read storage into CPU buffers. The
 Python wrapper exposes the data as named PyTorch tensors. In the usage example
-below, the application copies each tensor to a CUDA GPU while reads continue.
+below, the application copies each tensor to the selected CUDA or XPU device while reads continue.
 
 | Component | Role |
 | --- | --- |
