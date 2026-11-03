@@ -121,6 +121,19 @@ tests/gpu/run.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.
     --image nvidia/cuda:12.4.1-base-ubuntu22.04
 ```
 
+From the root of the repository, `make` has short forms of the common ones (`make gpu-help` lists them):
+
+```bash
+make gpu-test WHEEL=~/dist/runai_model_streamer-0.17.0-py3-none-any.whl   # also WHEEL_DIR=DIR, STREAMER_SPEC=SPEC
+make gpu-test-1gpu STREAMER_SPEC='runai-model-streamer==0.17.0'
+make gpu-test-object-storage WHEEL='A.whl B.whl'     # the streamer and the S3 plugin (paths without spaces)
+make gpu-dry-run WHEEL=PATH                         # what would run, without running it
+make gpu-unit-tests                                 # the CPU unit tests of all this: no GPU, no container
+```
+
+`SUITES`, `GPUS`, `MATRIX`, `ROWS` and `EXTRA` (any other option of `run.sh`) are variables of the same targets.
+`harness/unit_tests.sh` is the one list of those unit tests: `tests_entrypoint.sh` runs the same script.
+
 - The streamer comes from one place: `--wheel` (repeat it for more than one wheel), `--wheel-dir DIR` (a directory of
   wheels, mounted as it is: what CI downloads the artifact into), or `--streamer-spec` (a requirement specifier that pip
   installs: a version, a range, or just the name). `--wheel` copies the files alone into a temporary directory. Either way

@@ -127,8 +127,8 @@ fi
 # The CPU unit tests of the harness (the unit tests of each suite run with the suite). A failure fails the run, but the GPU
 # tests still run: their results are worth having. Without GPU_RESULTS, which the tests must not see.
 echo "== self-test of the harness"
-phase harness_unit_tests env -u GPU_RESULTS timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
-    python3 -m unittest tests/gpu/harness/test_*.py tests/gpu/test_run.py tests/gpu/test_suites.py || status=1
+phase harness_unit_tests timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
+    bash tests/gpu/harness/unit_tests.sh harness || status=1
 
 # What every suite runs under: the NCCL watchdog aborts the process on a timeout or an error (TORCH_NCCL_* from PyTorch
 # 2.2, NCCL_* before), unbuffered output for a log that is followed, and the streamer's own log on stderr.
