@@ -116,10 +116,6 @@ class TestSlotMemory(unittest.TestCase):
         self.assertEqual(HOST_SLOTS.label, "CPU")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestSlotGoesBackWhenRangesDoNotFit(unittest.TestCase):
     """The recoverable failure must leave the ring whole.
 
@@ -153,3 +149,7 @@ class TestSlotGoesBackWhenRangesDoNotFit(unittest.TestCase):
 
     def test_a_host_ring_does_the_same(self):
         self.assert_slot_comes_back(self.ring())
+
+
+if __name__ == "__main__":
+    unittest.main()
