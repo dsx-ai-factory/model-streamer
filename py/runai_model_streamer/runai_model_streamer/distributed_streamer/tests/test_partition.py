@@ -266,9 +266,6 @@ class TestPartitioning(unittest.TestCase):
         """No cleanup needed for these tests."""
         pass
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestPartitionBySpans(unittest.TestCase):
     """Each rank gets one contiguous span of the model, cut at tensor boundaries.
@@ -795,3 +792,7 @@ class TestRunCount(unittest.TestCase):
             for partition in policy(requests, 3):
                 with self.subTest(policy=policy.__name__):
                     self.assertGreaterEqual(count_runs(partition), len(partition))
+
+
+if __name__ == "__main__":
+    unittest.main()
