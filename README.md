@@ -24,16 +24,21 @@ Install the package
 pip install runai-model-streamer
 ```
 
-And stream tensors
+And stream tensors on available GPU device
 ```
 from runai_model_streamer import SafetensorsStreamer
+import torch
 
 file_path = "model.safetensors"
+
+device = "cuda"
+if hasattr(torch, "xpu") and torch.xpu.is_available():
+    device = "xpu"
 
 with SafetensorsStreamer() as streamer:
     streamer.stream_file(file_path)
     for name, tensor in streamer.get_tensors():
-        gpu_tensor = tensor.to('cuda:0')
+        gpu_tensor = tensor.to(f'{device}:0')
 ```
 
 ## Development

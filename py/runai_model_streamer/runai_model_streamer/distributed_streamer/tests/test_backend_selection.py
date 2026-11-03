@@ -4,7 +4,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 import torch.distributed as dist
@@ -71,18 +71,25 @@ class TestBackendLookup(unittest.TestCase):
 class TestSetIsDistributed(unittest.TestCase):
     """set_is_distributed decides from the backend that serves the device."""
 
-    def decide(self, backend, config, device, enable_dist="auto", cuda_free_memory=None):
-        """cuda_free_memory, when given, makes CUDA available with that much free memory."""
+    def decide(self, backend, config, device, enable_dist="auto", cuda_free_memory=None,
+               xpu_free_memory=None):
+        """cuda_free_memory and xpu_free_memory, when given, make that device available with that
+        much free memory."""
         patches = init_string(backend, config, cuda_available=cuda_free_memory is not None)
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": enable_dist}):
-            with DistributedStreamer() as streamer:
-                streamer.params.max_chunk = 1000
-                with patch.object(streamer, "get_cuda_free_memory", return_value=cuda_free_memory):
-                    streamer.set_is_distributed(True, device)
-                return streamer.is_distributed
+        # torch.xpu does not exist in every torch version
+        xpu = MagicMock()
+        xpu.is_available.return_value = xpu_free_memory is not None
+        with patch.object(distributed_streamer.torch, "xpu", xpu, create=True):
+            with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": enable_dist}):
+                with DistributedStreamer() as streamer:
+                    streamer.params.max_chunk = 1000
+                    with patch.object(streamer, "get_cuda_free_memory", return_value=cuda_free_memory), \
+                            patch.object(streamer, "get_xpu_free_memory", return_value=xpu_free_memory):
+                        streamer.set_is_distributed(True, device)
+                    return streamer.is_distributed
 
     def test_auto_mode_distributes_on_nccl_whichever_way_it_was_initialized(self):
         for backend, config in [("nccl", "cuda:nccl"),
@@ -122,6 +129,26 @@ class TestSetIsDistributed(unittest.TestCase):
     def test_gpu_memory_does_not_limit_streaming_to_a_cpu_device(self):
         self.assertTrue(self.decide("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo", "cpu",
                                     enable_dist="1", cuda_free_memory=0))
+
+    def test_auto_mode_distributes_on_xccl_whichever_way_it_was_initialized(self):
+        for backend, config in [("xccl", "xpu:xccl"), ("xpu:xccl,cpu:gloo", "xpu:xccl,cpu:gloo")]:
+            for device in ("xpu", "xpu:1"):
+                with self.subTest(config=config, device=device):
+                    self.assertTrue(self.decide(backend, config, device))
+
+    def test_xccl_does_not_serve_a_cpu_or_cuda_device(self):
+        # xccl is listed under xpu only, so these devices find no backend at all. The last config
+        # is hypothetical: it shows that listing xccl under other devices would not let it through.
+        for backend, config in [("xccl", "xpu:xccl"), ("xccl", "cpu:xccl,cuda:xccl,xpu:xccl")]:
+            for device in ("cpu", "cuda"):
+                with self.subTest(config=config, device=device):
+                    self.assertFalse(self.decide(backend, config, device, enable_dist="1"))
+
+    def test_low_xpu_memory_disables_distributed_streaming_to_an_xpu_device(self):
+        for backend, config in [("xccl", "xpu:xccl"), ("xpu:xccl,cpu:gloo", "xpu:xccl,cpu:gloo")]:
+            with self.subTest(backend=backend):
+                self.assertFalse(self.decide(backend, config, "xpu", xpu_free_memory=1999))
+                self.assertTrue(self.decide(backend, config, "xpu", xpu_free_memory=2000))
 
     def test_disabled_stays_disabled(self):
         self.assertFalse(self.decide("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo", "cuda", enable_dist="0"))
