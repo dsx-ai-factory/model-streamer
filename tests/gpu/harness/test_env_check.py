@@ -222,7 +222,7 @@ class CommandLine(unittest.TestCase):
                 self.assertEqual(handle.read(), "ERROR: x\nsecond line\n")
 
     def test_the_limited_status_is_not_one_a_crash_or_a_usage_error_could_have(self):
-        """setup_and_run.sh flags the container only on this status: a traceback (1), a usage error (2) or a timeout
+        """tests_entrypoint.sh flags the container only on this status: a traceback (1), a usage error (2) or a timeout
         (124) is not a verdict."""
         self.assertEqual(env_check.LIMITED_STATUS, 3)
         self.assertNotIn(env_check.LIMITED_STATUS, (0, 1, 2, 124))

@@ -199,7 +199,7 @@ assertions accept, and a case with an injected fault (`"fault"` in its results) 
 
 The workflow turns it on, in the newest-torch leg, for every manual run, and for a scheduled run when the code that it
 exercises changed since the last scheduled run that passed (this suite's test, `drills.py`, `gen_models.py`, `matrix.py`,
-`real_model.py` and `suite.sh`, the harness's `gpu_harness`, `common.sh` and `suites.sh`, `setup_and_run.sh`, or the
+`real_model.py` and `suite.sh`, the harness's `gpu_harness`, `common.sh` and `suites.sh`, `tests_entrypoint.sh`, or the
 workflow itself), so nobody has to remember to run it.
 
 ## The open files limit

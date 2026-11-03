@@ -29,7 +29,7 @@ import urllib.request
 PYPI_URL = "https://pypi.org/pypi/torch/json"
 TIMEOUT_SECONDS = 30
 WARNING_PREFIX = "WARNING: "  # a line that main() also prints as an annotation of the run
-LIMITED_STATUS = 3 # the exit status that says the container limits torch; setup_and_run.sh reads it
+LIMITED_STATUS = 3 # the exit status that says the container limits torch; tests_entrypoint.sh reads it
 
 _STABLE = re.compile(r"^\d+(\.\d+)*$")
 _CLAUSE = re.compile(r"^\s*(>=|<=|==|!=|~=|>|<)\s*([0-9]+(?:\.[0-9]+)*)(\.\*)?\s*$")

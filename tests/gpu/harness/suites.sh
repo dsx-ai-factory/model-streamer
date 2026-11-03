@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Run the suites of tests/gpu/suites/ that GPU_SUITES selects (default: streaming), and report. Sourced after common.sh by
-# the entry of an environment (tests/gpu/setup_and_run.sh), from the root of the checkout:
+# the entry of an environment (tests/gpu/tests_entrypoint.sh), from the root of the checkout:
 #
 #   select_suites || exit 1      the suites to run, from GPU_SUITES (a comma-separated list of names)
 #   run_suites                   each suite: its unit tests, its preparation, its tests, its artifacts

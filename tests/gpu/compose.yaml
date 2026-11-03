@@ -35,7 +35,7 @@ services:
               capabilities: [gpu]
     volumes:
       - ${GPU_REPO:-../..}:/workspace
-      # The wheel of the streamer: a directory with exactly one wheel in it, mounted where setup_and_run.sh looks.
+      # The wheel of the streamer: a directory with exactly one wheel in it, mounted where tests_entrypoint.sh looks.
       - ${GPU_WHEEL_HOST_DIR:?set GPU_WHEEL_HOST_DIR to a directory (with one wheel in it, or empty with GPU_STREAMER_SPEC)}:/wheel:ro
     environment:
       - PYTHONDONTWRITEBYTECODE=1     # the container is root: no root-owned __pycache__ in your checkout
@@ -68,7 +68,7 @@ services:
       seaweedfs:
         condition: service_healthy
         required: false               # only when its profile is on
-    command: ["bash", "tests/gpu/setup_and_run.sh"]
+    command: ["bash", "tests/gpu/tests_entrypoint.sh"]
 
   # Object storage, S3 compatible: SeaweedFS in its single-process mode, with one bucket and one pair of keys
   # (harness/seaweedfs-s3.json). Starts with the object_storage profile, which run.sh switches on for the suite of that

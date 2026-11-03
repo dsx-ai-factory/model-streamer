@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # What the entry of an environment and the suites share: the time budget and the caps, the timed phases, the steps that
-# a suite runs, and what to say when the script ends early. Sourced (not run) by tests/gpu/setup_and_run.sh, from the
+# a suite runs, and what to say when the script ends early. Sourced (not run) by tests/gpu/tests_entrypoint.sh, from the
 # root of the checkout, after it has set the variables that this reads:
 #
 #   RESULTS          the results directory         SETUP_TIMING   the file of the timings of the phases (under RESULTS)

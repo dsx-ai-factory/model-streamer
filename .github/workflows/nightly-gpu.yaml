@@ -67,7 +67,7 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           # self_check: whether the run ends with the self-check of the test's own checks (faults injected on purpose, see
-          # tests/gpu/setup_and_run.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
+          # tests/gpu/tests_entrypoint.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
           if [ "$EVENT" != schedule ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             echo "self_check=true" >> "$GITHUB_OUTPUT"
@@ -90,7 +90,7 @@ jobs:
                       tests/gpu/suites/streaming/drills.py tests/gpu/suites/streaming/gen_models.py \
                       tests/gpu/suites/streaming/matrix.py tests/gpu/suites/streaming/real_model.py \
                       tests/gpu/suites/streaming/suite.sh tests/gpu/harness/gpu_harness tests/gpu/harness/common.sh \
-                      tests/gpu/harness/suites.sh tests/gpu/setup_and_run.sh tests/gpu/run.sh tests/gpu/compose.yaml \
+                      tests/gpu/harness/suites.sh tests/gpu/tests_entrypoint.sh tests/gpu/run.sh tests/gpu/compose.yaml \
                       .github/workflows/nightly-gpu.yaml)
           if [ -n "$harness" ]; then
             echo "the test harness changed since $last, so the self-check runs:"; echo "$harness"
@@ -192,7 +192,7 @@ jobs:
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
-    # A healthy leg takes 40 minutes (newest) or 8 (oldest). The script (tests/gpu/setup_and_run.sh) gives itself a budget of
+    # A healthy leg takes 40 minutes (newest) or 8 (oldest). The script (tests/gpu/tests_entrypoint.sh) gives itself a budget of
     # GPU_BUDGET_MINUTES, which is this timeout less 15 minutes, and cuts every step to what is left of it, so that it
     # always gets to say which rows ran, whatever the step caps inside it add up to. Raise the two together.
     timeout-minutes: 300

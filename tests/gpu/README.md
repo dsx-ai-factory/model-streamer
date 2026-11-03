@@ -7,7 +7,7 @@ The code is in three parts, and a test is only ever in the last:
 
 | Part | What it is | Where |
 |---|---|---|
-| **Environment** | the containers that a run happens in: a clean CUDA container, and the services that a suite needs (object storage) | `compose.yaml`, `setup_and_run.sh` |
+| **Environment** | the containers that a run happens in: a clean CUDA container, and the services that a suite needs (object storage) | `compose.yaml`, `tests_entrypoint.sh` |
 | **Harness** | what every test shares: sets the container up, runs the suites with time caps and a budget, writes and reads results, reports the verdict. Contains no test of the streamer | `harness/` |
 | **Suites** | the tests: one directory per kind of test, each with its own README | `suites/<name>/` |
 
@@ -15,7 +15,7 @@ The code is in three parts, and a test is only ever in the last:
 tests/gpu/
   README.md                 this file
   compose.yaml              the default environment: `tests` (a clean CUDA container) and the services of the suites
-  setup_and_run.sh          the entry of that environment: sets the container up, runs the suites, reports
+  tests_entrypoint.sh       the entry of that environment: sets the container up, runs the suites, reports
   run.sh                    runs the environment, with the services of the selected suites: on your machine, and in CI
   harness/
     common.sh               time caps, the budget, timed steps, what to say when the script ends early
@@ -63,7 +63,7 @@ by the repository's own pull request workflow, and a manual run tests the image 
    the wheel of the S3 plugin, built the same way with `COMPONENT=s3`, in the same artifact).
 2. **`gpu-tests`**, two legs in parallel on runner group `nv-gpu-amd64-t4-2gpu` (label `linux-amd64-gpu-t4-latest-2`:
    two T4s, 12 cores, 48 GB). Each leg downloads the wheels, makes sure that the docker compose plugin is there (a pinned
-   release is installed if the runner has none), and runs `tests/gpu/run.sh`, which runs `setup_and_run.sh` in a clean CUDA container
+   release is installed if the runner has none), and runs `tests/gpu/run.sh`, which runs `tests_entrypoint.sh` in a clean CUDA container
    (`nvidia/cuda:12.6.3-base-ubuntu24.04` with Python 3.12 for the newest torch, which needs Python 3.11 or later;
    `nvidia/cuda:12.4.1-base-ubuntu22.04` with Python 3.10 for the oldest, since torch 2.0.0 has no wheel for 3.12. No
    Python packages, no toolchain, GPU passthrough, 2 GiB of `/dev/shm` for NCCL and the io_uring seccomp setting). The
@@ -123,7 +123,7 @@ tests/gpu/run.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.
 - The streamer comes from one place: `--wheel` (repeat it for more than one wheel), `--wheel-dir DIR` (a directory of
   wheels, mounted as it is: what CI downloads the artifact into), or `--streamer-spec` (a requirement specifier that pip
   installs: a version, a range, or just the name). `--wheel` copies the files alone into a temporary directory. Either way
-  the directory is mounted read-only at `/wheel`, where `setup_and_run.sh` looks for the wheels.
+  the directory is mounted read-only at `/wheel`, where `tests_entrypoint.sh` looks for the wheels.
 - `--suites a,b` picks the suites (default `streaming`). A suite that needs services has a compose profile of its own name
   (`object_storage` starts `seaweedfs`): a service with a profile starts only when the profile is asked for, and `run.sh`
   asks for the profile of every selected suite (a suite without services has none, which compose does not mind). The
@@ -141,7 +141,7 @@ tests/gpu/run.sh --wheel PATH --matrix full --self-check --torch-spec 'torch==2.
   not `run.log`), so a run of one GPU after a run of two is not counted as two ranks. The container runs as root, so the
   script gives what it wrote back to you at the end, and Python does not write `__pycache__` into the checkout.
 
-## What `setup_and_run.sh` does
+## What `tests_entrypoint.sh` does
 
 1. installs the system Python and pip, PyTorch and numpy at the leg's versions, then the streamer (the wheel in
    `/wheel`, or `GPU_STREAMER_SPEC`), and checks that the streamer is imported from the installed package and that the
@@ -248,18 +248,18 @@ image): see below. A new environment still runs the same suites.
 ## Environments
 
 An environment is a compose file with a service named `tests`, which runs an *entry*: a script that sets the container up and then
-runs the suites. `compose.yaml` is the default one: `tests` is a clean CUDA container, and its entry, `setup_and_run.sh`,
+runs the suites. `compose.yaml` is the default one: `tests` is a clean CUDA container, and its entry, `tests_entrypoint.sh`,
 installs Python, torch and the streamer; the services of a suite (`seaweedfs`) have a compose profile of the suite's name.
 
 To run in another environment, copy `compose.yaml`, change what differs (the image, the services, the command), and
 run it with `tests/gpu/run.sh --compose-file my-compose.yaml ...`. What the compose file has to keep: the service
 called `tests`; the checkout mounted at `/workspace`, and the wheels at `/wheel` (`GPU_REPO`, `GPU_WHEEL_HOST_DIR`); the
 `GPU_*` variables listed under `environment` (they are how `run.sh` hands over its options); and a `command` that is the
-entry. A different setup of the container needs its own entry: write it like `setup_and_run.sh`, which is short on purpose:
+entry. A different setup of the container needs its own entry: write it like `tests_entrypoint.sh`, which is short on purpose:
 set the variables (`WORLD` and `GPU_WORLD`, the same number: the first is what `common.sh` launches with, the second what the
 library reads; `RESULTS`, `FIXTURES`, `GPU_SEED`, `WHEEL_DIR` for the suites that install from the wheels, `SETUP_TIMING`,
 and `PYTHONPATH` with `tests/gpu/harness`), and the environment that every suite runs under (NCCL's error handling,
-unbuffered output, the streamer's log on stderr: copy the exports of `setup_and_run.sh` before `run_suites`), remove what
+unbuffered output, the streamer's log on stderr: copy the exports of `tests_entrypoint.sh` before `run_suites`), remove what
 an earlier run left in the results
 directory (`bash tests/gpu/harness/clean_results.sh "$RESULTS" $(ls tests/gpu/suites)`: without it `summarize.py` counts the
 files of the earlier run as this one's), source `harness/common.sh` and `harness/suites.sh`, set the container up, then

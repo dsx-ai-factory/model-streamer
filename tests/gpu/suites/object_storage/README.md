@@ -36,7 +36,7 @@ not see each other's objects. The tests are an ordinary `unittest` module of one
 - **boto3**, the client that puts the objects: installed by `suite_prepare` (it is not a dependency of the streamer).
 - **A GPU**: the tests stream to `cuda:0`, and fail when there is none, like every GPU test. `GPU_DEVICE=cpu` makes them stream
   to the CPU, for running the test module by hand (see below) on a machine without a GPU: the environment itself
-  (`run.sh`, `setup_and_run.sh`) refuses to run without one.
+  (`run.sh`, `tests_entrypoint.sh`) refuses to run without one.
 
 ## Running it
 
