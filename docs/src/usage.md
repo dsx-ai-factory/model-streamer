@@ -410,7 +410,7 @@ To load tensors from S3 compatible object store, define the following environmen
 
 `RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_ENDPOINT_URL="your_S3_endpoint" AWS_EC2_METADATA_DISABLED=true`
 
-Setting the environment variable `AWS_ENDPOINT_URL` is mandatory
+Setting the environment variable `AWS_ENDPOINT_URL` is mandatory. Alternatively set `AWS_ENDPOINT_URL_S3`, which applies to S3 only and takes precedence over `AWS_ENDPOINT_URL` - use it when other AWS services (e.g. STS for IRSA credentials) must keep their own endpoint
 
 Setting the environment variable `AWS_EC2_METADATA_DISABLED` is needed in order to avoid a delay of few seconds, which happens only when the aws s3 sdk is used for compatible storage as explained [here](https://github.com/aws/aws-sdk-cpp/issues/1410)   
 
