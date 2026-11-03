@@ -26,25 +26,7 @@ smoke_expected=false
 # installed streamer for that table, so it runs after the install. Generation takes under a minute.
 streaming_generate_models() {
     local dtypes
-    dtypes=$(python3 - <<'PY'
-import sys
-sys.path.insert(0, "tests/gpu/suites/streaming")
-import gen_models
-from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype
-
-streamer = set(safetensors_to_torch_dtype)
-covered = sorted(streamer & set(gen_models.DTYPES))
-print("streamer dtypes: %s" % " ".join(sorted(streamer)), file=sys.stderr)
-print("not generated:   %s" % (" ".join(sorted(set(gen_models.DTYPES) - streamer)) or "-"), file=sys.stderr)
-unknown = sorted(streamer - set(gen_models.DTYPES) - gen_models.KNOWN_GAPS)
-print("not known to the generator: %s" % (" ".join(unknown) or "-"), file=sys.stderr)
-if unknown:
-    print("ERROR: the streamer accepts %s, which the generator cannot write: add it to DTYPES in "
-          "tests/gpu/suites/streaming/gen_models.py" % " ".join(unknown), file=sys.stderr)
-    sys.exit(1)
-print(",".join(covered))
-PY
-    ) || return
+    dtypes=$(python3 "$streaming_dir/dtype_check.py") || return
     rm -rf "$GPU_FIXTURES"
     mkdir -p "$GPU_FIXTURES"
     timeout --signal=TERM --kill-after=30s "$(cap 20)s" \
@@ -68,24 +50,8 @@ streaming_check_fixture_storage() {
         *) echo "ERROR: the fixtures are on $source ($fstype), not on a block device; the direct I/O strategies would not be tested" >&2
            return 1 ;;
     esac
-    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 - "$GPU_FIXTURES" <<'PY' || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
-import mmap
-import os
-import sys
-
-path = os.path.join(sys.argv[1], ".direct-io-probe")
-with open(path, "wb") as probe:
-    probe.write(bytes(4096))
-try:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECT)
-    try:
-        if os.preadv(fd, [mmap.mmap(-1, 4096)], 0) != 4096:
-            raise OSError("short O_DIRECT read")
-    finally:
-        os.close(fd)
-finally:
-    os.unlink(path)
-PY
+    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 "$streaming_dir/direct_io_probe.py" "$GPU_FIXTURES" \
+        || { echo "ERROR: the fixtures storage does not serve O_DIRECT reads" >&2; return 1; }
 }
 
 suite_prepare() {

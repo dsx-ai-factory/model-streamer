@@ -33,19 +33,7 @@ suite_prepare() {
     object_storage_install_s3_plugin || return
     timeout --signal=TERM --kill-after=30s "$(cap 5)s" python3 -m pip install --no-cache-dir boto3 || return
     # The service is a container of its own: wait until it answers, and say how to get one if the environment has none.
-    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 - <<'PY'
-import sys
-
-from gpu_harness.object_store import ObjectStore, ObjectStoreNotAvailable
-
-try:
-    store = ObjectStore.from_environment()
-    store.wait_until_ready(seconds=90)
-    print("object storage: %s, bucket %s" % (store.endpoint, store.bucket))
-except ObjectStoreNotAvailable as error:
-    print("ERROR: %s" % error, file=sys.stderr)
-    sys.exit(1)
-PY
+    timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 tests/gpu/suites/object_storage/wait_for_service.py
 }
 
 suite_run() {

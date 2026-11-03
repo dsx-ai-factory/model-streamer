@@ -103,29 +103,7 @@ install_python_packages() {
 phase install_python_packages install_python_packages
 python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
 
-timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 - <<'PY'
-import os
-
-import torch
-import torch.distributed as dist
-import runai_model_streamer
-from runai_model_streamer.libstreamer import STREAMER_LIBRARY
-
-nccl = torch.cuda.nccl.version()
-nccl = ".".join(map(str, nccl)) if isinstance(nccl, tuple) else str(nccl)
-print(f"PyTorch {torch.__version__}; CUDA {torch.version.cuda}; NCCL {nccl}", flush=True)
-print(f"streamer package: {runai_model_streamer.__file__}", flush=True)
-print(f"streamer library: {STREAMER_LIBRARY}", flush=True)
-if "site-packages" not in runai_model_streamer.__file__ and "dist-packages" not in runai_model_streamer.__file__:
-    raise RuntimeError("the streamer was not imported from the installed wheel")
-world = int(os.environ["GPU_WORLD"])
-if not torch.cuda.is_available() or torch.cuda.device_count() < world:
-    raise RuntimeError(f"GPU tests require {world} visible CUDA GPUs")
-if not dist.is_nccl_available():
-    raise RuntimeError("GPU tests require an NCCL-enabled PyTorch build")
-for index in range(world):
-    print(f"GPU {index}: {torch.cuda.get_device_name(index)}", flush=True)
-PY
+timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 tests/gpu/harness/gpu_check.py
 
 # The newest-torch leg is meant to test the newest PyTorch. pip installs the newest release that this image's Python can
 # use, so when torch stops supporting that Python the leg quietly tests an older one. Flag it: the run goes on and

@@ -20,6 +20,7 @@ by copying this.
 Each test works under a prefix of its own in the bucket (`ObjectStore.new_prefix`) and removes it afterwards, so tests do
 not see each other's objects. The tests are an ordinary `unittest` module of one process: no `torchrun`, no ranks.
 `suite.sh` runs it with `run_unittest`, which writes the results of every test in the format of every suite.
+`wait_for_service.py` is what `suite_prepare` runs to wait until the service answers.
 
 ## What it needs, and how it gets it
 

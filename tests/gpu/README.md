@@ -23,6 +23,7 @@ tests/gpu/
     summarize.py            reads the results files: which cases ran, which failed, where a run ended
     clean_results.sh        removes what an earlier run left in the results directory
     env_check.py            checks that the container does not limit the newest torch
+    gpu_check.py            checks that the container has the GPUs and NCCL, and prints the versions
     seaweedfs-s3.json       the keys of the object storage service
     gpu_harness/            the python library of the suites (see "What the harness gives a suite")
     test_*.py               CPU unit tests of the harness
