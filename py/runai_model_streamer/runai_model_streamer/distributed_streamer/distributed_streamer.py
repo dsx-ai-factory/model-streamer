@@ -148,6 +148,10 @@ class DistributedStreamer:
             if backend_name is None:
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed has no backend for %s device (%s) - fallback to non distributed streaming", device, dist.get_backend_config())
                 self.is_distributed = False
+            elif backend_name == "nccl" and device == "cpu":
+                # torch 2.0 lists a plain nccl group under cpu as well, but nccl cannot broadcast CPU tensors
+                logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for CPU device - fallback to non distributed streaming", backend_name)
+                self.is_distributed = False
             elif backend_name == "gloo" and device != "cpu":
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for %s device - fallback to non distributed streaming", backend_name, device)
                 self.is_distributed = False

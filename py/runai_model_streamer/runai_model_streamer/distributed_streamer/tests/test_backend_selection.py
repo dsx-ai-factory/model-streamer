@@ -97,9 +97,13 @@ class TestSetIsDistributed(unittest.TestCase):
         self.assertFalse(self.decide("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo", "cpu"))
 
     def test_nccl_does_not_serve_a_cpu_device(self):
-        for backend, config in [("nccl", "cuda:nccl"), ("cuda:nccl", "cuda:nccl")]:
-            with self.subTest(backend=backend):
-                self.assertFalse(self.decide(backend, config, "cpu", enable_dist="1"))
+        # torch 2.0 lists a plain nccl group under cpu as well, as the last config shows
+        for backend, config in [("nccl", "cuda:nccl"),
+                                ("cuda:nccl", "cuda:nccl"),
+                                ("nccl", "cpu:nccl,cuda:nccl")]:
+            for enable_dist in ("auto", "1"):
+                with self.subTest(config=config, enable_dist=enable_dist):
+                    self.assertFalse(self.decide(backend, config, "cpu", enable_dist=enable_dist))
 
     def test_gloo_does_not_serve_a_cuda_device(self):
         self.assertFalse(self.decide("gloo", "cpu:gloo,cuda:gloo", "cuda", enable_dist="1"))
