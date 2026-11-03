@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The default environment of the real-GPU tests, on a machine of your own and in CI: tests/gpu/run.sh sets the variables and runs
+#
+#     docker compose -f tests/gpu/compose.yaml [--profile NAME] run --rm -T tests
+#
+# The workflow runs it through run.sh too (nightly-gpu.yaml), with every setting explicit.
+#
+# What an environment is: a compose file with a service called `tests`, which runs an entry (a script) that sets the container
+# up and then runs the suites (tests/gpu/README.md, "Environments"). This file is the default one: `tests` is a clean CUDA
+# container, and its entry installs Python, torch and the streamer. An environment of another kind (another image, a
+# toolchain, other services) is another compose file, which run.sh takes with --compose-file; copy this one and change
+# what differs. The services of a suite have a profile of the suite's name: a service with a profile starts only when the
+# profile is asked for, and run.sh asks for the profile of every selected suite (a suite without services has none, which
+# compose does not mind).
+#
+# A variable that is listed under environment without a value is passed on when it is set where compose runs, and is absent
+# from the container when it is not (the entry then uses its default).
+name: runai-gpu-tests
+
+services:
+  tests:
+    image: ${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}
+    working_dir: /workspace
+    shm_size: 2g                      # NCCL
+    security_opt:
+      - seccomp=unconfined            # io_uring
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all              # CUDA_VISIBLE_DEVICES, below, is what chooses the GPUs
+              capabilities: [gpu]
+    volumes:
+      - ${GPU_REPO:-../..}:/workspace
+      # The wheel of the streamer: a directory with exactly one wheel in it, mounted where tests_entrypoint.sh looks.
+      - ${GPU_WHEEL_HOST_DIR:?set GPU_WHEEL_HOST_DIR to a directory (with one wheel in it, or empty with GPU_STREAMER_SPEC)}:/wheel:ro
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1     # the container is root: no root-owned __pycache__ in your checkout
+      - CUDA_VISIBLE_DEVICES
+      - GPU_WORLD
+      - GPU_SUITES
+      - GPU_SEED
+      - GPU_TORCH_SPEC
+      - GPU_NUMPY_SPEC
+      - GPU_STREAMER_SPEC
+      - GPU_S3_SPEC
+      - GPU_DEVICE
+      - GPU_EXPECT_NEWEST_TORCH
+      - GPU_BUDGET_MINUTES
+      # Of the streaming suite
+      - GPU_MATRIX
+      - GPU_ROWS
+      - GPU_SELF_CHECK
+      - GPU_ALLOW_EMPTY_ROWS
+      - GPU_REAL_SMOKE
+      # Of the object-storage service below, which the streamer and the harness reach through these (test keys of a
+      # service that lives as long as the run)
+      - AWS_ENDPOINT_URL=http://seaweedfs:9000
+      - AWS_ACCESS_KEY_ID=testkey
+      - AWS_SECRET_ACCESS_KEY=testsecret
+      - RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0
+      - AWS_EC2_METADATA_DISABLED=true   # an S3-compatible endpoint: without it the client asks EC2 for a region (about 5 s)
+      - GPU_OBJECT_BUCKET=test-bucket
+    depends_on:
+      seaweedfs:
+        condition: service_healthy
+        required: false               # only when its profile is on
+    command: ["bash", "tests/gpu/tests_entrypoint.sh"]
+
+  # Object storage, S3 compatible: SeaweedFS in its single-process mode, with one bucket and one pair of keys
+  # (harness/seaweedfs-s3.json). Starts with the object_storage profile, which run.sh switches on for the suite of that
+  # name; the data lives in the container, and goes with it.
+  seaweedfs:
+    profiles: [object_storage]
+    image: chrislusf/seaweedfs:4.47
+    command: ["mini", "-dir=/data", "-bucket=test-bucket", "-s3.port=9000", "-s3.config=/etc/seaweedfs/s3.json"]
+    volumes:
+      - ./harness/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      # the master answers, and the S3 port is open
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/status && nc -z localhost 9000"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
