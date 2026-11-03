@@ -164,5 +164,60 @@ class TestS3UnsignedPublicBucket(unittest.TestCase):
             self.fail(f"Tensor mismatch: {message}")
 
 
+class TestS3SpecificEndpointUrl(unittest.TestCase):
+    """
+    AWS_ENDPOINT_URL_S3 (issue #83): the S3-only endpoint override takes precedence over the global
+    AWS_ENDPOINT_URL, which in the AWS SDKs applies to every service (e.g. STS for IRSA credentials).
+    """
+    DIRECTORY = "endpoint-url-s3"
+    # Nothing listens here: S3 reads sent to it fail, so a test only passes if they go to AWS_ENDPOINT_URL_S3
+    UNREACHABLE_ENDPOINT = "http://127.0.0.2:1"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = SeaweedFSServer()
+        cls.server.wait_for_startup()
+        cls.bucket = os.getenv("AWS_BUCKET")
+        cls.temp_dir = tempfile.mkdtemp()
+        cls.file_path = create_random_safetensors(cls.temp_dir)
+        cls.server.upload_file(cls.bucket, cls.DIRECTORY, cls.file_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.temp_dir)
+
+    def _stream_and_compare(self):
+        our = {}
+        with SafetensorsStreamer() as streamer:
+            streamer.stream_file(f"s3://{self.bucket}/{self.DIRECTORY}/model.safetensors", None, "cpu")
+            for name, tensor in streamer.get_tensors():
+                our[name] = tensor
+
+        their = {}
+        with safe_open(self.file_path, framework="pt", device="cpu") as f:
+            for name in f.keys():
+                their[name] = f.get_tensor(name)
+
+        equal, message = tensor_maps_are_equal(our, their)
+        if not equal:
+            self.fail(f"Tensor mismatch: {message}")
+
+    def test_s3_specific_endpoint_takes_precedence_over_global(self):
+        # The exact scenario of the issue: both variables set, S3 must use AWS_ENDPOINT_URL_S3 and leave
+        # AWS_ENDPOINT_URL to the other services
+        with patch.dict(os.environ, {
+            "AWS_ENDPOINT_URL_S3": self.server.url,
+            "AWS_ENDPOINT_URL": self.UNREACHABLE_ENDPOINT,
+        }):
+            self._stream_and_compare()
+
+    def test_s3_specific_endpoint_only(self):
+        # Issue #46: AWS_ENDPOINT_URL unset so that STS keeps its own endpoint, AWS_ENDPOINT_URL_S3 alone
+        # must still route S3 reads to the custom endpoint
+        with patch.dict(os.environ, {"AWS_ENDPOINT_URL_S3": self.server.url}):
+            os.environ.pop("AWS_ENDPOINT_URL", None)  # restored by patch.dict
+            self._stream_and_compare()
+
+
 if __name__ == "__main__":
     unittest.main()
