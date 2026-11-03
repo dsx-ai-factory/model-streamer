@@ -142,6 +142,7 @@ class DistributedStreamer:
 
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
+        backend_name = None
         if self.is_distributed:
             backend_name = get_backend_for_device(device)
             if backend_name is None:
@@ -155,7 +156,6 @@ class DistributedStreamer:
                 self.is_distributed = False
 
         # check if there is enough free memory on the device
-        # (is_distributed is still set, so backend_name was resolved above for this device)
         if self.is_distributed and torch.cuda.is_available() and backend_name == "nccl":
             free_memory = self.get_cuda_free_memory()
             if free_memory < 2 * self.params.max_chunk:
