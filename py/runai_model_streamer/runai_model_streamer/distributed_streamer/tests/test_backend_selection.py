@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 import os
 import tempfile
 import unittest
@@ -28,6 +29,20 @@ def init_string(backend: str, config: str, cuda_available: bool = False):
         patch.object(distributed_streamer.dist, "get_backend_config", return_value=config),
         patch.object(distributed_streamer.torch.cuda, "is_available", return_value=cuda_available),
     )
+
+
+@contextlib.contextmanager
+def without_torch_xpu():
+    """torch without the xpu module, as in older versions."""
+    had_xpu = hasattr(torch, "xpu")
+    saved = getattr(torch, "xpu", None)
+    if had_xpu:
+        del torch.xpu
+    try:
+        yield
+    finally:
+        if had_xpu:
+            torch.xpu = saved
 
 
 class TestBackendLookup(unittest.TestCase):
@@ -72,17 +87,17 @@ class TestSetIsDistributed(unittest.TestCase):
     """set_is_distributed decides from the backend that serves the device."""
 
     def decide(self, backend, config, device, enable_dist="auto", cuda_free_memory=None,
-               xpu_free_memory=None):
+               xpu_free_memory=None, torch_has_xpu=True):
         """cuda_free_memory and xpu_free_memory, when given, make that device available with that
-        much free memory."""
+        much free memory. torch_has_xpu=False removes torch.xpu, which older torch does not have."""
         patches = init_string(backend, config, cuda_available=cuda_free_memory is not None)
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        # torch.xpu does not exist in every torch version
         xpu = MagicMock()
         xpu.is_available.return_value = xpu_free_memory is not None
-        with patch.object(distributed_streamer.torch, "xpu", xpu, create=True):
+        with (patch.object(distributed_streamer.torch, "xpu", xpu, create=True) if torch_has_xpu
+              else without_torch_xpu()):
             with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": enable_dist}):
                 with DistributedStreamer() as streamer:
                     streamer.params.max_chunk = 1000
@@ -97,6 +112,22 @@ class TestSetIsDistributed(unittest.TestCase):
                                 ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
             with self.subTest(backend=backend):
                 self.assertTrue(self.decide(backend, config, "cuda"))
+
+    def test_an_indexed_device_is_served_by_the_backend_of_its_type(self):
+        for backend, config in [("nccl", "cuda:nccl"), ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
+            with self.subTest(backend=backend):
+                self.assertTrue(self.decide(backend, config, "cuda:0"))
+                self.assertFalse(self.decide(backend, config, "cuda:0", cuda_free_memory=1999))
+
+    def test_torch_without_the_xpu_module_still_decides_for_cuda(self):
+        # An nccl group never needs torch.xpu, which older torch does not have.
+        for backend, config in [("nccl", "cuda:nccl"), ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
+            with self.subTest(backend=backend):
+                self.assertTrue(self.decide(backend, config, "cuda", torch_has_xpu=False))
+                self.assertFalse(self.decide(backend, config, "cuda", cuda_free_memory=1999,
+                                             torch_has_xpu=False))
+                self.assertTrue(self.decide(backend, config, "cuda", cuda_free_memory=2000,
+                                            torch_has_xpu=False))
 
     def test_auto_mode_does_not_distribute_on_gloo(self):
         self.assertFalse(self.decide("gloo", "cpu:gloo,cuda:gloo", "cpu"))
