@@ -499,10 +499,10 @@ class FileStreamer:
         on purpose: torch's allocator is stream scoped, so a clone enqueued elsewhere cannot reuse the
         memory the consumer is freeing.
 
-        A caller that moves to another stream part way through is REFUSED. One event marks the
-        copies on one stream, so the slot would be refilled while copies on the first stream still
-        read it - wrong bytes, nothing raised. Covering it instead would mean an event per stream per
-        slot, which nothing asks for: a rank loads a model on one stream.
+        A caller that moves to another stream part way through is REFUSED, when the slot it is on is
+        released. One event marks the copies on one stream, so the slot would be refilled while copies
+        on the first stream still read it - wrong bytes, nothing raised. Covering it instead would mean
+        an event per stream per slot, which nothing asks for: a rank loads a model on one stream.
 
         The DEVICE needs no such care. It is resolved once in stream_files and bound into the ring."""
         if not self.streamer:

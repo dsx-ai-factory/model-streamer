@@ -269,6 +269,7 @@ class TestDeviceRingPath(unittest.TestCase):
                 fs.stream_files(chunks)
                 list(fs.get_chunks())
 
+        self.assertEqual(len(self.released), 3, "the setup released no slot")
         self.assertEqual(len(ring_at_wait), 1,
                          "__exit__ did not wait on the event the copies were recorded against")
         self.assertIsNotNone(ring_at_wait[0], "the ring was already dropped when the wait ran")
