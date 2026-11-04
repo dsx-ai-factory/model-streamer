@@ -55,8 +55,7 @@ The wheel is built in the repository's published development image (`devcontaine
 change of `.devcontainer/` merges and the image is published. A run that happens before the publish builds with the old
 image, and the next night builds with the new one.
 
-The README of the repository shows the status of the latest scheduled run, and the dates of the last one that passed and
-of the last one that failed.
+The README of the repository shows a badge with the result of the latest scheduled run.
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
    in the repository's development image, and uploads the wheel (and, for a run that asks for the `object_storage` suite,
