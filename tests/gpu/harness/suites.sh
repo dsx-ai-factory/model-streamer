@@ -118,8 +118,9 @@ run_suites() {
 report_suites() {
     local files
     echo "== cases that ran"
+    # Also kept in cases-summary.txt, for the job summary of the workflow.
     timeout --signal=TERM --kill-after=10s 120s python3 tests/gpu/harness/summarize.py "$RESULTS" \
-        ${EXPECTED_RESULTS[@]+"${EXPECTED_RESULTS[@]}"} || status=1
+        ${EXPECTED_RESULTS[@]+"${EXPECTED_RESULTS[@]}"} | tee "$RESULTS/cases-summary.txt" || status=1
 
     echo "== where the time went"
     mapfile -t files < <(find "$RESULTS" -name 'timing-*.jsonl' | sort)

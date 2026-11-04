@@ -27,6 +27,7 @@ import re
 import sys
 
 DEFAULT_WORLD = 2  # the ranks of a run whose results do not say; a results file says how many ranks its run had ("world")
+MAX_FAILED_LISTED = 5  # the failed cases that a line names; the results files have the rest
 _FILE = re.compile(r"^results-(?P<run>.+)-rank(?P<rank>\d+)\.json$")
 
 
@@ -50,6 +51,10 @@ def summarize(results, expected_globs=()):
         unexpected = [c["case"] for c in finished if not c["ok"] and not c.get("fault")]
         line = "%s: %d of %d cases finished, %d failed" % (os.path.relpath(path, results), len(finished),
                                                             data["expected_cases"], len(unexpected))
+        if unexpected:
+            line += "; failed: " + ", ".join(unexpected[:MAX_FAILED_LISTED])
+            if len(unexpected) > MAX_FAILED_LISTED:
+                line += ", and %d more" % (len(unexpected) - MAX_FAILED_LISTED)
         started = [c["case"] for c in cases if c["ok"] is None]
         if started:
             line += "; the run ended inside case " + started[0]
