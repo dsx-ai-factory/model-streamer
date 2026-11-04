@@ -43,7 +43,7 @@ class CleanResults(unittest.TestCase):
 
     def test_the_results_of_an_earlier_run_are_removed_and_the_log_is_not(self):
         for name in ("streaming/results-sync_buffered-rank0.json", "streaming/results-sync_buffered-rank1.json",
-                     "streaming/timing-sync_buffered-rank0.jsonl", "timing-summary.txt", "env-check.txt",
+                     "streaming/timing-sync_buffered-rank0.jsonl", "timing-summary.txt", "cases-summary.txt", "env-check.txt",
                      "timing-setup.jsonl", "streaming/self-check/results-sync_buffered-rank0.json",
                      "streaming/smoke/results-default-rank1.json"):
             touch(os.path.join(self.results, name))

@@ -164,8 +164,9 @@ make gpu-unit-tests                                 # the CPU unit tests of all 
 3. runs the CPU unit tests of the harness (the unit tests of a suite run with the suite);
 4. runs the suites that `GPU_SUITES` selects, one after the other (`harness/suites.sh`): for each, its unit tests, its
    `suite_prepare`, its `suite_run`, and then collects what it expects, its artifacts and its timings;
-5. prints which cases ran (`harness/summarize.py`), a table of where the time went, and the verdict. The exit status is 0
-   only if everything passed and every result that a suite expected is there.
+5. prints which cases ran, with the names of the failed ones (`harness/summarize.py`, also kept in `cases-summary.txt`
+   and shown at the top of the workflow's job summary), a table of where the time went, and the verdict. The exit status
+   is 0 only if everything passed and every result that a suite expected is there.
 
 ## What the harness gives a suite
 

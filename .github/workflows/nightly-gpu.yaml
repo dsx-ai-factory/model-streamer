@@ -299,7 +299,7 @@ jobs:
           docker ps -aq --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker rm -f >/dev/null 2>&1 || true
           docker network ls -q --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker network rm >/dev/null 2>&1 || true
 
-      - name: Show where the time went
+      - name: Show the cases that ran and where the time went
         if: always()
         run: |
           if [ -f test-results/gpu/env-check.txt ]; then
@@ -309,6 +309,11 @@ jobs:
               title="Newest torch check (${{ matrix.name }})"
             fi
             { echo "### $title"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f test-results/gpu/cases-summary.txt ]; then
+            { echo "### Cases that ran (${{ matrix.name }})"; echo '```'; cat test-results/gpu/cases-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Cases that ran (${{ matrix.name }}): none reported, the run ended before it could say (see the log)" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f test-results/gpu/timing-summary.txt ]; then
             { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
