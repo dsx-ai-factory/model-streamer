@@ -13,12 +13,75 @@
 #include "utils/logging/logging.h"
 #include "utils/env/env.h"
 
-#include <fstream>
-#include <thread>
+#include "google/cloud/log.h"
+
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
+#include <fstream>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <unistd.h>
 
 namespace runai::llm::streamer::impl::gcs
 {
+
+namespace
+{
+
+constexpr char kKeyFileEnv[] = "RUNAI_STREAMER_GCS_CREDENTIAL_FILE";
+constexpr char kAdcFileEnv[] = "GOOGLE_APPLICATION_CREDENTIALS";
+constexpr char kSdkTracingEnv[] = "GOOGLE_CLOUD_CPP_ENABLE_TRACING";
+
+// Tracing components only produce messages; the SDK prints them through its log sink, whose
+// default backend passes FATAL and above unless GOOGLE_CLOUD_CPP_ENABLE_CLOG is set. Without this,
+// RUNAI_STREAMER_S3_TRACE generated trace messages and dropped them.
+//
+// EnableStdClog() is a no-op while a default backend exists, so the default is replaced. A logging
+// setup the user chose through the SDK's own variables is left alone.
+void print_sdk_logs()
+{
+    static std::once_flag once;
+    std::call_once(once, []
+    {
+        if (!utils::getenv<std::string>("GOOGLE_CLOUD_CPP_ENABLE_CLOG", "").empty() ||
+            !utils::getenv<std::string>("GOOGLE_CLOUD_CPP_EXPERIMENTAL_LOG_CONFIG", "").empty())
+        {
+            LOG(DEBUG) << "google-cloud-cpp log output is configured by its own environment variables";
+            return;
+        }
+
+        LOG(DEBUG) << "Printing google-cloud-cpp logs to stderr";
+        google::cloud::LogSink::DisableStdClog();
+        google::cloud::LogSink::EnableStdClog();
+    });
+}
+
+} // namespace
+
+std::string credentials_source()
+{
+    const auto key_file = utils::getenv<std::string>(kKeyFileEnv, "");
+    if (!key_file.empty())
+    {
+        return std::string("service account key file ") + key_file + " (" + kKeyFileEnv + ")";
+    }
+
+    const auto adc_file = utils::getenv<std::string>(kAdcFileEnv, "");
+    if (!adc_file.empty())
+    {
+        std::string description = std::string("application default credentials file ") + adc_file + " (" + kAdcFileEnv + ")";
+        if (::access(adc_file.c_str(), R_OK) != 0)
+        {
+            description += " - not readable: ";
+            description += std::strerror(errno);
+        }
+        return description;
+    }
+
+    return "application default credentials - the gcloud well-known file if present, otherwise the metadata server";
+}
 
 ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
 {
@@ -61,18 +124,26 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
     const auto trace_gcs = utils::getenv<bool>("RUNAI_STREAMER_S3_TRACE", false);
     if (trace_gcs)
     {
-        LOG(DEBUG) << "Enabling log tracing for rpc/auth/http modules for GCS API calls";
-        std::set<std::string> logging_components;
-        logging_components.insert("rpc");
-        logging_components.insert("auth");
-        logging_components.insert("http");
-
-        options.set<google::cloud::LoggingComponentsOption>(std::move(logging_components));
+        // The SDK reads GOOGLE_CLOUD_CPP_ENABLE_TRACING only when the option is unset, so a
+        // component list the user chose is left for it to apply.
+        const auto sdk_tracing = utils::getenv<std::string>(kSdkTracingEnv, "");
+        if (sdk_tracing.empty())
+        {
+            LOG(DEBUG) << "Enabling google-cloud-cpp tracing of the rpc/auth/http components";
+            options.set<google::cloud::LoggingComponentsOption>(std::set<std::string>{"rpc", "auth", "http"});
+        }
+        else
+        {
+            LOG(DEBUG) << "Enabling google-cloud-cpp tracing of the components in " << kSdkTracingEnv << "=" << sdk_tracing;
+        }
+        print_sdk_logs();
     }
 
-    const auto sa_key_file_name = utils::getenv<std::string>("RUNAI_STREAMER_GCS_CREDENTIAL_FILE", "");
+    credentials = credentials_source();
+    LOG(DEBUG) << "GCS credentials: " << credentials;
+
+    const auto sa_key_file_name = utils::getenv<std::string>(kKeyFileEnv, "");
     if (!sa_key_file_name.empty()) {
-        LOG(DEBUG) << "Loading credentials for Service Account from file: " << sa_key_file_name;
         try {
             // Open the file stream.
             auto is = std::ifstream(sa_key_file_name);
@@ -87,7 +158,9 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
             options.set<google::cloud::UnifiedCredentialsOption>(
                 google::cloud::MakeServiceAccountCredentials(contents));
         } catch (const std::ios_base::failure& ex) {
-            LOG(ERROR) << "Failed to read service account key file: " << sa_key_file_name;
+            const int error = errno;
+            LOG(ERROR) << "Failed to read service account key file " << sa_key_file_name
+                       << " (" << kKeyFileEnv << "): " << std::strerror(error);
             throw common::Exception(common::ResponseCode::InvalidParameterError);
         }
     }

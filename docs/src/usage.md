@@ -388,6 +388,28 @@ export GRPC_TRACE=client_channel,xds
 
 In the resulting console output, you are looking for metric blocks related to actual file downloads (e.g. `google.storage.v2.Storage/ReadObject`). To know direct connectivity is set, you need to see the `grpc_target` field in those blocks explicitly targeting `google-c2p:///storage.googleapis.com`. If your actual file downloads are instead targeting standard `dns:///storage.googleapis.com` addresses, traffic is going through the standard public Cloud Load Balancers instead of the unproxied DirectPath route, and you should disable the gRPC client. (Note: You may still see `dns:///storage.googleapis.com` targets for background routing lookups like `RouteLookupService/RouteLookup`, which is perfectly normal as long as the `ReadObject` calls use `google-c2p:///`).
 
+###### Troubleshooting
+
+When a read fails, the streamer logs the error the google-cloud-cpp SDK reported, together with the
+credential source in use, for example:
+
+```
+Failed to read gs://my-bucket/model.safetensors range [0, 8) of request 0: UNAVAILABLE: ... (credentials: application default credentials - the gcloud well-known file if present, otherwise the metadata server)
+```
+
+The credential source is also logged at `DEBUG` level when each client is created.
+
+To trace the SDK's authentication, RPC and HTTP calls, set `RUNAI_STREAMER_S3_TRACE=1`. The trace is
+printed to stderr. Two google-cloud-cpp variables give finer control, and the streamer leaves them in
+effect when they are set:
+
+* `GOOGLE_CLOUD_CPP_ENABLE_TRACING`: a comma-separated list of components to trace, replacing the
+  default `auth,rpc,http`
+* `GOOGLE_CLOUD_CPP_ENABLE_CLOG`: the minimum severity the SDK prints (for example `DEBUG`), or any
+  other value to print everything
+
+The trace is verbose; enable it only to diagnose a failure.
+
 ##### HMAC Authentication
 
 S3 compatible HMAC authentication to GCS is provided through the Python package `runai-model-streamer-s3`.

@@ -5,6 +5,7 @@
 
 #include "gcs/gcs.h"
 #include "gcs/client/client.h"
+#include "gcs/client_configuration/client_configuration.h"
 #include "common/backend_api/object_storage/list_files_impl.h"
 #include "common/client_mgr/client_mgr.h"
 
@@ -100,12 +101,13 @@ common::backend_api::ResponseCode_t obj_create_client(common::backend_api::Objec
     }
     catch(const common::Exception & e)
     {
+        LOG(ERROR) << "Failed to create GCS client: " << e.what() << " (credentials: " << credentials_source() << ")";
         ret = e.error();
         *out_client_handle = nullptr;
     }
     catch(const std::exception & e)
     {
-        LOG(ERROR) << "Failed to create GCS client";
+        LOG(ERROR) << "Failed to create GCS client: " << e.what() << " (credentials: " << credentials_source() << ")";
         ret = common::ResponseCode::FileAccessError;
         *out_client_handle = nullptr;
     }
@@ -124,7 +126,7 @@ common::backend_api::ResponseCode_t obj_remove_client(common::backend_api::Objec
     }
     catch(const std::exception & e)
     {
-        LOG(ERROR) << "Failed to remove GCS client";
+        LOG(ERROR) << "Failed to remove GCS client: " << e.what();
         ret = common::ResponseCode::UnknownError;
     }
     return ret;
@@ -139,7 +141,7 @@ common::backend_api::ResponseCode_t obj_remove_all_clients()
     }
     catch(const std::exception & e)
     {
-        LOG(ERROR) << "Failed to remove all GCS clients";
+        LOG(ERROR) << "Failed to remove all GCS clients: " << e.what();
         ret = common::ResponseCode::UnknownError;
     }
     return ret;
@@ -154,7 +156,7 @@ common::backend_api::ResponseCode_t obj_cancel_all_reads()
     }
     catch(const std::exception & e)
     {
-        LOG(ERROR) << "Failed to stop all GCS clients";
+        LOG(ERROR) << "Failed to stop all GCS clients: " << e.what();
         ret = common::ResponseCode::UnknownError;
     }
     return ret;
@@ -178,7 +180,7 @@ common::backend_api::ResponseCode_t obj_request_read(common::backend_api::Object
     }
     catch(const std::exception& e)
     {
-        LOG(ERROR) << "Caught exception while sending async request";
+        LOG(ERROR) << "Caught exception while sending async request: " << e.what();
     }
     return common::ResponseCode::UnknownError;
 }
@@ -218,7 +220,7 @@ common::backend_api::ResponseCode_t obj_wait_for_completions(common::backend_api
     }
     catch(const std::exception& e)
     {
-        LOG(ERROR) << "Caught exception while sending async request";
+        LOG(ERROR) << "Caught exception while waiting for async responses: " << e.what();
     }
     return common::ResponseCode::UnknownError;
 }
