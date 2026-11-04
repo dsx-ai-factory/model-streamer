@@ -36,29 +36,21 @@ S3ClientWrapper::Params::Params(std::shared_ptr<StorageUri> uri, const Credentia
     else
     {
         // endpoint passed as environment variable: the S3-specific AWS_ENDPOINT_URL_S3 takes precedence over the
-        // global AWS_ENDPOINT_URL, as in the AWS SDKs. Setting only AWS_ENDPOINT_URL_S3 keeps other services (e.g.
-        // STS AssumeRoleWithWebIdentity) off the S3 endpoint. An empty value counts as unset, so an empty
-        // AWS_ENDPOINT_URL_S3 (e.g. from a templated manifest) does not hide AWS_ENDPOINT_URL.
-        std::string endpoint;
-        const char * source = nullptr;
-        for (const char * variable : {"AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL"})
+        // global AWS_ENDPOINT_URL, as in the AWS SDKs. An empty value counts as unset.
+        std::string endpoint = utils::getenv<std::string>("AWS_ENDPOINT_URL_S3", "");
+        if (endpoint.empty())
         {
-            if (utils::try_getenv(variable, endpoint) && !endpoint.empty())
-            {
-                source = variable;
-                break;
-            }
+            endpoint = utils::getenv<std::string>("AWS_ENDPOINT_URL", "");
         }
 
-        if (source != nullptr)
+        if (!endpoint.empty())
         {
             bool override_endpoint_flag = utils::getenv<bool>("RUNAI_STREAMER_OVERRIDE_ENDPOINT_URL", true);
-            LOG(DEBUG) << "direct override of url endpoint in client configuration";
             if (override_endpoint_flag)
             {
                 _endpoint = endpoint;
             }
-            LOG(DEBUG) << "Using environment variable " << source << " endpoint " << endpoint << (override_endpoint_flag ? " , using configuration parameter endpointOverride" : "");
+            LOG(DEBUG) << "Using environment variable endpoint " << endpoint << (override_endpoint_flag ? " , using configuration parameter endpointOverride" : "");
         }
     }
 }
