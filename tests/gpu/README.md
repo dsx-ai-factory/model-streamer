@@ -41,8 +41,8 @@ tests/gpu/
 
 ## Where it runs
 
-The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC, whether or not anything
-changed. With `workflow_dispatch` it can be run on demand:
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs at 00:17 UTC on every second day of the month
+(1st, 3rd, ... 31st: the 31st is followed by the 1st), whether or not anything changed. With `workflow_dispatch` it can be run on demand:
 `gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]
 [-f suites=streaming,object_storage]` (`matrix` and `rows` are the streaming suite's; `suites` defaults to `streaming`, and
 a run that asks for `object_storage` also builds the S3 plugin and starts the SeaweedFS service, in the newest-torch leg).
