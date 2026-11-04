@@ -43,7 +43,9 @@ setup(
     version=VERSION,
     license_files=("LICENSE", "THIRD_PARTY_NOTICES.txt"),
     packages=find_packages(),
-    install_requires=["boto3"],
+    # 1.28.0 is the first boto3 that reads AWS_ENDPOINT_URL / AWS_ENDPOINT_URL_S3 (configured endpoints).
+    # The listing client (files.py) relies on that to target the same endpoint as the C++ reads.
+    install_requires=["boto3>=1.28.0"],
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],
     cmdclass={"bdist_wheel": bdist_wheel},
 )
