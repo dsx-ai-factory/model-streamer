@@ -41,10 +41,8 @@ tests/gpu/
 
 ## Where it runs
 
-The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC. A scheduled run
-is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
-the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
-demand, and a manual run is never skipped:
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC, whether or not anything
+changed. With `workflow_dispatch` it can be run on demand:
 `gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]
 [-f suites=streaming,object_storage]` (`matrix` and `rows` are the streaming suite's; `suites` defaults to `streaming`, and
 a run that asks for `object_storage` also builds the S3 plugin and starts the SeaweedFS service, in the newest-torch leg).
@@ -54,10 +52,11 @@ the oldest-torch leg has only the core rows and passes, saying that it has nothi
 the summary say.
 
 The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
-change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds
-with the old image, and the next one, seeing nothing changed since that run, does not rebuild with the new one, so a
-`.devcontainer/` change can go untested by the nightly. That is accepted: the image is built and the wheel tested with it
-by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
+change of `.devcontainer/` merges and the image is published. A run that happens before the publish builds with the old
+image, and the next night builds with the new one.
+
+The README of the repository shows the status of the latest scheduled run, and the dates of the last one that passed and
+of the last one that failed.
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
    in the repository's development image, and uploads the wheel (and, for a run that asks for the `object_storage` suite,
