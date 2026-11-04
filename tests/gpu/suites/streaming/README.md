@@ -212,7 +212,7 @@ its files and requests. The container's soft limit of 1024 is too low for `many_
 (one file of about 100,000 tensors).
 
 `test_synthetic_models.py` raises the soft limit of its own process to 262,144, or to the hard limit if that is lower,
-and prints it (`open files limit: 1024 -> 262144`). No other process is raised. When #261 is fixed this can go.
+and prints it (`open files limit: 1024 -> 262144`). No other process is raised.
 
 ## Not covered
 
