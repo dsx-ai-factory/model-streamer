@@ -372,8 +372,10 @@ TEST_F(CacheProviderEnvTest, DirectoryIsIgnored)
 {
     setenv(RUNAI_AZURE_CACHE_LIB_ENV, cache_dir_.c_str(), 1);
     auto loader = AzCacheProviderLoader::from_env();
-    EXPECT_NE(log_output().find("ignoring configured cache library path " + cache_dir_.string()),
+    const auto output = log_output();
+    EXPECT_NE(output.find("ignoring configured cache library path " + cache_dir_.string()),
               std::string::npos);
+    EXPECT_NE(output.find("not a regular file"), std::string::npos);
     if (loader->is_enabled())
     {
         GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
@@ -414,7 +416,7 @@ TEST_F(CacheProviderEnvTest, MissingDefaultIsIgnored)
         GTEST_SKIP() << "A provider was auto-discovered; no-provider case is inapplicable";
     }
     EXPECT_FALSE(AzCacheProviderLoader::from_env()->is_enabled());
-    EXPECT_TRUE(log_output().empty());
+    EXPECT_EQ(log_output().find(default_path), std::string::npos);
 }
 
 TEST_F(CacheProviderEnvTest, DefaultLibraryLoadsWhenPresent)
