@@ -207,19 +207,12 @@ workflow itself), so nobody has to remember to run it.
 ## The open files limit
 
 The streamer keeps a file open until its submission ends
-([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)), so the descriptors that a load holds grow with
-the files and with the requests of a file, and the container's soft limit of 1024 is too low for two of the models:
-`many_files` (500 files, three times the largest real checkpoint surveyed, about 160 files; with an asynchronous reader
-about every file can be open at once, and a rank holds about 60 descriptors before it reads anything), and
-`many_tensors` (one file of about 100,000 tensors, in a distributed row of the `chunks` policy). On the T4 runner a
-model of 5,000 files failed under every strategy at the container's limit, and the scheduled run of 2026-11-04 failed
-in `many_tensors.dist.chunks.owned.cuda.tight` with `Too many open files` under every strategy.
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)), so a load holds descriptors in proportion to
+its files and requests. The container's soft limit of 1024 is too low for `many_files` (500 files) and `many_tensors`
+(one file of about 100,000 tensors).
 
-`test_synthetic_models.py` therefore raises the soft limit of its own process to 262,144 (or to the hard limit, if that
-is lower) before it loads anything, and prints the limit it got (`open files limit: 1024 -> 262144`). Nothing else is
-raised: the other processes of the run, and the streamer itself, keep the container's limit, so a test of the streamer
-without that limit is a test of #261 and not of this suite. When the streamer closes a file when it is done with it, or
-raises the limit for the program, this can go, and `DEFAULT_FILES` (in `gen_models.py`) can grow.
+`test_synthetic_models.py` raises the soft limit of its own process to 262,144, or to the hard limit if that is lower,
+and prints it (`open files limit: 1024 -> 262144`). No other process is raised. When #261 is fixed this can go.
 
 ## Not covered
 

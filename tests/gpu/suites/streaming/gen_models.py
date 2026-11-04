@@ -54,10 +54,7 @@ from gpu_harness.phase_timer import PhaseTimer, dump_jsonl, report  # noqa: E402
 
 GENERATOR_VERSION = 8
 
-# Files of the many_files model. The largest real checkpoint surveyed has about 160 files, so 500 is three times that.
-# The streamer keeps a file open until its submission ends (https://github.com/dsx-ai-factory/model-streamer/issues/261),
-# and with an asynchronous reader about every file can be open at once. test_synthetic_models.py raises the open files
-# limit of its own process: see "The open files limit" in the README.
+# Files of the many_files model: three times the largest real checkpoint surveyed (about 160 files).
 DEFAULT_FILES = 500
 
 # Tensors with zero elements: the generator draws zero dimensions (about 2% of the shapes), the mixed model gets two

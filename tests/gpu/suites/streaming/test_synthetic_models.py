@@ -62,10 +62,8 @@ MAX_ERRORS_PER_ROW = 40
 CONTROL_MARGIN_SECONDS = 120
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
-# The soft limit of open files that the test process asks for. The streamer keeps a file open until its submission ends
-# (https://github.com/dsx-ai-factory/model-streamer/issues/261), so the many_tensors model (one file, about 100,000
-# tensors) in a distributed row needs far more than the container's 1024. The limit is raised here, in the process of
-# the test, and nowhere else. The hard limit caps it.
+# Open files limit of this process only. The streamer keeps a file open until its submission ends (#261), and the
+# many_tensors model needs far more than the container's 1024. The hard limit caps it.
 OPEN_FILES_WANTED = 262144
 
 
