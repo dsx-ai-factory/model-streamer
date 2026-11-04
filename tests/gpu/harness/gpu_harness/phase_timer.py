@@ -65,13 +65,14 @@ def report(records, top=None):
     rows = sorted(groups.items(), key=lambda item: item[1]["seconds"], reverse=True)
     if top is not None:
         rows = rows[:top]
-    lines = ["%-44s %9s %6s %6s %10s" % ("phase", "seconds", "share", "count", "GiB/s")]
+    width = max([len("phase")] + [len(name) for name, _ in rows])  # a long phase name must not push the columns
+    lines = ["%-*s %9s %6s %6s %10s" % (width, "phase", "seconds", "share", "count", "GiB/s")]
     for name, entry in rows:
         rate = ""
         if entry["bytes"] and entry["seconds"] > 0:
             rate = "%.2f" % (entry["bytes"] / 2**30 / entry["seconds"])
-        lines.append("%-44s %9.2f %5.1f%% %6d %10s" % (
-            name, entry["seconds"], 100.0 * entry["seconds"] / total, entry["count"], rate))
+        lines.append("%-*s %9.2f %5.1f%% %6d %10s" % (
+            width, name, entry["seconds"], 100.0 * entry["seconds"] / total, entry["count"], rate))
     return "\n".join(lines)
 
 
