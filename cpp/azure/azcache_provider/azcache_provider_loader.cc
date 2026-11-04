@@ -255,6 +255,13 @@ std::shared_ptr<AzCacheProviderLoader> AzCacheProviderLoader::from_env()
         {
             config.lib_path = candidate_path;
         }
+        else if (!lib_path.empty())
+        {
+            LOG(WARNING) << "AzCacheProvider: ignoring configured cache library path "
+                         << candidate_path
+                         << " — not a regular file; trying package auto-discovery"
+                         << (ec ? ": " + ec.message() : "");
+        }
         else
         {
             LOG(DEBUG) << "AzCacheProvider: ignoring cache library path " << candidate_path
@@ -289,8 +296,8 @@ AzCacheProviderLoader::AzCacheProviderLoader(const CacheProviderConfig& config)
     {
         if (config.mode == CacheMode::Required)
         {
-            LOG(ERROR) << "AzCacheProvider: mode=1 (required) but no cache library path configured. "
-                       << "Set " << RUNAI_AZURE_CACHE_LIB_ENV << " or install a cache provider package.";
+            LOG(ERROR) << "AzCacheProvider: mode=1 (required) but no usable cache library was found. "
+                       << "Check " << RUNAI_AZURE_CACHE_LIB_ENV << " or install a cache provider package.";
             throw common::Exception(common::ResponseCode::InvalidParameterError);
         }
         LOG(DEBUG) << "AzCacheProvider: no cache library configured — cache disabled";
