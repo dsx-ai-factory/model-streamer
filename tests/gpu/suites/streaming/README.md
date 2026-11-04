@@ -206,15 +206,20 @@ workflow itself), so nobody has to remember to run it.
 
 ## The open files limit
 
-The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
-not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file
-open until its submission ends, and with an asynchronous reader about every file can be open at once, and a rank holds
-about 60 descriptors before it reads anything, so a model with more than about 900 files makes the load fail with
-`File access error` unless the program that loads it raises its own limit
-([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261): the streamer does not do that for the program).
-That is measured: on the T4 runner a model of 5,000 files failed under every strategy at the container's limit, on master
-(8 of 12 finished rows under each of the asynchronous strategies). If the descriptor code changes, the count
-(`DEFAULT_FILES` in `gen_models.py`) changes with it.
+The streamer keeps a file open until its submission ends
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)), so the descriptors that a load holds grow with
+the files and with the requests of a file, and the container's soft limit of 1024 is too low for two of the models:
+`many_files` (500 files, three times the largest real checkpoint surveyed, about 160 files; with an asynchronous reader
+about every file can be open at once, and a rank holds about 60 descriptors before it reads anything), and
+`many_tensors` (one file of about 100,000 tensors, in a distributed row of the `chunks` policy). On the T4 runner a
+model of 5,000 files failed under every strategy at the container's limit, and the scheduled run of 2026-11-04 failed
+in `many_tensors.dist.chunks.owned.cuda.tight` with `Too many open files` under every strategy.
+
+`test_synthetic_models.py` therefore raises the soft limit of its own process to 262,144 (or to the hard limit, if that
+is lower) before it loads anything, and prints the limit it got (`open files limit: 1024 -> 262144`). Nothing else is
+raised: the other processes of the run, and the streamer itself, keep the container's limit, so a test of the streamer
+without that limit is a test of #261 and not of this suite. When the streamer closes a file when it is done with it, or
+raises the limit for the program, this can go, and `DEFAULT_FILES` (in `gen_models.py`) can grow.
 
 ## Not covered
 

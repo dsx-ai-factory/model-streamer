@@ -31,6 +31,7 @@ The exit status is unittest's: a failing row, or a failing self-check, fails the
 import gc
 import json
 import os
+import resource
 import sys
 import time
 import unittest
@@ -61,6 +62,22 @@ MAX_ERRORS_PER_ROW = 40
 CONTROL_MARGIN_SECONDS = 120
 # Bytes the allocator may hold above the start of the run after a row: rounding and small bookkeeping, not a tensor.
 GPU_LEAK_SLACK = 8 * MIB
+# The soft limit of open files that the test process asks for. The streamer keeps a file open until its submission ends
+# (https://github.com/dsx-ai-factory/model-streamer/issues/261), so the many_tensors model (one file, about 100,000
+# tensors) in a distributed row needs far more than the container's 1024. The limit is raised here, in the process of
+# the test, and nowhere else. The hard limit caps it.
+OPEN_FILES_WANTED = 262144
+
+
+def raise_open_files_limit(wanted=OPEN_FILES_WANTED):
+    """Raise the soft limit of open files of this process to wanted, or to the hard limit if that is lower. Returns
+    (soft limit before, soft limit now)."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+    if soft != resource.RLIM_INFINITY and soft < target:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        return soft, target
+    return soft, soft
 
 # The rows of the self-checks: the richest model, loaded to the GPU by each rank on its own, with the tensors held
 # (owned) and not (borrowed).
@@ -276,6 +293,8 @@ class Harness(Session):
     a row on every rank, checked, with the ranks agreeing on its outcome."""
 
     def __init__(self):
+        before, now = raise_open_files_limit()
+        stamp("open files limit: %s -> %s (hard %s)" % (before, now, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))
         self.strategy = os.environ.get("RUNAI_STREAMER_FS_STRATEGY", "")
         # The ranks agree over a CPU-only group that waits longer than the streamer's own distributed timeout, so that a
         # rank that is only slow is never mistaken for a failed one.
