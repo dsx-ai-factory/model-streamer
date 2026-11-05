@@ -75,6 +75,8 @@ google::cloud::Status write_stream_to_buffer(
     while (stream.read(dest_buffer, bytesize)) {
         bytes_received += stream.gcount();
     }
+    // a read that stops short of bytesize returns false, but its bytes are still in gcount()
+    bytes_received += stream.gcount();
     stream.Close();
 
     auto status = stream.status();
