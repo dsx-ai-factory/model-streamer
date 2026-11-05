@@ -41,10 +41,8 @@ tests/gpu/
 
 ## Where it runs
 
-The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs every night at 00:17 UTC. A scheduled run
-is skipped when nothing under `cpp/`, `py/`, `tests/gpu/` or `.devcontainer/` (documentation files aside) changed since
-the last scheduled run that passed, so a failed run is repeated the next night. With `workflow_dispatch` it can be run on
-demand, and a manual run is never skipped:
+The `Nightly GPU tests` workflow (`.github/workflows/nightly-gpu.yaml`) runs at 00:17 UTC on every second day of the month
+(1st, 3rd, ... 31st: the 31st is followed by the 1st), whether or not anything changed. With `workflow_dispatch` it can be run on demand:
 `gh workflow run nightly-gpu.yaml --ref <branch> [-f matrix=core] [-f seed=N] [-f rows=PREFIX,...] [-f gpus=1]
 [-f suites=streaming,object_storage]` (`matrix` and `rows` are the streaming suite's; `suites` defaults to `streaming`, and
 a run that asks for `object_storage` also builds the S3 plugin and starts the SeaweedFS service, in the newest-torch leg).
@@ -54,10 +52,10 @@ the oldest-torch leg has only the core rows and passes, saying that it has nothi
 the summary say.
 
 The wheel is built in the repository's published development image (`devcontainer:latest`), which only changes after a
-change of `.devcontainer/` merges and the image is published. A scheduled run that happens before the publish builds
-with the old image, and the next one, seeing nothing changed since that run, does not rebuild with the new one, so a
-`.devcontainer/` change can go untested by the nightly. That is accepted: the image is built and the wheel tested with it
-by the repository's own pull request workflow, and a manual run tests the image that is published at that time.
+change of `.devcontainer/` merges and the image is published. A run that happens before the publish builds with the old
+image, and the next night builds with the new one.
+
+The README of the repository shows a badge with the result of the latest scheduled run.
 
 1. **`build-wheel`** (a CPU runner) builds `libstreamer.so` and the wheel of the streamer from the commit under test,
    in the repository's development image, and uploads the wheel (and, for a run that asks for the `object_storage` suite,
@@ -164,8 +162,9 @@ make gpu-unit-tests                                 # the CPU unit tests of all 
 3. runs the CPU unit tests of the harness (the unit tests of a suite run with the suite);
 4. runs the suites that `GPU_SUITES` selects, one after the other (`harness/suites.sh`): for each, its unit tests, its
    `suite_prepare`, its `suite_run`, and then collects what it expects, its artifacts and its timings;
-5. prints which cases ran (`harness/summarize.py`), a table of where the time went, and the verdict. The exit status is 0
-   only if everything passed and every result that a suite expected is there.
+5. prints which cases ran, with the names of the failed ones (`harness/summarize.py`, also kept in `cases-summary.txt`
+   and shown at the top of the workflow's job summary), a table of where the time went, and the verdict. The exit status
+   is 0 only if everything passed and every result that a suite expected is there.
 
 ## What the harness gives a suite
 

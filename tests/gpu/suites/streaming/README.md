@@ -206,15 +206,13 @@ workflow itself), so nobody has to remember to run it.
 
 ## The open files limit
 
-The `many_files` model has 500 files, three times the largest real checkpoint surveyed (about 160 files). The tests do
-not raise the open files limit, and 500 files stay under the container's soft limit of 1024: the streamer keeps a file
-open until its submission ends, and with an asynchronous reader about every file can be open at once, and a rank holds
-about 60 descriptors before it reads anything, so a model with more than about 900 files makes the load fail with
-`File access error` unless the program that loads it raises its own limit
-([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261): the streamer does not do that for the program).
-That is measured: on the T4 runner a model of 5,000 files failed under every strategy at the container's limit, on master
-(8 of 12 finished rows under each of the asynchronous strategies). If the descriptor code changes, the count
-(`DEFAULT_FILES` in `gen_models.py`) changes with it.
+The streamer keeps a file open until its submission ends
+([#261](https://github.com/dsx-ai-factory/model-streamer/issues/261)), so a load holds descriptors in proportion to
+its files and requests. The container's soft limit of 1024 is too low for `many_files` (500 files) and `many_tensors`
+(one file of about 100,000 tensors).
+
+`test_synthetic_models.py` raises the soft limit of its own process to 262,144, or to the hard limit if that is lower,
+and prints it (`open files limit: 1024 -> 262144`). No other process is raised.
 
 ## Not covered
 

@@ -1,5 +1,8 @@
 # Model Streamer
 
+[![Nightly GPU tests](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/model-streamer/nightly-gpu.yaml?branch=master&event=schedule&label=nightly%20GPU)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster)
+[![Last run](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fdsx-ai-factory%2Fmodel-streamer%2Factions%2Fworkflows%2Fnightly-gpu.yaml%2Fruns%3Fbranch%3Dmaster%26event%3Dschedule%26per_page%3D1&query=%24.workflow_runs%5B0%5D.updated_at&label=last%20run)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster)
+[![Last passed](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fdsx-ai-factory%2Fmodel-streamer%2Factions%2Fworkflows%2Fnightly-gpu.yaml%2Fruns%3Fbranch%3Dmaster%26event%3Dschedule%26status%3Dsuccess%26per_page%3D1&query=%24.workflow_runs%5B0%5D.updated_at&label=last%20passed&color=brightgreen)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster+is%3Asuccess)
 > [!IMPORTANT]
 > **Repository move and rename notice:** On September 13, 2026, Run:ai Model Streamer was
 > renamed to Model Streamer and the repository moved from the run-ai GitHub organization to

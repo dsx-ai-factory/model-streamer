@@ -57,7 +57,19 @@ class Summary(unittest.TestCase):
         self.write_all([case("a", True), case("b", False)], 2)
         lines, incomplete = self.summarize()
         self.assertFalse(incomplete)
-        self.assertIn("2 of 2 cases finished, 1 failed", lines[0])
+        self.assertIn("2 of 2 cases finished, 1 failed; failed: b", lines[0])
+
+    def test_the_failed_cases_are_named_up_to_a_limit(self):
+        count = summarize.MAX_FAILED_LISTED + 3
+        self.write_all([case("c%d" % i, False) for i in range(count)], count)
+        lines, _ = self.summarize()
+        listed = ", ".join("c%d" % i for i in range(summarize.MAX_FAILED_LISTED))
+        self.assertIn("failed: %s, and 3 more" % listed, lines[0])
+
+    def test_no_failed_cases_are_named_when_none_failed(self):
+        self.write_all([case("a", True)], 1)
+        lines, _ = self.summarize()
+        self.assertNotIn("failed:", lines[0])
 
     def test_a_case_with_a_fault_injected_on_purpose_is_not_counted_as_a_failure(self):
         """The self-checks inject faults, and the case has errors by design: only the other case is a failure."""

@@ -222,9 +222,8 @@ class GenerateModels(unittest.TestCase):
         self.assertGreaterEqual(len(gen.check_determinism(manifest)), 2)
 
     def test_the_many_files_model_has_the_default_number_of_files(self):
-        """Not the 40 of these tests: what a run generates, below the soft limit of 1024 open files."""
+        """Not the 40 of these tests: what a run generates."""
         self.assertEqual(gen.DEFAULT_FILES, 500)
-        self.assertLess(gen.DEFAULT_FILES, 1024)
 
     def test_many_files_has_header_only_and_single_byte_files(self):
         files = self.manifests["many_files"]["files"]

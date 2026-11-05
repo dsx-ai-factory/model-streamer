@@ -2,7 +2,7 @@ name: Nightly GPU tests
 
 on:
   schedule:
-    - cron: '17 0 * * *'   # every night, if the code changed since the last scheduled run (see the changes job)
+    - cron: '17 0 */2 * *'   # every second day of the month (1st, 3rd, ... 31st), at 00:17 UTC
   workflow_dispatch:
     inputs:
       matrix:
@@ -45,13 +45,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A scheduled run is skipped when nothing that the tests exercise changed since the last scheduled run that
-  # passed, so a failed run is repeated the next night and every commit ends up with a passing run. Manual
-  # runs always run.
+  # Decides whether the run ends with the self-check. Every run runs the GPU tests, scheduled or manual.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      run: ${{ steps.decide.outputs.run }}
       self_check: ${{ steps.decide.outputs.self_check }}
     steps:
       - name: Checkout code
@@ -60,7 +57,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Decide whether the code changed since the last scheduled run
+      - name: Decide whether the test harness changed since the last scheduled run
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
@@ -69,21 +66,17 @@ jobs:
           # self_check: whether the run ends with the self-check of the test's own checks (faults injected on purpose, see
           # tests/gpu/tests_entrypoint.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
           if [ "$EVENT" != schedule ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
             echo "self_check=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status success --limit 1 \
                    --json headSha --jq '.[0].headSha // ""')
           echo "last successful scheduled run: ${last:-none}; now: $GITHUB_SHA"
-          # No earlier run, or its commit is gone (a force push): run, with the self-check.
+          # No earlier run, or its commit is gone (a force push): with the self-check.
           if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
             echo "self_check=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          changed=$(git diff --name-only "$last" "$GITHUB_SHA" -- cpp py tests/gpu .devcontainer \
-                      .github/workflows/nightly-gpu.yaml ':(exclude)*.md')
           # The code that the self-check exercises: the test of the streaming suite, what it checks with (the bytes and CRC32
           # of a tensor, the shapes, the drills, the rows, the generator), and what runs it (the harness).
           harness=$(git diff --name-only "$last" "$GITHUB_SHA" -- tests/gpu/suites/streaming/test_synthetic_models.py \
@@ -98,19 +91,11 @@ jobs:
           else
             echo "self_check=false" >> "$GITHUB_OUTPUT"
           fi
-          if [ -n "$changed" ]; then
-            echo "changed since $last:"; echo "$changed"
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "nothing changed since $last: skipping the GPU run"
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
 
   # The wheel of the streamer, built from the commit under test in the repository's development image, on a CPU runner.
   # The GPU jobs install it into a clean CUDA container, the way a user installs the package.
   build-wheel:
     needs: changes
-    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -188,7 +173,6 @@ jobs:
   gpu-tests:
     name: GPU tests (${{ matrix.name }})
     needs: [changes, build-wheel]
-    if: needs.changes.outputs.run == 'true'
     runs-on:
       group: nv-gpu-amd64-t4-2gpu
       labels: linux-amd64-gpu-t4-latest-2
@@ -299,7 +283,7 @@ jobs:
           docker ps -aq --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker rm -f >/dev/null 2>&1 || true
           docker network ls -q --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker network rm >/dev/null 2>&1 || true
 
-      - name: Show where the time went
+      - name: Show the cases that ran and where the time went
         if: always()
         run: |
           if [ -f test-results/gpu/env-check.txt ]; then
@@ -309,6 +293,11 @@ jobs:
               title="Newest torch check (${{ matrix.name }})"
             fi
             { echo "### $title"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f test-results/gpu/cases-summary.txt ]; then
+            { echo "### Cases that ran (${{ matrix.name }})"; echo '```'; cat test-results/gpu/cases-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Cases that ran (${{ matrix.name }}): none reported, the run ended before it could say (see the log)" >> "$GITHUB_STEP_SUMMARY"
           fi
           if [ -f test-results/gpu/timing-summary.txt ]; then
             { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

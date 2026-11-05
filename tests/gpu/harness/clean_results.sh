@@ -18,7 +18,7 @@ dir=$1
 shift
 [ -d "$dir" ] || exit 0
 
-find "$dir" -type f \( -name 'results-*.json' -o -name 'timing-*.jsonl' -o -name 'timing-summary.txt' -o -name 'env-check.txt' \) -delete
+find "$dir" -type f \( -name 'results-*.json' -o -name 'timing-*.jsonl' -o -name 'timing-summary.txt' -o -name 'cases-summary.txt' -o -name 'env-check.txt' \) -delete
 for suite in "$@"; do
     rm -rf "${dir:?}/$suite"
 done
