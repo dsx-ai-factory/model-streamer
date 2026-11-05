@@ -20,12 +20,25 @@ def _build_client_config() -> Optional[Config]:
         config_kwargs["signature_version"] = UNSIGNED
     return Config(**config_kwargs) if config_kwargs else None
 
+def _endpoint_url(credentials: Optional[S3Credentials]) -> Optional[str]:
+    """Return the credentials endpoint in the form boto3 accepts, or None to use the configured or default endpoint.
+
+    An empty endpoint counts as unset. An endpoint without a scheme gets https://, the native client's default.
+    """
+    endpoint = credentials.endpoint if credentials else None
+    if not endpoint:
+        return None
+    if "://" not in endpoint:
+        return f"https://{endpoint}"
+    return endpoint
+
 def _build_s3_client(credentials: Optional[S3Credentials]):
     session, _ = get_credentials(credentials)
     client_config = _build_client_config()
+    endpoint_url = _endpoint_url(credentials)
     if session is None:
-        return boto3.client("s3", config=client_config)
-    return session.client("s3", config=client_config)
+        return boto3.client("s3", config=client_config, endpoint_url=endpoint_url)
+    return session.client("s3", config=client_config, endpoint_url=endpoint_url)
 
 def glob(path: str, allow_pattern: Optional[List[str]] = None, credentials: Optional[S3Credentials] = None) -> List[str]:
     s3 = _build_s3_client(credentials)

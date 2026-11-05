@@ -70,6 +70,36 @@ class TestBuildClientConfig(unittest.TestCase):
 
 
 class TestBuildS3Client(unittest.TestCase):
+    @patch("runai_model_streamer_s3.files.files._build_client_config")
+    @patch("runai_model_streamer_s3.files.files.boto3")
+    @patch("runai_model_streamer_s3.files.files.get_credentials")
+    def test_endpoint_and_config_forwarded_for_both_session_paths(
+            self, mock_get_credentials, mock_boto3, mock_config):
+        for has_session in (False, True):
+            for credentials, endpoint in (
+                    (files.S3Credentials(endpoint="https://s3.example.com"), "https://s3.example.com"),
+                    (files.S3Credentials(endpoint="http://10.1.254.10:9000"), "http://10.1.254.10:9000"),
+                    (files.S3Credentials(endpoint="HTTP://localhost:9000"), "HTTP://localhost:9000"),
+                    # boto3 requires a scheme; the native client defaults to HTTPS when none is given
+                    (files.S3Credentials(endpoint="localhost:9000"), "https://localhost:9000"),
+                    (files.S3Credentials(endpoint="10.1.254.10"), "https://10.1.254.10"),
+                    # an empty endpoint counts as unset, like in the native client
+                    (files.S3Credentials(endpoint=""), None),
+                    (files.S3Credentials(), None), (None, None)):
+                with self.subTest(has_session=has_session, credentials=credentials):
+                    mock_session = MagicMock() if has_session else None
+                    mock_get_credentials.return_value = (mock_session, credentials)
+                    mock_boto3.reset_mock()
+                    mock_get_credentials.reset_mock()
+                    result = files._build_s3_client(credentials)
+                    client = mock_session.client if has_session else mock_boto3.client
+                    mock_get_credentials.assert_called_once_with(credentials)
+                    client.assert_called_once_with(
+                        "s3", config=mock_config.return_value, endpoint_url=endpoint)
+                    self.assertIs(result, client.return_value)
+                    if has_session:
+                        mock_boto3.client.assert_not_called()
+
     @patch("runai_model_streamer_s3.files.files.boto3")
     @patch("runai_model_streamer_s3.files.files.get_credentials")
     def test_credentials_used_when_unsigned_disabled(self, mock_get_credentials, mock_boto3):
