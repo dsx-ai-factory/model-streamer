@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "google/cloud/common_options.h"
 #include "model_streamer_gcs_sdk/compatibility.h"
 
@@ -22,6 +24,14 @@ struct ClientConfiguration
     google::cloud::Options options;
     unsigned max_concurrency;
     bool use_grpc;
+    // Where the client's credentials are expected to come from, for log and error messages.
+    std::string credentials;
 };
+
+// Describes where the SDK will look for credentials, following its lookup order: our key file
+// variable, then GOOGLE_APPLICATION_CREDENTIALS, then the gcloud well-known file or the metadata
+// server. Reads the environment only - the last two cannot be told apart without probing the metadata
+// server, so the description names both.
+std::string credentials_source();
 
 }; //namespace runai::llm::streamer::impl::gcs

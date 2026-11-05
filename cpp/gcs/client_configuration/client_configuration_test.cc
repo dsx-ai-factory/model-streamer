@@ -8,10 +8,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 
+#include "common/exception/exception.h"
 #include "utils/temp/env/env.h"
 
 namespace runai::llm::streamer::impl::gcs
@@ -101,6 +103,78 @@ TEST_F(GcsConcurrency, An_Explicit_Connection_Count_Overrides_The_Formula)
     utils::temp::Env connections(std::string("RUNAI_STREAMER_S3_MAX_CONNECTIONS"), 7UL);
 
     EXPECT_EQ(ClientConfiguration(16).max_concurrency, 7u);
+}
+
+// Both credential variables are cleared before each test, so a test states only what it SETS.
+class GcsCredentials : public ::testing::Test
+{
+ protected:
+    void SetUp() override
+    {
+        _key_file = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"));
+        _adc_file = std::make_unique<utils::temp::UnsetEnv>(std::string("GOOGLE_APPLICATION_CREDENTIALS"));
+    }
+
+    void TearDown() override
+    {
+        _adc_file.reset();
+        _key_file.reset();
+    }
+
+    std::unique_ptr<utils::temp::UnsetEnv> _key_file;
+    std::unique_ptr<utils::temp::UnsetEnv> _adc_file;
+};
+
+TEST_F(GcsCredentials, Without_Variables_The_Sdk_Falls_Back_To_The_Metadata_Server)
+{
+    const auto source = credentials_source();
+
+    EXPECT_NE(source.find("metadata server"), std::string::npos) << source;
+    EXPECT_NE(ClientConfiguration(1).credentials.find("metadata server"), std::string::npos);
+}
+
+TEST_F(GcsCredentials, The_Adc_Variable_Names_Its_File)
+{
+    const std::string file = ::testing::TempDir() + "adc.json";
+    std::ofstream(file) << "{}";
+    utils::temp::Env adc(std::string("GOOGLE_APPLICATION_CREDENTIALS"), file);
+
+    const auto source = credentials_source();
+
+    EXPECT_NE(source.find("GOOGLE_APPLICATION_CREDENTIALS"), std::string::npos) << source;
+    EXPECT_NE(source.find(file), std::string::npos) << source;
+    EXPECT_EQ(source.find("not readable"), std::string::npos) << source;
+}
+
+// The SDK fails on a missing file only when it first authenticates, so the description says so up front.
+TEST_F(GcsCredentials, A_Missing_Adc_File_Is_Reported)
+{
+    utils::temp::Env adc(std::string("GOOGLE_APPLICATION_CREDENTIALS"), std::string("/nonexistent/adc.json"));
+
+    const auto source = credentials_source();
+
+    EXPECT_NE(source.find("not readable"), std::string::npos) << source;
+}
+
+// The streamer's own key file variable is applied as an explicit credential, ahead of the SDK's lookup.
+TEST_F(GcsCredentials, The_Key_File_Variable_Takes_Precedence)
+{
+    utils::temp::Env adc(std::string("GOOGLE_APPLICATION_CREDENTIALS"), std::string("/nonexistent/adc.json"));
+    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/path/key.json"));
+
+    const auto source = credentials_source();
+
+    EXPECT_NE(source.find("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string::npos) << source;
+    EXPECT_NE(source.find("/path/key.json"), std::string::npos) << source;
+    EXPECT_EQ(source.find("GOOGLE_APPLICATION_CREDENTIALS"), std::string::npos) << source;
+}
+
+// An unreadable key file is an invalid parameter rather than a client that fails on its first read.
+TEST_F(GcsCredentials, An_Unreadable_Key_File_Fails_Configuration)
+{
+    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/nonexistent/key.json"));
+
+    EXPECT_THROW(ClientConfiguration(1), common::Exception);
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

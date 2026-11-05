@@ -13,6 +13,7 @@ runai_portable_so(
         "//common/client_mgr",
         "//common/range",
         "//gcs/client",
+        "//gcs/client_configuration",
     ],
     ldscript = ":gcs.ldscript",
 )
