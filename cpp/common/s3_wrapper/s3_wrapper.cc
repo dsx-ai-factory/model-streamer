@@ -60,6 +60,7 @@ const common::backend_api::ObjectClientConfig_t S3ClientWrapper::Params::to_conf
     config.initial_params = initial_params.data();
     config.default_storage_chunk_size = chunk_bytesize;
     config.concurrent_readers = concurrent_readers;
+    config.process_group_size = process_group_size;
     return config;
 }
 

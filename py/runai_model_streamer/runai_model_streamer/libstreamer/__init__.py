@@ -49,6 +49,10 @@ class LibstreamerDLLWrapper:
         ]
         self.fn_runai_set_credentials.restype = ctypes.c_int
 
+        self.fn_runai_set_process_group_size = self.lib.runai_file_streamer_set_process_group_size
+        self.fn_runai_set_process_group_size.argtypes = [t_streamer, ctypes.c_uint]
+        self.fn_runai_set_process_group_size.restype = ctypes.c_int
+
         # Multi-request submit: credentials are streamer-scoped (runai_file_streamer_set_credentials), not passed here; the
         # assigned submission id is returned via out_submission_id.
         self.fn_runai_request = self.lib.runai_file_streamer_request
