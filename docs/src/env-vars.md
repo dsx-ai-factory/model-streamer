@@ -151,7 +151,7 @@ Overrides url endpoint for reading from S3 compatible object store
 
 > [!NOTE]
 > 
-> Mandatory for S3 compatible e.g. gcs, seaweedfs
+> Mandatory for S3 compatible e.g. gcs, seaweedfs, unless [AWS_ENDPOINT_URL_S3](#aws_endpoint_url_s3) is set
 > 
 > Optional if reading from AWS S3
 
@@ -162,6 +162,26 @@ String
 #### Default value
 
 Default S3 url endpoint
+
+### AWS_ENDPOINT_URL_S3
+
+Overrides url endpoint for S3 only. Takes precedence over [AWS_ENDPOINT_URL](#aws_endpoint_url)
+
+In the AWS SDKs `AWS_ENDPOINT_URL` applies to every service, while `AWS_ENDPOINT_URL_S3` applies to S3 alone. Use it when credentials are resolved through another AWS service, e.g. STS `AssumeRoleWithWebIdentity` (EKS IRSA) or AWS GovCloud FIPS endpoints, so that those calls are not sent to the S3 endpoint
+
+> [!NOTE]
+>
+> An endpoint passed explicitly in the S3 credentials takes precedence over both variables
+>
+> An empty value is ignored
+
+#### Values accepted
+
+String
+
+#### Default value
+
+Value of `AWS_ENDPOINT_URL`, or the default S3 url endpoint
 
 ### AWS_CA_BUNDLE
 

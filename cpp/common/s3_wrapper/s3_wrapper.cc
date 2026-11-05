@@ -35,17 +35,22 @@ S3ClientWrapper::Params::Params(std::shared_ptr<StorageUri> uri, const Credentia
     }
     else
     {
-        std::string endpoint;
-        bool override_endpoint = utils::try_getenv("AWS_ENDPOINT_URL", endpoint);
-        bool override_endpoint_flag = utils::getenv<bool>("RUNAI_STREAMER_OVERRIDE_ENDPOINT_URL", true);
-        if (override_endpoint) // endpoint passed as environment variable
+        // endpoint passed as environment variable: the S3-specific AWS_ENDPOINT_URL_S3 takes precedence over the
+        // global AWS_ENDPOINT_URL, as in the AWS SDKs. An empty value counts as unset.
+        std::string endpoint = utils::getenv<std::string>("AWS_ENDPOINT_URL_S3", "");
+        if (endpoint.empty())
         {
-            LOG(DEBUG) << "direct override of url endpoint in client configuration";
+            endpoint = utils::getenv<std::string>("AWS_ENDPOINT_URL", "");
+        }
+
+        if (!endpoint.empty())
+        {
+            bool override_endpoint_flag = utils::getenv<bool>("RUNAI_STREAMER_OVERRIDE_ENDPOINT_URL", true);
             if (override_endpoint_flag)
             {
                 _endpoint = endpoint;
             }
-            LOG(DEBUG) <<"Using environment variable endpoint " << endpoint << (override_endpoint_flag ? " , using configuration parameter endpointOverride" : "");
+            LOG(DEBUG) << "Using environment variable endpoint " << endpoint << (override_endpoint_flag ? " , using configuration parameter endpointOverride" : "");
         }
     }
 }

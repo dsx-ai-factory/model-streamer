@@ -19,7 +19,7 @@
 
 // For connecting to s3 providers other then aws:
 // 1. uri should be in the format s3://bucket/path
-// 2. endpoint url must be provided with environment variable AWS_ENDPOINT_URL
+// 2. endpoint url must be provided with environment variable AWS_ENDPOINT_URL_S3 or AWS_ENDPOINT_URL (AWS_ENDPOINT_URL_S3 takes precedence)
 // 3. set environment variable AWS_EC2_METADATA_DISABLED = true
 // 4. set RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING = 0
 // 5. Credentials can be provided in ~/.aws/credentials file or by passing environment variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY

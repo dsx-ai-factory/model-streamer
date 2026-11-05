@@ -13,7 +13,8 @@
 //
 // 1. Uri should be in the format s3://bucket/path
 //
-// 2. Provide endpoint url only with environment variable AWS_ENDPOINT_URL
+// 2. Provide endpoint url only with environment variable AWS_ENDPOINT_URL_S3 or AWS_ENDPOINT_URL
+//    AWS_ENDPOINT_URL_S3 applies to S3 only and takes precedence over AWS_ENDPOINT_URL
 //    Note: the aws cpp sdk ignores the endpoint url in ~/.aws/config file
 //    No need to set the endpoint for aws, if using the default endpoint
 //

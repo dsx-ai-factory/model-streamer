@@ -7,6 +7,9 @@
 
 #include <gtest/gtest.h>
 #include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "utils/dylib/dylib.h"
 #include "utils/random/random.h"
@@ -109,6 +112,7 @@ TEST_F(S3WrappertTest, Cleanup)
 TEST_F(S3WrappertTest, Endpoint_Exists)
 {
     auto endpoint = utils::random::string();
+    utils::temp::UnsetEnv unset_s3_endpoint("AWS_ENDPOINT_URL_S3"); // would take precedence if set in the environment
     utils::temp::Env endpoint_env("AWS_ENDPOINT_URL", endpoint);
 
     Credentials credentials_;
@@ -130,6 +134,74 @@ TEST_F(S3WrappertTest, Endpoint_In_Credentials)
 
     std::vector<common::backend_api::ObjectConfigParam_t> initial_params;
     EXPECT_EQ(params_.to_config(initial_params).endpoint_url, endpoint);
+}
+
+// Endpoint resolution: credentials endpoint > AWS_ENDPOINT_URL_S3 > AWS_ENDPOINT_URL > none (SDK default).
+// Each test pins every variable involved, so the result does not depend on the ambient environment.
+struct S3WrapperEndpointTest : S3WrappertTest
+{
+    // endpoint_url the client config carries for these credentials, or nullopt when none is set
+    std::optional<std::string> resolved_endpoint(const Credentials & credentials_)
+    {
+        S3ClientWrapper::Params params_(std::make_shared<StorageUri>(uri), credentials_, utils::random::number<size_t>(), 8);
+        std::vector<common::backend_api::ObjectConfigParam_t> initial_params;
+        const char * endpoint_url = params_.to_config(initial_params).endpoint_url;
+        return endpoint_url == nullptr ? std::nullopt : std::optional<std::string>(endpoint_url);
+    }
+
+    utils::temp::UnsetEnv unset_s3_endpoint{"AWS_ENDPOINT_URL_S3"};
+    utils::temp::UnsetEnv unset_endpoint{"AWS_ENDPOINT_URL"};
+    utils::temp::UnsetEnv unset_override_flag{"RUNAI_STREAMER_OVERRIDE_ENDPOINT_URL"};
+};
+
+TEST_F(S3WrapperEndpointTest, No_Endpoint)
+{
+    EXPECT_EQ(resolved_endpoint(Credentials()), std::nullopt);
+}
+
+TEST_F(S3WrapperEndpointTest, S3_Specific_Endpoint)
+{
+    auto s3_endpoint = utils::random::string();
+    utils::temp::Env s3_endpoint_env("AWS_ENDPOINT_URL_S3", s3_endpoint);
+
+    EXPECT_EQ(resolved_endpoint(Credentials()), s3_endpoint);
+}
+
+TEST_F(S3WrapperEndpointTest, S3_Specific_Endpoint_Takes_Precedence_Over_Global)
+{
+    auto s3_endpoint = utils::random::string();
+    auto global_endpoint = utils::random::string();
+    utils::temp::Env s3_endpoint_env("AWS_ENDPOINT_URL_S3", s3_endpoint);
+    utils::temp::Env global_endpoint_env("AWS_ENDPOINT_URL", global_endpoint);
+
+    EXPECT_EQ(resolved_endpoint(Credentials()), s3_endpoint);
+}
+
+TEST_F(S3WrapperEndpointTest, Credentials_Endpoint_Takes_Precedence_Over_S3_Specific)
+{
+    auto credentials_endpoint = utils::random::string();
+    utils::temp::Env s3_endpoint_env("AWS_ENDPOINT_URL_S3", utils::random::string());
+    utils::temp::Env global_endpoint_env("AWS_ENDPOINT_URL", utils::random::string());
+
+    EXPECT_EQ(resolved_endpoint(Credentials(nullptr, nullptr, nullptr, nullptr, credentials_endpoint.c_str())), credentials_endpoint);
+}
+
+TEST_F(S3WrapperEndpointTest, Empty_S3_Specific_Endpoint_Falls_Back_To_Global)
+{
+    // e.g. a k8s manifest templating AWS_ENDPOINT_URL_S3 to "" must not hide a real AWS_ENDPOINT_URL
+    auto global_endpoint = utils::random::string();
+    utils::temp::Env s3_endpoint_env("AWS_ENDPOINT_URL_S3", std::string(""));
+    utils::temp::Env global_endpoint_env("AWS_ENDPOINT_URL", global_endpoint);
+
+    EXPECT_EQ(resolved_endpoint(Credentials()), global_endpoint);
+}
+
+TEST_F(S3WrapperEndpointTest, Override_Disabled_Ignores_S3_Specific_Endpoint)
+{
+    utils::temp::Env s3_endpoint_env("AWS_ENDPOINT_URL_S3", utils::random::string());
+    utils::temp::Env override_flag_env("RUNAI_STREAMER_OVERRIDE_ENDPOINT_URL", false);
+
+    EXPECT_EQ(resolved_endpoint(Credentials()), std::nullopt);
 }
 
 TEST_F(S3WrappertTest, Shutdown_Policy)
