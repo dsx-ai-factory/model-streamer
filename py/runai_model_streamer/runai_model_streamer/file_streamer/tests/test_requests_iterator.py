@@ -7,6 +7,8 @@ import unittest
 import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer.requests_iterator import (
+    _packing_fill,
+    _device_ring_shape,
     FileChunksIterator,
     FilesRequestsIterator,
     FilesRequestsIteratorWithBuffer,
@@ -18,7 +20,12 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     DIRECT_IO_BLOCK,
     _max_pads_per_buffer,
     _ring_sizing,
+    device_ring_sizing,
+    DEFAULT_DEVICE_MEMORY_LIMIT,
+    RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
 )
+from runai_model_streamer.file_streamer.yield_order import YieldOrder
 
 
 class TestRingSizing(unittest.TestCase):
@@ -830,3 +837,275 @@ class TestFilesRequestsIteratorWithBuffer(unittest.TestCase):
         # the zero sized range consumes no buffer, so the range after it starts where it did
         _, _, view = requests_iterator.get_global_file_and_range(request, 0, 2)
         self.assertEqual(len(view), 3)
+
+
+class TestSubmissionsAreIssuedInOrdinalOrder(unittest.TestCase):
+    """YieldOrder parks early responses and hands them over in ordinal order. That cannot stall only
+    because a submission is never issued before an earlier ordinal, so whatever a parked view waits
+    for is already in flight. These tests record that property on the iterators themselves.
+
+    The ordinal is computed by YieldOrder, so the test follows the mapping the parking uses."""
+
+    # Ids disagree with the list order, an empty file sits in the middle, and a limit of 8 splits
+    # files across several requests while the largest range (7) still fits.
+    RANGE_COUNTS = [[3, 3, 3, 3, 3], [4], [], [2, 2, 2], [7, 1, 1, 1, 1, 1, 1]]
+    LIMIT = 8
+
+    def files(self):
+        return [FileChunks.contiguous(100 - position, f"{position}.bin", 0, list(sizes))
+                for position, sizes in enumerate(self.RANGE_COUNTS)]
+
+    def total_ranges(self):
+        return sum(len(sizes) for sizes in self.RANGE_COUNTS)
+
+    def ordinals_of(self, order, request):
+        return [order.ordinal(file_chunks.id, request.global_range_index(file_index, range_index))
+                for file_index, file_chunks in enumerate(request.files)
+                for range_index in range(len(file_chunks.sizes))]
+
+    def test_the_plain_iterator_issues_every_ordinal_once_in_order(self):
+        files = self.files()
+        order = YieldOrder(files)
+        iterator = FilesRequestsIterator(self.LIMIT, files)
+
+        issued = []
+        requests = 0
+        while True:
+            request = iterator.next_request()
+            if request is None:
+                break
+            issued += self.ordinals_of(order, request)
+            requests += 1
+
+        self.assertGreater(requests, 1, "one request would not test the order across submissions")
+        self.assertEqual(issued, list(range(self.total_ranges())))
+
+    def test_the_ring_issues_every_ordinal_once_in_order_while_slots_are_recycled(self):
+        files = self.files()
+        order = YieldOrder(files)
+        ring = FilesRequestsIteratorWithBuffer(self.LIMIT, 2, files)
+
+        issued = []
+        live = []
+        requests = 0
+        while True:
+            if not ring.has_free_buffer():
+                ring.release(live.pop(0))      # oldest first, as a stream that consumes in order does
+            request = ring.next_request()
+            if request is None:
+                break
+            issued += self.ordinals_of(order, request)
+            live.append(request)
+            requests += 1
+
+        self.assertGreater(requests, 2, "the ring has two slots, so recycling needs more requests")
+        self.assertEqual(issued, list(range(self.total_ranges())))
+
+
+GiB = 1 << 30
+
+
+class TestPackingFill(unittest.TestCase):
+    """How full the buffers get. A range cannot span two buffers, so what does not fit is waste."""
+
+    def test_ranges_that_tile_the_buffer_exactly_waste_nothing(self):
+        self.assertEqual(_packing_fill([4, 4, 4, 4], 8), 1.0)
+
+    def test_a_range_that_does_not_fit_leaves_the_rest_of_the_buffer_unused(self):
+        # 5 then 5: the second cannot join the first, so each buffer of 8 holds one. 10 of 16 used.
+        self.assertEqual(_packing_fill([5, 5], 8), 10 / 16)
+
+    def test_a_buffer_the_size_of_one_range_is_still_full(self):
+        # The floor is not automatically bad packing - this is what made the first hypothesis wrong.
+        self.assertEqual(_packing_fill([8, 8, 8], 8), 1.0)
+
+
+class TestDeviceRingShape(unittest.TestCase):
+    """Which buffer size the device ring picks, given a budget it must recycle within."""
+
+    def files(self, *sizes_per_file):
+        return [FileChunks.contiguous(i, f"{i}.bin", 0, list(sizes))
+                for i, sizes in enumerate(sizes_per_file)]
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_it_prefers_the_size_that_packs_best(self):
+        """Ranges of 7 against a budget of 24, which must recycle because the stream is 140.
+
+        The achievable buffers are 24//2 = 12 and 24//3 = 8. Both rings cost the whole 24, so memory
+        cannot choose between them - only packing can:
+
+            12 holds ONE range of 7 and wastes 5   -> 58% full
+             8 holds ONE range of 7 and wastes 1   -> 88% full
+
+        The deepest-first order offers 12 first, so a search that does not actually weigh packing
+        keeps it. That is what this pins."""
+        chunks = self.files([7] * 20)
+        buffer_size, buffers = _device_ring_shape(chunks, 24)
+
+        self.assertEqual(buffer_size, 8,
+                         f"chose a buffer of {buffer_size}; 8 packs to 88% where 12 packs to 58%")
+        self.assertEqual(buffers, 3)
+        self.assertLessEqual(buffer_size * buffers, 24, "the ring is over its budget")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_ring_never_exceeds_its_budget(self):
+        for budget in (20, 24, 31, 64, 100):
+            with self.subTest(budget=budget):
+                chunks = self.files([7] * 40)
+                buffer_size, buffers = _device_ring_shape(chunks, budget)
+                self.assertLessEqual(buffer_size * buffers, budget)
+                self.assertGreaterEqual(buffer_size, 7, "a buffer must hold the largest range")
+
+    @patch.dict(os.environ, {"RUNAI_STREAMER_RING_BUFFERS": "4"}, clear=True)
+    def test_a_set_depth_is_used_as_given(self):
+        """Ranges of 6 against a budget of 24, where the search would answer with TWO buffers.
+
+        Buffers of 12 hold two ranges each and buffers of 6 hold one each, so both pack to 100% and
+        both cost the whole 24. The tie goes to the first candidate, which is the shallow one - so a
+        search that treats the setting as a ceiling answers 2 where 4 was asked for, and says
+        nothing. That is what this pins."""
+        buffer_size, buffers = _device_ring_shape(self.files([6] * 20), 24)
+
+        self.assertEqual(buffers, 4, f"asked for 4 buffers and got {buffers}")
+        self.assertEqual(buffer_size, 6)
+
+    @patch.dict(os.environ, {"RUNAI_STREAMER_RING_BUFFERS": "9"}, clear=True)
+    def test_a_set_depth_still_shrinks_to_what_the_budget_pays_for(self):
+        """A buffer cannot be smaller than the largest range, so a budget of 24 affords three of 7
+        and no more. The setting is honoured as far as it can be, not beyond."""
+        buffer_size, buffers = _device_ring_shape(self.files([7] * 20), 24)
+
+        self.assertEqual(buffers, 3)
+        self.assertGreaterEqual(buffer_size, 7)
+        self.assertLessEqual(buffer_size * buffers, 24)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_stream_the_budget_spans_is_not_packed_at_all(self):
+        """Nothing is recycled there, so waste is unused memory rather than lost read-ahead - and one
+        range must still get one buffer rather than a ring it cannot overlap with."""
+        self.assertEqual(_device_ring_shape(self.files([GiB]), 8 * GiB)[1], 1)
+
+
+class TestDeviceRingSizing(unittest.TestCase):
+    """The budget for a ring in device memory: the configured limit, capped at a fraction of free.
+
+    free_bytes is a parameter, so none of this needs a GPU."""
+
+    def files(self, *sizes_per_file):
+        return [FileChunks.contiguous(i, f"{i}.bin", 0, list(sizes))
+                for i, sizes in enumerate(sizes_per_file)]
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_limit_binds_when_the_device_is_mostly_free(self):
+        # 100 GiB free would allow 50, but the default limit is 4 GiB.
+        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, DEFAULT_DEVICE_MEMORY_LIMIT)
+        self.assertGreaterEqual(buffer_size, GiB)      # never below the largest range
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_fraction_binds_when_little_is_free(self):
+        # 4 GiB free -> 2 GiB budget, which is below the 4 GiB limit.
+        buffer_size, num_buffers = device_ring_sizing(4 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, 2 * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_caller_named_depth_is_used_as_given(self):
+        # The host path honours ring_buffers, so the device path must too - a caller that names a
+        # depth knows something the packing search cannot, and silently ignoring it would make the
+        # same argument mean two different things depending on the destination.
+        asked = 3
+        _, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8), ring_buffers=asked)
+        self.assertEqual(num_buffers, asked)
+
+        # The DEFAULT differs here, which is what makes the assertion above mean something: a test
+        # whose two paths agree would pass with the argument thrown away.
+        _, by_search = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertNotEqual(by_search, asked)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_below_two_largest_ranges_it_falls_back(self):
+        # 3 GiB free -> 1.5 GiB budget, under the 2 GiB floor for a 1 GiB range.
+        self.assertIsNone(device_ring_sizing(3 * GiB, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_exactly_two_largest_ranges_is_enough(self):
+        sizing = device_ring_sizing(4 * GiB, self.files([GiB] * 8))
+        self.assertIsNotNone(sizing)
+        self.assertEqual(sizing[1], 2, "the floor is two buffers, so nothing deeper fits here")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_device_with_nothing_free_falls_back(self):
+        self.assertIsNone(device_ring_sizing(0, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_device_torch_cannot_measure_falls_back(self):
+        """None is what device_free_memory() reports for a device it cannot measure, and it answers
+        here rather than at each call site, so no caller invents its own meaning for unknown."""
+        self.assertIsNone(device_ring_sizing(None, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_limit_does_not_veto_a_ring_the_device_can_afford(self):
+        """A 3 GiB range needs a 6 GiB floor, above the 4 GiB limit - but the device has 100 GiB.
+        The limit is a target, so the data raises it rather than losing the device ring.
+
+        Eight ranges, not three: the ring never exceeds the stream, so a total below the floor would
+        give one buffer however large the budget is, and the depth below would say nothing."""
+        sizing = device_ring_sizing(100 * GiB, self.files([3 * GiB] * 8))
+        self.assertIsNotNone(sizing, "a setting refused a ring the device had room for")
+        buffer_size, num_buffers = sizing
+        self.assertGreaterEqual(buffer_size, 3 * GiB)      # a range cannot span two buffers
+        self.assertGreaterEqual(num_buffers, 2)            # and two is what lets them overlap
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_fraction_still_refuses_what_the_device_cannot_hold(self):
+        """The one thing that can still say no. 20 GiB free allows 10, and two 50 GiB ranges need
+        100 - raising the target past that would hand out memory the device does not have."""
+        self.assertIsNone(device_ring_sizing(20 * GiB, self.files([50 * GiB, GiB])))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: str(2 * GiB)}, clear=True)
+    def test_the_limit_is_configurable(self):
+        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, 2 * GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "1.0"}, clear=True)
+    def test_the_fraction_is_configurable(self):
+        # The whole 3 GiB is now usable, so the 2 GiB floor is met where 0.5 would have refused.
+        self.assertIsNotNone(device_ring_sizing(3 * GiB, self.files([GiB] * 8)))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "1.5"}, clear=True)
+    def test_a_fraction_above_one_is_rejected(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: "-1"}, clear=True)
+    def test_the_hosts_unlimited_mode_is_rejected_rather_than_guessed(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME: "4.5"}, clear=True)
+    def test_a_limit_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME: "half"}, clear=True)
+    def test_a_fraction_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_sizing(100 * GiB, self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_stream_smaller_than_the_budget_gets_fewer_buffers(self):
+        """The floor is on the BUDGET, not the depth. One range has nothing to overlap with, so one
+        buffer is the whole ring - and that still beats the host path, which would copy."""
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB]))[1], 1)
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 2))[1], 2)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_only_the_requested_ranges_decide_the_floor(self):
+        """A caller that asks for small tensors is not charged for a huge one it did not request -
+        SafetensorsStreamer filters before building FileChunks, so the giant range is simply absent."""
+        self.assertIsNone(device_ring_sizing(8 * GiB, self.files([90 * GiB, GiB])))
+        self.assertIsNotNone(device_ring_sizing(8 * GiB, self.files([GiB])))

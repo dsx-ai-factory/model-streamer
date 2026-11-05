@@ -126,16 +126,24 @@ Controls how the CPU Memory buffer to which tensors are read from the file is be
 
 ### RUNAI_STREAMER_RING_BUFFERS
 
-How many buffers `RUNAI_STREAMER_MEMORY_LIMIT` is divided into.
+How many buffers the streamer's memory is divided into.
 
-Each buffer is the limit divided by this number, but never smaller than the largest single tensor,
+The memory divided is `RUNAI_STREAMER_MEMORY_LIMIT` when reading into host memory, and the device
+budget - `RUNAI_STREAMER_DEVICE_MEMORY_LIMIT` capped by `RUNAI_STREAMER_DEVICE_MEMORY_FRACTION` -
+when reading straight into a GPU.
+
+Each buffer is that memory divided by this number, but never smaller than the largest single tensor,
 because a tensor cannot span two buffers. A model with large tensors therefore gets fewer buffers
 than asked for.
 
-The buffer size matters beyond read-ahead. Under the default `owned=True` a yielded tensor is a view
-into its buffer and the whole buffer is handed to the caller, so holding one tensor keeps its whole
-buffer alive - see [Tensor ownership](usage.md#tensor-ownership-owned). More, smaller buffers lower
-peak memory for a caller that retains tensors.
+When this is not set, a device read chooses the number of buffers by how well the tensors fit them,
+and may settle on fewer than the default. When it is set, the number is used as given.
+
+When reading into host memory, the buffer size matters beyond read-ahead. Under the default
+`owned=True` a yielded tensor is a view into its buffer and the whole buffer is handed to the caller,
+so holding one tensor keeps its whole buffer alive - see
+[Tensor ownership](usage.md#tensor-ownership-owned). More, smaller buffers lower peak memory for a
+caller that retains tensors. A device read hands back tensors of their own, so this does not apply.
 
 #### Values accepted
 
@@ -144,6 +152,59 @@ Positive integer value
 #### Default value
 
 `18`
+
+### RUNAI_STREAMER_DEVICE_MEMORY_LIMIT
+
+The device memory the streamer uses for its buffers when it reads straight into a GPU.
+
+This is a target, not a maximum. It is raised to two of the largest tensor when the model needs more,
+because a tensor cannot span two buffers. It is capped in every case at a fraction of the memory the
+target device has free - see `RUNAI_STREAMER_DEVICE_MEMORY_FRACTION`, which is the only setting that
+can refuse. When that cap leaves room for fewer than two of the largest tensor, the streamer reads
+into host memory and copies to the device instead.
+
+Unlike `RUNAI_STREAMER_MEMORY_LIMIT`, this setting has no unlimited or minimum mode.
+
+#### Values accepted
+
+Positive integer value, in bytes
+
+#### Default value
+
+8 GiB
+
+### RUNAI_STREAMER_DEVICE_MEMORY_FRACTION
+
+The share of a device's free memory the streamer may use for the buffers above.
+
+It leaves the rest for the model being loaded.
+
+#### Values accepted
+
+A number greater than `0` and at most `1`
+
+#### Default value
+
+`0.5`
+
+### RUNAI_STREAMER_ORDERED_YIELD
+
+Whether tensors are handed back in file order - by the order of the files given to the streamer, and
+by offset within each file - rather than in the order their reads completed.
+
+On by default. Turning it off yields each tensor as soon as its read finishes.
+
+> [!NOTE]
+> This applies to a single process reading for itself (tensor parallel size 1). It does not yet
+> affect the order under distributed streaming.
+
+#### Values accepted
+
+`0 - OFF`, or any other integer - ON
+
+#### Default value
+
+`1` (ordered)
 
 ### AWS_ENDPOINT_URL
 
