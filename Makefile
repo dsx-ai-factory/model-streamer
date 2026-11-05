@@ -95,3 +95,6 @@ ci-test-integration: ci-install
 	$(MAKE) -C tests all
 	library="$$(python3 -c 'from runai_model_streamer.libstreamer import DEFAULT_STREAMER_LIBRARY; print(DEFAULT_STREAMER_LIBRARY)')" && \
 		$(MAKE) test_strategies PYTHON_STRATEGY_TEST=test-unit-real-installed STREAMER_REAL_LIB="$$library"
+
+# Entry points of the real-GPU tests (make gpu-help)
+include tests/gpu/gpu.mk

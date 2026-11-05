@@ -1,0 +1,313 @@
+name: Nightly GPU tests
+
+on:
+  schedule:
+    - cron: '17 0 */2 * *'   # every second day of the month (1st, 3rd, ... 31st), at 00:17 UTC
+  workflow_dispatch:
+    inputs:
+      matrix:
+        description: Which rows the newest-torch leg runs, see tests/gpu/suites/streaming/matrix.py (the oldest-torch leg always runs core).
+        required: false
+        default: full
+        type: choice
+        options:
+          - core
+          - full
+      seed:
+        description: Seed of the synthetic models (default is the run id).
+        required: false
+        type: string
+      rows:
+        description: Only the rows whose id starts with one of these comma-separated prefixes (default all). A filter that matches no row of the newest-torch leg fails it (a typo); the oldest-torch leg has only the core rows, and passes when none matches.
+        required: false
+        type: string
+      suites:
+        description: The suites to run, comma-separated (tests/gpu/suites/). object_storage also builds the S3 plugin and starts a SeaweedFS service; it runs in the newest-torch leg only (the oldest-torch leg always runs streaming).
+        required: false
+        default: streaming
+        type: string
+      gpus:
+        description: GPUs that the test uses. 2 runs every row (what the nightly runs). 1 runs on one GPU of the runner, and leaves out the distributed rows (they need two ranks), which the log says.
+        required: false
+        default: '2'
+        type: choice
+        options:
+          - '2'
+          - '1'
+
+permissions:
+  contents: read
+  packages: read
+  actions: read
+
+concurrency:
+  group: nightly-gpu-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Decides whether the run ends with the self-check. Every run runs the GPU tests, scheduled or manual.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      self_check: ${{ steps.decide.outputs.self_check }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide whether the test harness changed since the last scheduled run
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          # self_check: whether the run ends with the self-check of the test's own checks (faults injected on purpose, see
+          # tests/gpu/tests_entrypoint.sh). It runs on every manual run, and on a scheduled run when the test harness changed.
+          if [ "$EVENT" != schedule ]; then
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(gh run list --workflow nightly-gpu.yaml --event schedule --status success --limit 1 \
+                   --json headSha --jq '.[0].headSha // ""')
+          echo "last successful scheduled run: ${last:-none}; now: $GITHUB_SHA"
+          # No earlier run, or its commit is gone (a force push): with the self-check.
+          if [ -z "$last" ] || ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The code that the self-check exercises: the test of the streaming suite, what it checks with (the bytes and CRC32
+          # of a tensor, the shapes, the drills, the rows, the generator), and what runs it (the harness).
+          harness=$(git diff --name-only "$last" "$GITHUB_SHA" -- tests/gpu/suites/streaming/test_synthetic_models.py \
+                      tests/gpu/suites/streaming/drills.py tests/gpu/suites/streaming/gen_models.py \
+                      tests/gpu/suites/streaming/matrix.py tests/gpu/suites/streaming/real_model.py \
+                      tests/gpu/suites/streaming/suite.sh tests/gpu/harness/gpu_harness tests/gpu/harness/common.sh \
+                      tests/gpu/harness/suites.sh tests/gpu/tests_entrypoint.sh tests/gpu/run.sh tests/gpu/compose.yaml \
+                      .github/workflows/nightly-gpu.yaml)
+          if [ -n "$harness" ]; then
+            echo "the test harness changed since $last, so the self-check runs:"; echo "$harness"
+            echo "self_check=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_check=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The wheel of the streamer, built from the commit under test in the repository's development image, on a CPU runner.
+  # The GPU jobs install it into a clean CUDA container, the way a user installs the package.
+  build-wheel:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ARCH: x86_64
+      COMPONENT: streamer
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # An image reference has to be lowercase, and github.repository keeps the case of the owner and the repository
+      # (the other workflows of the repository lowercase it the same way).
+      - name: Name the development image
+        run: |
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "CI_IMAGE=ghcr.io/${repository}/devcontainer:latest" >> "$GITHUB_ENV"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the development image
+        run: docker pull "$CI_IMAGE"
+
+      - name: Start the build container
+        id: container
+        run: |
+          docker run --detach --rm --init --pull never \
+            --name gpu-wheel-build \
+            --security-opt seccomp=unconfined \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env ARCH --env COMPONENT --env PACKAGE_VERSION="0.0.0+dev.${GITHUB_SHA::7}" \
+            --entrypoint sleep \
+            "$CI_IMAGE" infinity
+
+      - name: Build libstreamer
+        run: docker exec gpu-wheel-build make ci-build-cpp
+
+      - name: Build the wheel
+        run: docker exec gpu-wheel-build make ci-build-python
+
+      # The object_storage suite reads object storage through a plugin of the streamer, a package of its own (COMPONENT=s3).
+      # Only a manual run that asks for that suite builds it: the nightly runs the streaming suite, which does not need it.
+      - name: Build the S3 plugin
+        if: contains(inputs.suites, 'object_storage')
+        run: |
+          docker exec --env COMPONENT=s3 gpu-wheel-build make ci-build-cpp
+          docker exec --env COMPONENT=s3 gpu-wheel-build make ci-build-python
+
+      - name: Stop the build container
+        if: ${{ always() && steps.container.outcome == 'success' }}
+        run: docker stop gpu-wheel-build
+
+      - name: Upload the wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: |
+            py/runai_model_streamer/dist/runai_model_streamer-*.whl
+            py/runai_model_streamer_s3/dist/runai_model_streamer_s3-*.whl
+          if-no-files-found: error
+          # A re-run of all jobs builds the wheel again under the same name. (A re-run of the failed jobs only keeps the
+          # wheel of the first attempt, which is why the name has no attempt number.)
+          overwrite: true
+          retention-days: 7
+
+  # Two legs, each on two T4s in a clean container (nvidia/cuda, the system Python, pip: Ubuntu 24.04 for the newest torch, 22.04 for the oldest): the newest
+  # PyTorch with the whole set of rows, which is what covers the newest dtypes, and the oldest PyTorch that the package
+  # supports (torch>=2.0) with the core rows. The versions in between are not run.
+  gpu-tests:
+    name: GPU tests (${{ matrix.name }})
+    needs: [changes, build-wheel]
+    runs-on:
+      group: nv-gpu-amd64-t4-2gpu
+      labels: linux-amd64-gpu-t4-latest-2
+    # A healthy leg takes 40 minutes (newest) or 8 (oldest). The script (tests/gpu/tests_entrypoint.sh) gives itself a budget of
+    # GPU_BUDGET_MINUTES, which is this timeout less 15 minutes, and cuts every step to what is left of it, so that it
+    # always gets to say which rows ran, whatever the step caps inside it add up to. Raise the two together.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: newest-torch
+            newest: true
+            torch_spec: torch
+            numpy_spec: numpy
+            # Python 3.12: the newest torch needs Python 3.11 or later, which Ubuntu 22.04 does not have
+            image: nvidia/cuda:12.6.3-base-ubuntu24.04
+            rows: full
+            allow_empty_rows: false
+          - name: oldest-torch
+            newest: false
+            torch_spec: torch==2.0.0
+            numpy_spec: numpy<2
+            # Python 3.10: torch 2.0.0 has wheels for Python 3.8 to 3.11 only
+            image: nvidia/cuda:12.4.1-base-ubuntu22.04
+            rows: core
+            # it has only the core rows: a filter that matches none of them leaves it nothing to run, and is not a typo
+            allow_empty_rows: true
+    env:
+      GPU_BUDGET_MINUTES: 285
+      GPU_TEST_IMAGE: ${{ matrix.image }}
+      # The compose project of the run (tests/gpu/run.sh --project), so that the last step can remove its containers: a
+      # cancelled or timed-out job kills the docker client, not the container, and a container that goes on holds both GPUs.
+      GPU_PROJECT: gpu-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check runner GPUs
+        run: nvidia-smi
+
+      # Outside the checkout, and mounted read-only at /wheel in the container (tests/gpu/run.sh --wheel-dir). The artifact
+      # has the wheel of the streamer, and the one of the S3 plugin when the run asked for the object_storage suite.
+      - name: Download the wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: ${{ runner.temp }}/wheel
+
+      - name: Pull the CUDA image
+        run: docker pull "$GPU_TEST_IMAGE"
+
+      # tests/gpu/run.sh runs the container through docker compose (the environment of tests/gpu/compose.yaml, and the services
+      # of the suites). The plugin is part of recent docker installs; a runner that has none, or one older than 2.20 (which
+      # compose.yaml needs: depends_on with required: false), gets a pinned release, with its checksum.
+      - name: Check docker compose
+        run: |
+          required=2.20.0
+          have=$(docker compose version --short 2>/dev/null | tr -d 'v' || true)
+          if [ -n "$have" ] && [ "$(printf '%s\n%s\n' "$required" "$have" | sort -V | head -n 1)" = "$required" ]; then
+            echo "docker compose $have"
+            exit 0
+          fi
+          echo "docker compose '${have:-none}' is not at least $required: installing the pinned release"
+          version=v2.36.2
+          sha256=9040bd35b2cc0783ce6c5de491de7e52e24d4137dbfc5de8a524f718fc23556c
+          mkdir -p "$HOME/.docker/cli-plugins"
+          curl -fsSL -o "$HOME/.docker/cli-plugins/docker-compose" \
+            "https://github.com/docker/compose/releases/download/${version}/docker-compose-linux-x86_64"
+          echo "${sha256}  $HOME/.docker/cli-plugins/docker-compose" | sha256sum -c -
+          chmod +x "$HOME/.docker/cli-plugins/docker-compose"
+          docker compose version
+
+      - name: Run the suites on the GPUs
+        env:
+          GPU_SEED: ${{ inputs.seed || github.run_id }}
+          # The suites of the run: a manual run may ask for more, and only the newest-torch leg runs them (the oldest-torch
+          # leg is about the torch of the streaming suite).
+          SUITES: ${{ matrix.newest && (inputs.suites || 'streaming') || 'streaming' }}
+          MATRIX: ${{ matrix.newest && (inputs.matrix || matrix.rows) || matrix.rows }}
+          ROWS: ${{ inputs.rows }}
+          SELF_CHECK: ${{ matrix.newest && needs.changes.outputs.self_check || 'false' }}
+          TORCH_SPEC: ${{ matrix.torch_spec }}
+          NUMPY_SPEC: ${{ matrix.numpy_spec }}
+          # Two GPUs unless a manual run asks for one (a scheduled run has no inputs, so it is always two). Always given, so
+          # that a runner with fewer GPUs fails the job instead of running a subset.
+          GPUS: ${{ inputs.gpus || '2' }}
+          # Passed through compose to the container, as they are
+          GPU_EXPECT_NEWEST_TORCH: ${{ matrix.newest }}
+          GPU_ALLOW_EMPTY_ROWS: ${{ matrix.allow_empty_rows }}
+        # bash with pipefail, so that the exit status is the script's and not that of tee. The log is written here, not by
+        # the script: a tee inside the container is killed with the script and can lose its last lines, the verdict.
+        shell: bash
+        run: |
+          mkdir -p test-results/gpu
+          args=(--wheel-dir "$RUNNER_TEMP/wheel" --project "$GPU_PROJECT" --suites "$SUITES" --gpus "$GPUS"
+                --matrix "$MATRIX" --seed "$GPU_SEED" --image "$GPU_TEST_IMAGE" --torch-spec "$TORCH_SPEC"
+                --numpy-spec "$NUMPY_SPEC" --no-chown)
+          if [ -n "$ROWS" ]; then args+=(--rows "$ROWS"); fi
+          if [ "$SELF_CHECK" = true ]; then args+=(--self-check); fi
+          tests/gpu/run.sh "${args[@]}" 2>&1 | tee test-results/gpu/run.log
+
+      - name: Remove the containers of the run if they are still there
+        if: always()
+        run: |
+          docker ps -aq --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker rm -f >/dev/null 2>&1 || true
+          docker network ls -q --filter "label=com.docker.compose.project=$GPU_PROJECT" | xargs -r docker network rm >/dev/null 2>&1 || true
+
+      - name: Show the cases that ran and where the time went
+        if: always()
+        run: |
+          if [ -f test-results/gpu/env-check.txt ]; then
+            if grep -q '^ERROR' test-results/gpu/env-check.txt; then
+              title="The ${{ matrix.name }} leg is not testing the newest torch (fix: the base container). Its tests still ran: look at their results separately"
+            else
+              title="Newest torch check (${{ matrix.name }})"
+            fi
+            { echo "### $title"; echo '```'; cat test-results/gpu/env-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f test-results/gpu/cases-summary.txt ]; then
+            { echo "### Cases that ran (${{ matrix.name }})"; echo '```'; cat test-results/gpu/cases-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Cases that ran (${{ matrix.name }}): none reported, the run ended before it could say (see the log)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f test-results/gpu/timing-summary.txt ]; then
+            { echo "### Where the time went (${{ matrix.name }})"; echo '```'; cat test-results/gpu/timing-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload GPU test logs and timing
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results-${{ matrix.name }}-${{ github.run_attempt }}
+          path: test-results/gpu/
+          if-no-files-found: warn
+          retention-days: 14

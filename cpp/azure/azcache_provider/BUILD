@@ -35,6 +35,7 @@ runai_cc_test(
     data = [":libsimple_file_cache_test.so"],
     deps = [
         ":azcache_provider",
+        "//utils/logging",
     ],
     linkopts = ["-ldl"],
 )

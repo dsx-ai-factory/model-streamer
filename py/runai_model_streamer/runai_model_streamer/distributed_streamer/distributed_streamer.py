@@ -67,6 +67,21 @@ def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
 
+
+def get_backends() -> dict:
+    """Map each device type of the default process group to the backend that serves it.
+
+    dist.get_backend() returns the string given to init_process_group, so a device-prefixed one such as
+    "cuda:nccl,cpu:gloo" never equals "nccl". dist.get_backend_config() (torch 2.0 and later) always
+    uses the "device:backend[,device:backend]" form, whichever form was given.
+    """
+    return dict(entry.split(":", 1) for entry in dist.get_backend_config().split(","))
+
+
+def get_backend_for_device(device: str) -> Optional[str]:
+    """The backend of the default process group that serves device, or None if no backend does."""
+    return get_backends().get(str(device).split(":", 1)[0])
+
 class DistributedStreamer:
     def __init__(self) -> None:
         self.file_streamer = FileStreamer()
@@ -133,9 +148,14 @@ class DistributedStreamer:
 
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
+        backend_name = None
         if self.is_distributed:
-            backend_name = dist.get_backend()
-            if backend_name == "nccl" and device == "cpu":
+            backend_name = get_backend_for_device(device)
+            if backend_name is None:
+                logger.info("[RunAI Streamer][Distributed] Note: Torch distributed has no backend for %s device (%s) - fallback to non distributed streaming", device, dist.get_backend_config())
+                self.is_distributed = False
+            elif backend_name == "nccl" and device == "cpu":
+                # torch 2.0 lists a plain nccl group under cpu as well, but nccl cannot broadcast CPU tensors
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported for CPU device - fallback to non distributed streaming", backend_name)
                 self.is_distributed = False
             elif backend_name == "gloo" and device != "cpu":
@@ -148,10 +168,10 @@ class DistributedStreamer:
                 logger.info("[RunAI Streamer][Distributed] Note: Torch distributed backend %s is not supported by default for distributed streaming - To allow this backend, set RUNAI_STREAMER_DIST to `1`", backend_name)
                 self.is_distributed = False
 
-        cuda_dist = torch.cuda.is_available() and dist.is_initialized() and dist.get_backend() == "nccl"
-        xpu_dist = hasattr(torch, "xpu") and torch.xpu.is_available() and dist.is_initialized() and dist.get_backend() == "xccl"
+        cuda_dist = self.is_distributed and backend_name == "nccl" and torch.cuda.is_available()
+        xpu_dist = self.is_distributed and backend_name == "xccl" and hasattr(torch, "xpu") and torch.xpu.is_available()
         # check if there is enough free memory on the device
-        if self.is_distributed and (cuda_dist or xpu_dist):
+        if cuda_dist or xpu_dist:
             free_memory = self.get_cuda_free_memory() if cuda_dist else self.get_xpu_free_memory()
             if free_memory < 2 * self.params.max_chunk:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {2 * self.params.max_chunk} bytes")
