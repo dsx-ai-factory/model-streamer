@@ -100,6 +100,47 @@ class TestBuildS3Client(unittest.TestCase):
                     if has_session:
                         mock_boto3.client.assert_not_called()
 
+    @patch("runai_model_streamer_s3.files.files._build_client_config")
+    @patch("runai_model_streamer_s3.files.files.boto3")
+    @patch("runai_model_streamer_s3.files.files.get_credentials")
+    def test_explicit_credentials_forwarded_without_session(
+            self, mock_get_credentials, mock_boto3, mock_config):
+        keys = {"aws_access_key_id": "key", "aws_secret_access_key": "secret"}
+        # like the native client: key, secret and token only when both key and secret are set
+        for credentials, expected in (
+                (files.S3Credentials(access_key_id="key", secret_access_key="secret"), keys),
+                (files.S3Credentials(access_key_id="key", secret_access_key="secret", session_token="token"),
+                 {**keys, "aws_session_token": "token"}),
+                (files.S3Credentials(access_key_id="key", secret_access_key="secret", region_name="us-west-2"),
+                 {**keys, "region_name": "us-west-2"}),
+                (files.S3Credentials(region_name="us-west-2"), {"region_name": "us-west-2"}),
+                (files.S3Credentials(access_key_id="key"), {}),
+                (files.S3Credentials(secret_access_key="secret"), {}),
+                (files.S3Credentials(access_key_id="key", session_token="token"), {}),
+                (files.S3Credentials(), {}),
+                (None, {})):
+            with self.subTest(expected=expected):
+                mock_get_credentials.return_value = (None, credentials)
+                mock_boto3.reset_mock()
+                files._build_s3_client(credentials)
+                mock_boto3.client.assert_called_once_with(
+                    "s3", config=mock_config.return_value, endpoint_url=None, **expected)
+
+    @patch("runai_model_streamer_s3.files.files._build_client_config")
+    @patch("runai_model_streamer_s3.files.files.boto3")
+    @patch("runai_model_streamer_s3.files.files.get_credentials")
+    def test_explicit_credentials_not_forwarded_with_session(
+            self, mock_get_credentials, mock_boto3, mock_config):
+        # the session already carries the credentials and region
+        credentials = files.S3Credentials(access_key_id="key", secret_access_key="secret",
+                                          session_token="token", region_name="us-west-2")
+        mock_session = MagicMock()
+        mock_get_credentials.return_value = (mock_session, credentials)
+        files._build_s3_client(credentials)
+        mock_session.client.assert_called_once_with(
+            "s3", config=mock_config.return_value, endpoint_url=None)
+        mock_boto3.client.assert_not_called()
+
     @patch("runai_model_streamer_s3.files.files.boto3")
     @patch("runai_model_streamer_s3.files.files.get_credentials")
     def test_credentials_used_when_unsigned_disabled(self, mock_get_credentials, mock_boto3):
