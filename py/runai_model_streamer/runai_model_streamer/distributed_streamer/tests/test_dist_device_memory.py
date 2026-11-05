@@ -104,6 +104,7 @@ class DistributedJob:
                 patch("torch.distributed.is_initialized", return_value=True), \
                 patch("torch.distributed.get_world_size", return_value=len(self.free_by_rank)), \
                 patch("torch.distributed.get_backend", return_value="nccl"), \
+                patch("torch.distributed.get_backend_config", return_value="cuda:nccl"), \
                 patch("torch.tensor", lambda data, dtype=None, device=None: real_tensor(data, dtype=dtype)), \
                 patch("torch.zeros", lambda *args, **kwargs: real_tensor([0])), \
                 patch("torch.distributed.get_global_rank", return_value=0), \
@@ -137,7 +138,8 @@ class TestOwnFreeMemory(unittest.TestCase):
         with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1"}), \
                 patch("torch.distributed.is_initialized", return_value=True), \
                 patch("torch.distributed.get_world_size", return_value=2), \
-                patch("torch.distributed.get_backend", return_value="nccl"), \
+                patch("torch.distributed.get_backend", return_value="xccl"), \
+                patch("torch.distributed.get_backend_config", return_value="xpu:xccl"), \
                 patch.object(DistributedStreamer, "get_min_device_free_memory") as reduce_free:
             streamer.set_is_distributed(True, "xpu:0")
         self.assertTrue(streamer.is_distributed, "an unmeasurable device must not stop distributing")
@@ -389,6 +391,7 @@ class TestTheXcclBackend(unittest.TestCase):
                 patch("torch.distributed.is_initialized", return_value=True), \
                 patch("torch.distributed.get_world_size", return_value=2), \
                 patch("torch.distributed.get_backend", return_value="xccl"), \
+                patch("torch.distributed.get_backend_config", return_value="xpu:xccl"), \
                 patch.object(DistributedStreamer, "get_min_device_free_memory",
                              return_value=1 << 40) as reduce_free:
             streamer.set_is_distributed(True, device)

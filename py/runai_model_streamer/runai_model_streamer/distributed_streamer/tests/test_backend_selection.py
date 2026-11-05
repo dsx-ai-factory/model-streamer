@@ -13,9 +13,14 @@ import torch.distributed as dist
 from runai_model_streamer.distributed_streamer import distributed_streamer
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DistributedStreamer,
+    dist_device_bytes_required,
     get_backend_for_device,
     get_backends,
 )
+
+MAX_CHUNK = 1000
+# From the function the check itself calls, so the boundary cannot drift from the production one.
+REQUIRED = dist_device_bytes_required(MAX_CHUNK)
 
 
 def init_string(backend: str, config: str, cuda_available: bool = False):
@@ -100,9 +105,13 @@ class TestSetIsDistributed(unittest.TestCase):
               else without_torch_xpu()):
             with patch.dict(os.environ, {"RUNAI_STREAMER_DIST": enable_dist}):
                 with DistributedStreamer() as streamer:
-                    streamer.params.max_chunk = 1000
-                    with patch.object(streamer, "get_cuda_free_memory", return_value=cuda_free_memory), \
-                            patch.object(streamer, "get_xpu_free_memory", return_value=xpu_free_memory):
+                    streamer.params.max_chunk = MAX_CHUNK
+                    # ONE seam for both vendors: the check reads the group minimum through
+                    # get_min_device_free_memory, which also takes the collective these tests
+                    # have no group for.
+                    free = (xpu_free_memory if distributed_streamer.torch.device(device).type == "xpu"
+                            else cuda_free_memory)
+                    with patch.object(streamer, "get_min_device_free_memory", return_value=free):
                         streamer.set_is_distributed(True, device)
                     return streamer.is_distributed
 
@@ -117,16 +126,16 @@ class TestSetIsDistributed(unittest.TestCase):
         for backend, config in [("nccl", "cuda:nccl"), ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
             with self.subTest(backend=backend):
                 self.assertTrue(self.decide(backend, config, "cuda:0"))
-                self.assertFalse(self.decide(backend, config, "cuda:0", cuda_free_memory=1999))
+                self.assertFalse(self.decide(backend, config, "cuda:0", cuda_free_memory=REQUIRED - 1))
 
     def test_torch_without_the_xpu_module_still_decides_for_cuda(self):
         # An nccl group never needs torch.xpu, which older torch does not have.
         for backend, config in [("nccl", "cuda:nccl"), ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
             with self.subTest(backend=backend):
                 self.assertTrue(self.decide(backend, config, "cuda", torch_has_xpu=False))
-                self.assertFalse(self.decide(backend, config, "cuda", cuda_free_memory=1999,
+                self.assertFalse(self.decide(backend, config, "cuda", cuda_free_memory=REQUIRED - 1,
                                              torch_has_xpu=False))
-                self.assertTrue(self.decide(backend, config, "cuda", cuda_free_memory=2000,
+                self.assertTrue(self.decide(backend, config, "cuda", cuda_free_memory=REQUIRED,
                                             torch_has_xpu=False))
 
     def test_auto_mode_does_not_distribute_on_gloo(self):
@@ -154,8 +163,8 @@ class TestSetIsDistributed(unittest.TestCase):
         for backend, config in [("nccl", "cuda:nccl"),
                                 ("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo")]:
             with self.subTest(backend=backend):
-                self.assertFalse(self.decide(backend, config, "cuda", cuda_free_memory=1999))
-                self.assertTrue(self.decide(backend, config, "cuda", cuda_free_memory=2000))
+                self.assertFalse(self.decide(backend, config, "cuda", cuda_free_memory=REQUIRED - 1))
+                self.assertTrue(self.decide(backend, config, "cuda", cuda_free_memory=REQUIRED))
 
     def test_gpu_memory_does_not_limit_streaming_to_a_cpu_device(self):
         self.assertTrue(self.decide("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo", "cpu",
@@ -178,8 +187,8 @@ class TestSetIsDistributed(unittest.TestCase):
     def test_low_xpu_memory_disables_distributed_streaming_to_an_xpu_device(self):
         for backend, config in [("xccl", "xpu:xccl"), ("xpu:xccl,cpu:gloo", "xpu:xccl,cpu:gloo")]:
             with self.subTest(backend=backend):
-                self.assertFalse(self.decide(backend, config, "xpu", xpu_free_memory=1999))
-                self.assertTrue(self.decide(backend, config, "xpu", xpu_free_memory=2000))
+                self.assertFalse(self.decide(backend, config, "xpu", xpu_free_memory=REQUIRED - 1))
+                self.assertTrue(self.decide(backend, config, "xpu", xpu_free_memory=REQUIRED))
 
     def test_disabled_stays_disabled(self):
         self.assertFalse(self.decide("cuda:nccl,cpu:gloo", "cuda:nccl,cpu:gloo", "cuda", enable_dist="0"))

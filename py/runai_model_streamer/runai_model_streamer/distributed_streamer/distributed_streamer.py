@@ -270,7 +270,7 @@ class DistributedStreamer:
         # EVERY RANK TAKES THIS BRANCH OR NONE DOES, which the collectives below need. The ranks of
         # a distributed job run one kind of device under one backend, so both terms are facts about
         # the JOB - there is nothing here for the ranks to agree at runtime.
-        if self.is_distributed and can_measure_device_memory(device) and dist.get_backend() in ("nccl", "xccl"):
+        if self.is_distributed and can_measure_device_memory(device) and backend_name in ("nccl", "xccl"):
             free_memory = self.get_min_device_free_memory(device)
             required = dist_device_bytes_required(self.params.max_chunk)
             if free_memory < required:
