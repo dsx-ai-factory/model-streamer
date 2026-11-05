@@ -363,7 +363,10 @@ To authenticate to GCS, there are multiple configuration options:
    SDK will load credentials from a JSON file at the path specified (eg: service account credentials)
 2. Default Credentials: If you set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable, the google-cloud-cpp
    SDK will read application default credentials from a JSON file at the path specified.
-3. Metadata Server: If neither above environment variables are set, the SDK attempts to fetch an auth token from
+3. gcloud credentials: If neither variable is set, the SDK reads the file written by
+   `gcloud auth application-default login` (`~/.config/gcloud/application_default_credentials.json`
+   on Linux and macOS), if it exists.
+4. Metadata Server: If none of the above is found, the SDK attempts to fetch an auth token from
    the GCP metadata server. This is applicable when running on a GCE, GKE or GAE environment.
 
 See [How Application Default Credentials works](https://cloud.google.com/docs/authentication/application-default-credentials)
