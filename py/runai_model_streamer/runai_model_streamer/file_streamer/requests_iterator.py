@@ -267,6 +267,23 @@ class FilesRequestsIteratorWithBuffer:
 
         return dsts
 
+    def slot_memory_of(self, request: FilesRequest):
+        """The USED prefix of this request's slot, as the slot is made of.
+
+        What a caller broadcasts or copies: the ranges were placed from the slot base, so everything
+        written lies below the end of the last one. Measured from the placement rather than summed
+        from the sizes, because an ALIGNED layout leaves gaps and the sum would then be short.
+
+        The whole slot would also be correct and is simpler, but it sends the unused tail - on a
+        partly filled last slot that is most of it."""
+        base = self._pool.slot(request.buffer_index).address
+        used = 0
+        for file_index, file_chunks in enumerate(request.files):
+            for range_index, size in enumerate(file_chunks.sizes):
+                end = request.range_dsts[request.flat_index(file_index, range_index)] + size - base
+                used = max(used, end)
+        return self._pool.slot(request.buffer_index).memory[:used]
+
     def has_free_buffer(self) -> bool:
         return self._pool.has_free()
 
@@ -732,6 +749,20 @@ def _device_memory_fraction() -> float:
             f"got {value}"
         )
     return value
+
+
+def host_ring_sizing(files_chunks: List[FileChunks],
+                     memory_limit: Optional[int] = None,
+                     ring_buffers: Optional[int] = None) -> Tuple[int, int]:
+    """(buffer_size, num_buffers) the HOST ring would choose for this list.
+
+    The shape without the ring, so a caller that must agree with its peers can compute it from the
+    whole model before any rank allocates. with_memory_mode() reaches the same numbers on its way to
+    building an iterator; this is that arithmetic on its own, not a second copy of it."""
+    if memory_limit is None:
+        configured = os.getenv(RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME)
+        memory_limit = int(configured if configured is not None else DEFAULT_MEMORY_LIMIT_STRING)
+    return _ring_sizing(_get_memory_mode(memory_limit), files_chunks, memory_limit, ring_buffers)
 
 
 def device_ring_sizing(free_bytes: Optional[int],

@@ -26,6 +26,8 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    HOST_SLOTS,
+    _alloc_slot,
 )
 from runai_model_streamer.file_streamer.slot_pool import Slot
 
@@ -38,6 +40,7 @@ from runai_model_streamer.s3_utils.s3_utils import (
 )
 
 import torch
+from collections import deque
 from functools import partial
 from humanize import naturalsize
 
@@ -171,6 +174,8 @@ class FileStreamer:
         # released, so the ring can be dropped once the copies out of it have finished.
         self._clone_stream = None
         self._clone_event = None
+        # Submission ids in issue order; get_slots hands slots over in it.
+        self.submission_order = deque()
 
     def __enter__(self) -> "FileStreamer":
         self.streamer = runai_start()
@@ -291,6 +296,8 @@ class FileStreamer:
             memory_limit: Optional[int] = None,
             owned: bool = True,
             ring_buffers: Optional[int] = None,
+            slot_shape: Optional[Tuple[int, int]] = None,
+            tight_packing: bool = False,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
@@ -302,7 +309,18 @@ class FileStreamer:
 
         memory_limit caps HOST memory, and says nothing about a GPU. A device ring is bounded by a
         fraction of free DEVICE memory, with RUNAI_STREAMER_DEVICE_MEMORY_LIMIT as a target that the
-        largest range can raise - so the ring can exceed that setting, but never the fraction."""
+        largest range can raise - so the ring can exceed that setting, but never the fraction.
+
+        slot_shape is (buffer_size, num_buffers) DICTATED by the caller, in place of sizing the ring
+        from this request list. Distributed streaming needs it: every rank must pack to the same slot
+        size or they lay their ranges out differently, and the sizes derived here differ per rank
+        because they are floored by the largest range in THIS rank's share.
+
+        tight_packing lays ranges out one after another even on a host ring, giving up the congruence
+        a direct read needs. Distributed streaming needs THAT because the layout is a contract
+        between ranks: the padding depends on direct_block, which is PROBED FROM THE MOUNT, so two
+        ranks on different nodes could pad differently and predict different layouts of each other.
+        A device ring is already tight - nothing reads directly into a device."""
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
         #
@@ -360,7 +378,13 @@ class FileStreamer:
         # which it does not depend on: free memory and the range sizes name no mount.
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
-        sizing = device_ring_sizing(free, file_stream_requests, ring_buffers)
+        # slot_shape says what SIZE to use, never WHERE. A device the C++ layer cannot write into
+        # still takes the host ring, and takes the dictated shape there instead - see the host
+        # branch below.
+        sizing = None
+        if support is not None:
+            sizing = (slot_shape if slot_shape is not None
+                      else device_ring_sizing(free, file_stream_requests, ring_buffers))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
@@ -420,14 +444,25 @@ class FileStreamer:
             # tensor.to(device)": .to() RETURNS SELF when the device already matches, so that reading
             # hands the live slot back on any ring whose memory is already on the target.
             self._device = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
-            self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
-                file_stream_requests, memory_limit, direct_block,
-                owned and self.device_str == "cpu", ring_buffers
-            )
+            if slot_shape is not None:
+                buffer_size, num_buffers = slot_shape
+                slots = (SlotMemory(_alloc_slot, direct_io=False, label="CPU",
+                                    new_event=None, current_stream=None)
+                         if tight_packing else HOST_SLOTS)
+                self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                    buffer_size, num_buffers, file_stream_requests, direct_block,
+                    owned=owned and self.device_str == "cpu", slots=slots,
+                )
+            else:
+                self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
+                    file_stream_requests, memory_limit, direct_block,
+                    owned and self.device_str == "cpu", ring_buffers
+                )
         # Built from the request list, which is where the file order is defined.
         self.yield_order = yield_order_for(file_stream_requests)
 
         self.live_requests = {}
+        self.submission_order = deque()
         # Ranges of each live submission not yet HANDED OVER, which is not the same as not yet
         # received once responses are reordered. See the release in get_chunks.
         self.ranges_not_yielded = {}
@@ -487,6 +522,10 @@ class FileStreamer:
             self.live_requests[submission_id] = request
             self.ranges_not_yielded[submission_id] = request.num_ranges
             self.outstanding += request.num_ranges
+            # The order they were ISSUED, which is the order the ranges appear in the file list and
+            # so the order a peer predicting this stream expects its slots in. Responses interleave,
+            # so completion order is not it - see get_slots.
+            self.submission_order.append(submission_id)
 
     # This function iterates over the ready ranges of every live submission, in whatever order the C++
     # layer completes them. The indexes in a response are relative to its own submission and need to be
@@ -634,6 +673,88 @@ class FileStreamer:
         finally:
             self.drain_live_submissions()
 
+    def get_slots(self) -> Iterator:
+        """WHOLE SLOTS instead of ranges, in the order they were submitted.
+
+        The distributed path broadcasts a slot, so it wants the slot, not its contents one at a time.
+        Two differences from get_chunks, and both matter:
+
+        A slot is handed over once every range in it has ARRIVED. get_chunks releases on the last
+        range being HANDED OVER, which is a different and later moment - there is no per range
+        handover here, so the slot is ready as soon as it is full.
+
+        IN SUBMISSION ORDER, never completion order. Submissions interleave, so a later slot can
+        finish first, while a peer predicting this stream expects slot 0 then slot 1. `finished`
+        parks a full slot until its turn comes, the way yield_order parks a range.
+
+        Send an event back - `gen.send(event)` - to say when the slot may be refilled. The slot goes
+        back to the pool on the resume, so the consumer must be done reading it by then: for a device
+        ring that means an event recorded after the broadcast AND after any copy out of the slot.
+        A host ring takes None, because nothing there is enqueued."""
+        if not self.streamer:
+            raise ValueError("Streamer not initialized")
+
+        received: Dict[int, int] = {}
+        finished: Dict[int, Any] = {}
+        # The teardown reads these. __exit__ frees the ring, and the last slot's readers - the
+        # consumer's copies, and on the distributed path an NCCL broadcast - are only ENQUEUED, so
+        # without them the ring is freed while they are still reading it.
+        slot_memory = self.requests_iterator.slots if self.requests_iterator is not None else None
+        if slot_memory is not None and slot_memory.new_event is not None:
+            self._clone_stream = slot_memory.current_stream()
+        try:
+            while self.live_requests:
+                response = runai_response(self.streamer)
+                if response is None:
+                    return    # teardown: no further responses are coming
+                ret, submission_id, _, _, done = response
+                self.outstanding -= 1
+
+                request = self.live_requests.get(submission_id)
+                if request is None:
+                    raise ValueError(f"response for unknown submission {submission_id}")
+
+                if done:
+                    self.reported_done.add(submission_id)
+
+                if ret != SUCCESS_ERROR_CODE:
+                    raise ValueError(
+                        f"Could not receive response from libstreamer due to: {runai_response_str(ret)}"
+                    )
+
+                received[submission_id] = received.get(submission_id, 0) + 1
+                if received[submission_id] == request.num_ranges:
+                    if submission_id not in self.reported_done:
+                        raise ValueError(
+                            f"submission {submission_id} received every range before the library "
+                            f"reported it complete"
+                        )
+                    finished[submission_id] = request
+
+                # Oldest first, stopping at the first that is not full: self.submission_order is the
+                # order they were issued, which is the order a peer predicts.
+                while self.submission_order and self.submission_order[0] in finished:
+                    ready_id = self.submission_order.popleft()
+                    ready_request = finished.pop(ready_id)
+
+                    slot = self.requests_iterator.slot_memory_of(ready_request)
+                    ready_event = yield ready_request, slot
+
+                    # Serves the teardown as well as the pool, exactly as in get_chunks: the newest
+                    # one is after every read of every slot handed over so far.
+                    if ready_event is not None:
+                        self._clone_event = ready_event
+
+                    self.reported_done.discard(ready_id)
+                    del received[ready_id]
+                    self.ranges_not_yielded.pop(ready_id, None)
+                    del self.live_requests[ready_id]
+                    if self.requests_iterator is not None:
+                        self.requests_iterator.release(ready_request, ready_event)
+                        self._submit_while_buffers_free()
+        finally:
+            self.drain_live_submissions()
+
     def drain_live_submissions(self) -> None:
         """Consume the responses still owed by every live submission, however this generator ended.
 
@@ -662,6 +783,7 @@ class FileStreamer:
         if self.live_requests:
             self._clone_event = None
         self.live_requests = {}
+        self.submission_order = deque()
         self.ranges_not_yielded = {}
         self.reported_done = set()
         # A parked payload is a VIEW into a ring slot, so these are not only counters: a stream that
