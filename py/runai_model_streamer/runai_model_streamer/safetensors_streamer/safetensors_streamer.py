@@ -305,6 +305,9 @@ class SafetensorsStreamer:
             # Not under the ordering flag: the ranks have to agree whether or not the yield is
             # ordered. A single process reading for itself needs no agreement, so its order is left
             # exactly as the caller gave it.
+            #
+            # Not a yield order either. Ranks broadcast one batch each per round, so the tensors a
+            # caller sees are interleaved by rank whatever this list's order is.
             paths = sorted(paths)
 
         self.files_to_tensors_metadata = {}
