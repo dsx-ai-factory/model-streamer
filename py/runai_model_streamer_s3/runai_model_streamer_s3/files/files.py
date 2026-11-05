@@ -20,12 +20,44 @@ def _build_client_config() -> Optional[Config]:
         config_kwargs["signature_version"] = UNSIGNED
     return Config(**config_kwargs) if config_kwargs else None
 
+def _endpoint_url(credentials: Optional[S3Credentials]) -> Optional[str]:
+    """Return the credentials endpoint in the form boto3 accepts, or None to use the configured or default endpoint.
+
+    An empty endpoint counts as unset. An endpoint without a scheme gets https://, the native client's default.
+    """
+    endpoint = credentials.endpoint if credentials else None
+    if not endpoint:
+        return None
+    if "://" not in endpoint:
+        return f"https://{endpoint}"
+    return endpoint
+
+def _explicit_client_kwargs(credentials: Optional[S3Credentials]) -> dict:
+    """Return the explicit credentials and region for a client created without a boto3 session.
+
+    Like the native client, the access key, secret and token are used only when both the key and the secret are set;
+    otherwise boto3 falls back to its default credential chain.
+    """
+    kwargs = {}
+    if credentials is None:
+        return kwargs
+    if credentials.access_key_id and credentials.secret_access_key:
+        kwargs["aws_access_key_id"] = credentials.access_key_id
+        kwargs["aws_secret_access_key"] = credentials.secret_access_key
+        if credentials.session_token:
+            kwargs["aws_session_token"] = credentials.session_token
+    if credentials.region_name:
+        kwargs["region_name"] = credentials.region_name
+    return kwargs
+
 def _build_s3_client(credentials: Optional[S3Credentials]):
     session, _ = get_credentials(credentials)
     client_config = _build_client_config()
+    endpoint_url = _endpoint_url(credentials)
     if session is None:
-        return boto3.client("s3", config=client_config)
-    return session.client("s3", config=client_config)
+        return boto3.client("s3", config=client_config, endpoint_url=endpoint_url,
+                            **_explicit_client_kwargs(credentials))
+    return session.client("s3", config=client_config, endpoint_url=endpoint_url)
 
 def glob(path: str, allow_pattern: Optional[List[str]] = None, credentials: Optional[S3Credentials] = None) -> List[str]:
     s3 = _build_s3_client(credentials)
