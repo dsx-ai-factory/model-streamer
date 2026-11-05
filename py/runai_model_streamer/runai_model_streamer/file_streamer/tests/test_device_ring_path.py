@@ -32,7 +32,8 @@ class FakeStream:
         self.device = device
 
     def synchronize(self) -> None:
-        """Here only so a test can show it is NOT called: the wait is on an event."""
+        """Called ONCE, when a device ring is built, to wait out whatever the previous owner of its
+        cached blocks had queued. Never per slot - that wait is on an event."""
 
     @classmethod
     def of(cls, device) -> "FakeStream":

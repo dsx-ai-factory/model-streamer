@@ -382,6 +382,12 @@ class FileStreamer:
             )
             # A vendor with no ordinals at all reports None, and 0 is then the only device there is.
             self._device = (support.api_type, 0 if resolved.index is None else resolved.index)
+
+            # These slots may be CACHED blocks whose previous owner still has work queued on this
+            # stream. Torch reuses them relying on stream order, and the C++ layer writes on its own
+            # stream, which that order does not cover. Once is enough: the pool allocates every slot
+            # here, and an unowned pool never allocates again.
+            support.current_stream(str(resolved)).synchronize()
         else:
             if support is not None:
                 # The BUDGET, not free memory: it is the number that refused the ring, and a limit

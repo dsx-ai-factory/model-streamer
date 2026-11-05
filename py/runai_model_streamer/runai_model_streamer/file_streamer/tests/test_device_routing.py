@@ -13,7 +13,11 @@ from runai_model_streamer.file_streamer import file_streamer as file_streamer_mo
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import FileChunks
-from runai_model_streamer.file_streamer.tests.test_device_ring_path import FAKE_STREAM, FakeCudaEvent
+from runai_model_streamer.file_streamer.tests.test_device_ring_path import (
+    FAKE_STREAM,
+    FakeCudaEvent,
+    FakeStream,
+)
 from runai_model_streamer.libstreamer import (
     RUNAI_FILE_STREAMER_DEVICE_CPU,
     RUNAI_FILE_STREAMER_DEVICE_CUDA,
@@ -89,6 +93,33 @@ class TestDeviceRouting(unittest.TestCase):
                          ring._pool._owned)
                 fs.drain_live_submissions()
         return shape
+
+    def test_the_ring_waits_on_the_stream_before_it_submits(self):
+        """A fresh slot can be a cached block whose previous owner still has work queued on this
+        stream. Torch reuses it relying on stream order, and the library writes on its own stream,
+        which that order does not cover - so only this wait keeps a late write off a filled slot.
+
+        ONCE, and before the first address goes out: after that the blocks are the ring's own and
+        nothing else can queue work against them."""
+        order = []
+        real_request = file_streamer_module.runai_request
+
+        def recording_request(streamer, *args, **kwargs):
+            order.append("submit")
+            return real_request(streamer, *args, **kwargs)
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_request", recording_request), \
+                patch.object(FakeStream, "synchronize", lambda _stream: order.append("sync")):
+            with FileStreamer() as fs:
+                fs.stream_files(self.chunks(), None, "cpu")
+                fs.drain_live_submissions()
+
+        self.assertIn("submit", order, "nothing was submitted, so the order proves nothing")
+        self.assertEqual(order.count("sync"), 1,
+                         f"the stream was waited on {order.count('sync')} times, not once")
+        self.assertEqual(order[0], "sync", "an address was submitted before the stream was waited on")
 
     def test_memory_limit_does_not_reach_the_device_ring(self):
         """memory_limit caps HOST memory. A device ring is bounded by the device budget instead, so
