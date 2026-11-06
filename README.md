@@ -120,6 +120,8 @@ Release tags use `X.Y.Z` without a `v` prefix or prerelease suffix. For example,
 record a source branch, so CI checks ancestry against the matching release
 branch. The tagged commit must already contain the release workflow and scripts.
 
+Write the release notes before tagging. Follow [Writing release notes](docs/writing-release-notes.md), land `docs/release-notes/X.Y.Z.md` on the release branch, and after the release is published set the GitHub release body from it with `gh release edit X.Y.Z --notes-file docs/release-notes/X.Y.Z.md`.
+
 Before the first release, configure **Settings → Environments → pypi** with
 required reviewers. Manage the approver list in those settings and disable
 administrator bypass to require approval for every publication. The publishing
