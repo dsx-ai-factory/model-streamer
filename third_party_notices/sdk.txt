@@ -12,20 +12,20 @@ CONTENTS
    3. liburing 2.14 - MIT (dual-licensed LGPL-2.1 OR MIT; the MIT option is used)
    4. libaio 0.3.113 - LGPL-2.1-or-later
    5. NVIDIA CUDA driver API header (cuda.h) 12.8.57 - NVIDIA CUDA header notice
-   6. AWS SDK for C++ (core, s3-crt) 1.11.584 - Apache-2.0
-   7. aws-crt-cpp v0.32.8 - Apache-2.0
-   8. aws-c-auth v0.9.0 - Apache-2.0
-   9. aws-c-cal v0.9.1 - Apache-2.0
-  10. aws-c-common v0.12.3 - Apache-2.0
-  11. aws-c-compression v0.3.1 - Apache-2.0
-  12. aws-c-event-stream v0.5.4 - Apache-2.0
-  13. aws-c-http v0.10.1 - Apache-2.0
-  14. aws-c-io v0.19.1 - Apache-2.0
-  15. aws-c-mqtt v0.13.1 - Apache-2.0
-  16. aws-c-s3 v0.8.0 - Apache-2.0
-  17. aws-c-sdkutils v0.2.4 - Apache-2.0
-  18. aws-checksums v0.2.7 - Apache-2.0
-  19. s2n-tls v1.5.19 - Apache-2.0
+   6. AWS SDK for C++ (core, s3-crt) 1.11.924 - Apache-2.0
+   7. aws-crt-cpp v0.44.2 - Apache-2.0
+   8. aws-c-auth v1.0.0 - Apache-2.0
+   9. aws-c-cal v1.0.0 - Apache-2.0
+  10. aws-c-common v1.0.3 - Apache-2.0
+  11. aws-c-compression v1.0.0 - Apache-2.0
+  12. aws-c-event-stream v1.0.0 - Apache-2.0
+  13. aws-c-http v1.1.0 - Apache-2.0
+  14. aws-c-io v1.1.0 - Apache-2.0
+  15. aws-c-mqtt v1.1.2 - Apache-2.0
+  16. aws-c-s3 v1.3.1 - Apache-2.0
+  17. aws-c-sdkutils v1.0.0 - Apache-2.0
+  18. aws-checksums v1.0.1 - Apache-2.0
+  19. s2n-tls v1.7.11 - Apache-2.0
   20. OpenSSL 3.5.0 - Apache-2.0
   21. curl (libcurl) 8.13.0 - curl
   22. zlib 1.3.1 - Zlib
@@ -1954,7 +1954,7 @@ Note:      Headers from NVIDIA's cuda_cudart 12.8.57 redistributable archive. Co
 ==============================================================================
 [6] AWS SDK for C++ (core, s3-crt)
 ==============================================================================
-Version:   1.11.584
+Version:   1.11.924
 Project:   https://github.com/aws/aws-sdk-cpp
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2050,7 +2050,7 @@ The licenses for these third party components are included in LICENSE.txt
 ==============================================================================
 [7] aws-crt-cpp
 ==============================================================================
-Version:   v0.32.8
+Version:   v0.44.2
 Project:   https://github.com/awslabs/aws-crt-cpp
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2067,7 +2067,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [8] aws-c-auth
 ==============================================================================
-Version:   v0.9.0
+Version:   v1.0.0
 Project:   https://github.com/awslabs/aws-c-auth
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2084,7 +2084,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [9] aws-c-cal
 ==============================================================================
-Version:   v0.9.1
+Version:   v1.0.0
 Project:   https://github.com/awslabs/aws-c-cal
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2276,7 +2276,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [10] aws-c-common
 ==============================================================================
-Version:   v0.12.3
+Version:   v1.0.3
 Project:   https://github.com/awslabs/aws-c-common
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2292,7 +2292,7 @@ Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ==============================================================================
 [11] aws-c-compression
 ==============================================================================
-Version:   v0.3.1
+Version:   v1.0.0
 Project:   https://github.com/awslabs/aws-c-compression
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2309,7 +2309,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [12] aws-c-event-stream
 ==============================================================================
-Version:   v0.5.4
+Version:   v1.0.0
 Project:   https://github.com/awslabs/aws-c-event-stream
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2326,7 +2326,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [13] aws-c-http
 ==============================================================================
-Version:   v0.10.1
+Version:   v1.1.0
 Project:   https://github.com/awslabs/aws-c-http
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2343,7 +2343,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [14] aws-c-io
 ==============================================================================
-Version:   v0.19.1
+Version:   v1.1.0
 Project:   https://github.com/awslabs/aws-c-io
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2362,7 +2362,7 @@ The source/pkcs11/v2.40/pkcs11.h header file is based on Public Domain content f
 ==============================================================================
 [15] aws-c-mqtt
 ==============================================================================
-Version:   v0.13.1
+Version:   v1.1.2
 Project:   https://github.com/awslabs/aws-c-mqtt
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2379,7 +2379,7 @@ SPDX-License-Identifier: Apache-2.0.
 ==============================================================================
 [16] aws-c-s3
 ==============================================================================
-Version:   v0.8.0
+Version:   v1.3.1
 Project:   https://github.com/awslabs/aws-c-s3
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2569,7 +2569,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ==============================================================================
 [17] aws-c-sdkutils
 ==============================================================================
-Version:   v0.2.4
+Version:   v1.0.0
 Project:   https://github.com/awslabs/aws-c-sdkutils
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2759,7 +2759,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 ==============================================================================
 [18] aws-checksums
 ==============================================================================
-Version:   v0.2.7
+Version:   v1.0.1
 Project:   https://github.com/awslabs/aws-checksums
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -2972,7 +2972,7 @@ Used by:   libstreamers3
 ==============================================================================
 [19] s2n-tls
 ==============================================================================
-Version:   v1.5.19
+Version:   v1.7.11
 Project:   https://github.com/aws/s2n-tls
 License:   Apache-2.0
 Copyright: Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
