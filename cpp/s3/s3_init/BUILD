@@ -7,6 +7,7 @@ runai_cc_auto_library(
     name = "s3_init",
     deps = [
         "@aws",
+        "//s3/ca_http_client_factory",
         "//utils/env",
         "//utils/logging",
     ],

@@ -7,6 +7,8 @@
 
 #include "s3/s3_init/s3_init.h"
 
+#include "s3/ca_http_client_factory/ca_http_client_factory.h"
+
 #include "utils/logging/logging.h"
 #include "utils/env/env.h"
 
@@ -22,6 +24,15 @@ S3Init::S3Init()
         // aws trace logs are written to a file
         options.loggingOptions.logLevel = Aws::Utils::Logging::LogLevel::Trace;
     }
+
+    // The SDK creates the HTTP clients for STS, SSO and IMDS itself, without a CA; give them the same CA
+    // the S3 client uses (AWS_CA_BUNDLE, profile ca_bundle), or the system bundle
+    const bool init_curl = options.httpOptions.initAndCleanupCurl;
+    const bool install_sigpipe_handler = options.httpOptions.installSigPipeHandler;
+    options.httpOptions.httpClientFactory_create_fn = [init_curl, install_sigpipe_handler]()
+    {
+        return Aws::MakeShared<CaHttpClientFactory>("RunaiS3Init", init_curl, install_sigpipe_handler);
+    };
 
     Aws::InitAPI(options);
 }
