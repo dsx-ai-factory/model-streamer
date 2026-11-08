@@ -23,3 +23,14 @@ runai_cc_test(
         "//utils/temp/env",
     ],
 )
+
+# Its own binary: the IMDS region is resolved once per process.
+runai_cc_test(
+    name = "client_configuration_imds_test",
+    srcs = ["client_configuration_imds_test.cc"],
+    deps = [
+        ":client_configuration",
+        "//s3/s3_init",
+        "//utils/temp/env",
+    ],
+)

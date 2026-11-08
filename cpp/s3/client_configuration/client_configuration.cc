@@ -5,6 +5,9 @@
 
 #include "s3/client_configuration/client_configuration.h"
 
+#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
+#include <aws/core/platform/Environment.h>
+
 #include <algorithm>
 
 #include "common/backend_api/object_storage/object_storage.h"
@@ -39,8 +42,46 @@ size_t inflight_window_bytes(size_t chunk_bytesize, double target_gbps)
     return result;
 }
 
-ClientConfiguration::ClientConfiguration()
+namespace
 {
+
+// Whether the SDK finds a region without asking IMDS: the same sources, in the same order, as the
+// SDK's ClientConfiguration constructor checks before it falls back to IMDS.
+bool region_configured()
+{
+    return !Aws::Environment::GetEnv("AWS_DEFAULT_REGION").empty() ||
+           !Aws::Environment::GetEnv("AWS_REGION").empty() ||
+           !Aws::Config::GetCachedConfigValue("region").empty();
+}
+
+// The SDK's ClientConfiguration constructor asks IMDS for the region whenever none is configured
+// (unless AWS_EC2_METADATA_DISABLED=true), and every S3 client builds one, so a load asked IMDS once per
+// client. Off AWS each lookup fails and is retried, which costs seconds per load. The environment and
+// the profile are still read for every client; only the IMDS answer is resolved once per process.
+Aws::S3Crt::ClientConfiguration make_sdk_configuration()
+{
+    if (region_configured())
+    {
+        return Aws::S3Crt::ClientConfiguration();
+    }
+
+    // IMDS if it is enabled and answers, otherwise the SDK default (us-east-1)
+    static const Aws::String imds_region = Aws::S3Crt::ClientConfiguration().region;
+
+    Aws::Client::ClientConfigurationInitValues init_values;
+    init_values.shouldDisableIMDS = true;
+    Aws::S3Crt::ClientConfiguration config(init_values);
+    config.region = imds_region;
+    return config;
+}
+
+} // namespace
+
+ClientConfiguration::ClientConfiguration() :
+    config(make_sdk_configuration())
+{
+    LOG(DEBUG) << "S3 client region is " << config.region;
+
     // Undocumented, for benchmarking. The CRT splits a read larger than this into parts and fetches
     // them in parallel, so raising it to the read size REMOVES that parallelism: measured at 5.7x
     // slower on a 1 GiB chunk. Left at the SDK default unless someone is deliberately measuring.
