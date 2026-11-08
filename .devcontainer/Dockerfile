@@ -379,17 +379,13 @@ RUN curl -fsSL -o liburing-2.14.tar.gz https://github.com/axboe/liburing/archive
 #   CFLAGS -I.       libaio has no ./configure, and its sources include <libaio.h> from src/
 #   copy, not make install   its install target also lays down libaio.so and its sonames; we want
 #                            only the archive
-#   the URL     pagure.io was SUNSET in 2026 and is now a static snapshot. Its /archive/<ref>.tar.gz
-#               endpoint generated tarballs on demand, so it needs a running app and now returns 404
-#               for every project - including pagure's own. The git remote and releases.pagure.org
-#               are plain files and still serve, which is why this fetches a published release rather
-#               than a generated archive.
-#   the sha256  so the host stops being load-bearing. This exact tarball is served byte-identically by
-#               releases.pagure.org and by Debian
-#               (deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz), and its
-#               src/ matches the libaio-0.3.113 git tag. If this host disappears too, point the URL
-#               at any mirror - a wrong tarball then fails here instead of shipping.
-RUN curl -fsSL -o libaio-0.3.113.tar.gz https://releases.pagure.org/libaio/libaio-0.3.113.tar.gz && \
+#   the URL     Debian's copy of the release tarball. pagure.io was sunset in 2026 and
+#               releases.pagure.org now returns 404 for this file too.
+#   the sha256  so the host stops being load-bearing. This is the same tarball releases.pagure.org
+#               served, and its src/ matches the libaio-0.3.113 git tag. If this host disappears
+#               too, point the URL at any mirror - a wrong tarball then fails here instead of
+#               shipping.
+RUN curl -fsSL -o libaio-0.3.113.tar.gz https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz && \
     echo "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz" | sha256sum -c - && \
     tar zxf libaio-0.3.113.tar.gz && \
     cd libaio-0.3.113 && \
