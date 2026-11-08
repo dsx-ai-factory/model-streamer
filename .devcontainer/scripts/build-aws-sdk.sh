@@ -29,6 +29,7 @@ cmake -DBUILD_ONLY="s3-crt" \
       -DBUILD_SHARED_LIBS=OFF \
       -DENABLE_TESTING=OFF \
       -DAUTORUN_UNIT_TESTS=OFF \
+      -DUSE_CRT_HTTP_CLIENT=ON \
       -DZLIB_LIBRARY="/opt/${arch}-zlib/lib/libz.a" \
       -DZLIB_INCLUDE_DIR="/opt/${arch}-zlib/include" \
       -Dcrypto_LIBRARY="/opt/${arch}-ssl/lib/libcrypto.a" \
