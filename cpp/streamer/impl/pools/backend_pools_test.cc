@@ -65,6 +65,80 @@ std::unique_ptr<utils::Worker<Workload>> noop_factory()
 }
 } // namespace
 
+// One mount is ONE worker unless asked otherwise - one thread, one ring, one staging pool.
+TEST(BackendPools, OneWorkerPerMountByDefault)
+{
+    utils::temp::UnsetEnv workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+
+    std::atomic<unsigned> built{0};
+    auto counting = [&](dev_t, size_t, unsigned, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        ++built;
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, counting, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 512, true /* register buffers */, Workload{});
+
+    EXPECT_EQ(built.load(), 1u);
+}
+
+// RUNAI_STREAMER_FS_WORKERS_PER_MOUNT gives ONE mount several readers. ThreadPool calls the factory
+// once per thread, so the count of factory calls IS the worker count - and each of those workers
+// owns its own engine, thread and staging pool.
+//
+// Three, not two: two is also what a second mount would produce, so it cannot tell a second worker
+// from a second engine.
+TEST(BackendPools, WorkersPerMountBuildsThatManyWorkersForOneMount)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 3UL);
+
+    std::atomic<unsigned> built{0};
+    auto counting = [&](dev_t, size_t, unsigned, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        ++built;
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, counting, noop_factory, 2, 3);
+
+    // ONE mount, pushed once. Everything built here belongs to it.
+    pools.push_async(makedev(8, 1), 0 /* block */, 512, true /* register buffers */, Workload{});
+
+    EXPECT_EQ(built.load(), 3u) << "one mount must get the configured number of workers";
+}
+
+// The setting is read per ENGINE, not once per process, so a second streamer sees the value it was
+// given rather than the first streamer's. A static would make this test depend on which test ran
+// first, and would hand a long-lived process a stale answer.
+TEST(BackendPools, WorkersPerMountIsReadAgainForEachStreamer)
+{
+    std::atomic<unsigned> first{0};
+    std::atomic<unsigned> second{0};
+    auto counting = [](std::atomic<unsigned> & into)
+    {
+        return [&into](dev_t, size_t, unsigned, bool) -> std::unique_ptr<utils::Worker<Workload>>
+        {
+            ++into;
+            return std::make_unique<NoopWorker>();
+        };
+    };
+
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 2UL);
+        BackendPools pools(run, counting(first), noop_factory, 2, 3);
+        pools.push_async(makedev(8, 1), 0 /* block */, 512, true, Workload{});
+    }
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+        BackendPools pools(run, counting(second), noop_factory, 2, 3);
+        pools.push_async(makedev(8, 1), 0 /* block */, 512, true, Workload{});
+    }
+
+    EXPECT_EQ(first.load(), 2u);
+    EXPECT_EQ(second.load(), 4u) << "the second streamer read a stale value";
+}
+
 // The default is ONE engine per queue depth: the throughput case for splitting is unmeasured, and
 // io_uring itself is off by default for the same reason. So a streamer that reads three mounts at one
 // depth still builds one engine unless someone raises the variable.
