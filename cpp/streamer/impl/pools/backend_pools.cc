@@ -69,9 +69,12 @@ unsigned workers_per_mount()
     // way several processes do - each owns its own engine, and they share the queue.
     //
     // Costs pinned memory per worker, so it is opt in.
-    static const unsigned workers = utils::getenv_positive<unsigned>(
-        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1u, 1u);
-    return workers;
+    //
+    // Read per ENGINE, not once per process. An engine is built once per mount, under the lock this
+    // is called behind, so the lookup is rare - and a static would hand a second streamer in the
+    // same process the first one's answer, which is the same first-wins trap that binding values
+    // into a shared engine already carries.
+    return utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1u, 1u);
 }
 
 } // namespace
