@@ -5,103 +5,103 @@
  },
  "aws-c-auth/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v0.9.0/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v1.0.0/LICENSE"
  },
  "aws-c-auth/NOTICE": {
   "sha256": "f228f9b9f0405035d8bc2dbd9f018533b641136c7110f9e6a34edec7dd52e310",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v0.9.0/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v1.0.0/NOTICE"
  },
  "aws-c-cal/LICENSE": {
   "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v0.9.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v1.0.0/LICENSE"
  },
  "aws-c-cal/NOTICE": {
   "sha256": "06da05ec640017cc2bc80e4856cf14a9002efdd57b1ed4655714bfe5e777d216",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v0.9.1/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v1.0.0/NOTICE"
  },
  "aws-c-common/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v0.12.3/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v1.0.3/LICENSE"
  },
  "aws-c-common/NOTICE": {
   "sha256": "f43576ad8c3330cd2647c8e8dc3572d8bf7dfc47a13d56dbdb8c1abbef900367",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v0.12.3/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v1.0.3/NOTICE"
  },
  "aws-c-compression/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v0.3.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v1.0.0/LICENSE"
  },
  "aws-c-compression/NOTICE": {
   "sha256": "758db6c88293e55e9790adc73e9e58066405c408797afa9d48bef18d308eb49e",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v0.3.1/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v1.0.0/NOTICE"
  },
  "aws-c-event-stream/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v0.5.4/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v1.0.0/LICENSE"
  },
  "aws-c-event-stream/NOTICE": {
   "sha256": "ca6098641e6982418933b0eb3973e56f544e94932f1244cb9352db60321a040f",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v0.5.4/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v1.0.0/NOTICE"
  },
  "aws-c-http/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v0.10.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v1.1.0/LICENSE"
  },
  "aws-c-http/NOTICE": {
   "sha256": "2d1f498ef5ec8f71a7590ad3447688de6f0276434c619b5c4ce6e53c068ea33e",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v0.10.1/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v1.1.0/NOTICE"
  },
  "aws-c-io/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v0.19.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v1.1.0/LICENSE"
  },
  "aws-c-io/NOTICE": {
   "sha256": "f0604df9ed45fb474874f8b363700aa2e493705799ffd6e1362b899aa70653e4",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v0.19.1/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v1.1.0/NOTICE"
  },
  "aws-c-mqtt/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v0.13.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v1.1.2/LICENSE"
  },
  "aws-c-mqtt/NOTICE": {
   "sha256": "09211ec471e551c78cd57aba8344847091f297a6ae389288beb5d55076ab2c76",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v0.13.1/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v1.1.2/NOTICE"
  },
  "aws-c-s3/LICENSE": {
   "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v0.8.0/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v1.3.1/LICENSE"
  },
  "aws-c-s3/NOTICE": {
   "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v0.8.0/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v1.3.1/NOTICE"
  },
  "aws-c-sdkutils/LICENSE": {
   "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v0.2.4/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v1.0.0/LICENSE"
  },
  "aws-c-sdkutils/NOTICE": {
   "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v0.2.4/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v1.0.0/NOTICE"
  },
  "aws-checksums/LICENSE": {
   "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-checksums/v0.2.7/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-checksums/v1.0.1/LICENSE"
  },
  "aws-crt-cpp/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.32.8/LICENSE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.44.2/LICENSE"
  },
  "aws-crt-cpp/NOTICE": {
   "sha256": "90f9b4a63a71d4a70420242c414b2fe24ee809c094c2dbac3b8871a646469293",
-  "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.32.8/NOTICE"
+  "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.44.2/NOTICE"
  },
  "aws-sdk-cpp/LICENSE.txt": {
   "sha256": "d721f7df04e3f82ff104de91a734c4e2ea40e8e4bb2f89dc4d4c7dd6ebbecb40",
-  "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/LICENSE.txt"
+  "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.924/LICENSE.txt"
  },
  "aws-sdk-cpp/NOTICE.txt": {
   "sha256": "8f43c4888a1e14f48c102b3f5556d581d02ea3afc9cbe31a2b714dae9383ef36",
-  "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/NOTICE.txt"
+  "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.924/NOTICE.txt"
  },
  "azure-sdk-for-cpp/LICENSE.txt": {
   "sha256": "9906940f61b1f0b533fa7d99baf55178b2808fbe113ea51dfbfad8572ccd5f2b",
@@ -214,11 +214,11 @@
  },
  "s2n-tls/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.5.19/LICENSE"
+  "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.7.11/LICENSE"
  },
  "s2n-tls/NOTICE": {
   "sha256": "b009d59fea9a0d7fed87b24f6b174a6ac41e1cf94ce77a8160e29997a4c7883c",
-  "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.5.19/NOTICE"
+  "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.7.11/NOTICE"
  },
  "utf8-range/LICENSE": {
   "sha256": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074",

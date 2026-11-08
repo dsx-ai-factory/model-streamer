@@ -115,7 +115,7 @@
   {
    "id": "aws-sdk-cpp",
    "name": "AWS SDK for C++ (core, s3-crt)",
-   "version": "1.11.584",
+   "version": "1.11.924",
    "url": "https://github.com/aws/aws-sdk-cpp",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -126,11 +126,11 @@
    "files": [
     {
      "name": "LICENSE.txt",
-     "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/LICENSE.txt"
+     "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.924/LICENSE.txt"
     },
     {
      "name": "NOTICE.txt",
-     "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.584/NOTICE.txt"
+     "url": "https://raw.githubusercontent.com/aws/aws-sdk-cpp/1.11.924/NOTICE.txt"
     }
    ],
    "note": "aws-cpp-sdk-core bundles TinyXml2 and cJSON; their license texts are in LICENSE.txt below, as the project's NOTICE.txt states."
@@ -138,7 +138,7 @@
   {
    "id": "aws-crt-cpp",
    "name": "aws-crt-cpp",
-   "version": "v0.32.8",
+   "version": "v0.44.2",
    "url": "https://github.com/awslabs/aws-crt-cpp",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -149,18 +149,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.32.8/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.44.2/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.32.8/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-crt-cpp/v0.44.2/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-auth",
    "name": "aws-c-auth",
-   "version": "v0.9.0",
+   "version": "v1.0.0",
    "url": "https://github.com/awslabs/aws-c-auth",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -171,18 +171,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v0.9.0/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v1.0.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v0.9.0/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-auth/v1.0.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-cal",
    "name": "aws-c-cal",
-   "version": "v0.9.1",
+   "version": "v1.0.0",
    "url": "https://github.com/awslabs/aws-c-cal",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -193,18 +193,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v0.9.1/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v1.0.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v0.9.1/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-cal/v1.0.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-common",
    "name": "aws-c-common",
-   "version": "v0.12.3",
+   "version": "v1.0.3",
    "url": "https://github.com/awslabs/aws-c-common",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -215,18 +215,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v0.12.3/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v1.0.3/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v0.12.3/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/v1.0.3/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-compression",
    "name": "aws-c-compression",
-   "version": "v0.3.1",
+   "version": "v1.0.0",
    "url": "https://github.com/awslabs/aws-c-compression",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -237,18 +237,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v0.3.1/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v1.0.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v0.3.1/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-compression/v1.0.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-event-stream",
    "name": "aws-c-event-stream",
-   "version": "v0.5.4",
+   "version": "v1.0.0",
    "url": "https://github.com/awslabs/aws-c-event-stream",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -259,18 +259,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v0.5.4/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v1.0.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v0.5.4/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-event-stream/v1.0.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-http",
    "name": "aws-c-http",
-   "version": "v0.10.1",
+   "version": "v1.1.0",
    "url": "https://github.com/awslabs/aws-c-http",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -281,18 +281,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v0.10.1/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v1.1.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v0.10.1/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/v1.1.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-io",
    "name": "aws-c-io",
-   "version": "v0.19.1",
+   "version": "v1.1.0",
    "url": "https://github.com/awslabs/aws-c-io",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -303,18 +303,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v0.19.1/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v1.1.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v0.19.1/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/v1.1.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-mqtt",
    "name": "aws-c-mqtt",
-   "version": "v0.13.1",
+   "version": "v1.1.2",
    "url": "https://github.com/awslabs/aws-c-mqtt",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -325,18 +325,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v0.13.1/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v1.1.2/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v0.13.1/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-mqtt/v1.1.2/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-s3",
    "name": "aws-c-s3",
-   "version": "v0.8.0",
+   "version": "v1.3.1",
    "url": "https://github.com/awslabs/aws-c-s3",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -347,18 +347,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v0.8.0/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v1.3.1/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v0.8.0/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-s3/v1.3.1/NOTICE"
     }
    ]
   },
   {
    "id": "aws-c-sdkutils",
    "name": "aws-c-sdkutils",
-   "version": "v0.2.4",
+   "version": "v1.0.0",
    "url": "https://github.com/awslabs/aws-c-sdkutils",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -369,18 +369,18 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v0.2.4/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v1.0.0/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v0.2.4/NOTICE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-c-sdkutils/v1.0.0/NOTICE"
     }
    ]
   },
   {
    "id": "aws-checksums",
    "name": "aws-checksums",
-   "version": "v0.2.7",
+   "version": "v1.0.1",
    "url": "https://github.com/awslabs/aws-checksums",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -391,14 +391,14 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/awslabs/aws-checksums/v0.2.7/LICENSE"
+     "url": "https://raw.githubusercontent.com/awslabs/aws-checksums/v1.0.1/LICENSE"
     }
    ]
   },
   {
    "id": "s2n-tls",
    "name": "s2n-tls",
-   "version": "v1.5.19",
+   "version": "v1.7.11",
    "url": "https://github.com/aws/s2n-tls",
    "spdx": "Apache-2.0",
    "copyright": "Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.",
@@ -409,11 +409,11 @@
    "files": [
     {
      "name": "LICENSE",
-     "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.5.19/LICENSE"
+     "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.7.11/LICENSE"
     },
     {
      "name": "NOTICE",
-     "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.5.19/NOTICE"
+     "url": "https://raw.githubusercontent.com/aws/s2n-tls/v1.7.11/NOTICE"
     }
    ]
   },
