@@ -59,6 +59,23 @@ void BackendPools::push(Pool pool, Workload && workload)
     _filesystem_pool->push(std::move(workload));
 }
 
+namespace
+{
+
+unsigned workers_per_mount()
+{
+    // One worker per mount is the default, and it is one thread with one ring. On storage fast
+    // enough to outrun a single thread, several independent workers on the same mount read it the
+    // way several processes do - each owns its own engine, and they share the queue.
+    //
+    // Costs pinned memory per worker, so it is opt in.
+    static const unsigned workers = utils::getenv_positive<unsigned>(
+        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1u, 1u);
+    return workers;
+}
+
+} // namespace
+
 void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool register_buffers, Workload && workload)
 {
     utils::ThreadPool<Workload> * pool = nullptr;
@@ -90,7 +107,7 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                 // The block is bound HERE and never changes for this engine.
                 auto created = std::make_unique<utils::ThreadPool<Workload>>(
                     [factory = _filesystem_async_factory, device, block, depth, register_buffers]()
-                    { return factory(device, block, depth, register_buffers); }, 1);
+                    { return factory(device, block, depth, register_buffers); }, workers_per_mount());
                 pool = created.get();
                 engines.push_back(std::move(created));
 
