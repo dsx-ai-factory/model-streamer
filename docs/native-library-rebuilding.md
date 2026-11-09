@@ -86,12 +86,13 @@ link results from another output directory.
 
 The resulting library is `cpp/bazel-bin/streamer/libstreamer.so`. Retain a linker
 map to check that the archive supplied code, and inspect ELF dependencies to
-confirm it was not linked dynamically:
+confirm it was not linked dynamically. Run this link action locally so Bazel's
+sandbox cannot hide the temporary directory receiving the map:
 
 ```sh
 cd "$STREAMER_SOURCE_DIR/cpp"
 bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
-  --config="$ARCH" --noremote_accept_cached --disk_cache= \
+  --config="$ARCH" --noremote_accept_cached --disk_cache= --strategy=CppLink=local \
   --linkopt="-Wl,-Map=$AIO_REBUILD_DIR/libstreamer.map"
 grep 'libaio.a' "$AIO_REBUILD_DIR/libstreamer.map"
 readelf -d bazel-bin/streamer/libstreamer.so | grep NEEDED
