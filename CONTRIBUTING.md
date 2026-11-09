@@ -279,11 +279,9 @@ under constraints preserving the existing framework environment. It runs
 `pip check`, verifies the candidate package versions, and uploads package lists
 and constraints for diagnosis. Failures block the final required PR check.
 
-This checks declared dependency compatibility only; it does not import the
-framework loaders or validate GPU inference. PR wheel versions are
-`0.0.0+dev.*`, below the frameworks' `runai` extras requirement of `>=0.15.7`,
-so these jobs install the base frameworks and candidate wheels explicitly.
-Release-extra resolution and GPU loader tests remain separate validation work.
+This checks declared dependency compatibility, including each framework's `runai`
+extra resolved against the explicitly supplied candidate wheels. It does not import
+framework loaders, validate native glibc requirements, or run GPU inference.
 Update the exact framework pins in the workflow through reviewed PRs.
 
 To repeat the installation check in an isolated Python environment where the
@@ -292,7 +290,8 @@ chosen framework is already installed, run both commands in that environment:
 ```sh
 make ci-framework-baseline PYTHON=python
 make ci-test-framework-install PYTHON=python \
-  FRAMEWORK_WHEELS=/path/to/downloaded/wheels PACKAGE_VERSION=0.0.0+dev.abc1234
+  FRAMEWORK=vllm==0.33.0 FRAMEWORK_WHEELS=/path/to/downloaded/wheels \
+  PACKAGE_VERSION=0.18.0.dev348+gabc1234
 ```
 
 The baseline command records the existing environment before candidate installation.
@@ -344,7 +343,13 @@ eight wheels under `wheels/`, two complete C++ SDK
 archives under `cpp/`, and `SHA256SUMS`. SDK archives contain the libraries,
 public headers, license, and third-party notices. The bundler checks completeness,
 ELF architectures, matching headers/licenses, and checksums before upload.
-PR versions use `0.0.0+dev.<commit>`; release publication still requires `X.Y.Z`.
+PR versions use `X.Y.Z.dev<PR number>+g<commit>`. Setup selects the highest stable
+`X.Y.Z` tag reachable from the target commit, increments the minor version and
+resets the patch to zero for `master`, or increments the patch within the matching
+`release/X.Y` line. For example, a baseline of `0.17.2` produces
+`0.18.0.dev348+gabc1234` on master and `0.17.3.dev348+gabc1234` on release/0.17.
+Selection fails explicitly if no matching stable tag exists. The commit identifies
+the tested PR merge commit. Release publication still requires `X.Y.Z`.
 Download the bundle for Python wheels and complete C++ SDKs. Bundle assembly
 runs independently of integration tests; require the final **Test, Build & Push**
 check to pass before using a PR build.
@@ -375,7 +380,7 @@ To verify an extracted PR bundle locally, substitute its development version:
 
 ```sh
 python3 .github/scripts/release_bundle.py verify \
-  --version 0.0.0+dev.abc1234 --allow-development-version --bundle release-bundle
+  --version 0.18.0.dev348+gabc1234 --allow-development-version --bundle release-bundle
 ```
 
 ## Getting Help

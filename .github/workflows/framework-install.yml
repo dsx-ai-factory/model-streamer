@@ -51,9 +51,6 @@ jobs:
         path: candidate-wheels
         merge-multiple: true
 
-    # PR wheels use 0.0.0+dev.* and cannot satisfy the frameworks' runai
-    # extras (>=0.15.7). Test base framework dependency coexistence here;
-    # release-extra installation and real GPU loaders need separate gates.
     - name: Install framework in an isolated environment
       run: |
         python -m venv "$RUNNER_TEMP/framework-env"
@@ -65,7 +62,7 @@ jobs:
     - name: Protect the resolved framework environment
       run: make ci-framework-baseline PYTHON=python
 
-    - name: Install all four candidate wheels and check dependencies
+    - name: Install framework runai extra with all four candidate wheels
       run: make ci-test-framework-install PYTHON=python FRAMEWORK_WHEELS=candidate-wheels
 
     - name: Record installed packages

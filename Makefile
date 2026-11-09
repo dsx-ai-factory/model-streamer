@@ -110,7 +110,8 @@ ci-framework-baseline:
 	$(PYTHON) .github/scripts/framework_install.py snapshot --directory "$(FRAMEWORK_STATE_DIR)"
 
 ci-test-framework-install:
+	@test -n "$(FRAMEWORK)" || { echo "FRAMEWORK is required (e.g. vllm==0.33.0)" >&2; exit 1; }
 	@test -n "$(PACKAGE_VERSION)" || { echo "PACKAGE_VERSION is required" >&2; exit 1; }
 	$(PYTHON) .github/scripts/framework_install.py install \
 		--directory "$(FRAMEWORK_STATE_DIR)" --wheel-directory "$(FRAMEWORK_WHEELS)" \
-		--package-version "$(PACKAGE_VERSION)"
+		--package-version "$(PACKAGE_VERSION)" --framework "$(FRAMEWORK)"

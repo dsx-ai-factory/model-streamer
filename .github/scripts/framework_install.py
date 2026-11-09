@@ -47,13 +47,17 @@ def verify(directory, package_version):
             raise ValueError(f"Wrong candidate version: {name}=={actual}")
 
 
-def install(directory, wheel_directory, package_version):
+def install(directory, wheel_directory, package_version, framework):
+    match = re.fullmatch(r"(vllm|sglang)==([0-9]+(?:\.[0-9]+)*(?:[a-z0-9.]*)?)", framework)
+    if not match:
+        raise ValueError("Framework must be an exact vllm==VERSION or sglang==VERSION pin")
+    requirement = f"{match[1]}[runai]=={match[2]}"
     wheels = sorted(wheel_directory.rglob("*.whl"))
     if len(wheels) != len(CANDIDATES):
         raise ValueError(f"Expected four candidate wheels, found {len(wheels)}")
     subprocess.run([
         sys.executable, "-m", "pip", "install", "--constraint",
-        str(directory / "framework-constraints.txt"),
+        str(directory / "framework-constraints.txt"), requirement,
         *(str(wheel) for wheel in wheels),
     ], check=True)
     subprocess.run([sys.executable, "-m", "pip", "check"], check=True)
@@ -69,11 +73,12 @@ def main():
     candidate.add_argument("--directory", type=Path, default=Path("."))
     candidate.add_argument("--wheel-directory", type=Path, required=True)
     candidate.add_argument("--package-version", required=True)
+    candidate.add_argument("--framework", required=True)
     args = parser.parse_args()
     if args.command == "snapshot":
         snapshot(args.directory)
     else:
-        install(args.directory, args.wheel_directory, args.package_version)
+        install(args.directory, args.wheel_directory, args.package_version, args.framework)
 
 
 if __name__ == "__main__":

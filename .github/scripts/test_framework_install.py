@@ -21,7 +21,7 @@ class FrameworkInstallTests(unittest.TestCase):
         self.directory = Path(self.temp.name)
         self.baseline = self.directory / "framework-baseline.json"
         self.baseline.write_text(json.dumps({"torch": "2.14.0"}))
-        self.version = "0.0.0+dev.abc1234"
+        self.version = "0.18.0.dev348+gabc1234"
 
     def test_snapshot_normalizes_names_and_excludes_candidates(self):
         distributions = [
@@ -57,7 +57,7 @@ class FrameworkInstallTests(unittest.TestCase):
     def test_incomplete_wheel_set_is_rejected_before_installation(self):
         with patch.object(check.subprocess, "run") as run:
             with self.assertRaisesRegex(ValueError, "Expected four candidate wheels"):
-                check.install(self.directory, self.directory, self.version)
+                check.install(self.directory, self.directory, self.version, "vllm==0.33.0")
             run.assert_not_called()
 
     def test_pip_failure_stops_verification(self):
@@ -67,8 +67,9 @@ class FrameworkInstallTests(unittest.TestCase):
         with patch.object(check.subprocess, "run", side_effect=failure) as run:
             with patch.object(check, "verify") as verify:
                 with self.assertRaises(subprocess.CalledProcessError):
-                    check.install(self.directory, self.directory, self.version)
+                    check.install(self.directory, self.directory, self.version, "vllm==0.33.0")
                 self.assertIn("--constraint", run.call_args.args[0])
+                self.assertIn("vllm[runai]==0.33.0", run.call_args.args[0])
                 self.assertTrue(run.call_args.kwargs["check"])
                 verify.assert_not_called()
 
