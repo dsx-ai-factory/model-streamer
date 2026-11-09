@@ -1111,45 +1111,17 @@ class TestDeviceRingSizing(unittest.TestCase):
         self.assertIsNotNone(device_ring_sizing(8 * GiB, self.files([GiB])))
 
 
-class TestABufferMustHoldTheLargestRange(unittest.TestCase):
-    """A ring whose buffer cannot hold a range reads that range as NOTHING, and says nothing.
+class TestAnImpossibleBufferTruncatesSilently(unittest.TestCase):
+    """WHY stream_files refuses a dictated shape that cannot hold the largest range.
 
-    next_chunks() can only return an empty slice for it, next_request() then returns None, and the
-    stream ends with those bytes missing - wrong weights, no error. The sizing functions floor the
-    buffer so they never produce one; a caller that DICTATES a shape has no such floor, which is why
-    the check lives in the constructor rather than in them."""
+    The packer carries no guard and never will - stream_files is what refuses an impossible shape
+    before one is ever built. So this drives the packer directly and shows what the refusal
+    prevents: the range is handed over as NOTHING, the stream simply ends, and nothing is raised."""
 
     def requests(self, sizes):
         return [FileChunks.contiguous(0, "/m/a.safetensors", 0, sizes)]
 
-    def test_a_buffer_smaller_than_the_largest_range_is_refused(self):
-        with self.assertRaises(RunaiStreamerMemoryLimitException) as caught:
-            FilesRequestsIteratorWithBuffer(1000, 2, self.requests([800, 5000]), 4096, owned=False)
-        self.assertIn("5000", str(caught.exception), "the message must name the range that does not fit")
-
-    def test_a_buffer_exactly_the_largest_range_is_accepted(self):
-        # The boundary, pinned: 5000 is enough for a 5000-byte range, 4999 is not.
-        FilesRequestsIteratorWithBuffer(5000, 2, self.requests([800, 5000]), 4096, owned=False)
-        with self.assertRaises(RunaiStreamerMemoryLimitException):
-            FilesRequestsIteratorWithBuffer(4999, 2, self.requests([800, 5000]), 4096, owned=False)
-
-    def test_a_ring_needs_a_buffer(self):
-        with self.assertRaises(RunaiStreamerMemoryLimitException):
-            FilesRequestsIteratorWithBuffer(1 << 20, 0, self.requests([800]), 4096, owned=False)
-
-    def test_an_empty_request_list_is_not_refused(self):
-        # No ranges at all - the safetensors header sweeps build rings like this. Pins nothing about
-        # the guard as written, and is here for the shape the guard might grow into: a `largest =
-        # max(...)` would raise on an empty list, and this says that would be wrong.
-        FilesRequestsIteratorWithBuffer(1 << 20, 2, [], 4096, owned=False)
-
-    def test_without_the_guard_the_stream_would_end_with_ranges_unread(self):
-        """WHY the guard exists, asserted rather than described.
-
-        FilesRequestsIterator is the packer and carries no guard of its own - the class above it is
-        what refuses an impossible buffer. So this drives the packer directly and shows the failure
-        the guard prevents: a range larger than the buffer is handed over as NOTHING, the stream
-        simply ends, and no exception is raised anywhere."""
+    def test_a_range_larger_than_the_buffer_ends_the_stream_with_bytes_unread(self):
         packer = FilesRequestsIterator(1000, self.requests([800, 5000, 800]))
 
         handed_over = []

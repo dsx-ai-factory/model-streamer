@@ -26,6 +26,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    _largest_range,
     RunaiStreamerMemoryLimitException,
 )
 from runai_model_streamer.file_streamer.slot_pool import Slot
@@ -382,6 +383,27 @@ class FileStreamer:
         # the switch - an engine asks for this by naming its device, which it has to do anyway, so
         # there is no second setting that could disagree with it. Decided before the probe below,
         # which it does not depend on: free memory and the range sizes name no mount.
+        if slot_shape is not None:
+            # CHECKED HERE, where the untrusted value arrives, rather than inside the ring. Every
+            # other way to a ring goes through a sizing function that FLOORS the buffer at the
+            # largest range; a dictated shape has no such floor, so this is the only path that can
+            # carry a buffer too small to hold one.
+            #
+            # And a buffer that cannot hold a range reads it as NOTHING: next_chunks() can only
+            # return an empty slice for it, next_request() then returns None, and the stream ends
+            # with those bytes missing. Silent wrong weights, not an error.
+            dictated_buffer, dictated_count = slot_shape
+            largest = _largest_range(file_stream_requests)
+            if dictated_buffer < largest:
+                raise RunaiStreamerMemoryLimitException(
+                    f"the ring shape asked for has {dictated_buffer}-byte buffers, which cannot "
+                    f"hold the largest range ({largest} bytes); it would be read as nothing at all"
+                )
+            if dictated_count < 1:
+                raise RunaiStreamerMemoryLimitException(
+                    f"a ring needs at least one buffer, got {dictated_count}"
+                )
+
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
         sizing = None

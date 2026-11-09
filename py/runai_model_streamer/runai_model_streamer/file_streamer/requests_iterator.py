@@ -215,25 +215,6 @@ class FilesRequestsIteratorWithBuffer:
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
         self.direct_block = direct_block
-
-        # A BUFFER HAS TO HOLD THE LARGEST RANGE, or that range is never read and nothing says so:
-        # next_chunks() can only ever return an empty slice for it, next_request() then returns None,
-        # and the stream ENDS with those bytes missing. Silent wrong weights, not an error.
-        #
-        # The sizing functions already guarantee it - _ring_sizing floors the buffer at the largest
-        # range and device_ring_sizing refuses a budget below two of them - so this costs nothing
-        # there. It is for the caller that DICTATES a shape and has no such floor.
-        largest = _largest_range(files_chunks)
-        if buffer_size < largest:
-            raise RunaiStreamerMemoryLimitException(
-                f"a ring buffer of {buffer_size} bytes cannot hold the largest range "
-                f"({largest} bytes); it would be read as nothing at all"
-            )
-        if num_buffers < 1:
-            raise RunaiStreamerMemoryLimitException(
-                f"a ring needs at least one buffer, got {num_buffers}"
-            )
-
         self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks)
         self.buffer_size = buffer_size
         self.num_buffers = num_buffers

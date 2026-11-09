@@ -92,6 +92,44 @@ class TestDictatedSlotShape(unittest.TestCase):
                          (RANGE_SIZE * 2, 7, False))
 
 
+class TestADictatedShapeIsValidated(unittest.TestCase):
+    """stream_files refuses a shape that cannot work, at the boundary where it arrives.
+
+    Every other way to a ring goes through a sizing function that floors the buffer at the largest
+    range. A dictated shape has no floor, so this is the only path that can carry an impossible one -
+    and TestAnImpossibleBufferTruncatesSilently shows what it would do."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("x" * (RANGE_SIZE * RANGES))
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def stream_with(self, slot_shape):
+        chunks = [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+        with patch.object(file_streamer_module, "runai_probe_direct_block_size", return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(chunks, None, "cpu", slot_shape=slot_shape)
+                fs.drain_live_submissions()
+
+    def test_a_buffer_too_small_for_the_largest_range_is_refused(self):
+        with self.assertRaises(RunaiStreamerMemoryLimitException) as caught:
+            self.stream_with((RANGE_SIZE - 1, 4))
+        self.assertIn(str(RANGE_SIZE), str(caught.exception),
+                      "the refusal must name the range that does not fit")
+
+    def test_the_boundary_is_exact(self):
+        # Exactly the largest range is enough; one byte less is not.
+        self.stream_with((RANGE_SIZE, 4))
+        with self.assertRaises(RunaiStreamerMemoryLimitException):
+            self.stream_with((RANGE_SIZE - 1, 4))
+
+    def test_a_ring_needs_a_buffer(self):
+        with self.assertRaises(RunaiStreamerMemoryLimitException):
+            self.stream_with((RANGE_SIZE * 2, 0))
+
+
 class TestADictatedShapeThatDoesNotFit(unittest.TestCase):
     """A shape that will not fit is REFUSED, and the refusal says what was asked for.
 
