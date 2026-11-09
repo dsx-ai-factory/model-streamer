@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: runai-streamer
+Description: Model Streamer C API
+Version: @VERSION@
+Libs: -L${libdir} -lstreamer
+Cflags: -I${includedir}

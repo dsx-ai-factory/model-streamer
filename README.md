@@ -232,12 +232,19 @@ lib/libstreamer.so
 lib/libstreamers3.so
 lib/libstreamergcs.so
 lib/libstreamerazure.so
+lib/pkgconfig/runai-streamer.pc
+lib/cmake/runai-streamer/runai-streamer-config.cmake
+examples/hello_streamer/    File-read example and CMake/pkg-config build instructions
 LICENSE
 THIRD_PARTY_NOTICES.txt    Licenses of the third-party code linked into the libraries
 ```
 
 The archives contain the original build outputs without rebuilding or modifying
-the library and header bytes. They use normalized ordering, permissions,
+the library and header bytes, plus relocatable build-system discovery files and
+the [native example](examples/hello_streamer/README.md). CMake consumers can use
+`find_package(runai-streamer CONFIG REQUIRED)` and link `runai::streamer`;
+other builds can use `pkg-config --cflags --libs runai-streamer`.
+They use normalized ordering, permissions,
 ownership, and timestamps. Wheels remain under `wheels/` in the saved workflow
 bundle; SDK archives are under `cpp/`. Only the wheels are sent to PyPI.
 
