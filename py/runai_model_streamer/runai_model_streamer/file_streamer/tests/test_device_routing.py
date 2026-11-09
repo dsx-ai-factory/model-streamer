@@ -12,7 +12,11 @@ import torch
 from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
-from runai_model_streamer.file_streamer.requests_iterator import FileChunks
+from runai_model_streamer.file_streamer.requests_iterator import (
+    FileChunks,
+    FilesRequestsIteratorWithBuffer,
+    RunaiStreamerMemoryLimitException,
+)
 from runai_model_streamer.file_streamer.tests.test_device_ring_path import (
     FAKE_STREAM,
     FakeCudaEvent,
@@ -26,6 +30,105 @@ from runai_model_streamer.libstreamer import (
 RANGE_SIZE = 8
 RANGES = 12
 WARNS_FROM = "runai_model_streamer.file_streamer.file_streamer"
+
+
+class TestDictatedSlotShape(unittest.TestCase):
+    """stream_files(slot_shape=...) on BOTH branches it reaches.
+
+    Distributed streaming dictates a shape because the size each peer derives is floored by the
+    largest range in its OWN share, so peers derive different sizes and would lay the same ranges
+    out differently. These drive the real stream_files, not the iterator underneath it: the
+    constructor already took an explicit shape before this existed, so a test that called it
+    directly would pass whether or not stream_files honours the argument at all."""
+
+    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
+                            current_stream=FAKE_STREAM)
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("x" * (RANGE_SIZE * RANGES))
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def chunks(self):
+        return [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+
+    def ring_shape(self, supported, slot_shape):
+        """(buffer_size, num_buffers, is_device_ring) of the ring stream_files actually built.
+
+        The third element matters: both branches honour slot_shape, so a device branch that ignored
+        it would fall through to the host one and produce the SAME shape. Only the kind of ring says
+        which branch ran."""
+        # Sizing is made to RAISE: if either branch consults it, the dictated shape is being
+        # ignored and the test fails loudly rather than by comparing numbers that happen to match.
+        def must_not_be_called(*args, **kwargs):
+            raise AssertionError("sizing was consulted although a shape was dictated")
+
+        with patch.object(file_streamer_module, "device_support",
+                          return_value=self.SUPPORT if supported else None), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "device_ring_sizing", must_not_be_called), \
+                patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", must_not_be_called), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size", return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(self.chunks(), None, "cpu", slot_shape=slot_shape)
+                ring = fs.requests_iterator
+                shape = (ring.buffer_size, ring.num_buffers, ring.slots.reuse_needs_event)
+                fs.drain_live_submissions()
+        return shape
+
+    def test_the_device_branch_uses_the_dictated_shape(self):
+        # Deliberately not what sizing would choose for these ranges, and a DEVICE ring: a device
+        # branch that ignored the shape would fall through to the host one and look identical.
+        # The pair is also pinned the right way round here: swap the unpacking and buffer_size
+        # becomes 5, below the largest range, which the constructor refuses outright.
+        self.assertEqual(self.ring_shape(supported=True, slot_shape=(RANGE_SIZE * 3, 5)),
+                         (RANGE_SIZE * 3, 5, True))
+
+    def test_the_host_fallback_uses_the_dictated_shape(self):
+        # A device the C++ layer does not serve still takes the shape, on the host ring.
+        self.assertEqual(self.ring_shape(supported=False, slot_shape=(RANGE_SIZE * 2, 7)),
+                         (RANGE_SIZE * 2, 7, False))
+
+
+class TestADictatedShapeThatDoesNotFit(unittest.TestCase):
+    """A shape that will not fit is REFUSED, and the refusal says what was asked for.
+
+    Not a fallback: a rank that quietly took the host ring instead would lay its ranges out
+    differently from the peers it broadcasts to, which is the failure a dictated shape exists to
+    prevent. So the only question is whether the error is usable."""
+
+    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
+                            current_stream=FAKE_STREAM)
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("x" * (RANGE_SIZE * RANGES))
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def test_the_refusal_names_the_shape_the_device_and_what_was_free(self):
+        chunks = [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+
+        def out_of_memory(*args, **kwargs):
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=7 << 20), \
+                patch.object(file_streamer_module, "device_slots", out_of_memory), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size", return_value=4096):
+            with FileStreamer() as fs:
+                with self.assertRaises(RunaiStreamerMemoryLimitException) as caught:
+                    fs.stream_files(chunks, None, "cpu", slot_shape=(RANGE_SIZE * 2, 4))
+
+        message = str(caught.exception)
+        # The three things the allocator's own message does not say.
+        self.assertIn("4 x", message, "the refusal must name the shape asked for")
+        self.assertIn("7.0 MiB", message, "and what was free")
+        self.assertIn("cpu", message, "and which device")
+        self.assertIsInstance(caught.exception.__cause__, torch.cuda.OutOfMemoryError)
 
 
 class TestDeviceRouting(unittest.TestCase):

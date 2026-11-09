@@ -26,6 +26,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    RunaiStreamerMemoryLimitException,
 )
 from runai_model_streamer.file_streamer.slot_pool import Slot
 
@@ -291,6 +292,7 @@ class FileStreamer:
             memory_limit: Optional[int] = None,
             owned: bool = True,
             ring_buffers: Optional[int] = None,
+            slot_shape: Optional[Tuple[int, int]] = None,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
@@ -302,7 +304,29 @@ class FileStreamer:
 
         memory_limit caps HOST memory, and says nothing about a GPU. A device ring is bounded by a
         fraction of free DEVICE memory, with RUNAI_STREAMER_DEVICE_MEMORY_LIMIT as a target that the
-        largest range can raise - so the ring can exceed that setting, but never the fraction."""
+        largest range can raise - so the ring can exceed that setting, but never the fraction. That
+        bound does NOT apply to a dictated slot_shape: see below.
+
+        slot_shape is (buffer_size, num_buffers) DICTATED by the caller, in place of sizing the ring
+        from this request list. Distributed streaming needs it: the sizes derived here are floored by
+        the largest range in THIS caller's share, so they differ between peers - and peers that pack
+        to different slot sizes lay their ranges out differently.
+
+        It says what SIZE, never WHERE. A device the C++ layer cannot write into still falls back to
+        the host ring, and takes the dictated shape there instead.
+
+        A dictated shape REPLACES the sizing, and with it both of the sizing's safety nets. The
+        free-memory fraction is not consulted, so a device that cannot hold the shape raises an
+        allocation error here rather than quietly using the host ring; and the host memory limit is
+        not consulted either. A caller that dictates has taken both decisions, and a shape that will
+        not fit is REFUSED here rather than quietly falling back to the host ring - a rank that fell
+        back alone would lay its ranges out differently from the peers it broadcasts to.
+
+        (The intended caller is distributed streaming, which will agree a shape from a reading of
+        free memory taken across the group. Nothing implements that yet.)
+
+        What is still checked is the one invariant a ring cannot do without: a buffer must hold the
+        largest range. FilesRequestsIteratorWithBuffer raises if it does not."""
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
         #
@@ -360,7 +384,10 @@ class FileStreamer:
         # which it does not depend on: free memory and the range sizes name no mount.
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
-        sizing = device_ring_sizing(free, file_stream_requests, ring_buffers)
+        sizing = None
+        if support is not None:
+            sizing = (slot_shape if slot_shape is not None
+                      else device_ring_sizing(free, file_stream_requests, ring_buffers))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
@@ -376,10 +403,29 @@ class FileStreamer:
             # all take this one value rather than re-resolving the caller's spelling.
             resolved = torch.empty(0, device=self.device_str).device
 
-            self.requests_iterator = FilesRequestsIteratorWithBuffer(
-                buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
-                slots=device_slots(str(resolved), support.new_event, support.current_stream),
-            )
+            try:
+                self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                    buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
+                    slots=device_slots(str(resolved), support.new_event, support.current_stream),
+                )
+            except torch.cuda.OutOfMemoryError as error:
+                # REFUSE, do not fall back. A dictated shape is an agreement between peers, and a
+                # rank that quietly took the host ring instead would lay its ranges out differently
+                # from everyone it is broadcasting to - the exact failure the shape exists to
+                # prevent. So the stream ends here.
+                #
+                # Named rather than re-raised bare: the allocator's own message says nothing about
+                # the shape, the device or what was free, and this lands after credentials, the
+                # block probe and the device resolution have already run. It also usually means
+                # something GREW on this device since the shape was agreed, because the group takes
+                # the MINIMUM free memory across ranks before deciding - an anomaly worth naming.
+                asked = buffer_size * num_buffers
+                raise RunaiStreamerMemoryLimitException(
+                    f"cannot build the ring this stream asks for on {resolved}: "
+                    f"{num_buffers} x {naturalsize(buffer_size, binary=True)} = "
+                    f"{naturalsize(asked, binary=True)}, with "
+                    f"{naturalsize(free, binary=True) if free is not None else 'unknown'} free"
+                ) from error
             # A vendor with no ordinals at all reports None, and 0 is then the only device there is.
             self._device = (support.api_type, 0 if resolved.index is None else resolved.index)
 
@@ -426,10 +472,21 @@ class FileStreamer:
             # tensor.to(device)": .to() RETURNS SELF when the device already matches, so that reading
             # hands the live slot back on any ring whose memory is already on the target.
             self._device = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
-            self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
-                file_stream_requests, memory_limit, direct_block,
-                owned and self.device_str == "cpu", ring_buffers
-            )
+            hands_over = owned and self.device_str == "cpu"
+            if slot_shape is not None:
+                # The memory limit is not consulted - see the docstring. Note what is ALLOCATED is
+                # larger than what is dictated on this ring: a host slot reserves pad room so a
+                # direct read can land congruently, so each slot costs buffer_size plus up to
+                # RUNAI_STREAMER_MAX_PADS_PER_BUFFER blocks. The device branch above does not, since
+                # nothing reads directly into a device.
+                buffer_size, num_buffers = slot_shape
+                self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                    buffer_size, num_buffers, file_stream_requests, direct_block, owned=hands_over,
+                )
+            else:
+                self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
+                    file_stream_requests, memory_limit, direct_block, hands_over, ring_buffers,
+                )
         # Built from the request list, which is where the file order is defined.
         self.yield_order = yield_order_for(file_stream_requests)
 
