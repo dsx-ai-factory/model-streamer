@@ -1,16 +1,8 @@
-# Proposed Contributor Covenant Code of Conduct
-
-> [!IMPORTANT]
-> **Proposal for repository owner review; not an adopted project policy.**
-> Before merging this proposal, repository owners must confirm that the policy
-> is suitable for Model Streamer, identify who will enforce it, and confirm that
-> the reporting address below accepts and handles reports for this project.
-> The responsibilities and reporting process below are proposed until that
-> confirmation is complete.
+# Contributor Covenant Code of Conduct
 
 ## Overview
 
-This proposal adapts the [nv-rms code of conduct](https://github.com/dsx-ai-factory/nv-rms/blob/main/CODE_OF_CONDUCT.md)
+This Code of Conduct adapts the [nv-rms code of conduct](https://github.com/dsx-ai-factory/nv-rms/blob/main/CODE_OF_CONDUCT.md)
 for Model Streamer.
 
 ### Intended audience
@@ -85,7 +77,7 @@ members of the project's leadership.
 
 ## Attribution
 
-This proposal is adapted from the [nv-rms code of conduct](https://github.com/dsx-ai-factory/nv-rms/blob/main/CODE_OF_CONDUCT.md),
+This Code of Conduct is adapted from the [nv-rms code of conduct](https://github.com/dsx-ai-factory/nv-rms/blob/main/CODE_OF_CONDUCT.md),
 which is adapted from the [Contributor Covenant][homepage], version 1.4,
 available at [Contributor Covenant version 1.4](https://www.contributor-covenant.org/version/1/4/code-of-conduct.html).
 

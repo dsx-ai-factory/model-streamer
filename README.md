@@ -89,9 +89,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution steps, the Developer
 Certificate of Origin, and review requirements. For questions and bug reports,
 use the existing [Getting Help](CONTRIBUTING.md#getting-help) instructions.
 
-The [proposed code of conduct](CODE_OF_CONDUCT.md) adapts the nv-rms policy for
-Model Streamer. It requires repository owner confirmation of its suitability,
-enforcement responsibilities, and reporting contact before adoption.
+The [code of conduct](CODE_OF_CONDUCT.md) adapts the nv-rms policy for
+Model Streamer.
 
 ## Development
 
