@@ -1,0 +1,125 @@
+name: Framework dependency installation
+
+on:
+  workflow_call:
+    inputs:
+      package_version:
+        description: Expected version of all four candidate wheels from this run.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  install:
+    name: Install alongside ${{ matrix.framework }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # Deliberately pinned: update these in reviewed PRs.
+        framework: [vllm==0.33.0, sglang==0.5.23]
+    env:
+      FRAMEWORK: ${{ matrix.framework }}
+      PACKAGE_VERSION: ${{ inputs.package_version }}
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_CACHE_DIR: '1'
+    steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.12'
+
+    - name: Download candidate AMD64 wheels
+      uses: actions/download-artifact@v7
+      with:
+        pattern: ci-packages-*-x86_64
+        path: candidate-wheels
+        merge-multiple: true
+
+    # PR wheels use 0.0.0+dev.* and cannot satisfy the frameworks' runai
+    # extras (>=0.15.7). Test base framework dependency coexistence here;
+    # release-extra installation and real GPU loaders need separate gates.
+    - name: Install framework in an isolated environment
+      run: |
+        python -m venv "$RUNNER_TEMP/framework-env"
+        echo "$RUNNER_TEMP/framework-env/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/framework-env/bin/python" -m pip install 'pip==25.3'
+        "$RUNNER_TEMP/framework-env/bin/python" -m pip install "$FRAMEWORK"
+        "$RUNNER_TEMP/framework-env/bin/python" -m pip check
+
+    - name: Protect the resolved framework environment
+      run: |
+        python - <<'PY'
+        import importlib.metadata as metadata
+        import json
+        import re
+        from pathlib import Path
+
+        def canonical(name):
+            return re.sub(r"[-_.]+", "-", name).lower()
+
+        candidates = {
+            "runai-model-streamer", "runai-model-streamer-s3",
+            "runai-model-streamer-gcs", "runai-model-streamer-azure",
+        }
+        baseline = {
+            canonical(dist.metadata["Name"]): dist.version
+            for dist in metadata.distributions()
+            if canonical(dist.metadata["Name"]) not in candidates
+        }
+        Path("framework-baseline.json").write_text(json.dumps(baseline, indent=2))
+        Path("framework-constraints.txt").write_text(
+            "".join(f"{name}=={version}\n" for name, version in sorted(baseline.items()))
+        )
+        PY
+
+    - name: Install all four candidate wheels and check dependencies
+      run: |
+        mapfile -t wheels < <(find candidate-wheels -type f -name '*.whl' | sort)
+        test "${#wheels[@]}" -eq 4
+        python -m pip install --constraint framework-constraints.txt "${wheels[@]}"
+        python -m pip check
+        python - <<'PY'
+        import importlib.metadata as metadata
+        import json
+        import os
+        from pathlib import Path
+
+        baseline = json.loads(Path("framework-baseline.json").read_text())
+        for name, version in baseline.items():
+            actual = metadata.version(name)
+            if actual != version:
+                raise SystemExit(f"Framework dependency changed: {name}: {version} -> {actual}")
+        for name in (
+            "runai-model-streamer", "runai-model-streamer-s3",
+            "runai-model-streamer-gcs", "runai-model-streamer-azure",
+        ):
+            actual = metadata.version(name)
+            if actual != os.environ["PACKAGE_VERSION"]:
+                raise SystemExit(f"Wrong candidate version: {name}=={actual}")
+        PY
+
+    - name: Record installed packages
+      if: always()
+      run: |
+        python --version > python-version.txt
+        python -m pip freeze --all > installed-packages.txt
+
+    - name: Upload installation diagnostics
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: framework-install-${{ matrix.framework }}
+        path: |
+          framework-baseline.json
+          framework-constraints.txt
+          installed-packages.txt
+          python-version.txt
+        retention-days: 7

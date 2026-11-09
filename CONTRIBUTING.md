@@ -267,6 +267,25 @@ builds only the current architecture. Build the other architecture on its native
 runner. Dependency versions, installation prefixes, and release artifact names
 are unchanged.
 
+### Framework dependency installation checks
+
+PRs that change Python dependency/build declarations, Bazel dependency/toolchain
+configuration, devcontainer inputs, or CI workflows/scripts run
+`framework-install.yml` after the AMD64 component builds. Ordinary source-only
+and documentation-only changes skip this check. It uses Python 3.12 and separate
+environments for pinned vLLM and SGLang releases. Each job installs its framework,
+checks its baseline dependencies, then installs all four wheels from that PR run
+under constraints preserving the existing framework environment. It runs
+`pip check`, verifies the candidate package versions, and uploads package lists
+and constraints for diagnosis. Failures block the final required PR check.
+
+This checks declared dependency compatibility only; it does not import the
+framework loaders or validate GPU inference. PR wheel versions are
+`0.0.0+dev.*`, below the frameworks' `runai` extras requirement of `>=0.15.7`,
+so these jobs install the base frameworks and candidate wheels explicitly.
+Release-extra resolution and GPU loader tests remain separate validation work.
+Update the exact framework pins in the workflow through reviewed PRs.
+
 ### Parallel PR checks
 
 A setup job computes `PACKAGE_VERSION` once. Separate `build_x86` and `build_arm`

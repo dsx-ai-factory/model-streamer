@@ -21,6 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
+      framework_install_changed: ${{ steps.framework_install_changes.outputs.any_modified }}
       devcontainer_changed: ${{ steps.devcontainer_changes.outputs.any_modified }}
       baseline_tag: ${{ steps.image.outputs.baseline_tag }}
       baseline_image: ${{ steps.published_image.outputs.image }}
@@ -30,6 +31,28 @@ jobs:
       with:
         fetch-depth: 0
         persist-credentials: false
+
+    - name: Detect framework installation changes
+      id: framework_install_changes
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96
+      with:
+        files: |
+          py/**/setup.py
+          py/**/pyproject.toml
+          py/**/Makefile
+          py/**/requirements*
+          cpp/WORKSPACE
+          cpp/MODULE.bazel*
+          cpp/.bazelversion
+          cpp/.bazelrc
+          cpp/**/*.bzl
+          .devcontainer/**
+          Makefile
+          requirements*.txt
+          .github/workflows/**
+          .github/scripts/**
+        skip_initial_fetch: true
+        output_renamed_files_as_deleted_and_added: true
 
     - name: Detect devcontainer changes
       id: devcontainer_changes
@@ -234,10 +257,21 @@ jobs:
       retention_days: 7
       allow_development_version: true
 
+  framework-install:
+    name: Framework dependency installation
+    needs: [setup, build_x86]
+    if: >-
+      ${{ !cancelled() && needs.setup.result == 'success' &&
+          needs.build_x86.result == 'success' &&
+          needs.setup.outputs.framework_install_changed == 'true' }}
+    uses: ./.github/workflows/framework-install.yml
+    with:
+      package_version: ${{ needs.setup.outputs.package_version }}
+
   lifecycle-install-tests:
     name: Test, Build & Push
     if: always()
-    needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm, tests, packages]
+    needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm, tests, packages, framework-install]
     runs-on: ubuntu-24.04
     steps:
     - name: Require all builds, tests, and package uploads to succeed
@@ -246,6 +280,8 @@ jobs:
         ARM_RESULT: ${{ needs.build_arm.result }}
         TEST_RESULT: ${{ needs.tests.result }}
         PACKAGES_RESULT: ${{ needs.packages.result }}
+        FRAMEWORK_INSTALL_CHANGED: ${{ needs.setup.outputs.framework_install_changed }}
+        FRAMEWORK_INSTALL_RESULT: ${{ needs.framework-install.result }}
         DEVCONTAINER_CHANGED: ${{ needs.setup.outputs.devcontainer_changed }}
         AMD64_IMAGE_RESULT: ${{ needs.devcontainer_amd64.result }}
         ARM64_IMAGE_RESULT: ${{ needs.devcontainer_arm64.result }}
@@ -254,6 +290,11 @@ jobs:
         test "$ARM_RESULT" = success
         test "$TEST_RESULT" = success
         test "$PACKAGES_RESULT" = success
+        if [[ "$FRAMEWORK_INSTALL_CHANGED" == true ]]; then
+          test "$FRAMEWORK_INSTALL_RESULT" = success
+        else
+          test "$FRAMEWORK_INSTALL_RESULT" = skipped
+        fi
         if [[ "$DEVCONTAINER_CHANGED" == true ]]; then
           test "$AMD64_IMAGE_RESULT" = success
           test "$ARM64_IMAGE_RESULT" = success
