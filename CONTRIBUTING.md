@@ -286,6 +286,20 @@ so these jobs install the base frameworks and candidate wheels explicitly.
 Release-extra resolution and GPU loader tests remain separate validation work.
 Update the exact framework pins in the workflow through reviewed PRs.
 
+To repeat the installation check in an isolated Python environment where the
+chosen framework is already installed, run both commands in that environment:
+
+```sh
+make ci-framework-baseline PYTHON=python
+make ci-test-framework-install PYTHON=python \
+  FRAMEWORK_WHEELS=/path/to/downloaded/wheels PACKAGE_VERSION=0.0.0+dev.abc1234
+```
+
+The baseline command records the existing environment before candidate installation.
+The installation command modifies that environment, checks dependencies, and verifies
+that protected versions stayed unchanged. Both commands accept `FRAMEWORK_STATE_DIR`
+(default: current directory) for the baseline and constraint files.
+
 ### Parallel PR checks
 
 A setup job computes `PACKAGE_VERSION` once. Separate `build_x86` and `build_arm`

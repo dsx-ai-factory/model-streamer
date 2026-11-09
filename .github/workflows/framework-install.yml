@@ -31,10 +31,18 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       PIP_NO_CACHE_DIR: '1'
     steps:
+    - name: Checkout installation scripts
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
     - name: Set up Python
       uses: actions/setup-python@v6
       with:
         python-version: '3.12'
+
+    - name: Test installation helper
+      run: python -B -m unittest discover -s .github/scripts -p test_framework_install.py -v
 
     - name: Download candidate AMD64 wheels
       uses: actions/download-artifact@v7
@@ -55,56 +63,10 @@ jobs:
         "$RUNNER_TEMP/framework-env/bin/python" -m pip check
 
     - name: Protect the resolved framework environment
-      run: |
-        python - <<'PY'
-        import importlib.metadata as metadata
-        import json
-        import re
-        from pathlib import Path
-
-        def canonical(name):
-            return re.sub(r"[-_.]+", "-", name).lower()
-
-        candidates = {
-            "runai-model-streamer", "runai-model-streamer-s3",
-            "runai-model-streamer-gcs", "runai-model-streamer-azure",
-        }
-        baseline = {
-            canonical(dist.metadata["Name"]): dist.version
-            for dist in metadata.distributions()
-            if canonical(dist.metadata["Name"]) not in candidates
-        }
-        Path("framework-baseline.json").write_text(json.dumps(baseline, indent=2))
-        Path("framework-constraints.txt").write_text(
-            "".join(f"{name}=={version}\n" for name, version in sorted(baseline.items()))
-        )
-        PY
+      run: make ci-framework-baseline PYTHON=python
 
     - name: Install all four candidate wheels and check dependencies
-      run: |
-        mapfile -t wheels < <(find candidate-wheels -type f -name '*.whl' | sort)
-        test "${#wheels[@]}" -eq 4
-        python -m pip install --constraint framework-constraints.txt "${wheels[@]}"
-        python -m pip check
-        python - <<'PY'
-        import importlib.metadata as metadata
-        import json
-        import os
-        from pathlib import Path
-
-        baseline = json.loads(Path("framework-baseline.json").read_text())
-        for name, version in baseline.items():
-            actual = metadata.version(name)
-            if actual != version:
-                raise SystemExit(f"Framework dependency changed: {name}: {version} -> {actual}")
-        for name in (
-            "runai-model-streamer", "runai-model-streamer-s3",
-            "runai-model-streamer-gcs", "runai-model-streamer-azure",
-        ):
-            actual = metadata.version(name)
-            if actual != os.environ["PACKAGE_VERSION"]:
-                raise SystemExit(f"Wrong candidate version: {name}=={actual}")
-        PY
+      run: make ci-test-framework-install PYTHON=python FRAMEWORK_WHEELS=candidate-wheels
 
     - name: Record installed packages
       if: always()
