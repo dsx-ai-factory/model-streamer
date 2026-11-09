@@ -33,6 +33,13 @@ The wheel files are symlinks, and each `setup.py` lists `THIRD_PARTY_NOTICES.txt
 `THIRD_PARTY_NOTICES.txt`, and `verify` fails if an archive lacks it or the `LICENSE`.
 The two SDK archives (x86_64 and aarch64) get the same file, the union of the four libraries.
 
+## Dependency source and rebuilding
+
+The files in `licenses/` contain license and notice texts, not complete dependency
+source. See [Native library sources and rebuilding](../docs/native-library-rebuilding.md)
+for obtaining the matching source, rebuilding with modified libaio or liburing,
+and the source-delivery steps required before distributing a release.
+
 ## Regenerating after a change
 
 Run these whenever a dependency version, a build flag or the set of linked libraries changes.

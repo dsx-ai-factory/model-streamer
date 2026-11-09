@@ -288,3 +288,5 @@ Model Streamer is licensed under the [Apache License 2.0](LICENSE).
   - `libstreamer.txt`, `libstreamers3.txt`, `libstreamergcs.txt` and `libstreamerazure.txt`
     are the consolidated notices for each wheel. `sdk.txt` is the notice for the C/C++ SDK archive.
 
+For source delivery and replacing the statically linked I/O libraries, see
+[Native library sources and rebuilding](docs/native-library-rebuilding.md).
