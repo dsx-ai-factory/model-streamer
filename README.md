@@ -1,8 +1,10 @@
 # Model Streamer
 
+[![PyPI version](https://img.shields.io/pypi/v/runai-model-streamer.svg)](https://pypi.org/project/runai-model-streamer/)
 [![Nightly GPU tests](https://img.shields.io/github/actions/workflow/status/dsx-ai-factory/model-streamer/nightly-gpu.yaml?branch=master&event=schedule&label=nightly%20GPU)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster)
 [![Last run](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fdsx-ai-factory%2Fmodel-streamer%2Factions%2Fworkflows%2Fnightly-gpu.yaml%2Fruns%3Fbranch%3Dmaster%26event%3Dschedule%26per_page%3D1&query=%24.workflow_runs%5B0%5D.updated_at&label=last%20run)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster)
 [![Last passed](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fdsx-ai-factory%2Fmodel-streamer%2Factions%2Fworkflows%2Fnightly-gpu.yaml%2Fruns%3Fbranch%3Dmaster%26event%3Dschedule%26status%3Dsuccess%26per_page%3D1&query=%24.workflow_runs%5B0%5D.updated_at&label=last%20passed&color=brightgreen)](https://github.com/dsx-ai-factory/model-streamer/actions/workflows/nightly-gpu.yaml?query=event%3Aschedule+branch%3Amaster+is%3Asuccess)
+
 > [!IMPORTANT]
 > **Repository move and rename notice:** On September 13, 2026, Run:ai Model Streamer was
 > renamed to Model Streamer and the repository moved from the run-ai GitHub organization to
@@ -15,20 +17,57 @@
 
 
 ## Overview
-Model Streamer is a Python SDK designed to facilitate the streaming of tensors from tensors files to GPU memory with concurrency and streaming. It provides an API for loading SafeTensors files and building AI models, allowing loading models seamlessly.
+Model Streamer loads SafeTensors model weights as PyTorch tensors. A C++ streaming
+engine reads data concurrently, and a Python SDK lets applications consume tensors
+as data arrives. Applications can transfer tensors from CPU memory to GPU memory
+while the engine reads more data from storage.
 
-For documentation click [here](docs/README.md)
+It is for ML engineers who load large SafeTensors checkpoints into PyTorch
+applications, including inference services.
 
-For benchmarks click [here](docs/src/benchmarks.md)
+Model Streamer supplies the checkpoint-loading part of a PyTorch application.
+`SafetensorsStreamer` supplies named PyTorch tensors while the native engine
+continues storage reads. With the default CPU destination, the application
+transfers tensors to the selected CUDA or XPU device, as shown below, and uses them for model execution.
+
+## Features
+
+- Stream one SafeTensors file with `stream_file()` or several files with
+  `stream_files()`.
+- Read from local and network file systems, Amazon S3, Google Cloud Storage, or
+  Azure Blob Storage. Object storage requires the matching storage package; see
+  [installation](docs/src/installation.md) for S3 and Azure, and
+  [GCS setup](docs/src/usage.md#streaming-from-google-cloud-storage) for Google Cloud Storage.
+- Select tensors by name and use distributed streaming for multi-process loading;
+  see [usage and requirements](docs/src/usage.md).
+- Control read concurrency and memory limits with the documented
+  [environment variables](docs/src/env-vars.md).
+
+## Architecture
+
+The native engine uses multiple threads to read storage into CPU buffers. The
+Python wrapper exposes the data as named PyTorch tensors. In the usage example
+below, the application copies each tensor to the selected CUDA or XPU device while reads continue.
+
+| Component | Role |
+| --- | --- |
+| [`cpp/streamer`](cpp/streamer) | C++ streaming engine and concurrent reads |
+| [`cpp/s3`](cpp/s3), [`cpp/gcs`](cpp/gcs), [`cpp/azure`](cpp/azure) | Object storage backend clients |
+| [`cpp/streamer/api/streamer`](cpp/streamer/api/streamer) | C API used by the Python wrapper through `ctypes` |
+| [`py/runai_model_streamer`](py/runai_model_streamer) | Python SDK and SafeTensors-to-PyTorch interface |
+
+See the [documentation overview](docs/README.md) for the data flow and supported
+application framework, and [benchmarks](docs/src/benchmarks.md) for measurements
+and their test conditions.
 
 ## Usage
 Install the package
-```
+```bash
 pip install runai-model-streamer
 ```
 
 And stream tensors on available GPU device
-```
+```python
 from runai_model_streamer import SafetensorsStreamer
 import torch
 
@@ -43,6 +82,15 @@ with SafetensorsStreamer() as streamer:
     for name, tensor in streamer.get_tensors():
         gpu_tensor = tensor.to(f'{device}:0')
 ```
+
+## Contributing and support
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution steps, the Developer
+Certificate of Origin, and review requirements. For questions and bug reports,
+use the existing [Getting Help](CONTRIBUTING.md#getting-help) instructions.
+
+The [code of conduct](CODE_OF_CONDUCT.md) adapts the nv-rms policy for
+Model Streamer.
 
 ## Development
 
