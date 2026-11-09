@@ -47,15 +47,18 @@ installation with a production application.
 
 First download and verify the original source. `mktemp` gives each rebuild its
 own directory, and the original archive remains available after modification.
+Run the snippets in the same Bash session. Error exits are enabled below: stop
+and resolve any failure before continuing with another block.
 
 ```sh
+set -euo pipefail
 STREAMER_SOURCE_DIR=$PWD
 AIO_REBUILD_DIR=$(mktemp -d)
 ARCH=$(uname -m)
 cd "$AIO_REBUILD_DIR"
 curl -fsSL --connect-timeout 15 --max-time 60 -o libaio-0.3.113.tar.gz \
-  https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz
-echo "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz" | sha256sum -c -
+  https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz || exit 1
+echo "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz" | sha256sum -c - || exit 1
 tar -xzf libaio-0.3.113.tar.gz
 ```
 
@@ -68,17 +71,27 @@ make -C "$AIO_REBUILD_DIR/libaio-0.3.113/src" -B \
   ENABLE_SHARED=0 CFLAGS="-fPIC -O2 -I."
 cp "$AIO_REBUILD_DIR/libaio-0.3.113/src/libaio.a" "/opt/$ARCH-aio/lib/libaio.a"
 cp "$AIO_REBUILD_DIR/libaio-0.3.113/src/libaio.h" "/opt/$ARCH-aio/include/libaio.h"
-cd "$STREAMER_SOURCE_DIR"
-make -C cpp build_streamer
+STREAMER_BAZEL_OUTPUT=$(mktemp -d)
+cd "$STREAMER_SOURCE_DIR/cpp"
+bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
+  --config="$ARCH" --noremote_accept_cached --disk_cache=
 ```
 
-The resulting library is `cpp/bazel-bin/streamer/libstreamer.so`. Replacing the
-archive triggers relinking; retain a linker map to check that the archive supplied
-code, and inspect ELF dependencies to confirm it was not linked dynamically:
+The archives are passed through linker flags, so Bazel does not track their
+contents as inputs. Replacing an archive alone can leave the old core or test
+binary cached. **Create a new `STREAMER_BAZEL_OUTPUT` after every dependency
+change**, as above, and use it for the subsequent builds and tests. These commands
+also disable remote cache reads and the disk cache to prevent reuse of stale
+link results from another output directory.
+
+The resulting library is `cpp/bazel-bin/streamer/libstreamer.so`. Retain a linker
+map to check that the archive supplied code, and inspect ELF dependencies to
+confirm it was not linked dynamically:
 
 ```sh
 cd "$STREAMER_SOURCE_DIR/cpp"
-bazel build streamer:libstreamer.so --config="$ARCH" \
+bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
+  --config="$ARCH" --noremote_accept_cached --disk_cache= \
   --linkopt="-Wl,-Map=$AIO_REBUILD_DIR/libstreamer.map"
 grep 'libaio.a' "$AIO_REBUILD_DIR/libstreamer.map"
 readelf -d bazel-bin/streamer/libstreamer.so | grep NEEDED
@@ -91,8 +104,10 @@ For the project's native engine tests, run:
 
 ```sh
 cd "$STREAMER_SOURCE_DIR/cpp"
-bazel test //posix_io/libaio_probe:libaio_probe_test \
-  //posix_io/libaio_engine:libaio_engine_test --config="$ARCH" --test_output=errors
+bazel --output_base="$STREAMER_BAZEL_OUTPUT" test \
+  //posix_io/libaio_probe:libaio_probe_test \
+  //posix_io/libaio_engine:libaio_engine_test --config="$ARCH" --test_output=errors \
+  --noremote_accept_cached --disk_cache=
 ```
 
 ## Use the rebuilt library
@@ -103,12 +118,31 @@ The override is read when the package is imported. If you use cloud backends,
 keep their matching plugin libraries beside the rebuilt core library so its
 `$ORIGIN` plugin lookup can find them.
 
-Alternatively, build and install a replacement core wheel from the project root:
+Alternatively, build and install a replacement core wheel. First determine the
+installed version in your **application's Python environment**:
+
+```sh
+python3 -c 'from importlib.metadata import version; print(version("runai-model-streamer"))'
+```
+
+In the build container, set `PACKAGE_VERSION` to that exact version and check
+that you obtained its matching source tag or commit. The core wheel pins its
+cloud extras to this version, so do not replace it with `0.0.0`.
 
 ```sh
 cd "$STREAMER_SOURCE_DIR"
-PACKAGE_VERSION=0.0.0 make -C py/runai_model_streamer build
-# Install the wheel from py/runai_model_streamer/dist/ in your application's environment.
+PACKAGE_VERSION=X.Y.Z  # Replace with the installed version reported above.
+PACKAGE_VERSION="$PACKAGE_VERSION" make -C py/runai_model_streamer build
+```
+
+Back in the application's Python environment, from the project root, install the
+wheel for that version and architecture. Force-reinstall it because the version
+has not changed. `--no-deps` preserves the application's existing dependencies:
+
+```sh
+PACKAGE_VERSION=X.Y.Z  # Use the same installed version.
+python3 -m pip install --force-reinstall --no-deps \
+  py/runai_model_streamer/dist/runai_model_streamer-"$PACKAGE_VERSION"-py3-none-*_"$(uname -m)".whl
 ```
 
 For a native SDK installation, copy the rebuilt library into a separate SDK
@@ -121,19 +155,26 @@ To change liburing too, obtain the complete pinned archive from the I/O build
 script and verify its checksum before editing it. For this revision:
 
 ```sh
+set -euo pipefail
 cd "$AIO_REBUILD_DIR"
 curl -fsSL --connect-timeout 15 --max-time 60 -o liburing-2.14.tar.gz \
-  https://codeload.github.com/axboe/liburing/tar.gz/refs/tags/liburing-2.14
-echo "5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c  liburing-2.14.tar.gz" | sha256sum -c -
+  https://codeload.github.com/axboe/liburing/tar.gz/refs/tags/liburing-2.14 || exit 1
+echo "5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c  liburing-2.14.tar.gz" | sha256sum -c - || exit 1
 tar -xzf liburing-2.14.tar.gz
 cd liburing-liburing-2.14
 # Make your source changes before configuring and compiling.
 ./configure --use-libc --prefix="/opt/$ARCH-uring" --libdir="/opt/$ARCH-uring/lib"
 make -C src -j4 ENABLE_SHARED=0 CFLAGS="-fPIC -O2"
 make install ENABLE_SHARED=0
-cd "$STREAMER_SOURCE_DIR"
-make -C cpp build_streamer
+STREAMER_BAZEL_OUTPUT=$(mktemp -d)
+cd "$STREAMER_SOURCE_DIR/cpp"
+bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
+  --config="$ARCH" --noremote_accept_cached --disk_cache=
 ```
+
+After changing liburing, repeat [Use the rebuilt library](#use-the-rebuilt-library):
+rebuild and force-reinstall the wheel, or replace the native library again.
+Rebuilding the Bazel library does not update an already installed wheel or SDK.
 
 Use `RUNAI_STREAMER_FS_STRATEGY=io_uring_direct` or `io_uring_buffered` when testing
 that path. The host kernel and container security configuration must permit
