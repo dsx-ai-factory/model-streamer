@@ -36,7 +36,8 @@ transfers tensors to the selected CUDA or XPU device, as shown below, and uses t
   `stream_files()`.
 - Read from local and network file systems, Amazon S3, Google Cloud Storage, or
   Azure Blob Storage. Object storage requires the matching storage package; see
-  [installation](docs/src/installation.md).
+  [installation](docs/src/installation.md) for S3 and Azure, and
+  [GCS setup](docs/src/usage.md#streaming-from-google-cloud-storage) for Google Cloud Storage.
 - Select tensors by name and use distributed streaming for multi-process loading;
   see [usage and requirements](docs/src/usage.md).
 - Control read concurrency and memory limits with the documented
