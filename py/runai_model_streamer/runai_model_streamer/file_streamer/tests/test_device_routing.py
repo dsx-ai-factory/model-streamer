@@ -82,7 +82,7 @@ class TestDictatedSlotShape(unittest.TestCase):
         # Deliberately not what sizing would choose for these ranges, and a DEVICE ring: a device
         # branch that ignored the shape would fall through to the host one and look identical.
         # The pair is also pinned the right way round here: swap the unpacking and buffer_size
-        # becomes 5, below the largest range, which the constructor refuses outright.
+        # becomes 5, below the largest range, which stream_files refuses before building a ring.
         self.assertEqual(self.ring_shape(supported=True, slot_shape=(RANGE_SIZE * 3, 5)),
                          (RANGE_SIZE * 3, 5, True))
 
@@ -130,12 +130,15 @@ class TestADictatedShapeIsValidated(unittest.TestCase):
             self.stream_with((RANGE_SIZE * 2, 0))
 
 
-class TestADictatedShapeThatDoesNotFit(unittest.TestCase):
-    """A shape that will not fit is REFUSED, and the refusal says what was asked for.
+class TestARingThatCannotBeAllocated(unittest.TestCase):
+    """What a failed device-ring allocation looks like, which depends on WHO chose the shape.
 
-    Not a fallback: a rank that quietly took the host ring instead would lay its ranges out
-    differently from the peers it broadcasts to, which is the failure a dictated shape exists to
-    prevent. So the only question is whether the error is usable."""
+    A dictated shape is an agreement between peers, so a shape that will not fit is REFUSED and the
+    refusal says what was asked for - a rank that quietly took the host ring instead would lay its
+    ranges out differently from the peers it broadcasts to.
+
+    A shape this layer DERIVED has no agreement to explain, so the allocator's own error travels out
+    untouched."""
 
     SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
                             current_stream=FAKE_STREAM)
@@ -162,11 +165,32 @@ class TestADictatedShapeThatDoesNotFit(unittest.TestCase):
                     fs.stream_files(chunks, None, "cpu", slot_shape=(RANGE_SIZE * 2, 4))
 
         message = str(caught.exception)
-        # The three things the allocator's own message does not say.
+        # The three things the allocator's own message does not say. The device is pinned BY
+        # POSITION - a bare "cpu" would pass on a message that named no device at all, since the
+        # word is this test's own argument. (A distinctive device string would be better still, but
+        # the device is resolved for real through torch, which has no CUDA in this environment.)
         self.assertIn("4 x", message, "the refusal must name the shape asked for")
         self.assertIn("7.0 MiB", message, "and what was free")
-        self.assertIn("cpu", message, "and which device")
+        self.assertIn("on cpu:", message, "and which device it tried to build on, in its own slot")
         self.assertIsInstance(caught.exception.__cause__, torch.cuda.OutOfMemoryError)
+
+    def test_a_derived_shape_keeps_the_allocator_s_own_error(self):
+        """No slot_shape, so nothing was agreed and nothing is explained.
+
+        An engine that catches OutOfMemoryError to retry at a lower memory fraction has to keep
+        catching it - converting this would break a caller that never asked for a dictated shape."""
+        chunks = [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+
+        def out_of_memory(*args, **kwargs):
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory.")
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=7 << 20), \
+                patch.object(file_streamer_module, "device_slots", out_of_memory), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size", return_value=4096):
+            with FileStreamer() as fs:
+                with self.assertRaises(torch.cuda.OutOfMemoryError):
+                    fs.stream_files(chunks, None, "cpu")
 
 
 class TestDeviceRouting(unittest.TestCase):

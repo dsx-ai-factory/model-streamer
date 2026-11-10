@@ -431,6 +431,12 @@ class FileStreamer:
                     slots=device_slots(str(resolved), support.new_event, support.current_stream),
                 )
             except torch.cuda.OutOfMemoryError as error:
+                if slot_shape is None:
+                    # A shape THIS LAYER derived, so there is no agreement to explain and no caller
+                    # to tell what it asked for. Left as the allocator raised it: an engine that
+                    # catches OutOfMemoryError to retry at a lower memory fraction must keep
+                    # catching it.
+                    raise
                 # REFUSE, do not fall back. A dictated shape is an agreement between peers, and a
                 # rank that quietly took the host ring instead would lay its ranges out differently
                 # from everyone it is broadcasting to - the exact failure the shape exists to

@@ -24,6 +24,8 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     DEFAULT_DEVICE_MEMORY_LIMIT,
     RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
+    HOST_SLOTS,
+    host_ring_sizing,
 )
 from runai_model_streamer.file_streamer.yield_order import YieldOrder
 
@@ -1134,3 +1136,138 @@ class TestAnImpossibleBufferTruncatesSilently(unittest.TestCase):
         self.assertEqual(handed_over, [800],
                          "the 5000-byte range stops the stream, and the 800 after it is lost too")
         self.assertEqual(sum(handed_over), 800, "800 of 6600 bytes, silently")
+
+
+class TestSlotMemoryOf(unittest.TestCase):
+    """The used prefix of a slot: what a caller broadcasts out of it.
+
+    The whole slot would be correct and simpler, but the last slot of a stream is usually part full,
+    so its unused tail is most of it - and on a collective that tail costs the same as real data."""
+
+    def two_files(self, sizes):
+        """Two files, so an aligned layout has somewhere to insert a pad.
+
+        Within one file read from offset 0 no pad is ever inserted: the slot base is page aligned,
+        so address and file offset stay in step by themselves."""
+        return [FileChunks.contiguous(0, "/m/a.safetensors", 0, sizes),
+                FileChunks.contiguous(1, "/m/b.safetensors", 0, sizes)]
+
+    def test_an_aligned_layout_measures_the_extent_not_the_sum(self):
+        sizes = [1000, 2000]
+        iterator = FilesRequestsIteratorWithBuffer(
+            1 << 20, 2, self.two_files(sizes), 4096, owned=False)
+        request = iterator.next_request()
+
+        used = len(iterator.slot_memory_of(request))
+        total = sum(sizes) * 2
+
+        # The pad at the file boundary makes the extent LONGER than the data. A caller that sent
+        # `total` bytes would cut the last range short.
+        self.assertGreater(used, total, "an aligned layout leaves a gap, so the extent exceeds the sum")
+        # max(), not [-1]: that is what makes this independent of the implementation, which takes
+        # the LAST destination on the grounds that _place only advances. A placement that reordered
+        # ranges would make the two disagree, and this is the assertion that would notice.
+        base = iterator._pool.slot(request.buffer_index).address
+        furthest = max(dst for dst in request.range_dsts) + sizes[-1] - base
+        self.assertEqual(used, furthest, "the prefix ends where the FURTHEST range ends")
+
+    def test_a_tight_layout_measures_exactly_the_data(self):
+        sizes = [1000, 2000]
+        iterator = FilesRequestsIteratorWithBuffer(
+            1 << 20, 2, self.two_files(sizes), 4096, owned=False,
+            slots=HOST_SLOTS._replace(direct_io=False))
+        request = iterator.next_request()
+        self.assertEqual(len(iterator.slot_memory_of(request)), sum(sizes) * 2)
+
+    def test_a_part_full_slot_sends_less_than_the_whole_slot(self):
+        # One small range in a slot sized for far more.
+        iterator = FilesRequestsIteratorWithBuffer(
+            1 << 20, 2, [FileChunks.contiguous(0, "/m/a.safetensors", 0, [4096])], 4096, owned=False)
+        request = iterator.next_request()
+        self.assertEqual(len(iterator.slot_memory_of(request)), 4096)
+        self.assertLess(len(iterator.slot_memory_of(request)),
+                        len(iterator._pool.slot(request.buffer_index).memory))
+
+
+class TestHostRingSizing(unittest.TestCase):
+    """The shape the host ring would choose, asked without building one.
+
+    Peers agreeing a shape have to know it before any of them allocates. The property that matters
+    is that the answer is the shape the ring ACTUALLY takes - so these compare against a real ring
+    rather than against a second calculation."""
+
+    def chunks(self, sizes):
+        return [FileChunks.contiguous(0, "/m/a.safetensors", 0, sizes)]
+
+    def test_it_matches_the_ring_that_would_be_built(self):
+        for limit in (1 << 20, 1 << 24, 1 << 30):
+            for sizes in ([4096] * 50, [1 << 16, 4096, 1 << 18]):
+                with self.subTest(limit=limit, sizes=sizes):
+                    predicted = host_ring_sizing(self.chunks(sizes), limit)
+                    built = FilesRequestsIteratorWithBuffer.with_memory_mode(
+                        self.chunks(sizes), limit, 4096, False)
+                    self.assertEqual(predicted, (built.buffer_size, built.num_buffers))
+
+    def test_the_depth_is_honoured(self):
+        predicted = host_ring_sizing(self.chunks([4096] * 50), 1 << 24, ring_buffers=3)
+        built = FilesRequestsIteratorWithBuffer.with_memory_mode(
+            self.chunks([4096] * 50), 1 << 24, 4096, False, ring_buffers=3)
+        self.assertEqual(predicted, (built.buffer_size, built.num_buffers))
+        self.assertEqual(predicted[1], 3)
+
+
+class TestSlotMemoryOfRefusesAReleasedSlot(unittest.TestCase):
+    """A released request has no slot, and saying so beats indexing with None.
+
+    Without this the pool is indexed with None and raises `TypeError: list indices must be
+    integers`, which says nothing about what the caller did wrong."""
+
+    def test_asking_after_release_says_what_happened(self):
+        chunks = [FileChunks.contiguous(0, "/m/a.safetensors", 0, [1000])]
+        iterator = FilesRequestsIteratorWithBuffer(1 << 20, 2, chunks, 4096, owned=False)
+        request = iterator.next_request()
+        iterator.release(request)
+
+        with self.assertRaises(RuntimeError) as caught:
+            iterator.slot_memory_of(request)
+        self.assertIn("released", str(caught.exception))
+
+
+class TestHostRingSizingAcrossModes(unittest.TestCase):
+    """The modes and the branch the agreement actually uses.
+
+    TestHostRingSizing compares against a built ring, but every one of its cases lands in `limited`
+    with a limit that never binds - so it only ever exercises the whole-stream branch. The
+    distributed case is the opposite: a limit that BINDS, giving a recycling ring."""
+
+    def chunks(self, sizes):
+        return [FileChunks.contiguous(0, "/m/a.safetensors", 0, sizes)]
+
+    def matches_the_built_ring(self, sizes, limit, ring_buffers=None):
+        predicted = host_ring_sizing(self.chunks(sizes), limit, ring_buffers)
+        built = FilesRequestsIteratorWithBuffer.with_memory_mode(
+            self.chunks(sizes), limit, 4096, False, ring_buffers)
+        self.assertEqual(predicted, (built.buffer_size, built.num_buffers))
+        return predicted
+
+    def test_a_limit_that_binds(self):
+        # total 331776, limit 300000: the ring must RECYCLE, which is the distributed case and the
+        # branch TestHostRingSizing never reaches.
+        sizes = [65536, 4096, 262144]
+        self.assertGreater(sum(sizes), 300000, "the limit has to bind, or this repeats the other test")
+        self.matches_the_built_ring(sizes, 300000)
+
+    def test_largest_chunk_mode(self):
+        # 0 is a MODE, not a quantity: one buffer, the size of the largest range.
+        buffer_size, num_buffers = self.matches_the_built_ring([65536, 4096, 262144], 0)
+        self.assertEqual((buffer_size, num_buffers), (262144, 1))
+
+    def test_unlimited_mode(self):
+        # -1 is the other mode: spend what the stream needs.
+        self.matches_the_built_ring([65536, 4096, 262144], -1)
+
+    def test_the_memory_limit_is_required(self):
+        # Defaulting it would hand every rank the NODE total - the hazard the signature exists to
+        # prevent, and one that no other test would notice.
+        with self.assertRaises(TypeError):
+            host_ring_sizing(self.chunks([4096]))

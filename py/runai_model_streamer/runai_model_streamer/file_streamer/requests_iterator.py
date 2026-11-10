@@ -267,6 +267,42 @@ class FilesRequestsIteratorWithBuffer:
 
         return dsts
 
+    def slot_memory_of(self, request: FilesRequest):
+        """The USED prefix of this request's slot, as the slot is made of.
+
+        What a caller broadcasts or copies out. The whole slot would also be correct and is simpler,
+        but it sends the unused tail - and the last slot of a stream is usually part full, so that
+        tail is most of it.
+
+        MEASURED FROM THE PLACEMENT, not summed from the sizes. An aligned layout pushes ranges
+        forward to stay congruent with their file offsets, so it leaves gaps: the sum of the sizes
+        is then SHORTER than the extent, and a caller sending that many bytes would truncate the
+        last range. Reading the end of the furthest range cannot make that mistake, and is right for
+        a tight layout too.
+
+        AGREEING A SLOT SIZE IS NOT ENOUGH to make this the same on two ranks. On a host ring the
+        extent also depends on RUNAI_STREAMER_MAX_PADS_PER_BUFFER, which distributed streaming
+        assumes is equal across ranks, and on the probed direct_block, which is NOT an assumption -
+        it is measured per mount, so ranks reading different mounts can differ. Either one changes
+        the pad width, which can make _place(aligned=True) refuse on one rank and fall back to tight
+        packing while its peers stay aligned: same ranges, same dictated shape, different layout and
+        a different length here.
+
+        A DEVICE ring is immune - direct_io=False, so there are no pads and the extent is just the
+        data."""
+        if request.buffer_index is None:
+            raise RuntimeError("slot_memory_of on a request whose slot has already been released")
+
+        slot = self._pool.slot(request.buffer_index)
+
+        # THE LAST RANGE ENDS FURTHEST, so this is O(1) rather than a walk over every range - which
+        # matters, because a model brings a few hundred thousand of them. _place only ever ADVANCES
+        # its cursor, aligned or not, so range_dsts is non-decreasing and nothing placed earlier can
+        # reach past the last one. A placement that reordered ranges would break this, and would
+        # break the file-order yield as well.
+        used = request.range_dsts[-1] + request.files[-1].sizes[-1] - slot.address
+        return slot.memory[:used]
+
     def has_free_buffer(self) -> bool:
         return self._pool.has_free()
 
@@ -852,6 +888,30 @@ def _device_ring_shape(files_chunks: List[FileChunks], budget: int,
     if best is None:
         return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
     return best[1], best[2]
+
+
+def host_ring_sizing(files_chunks: List[FileChunks],
+                     memory_limit: int,
+                     ring_buffers: Optional[int] = None) -> Tuple[int, int]:
+    """(buffer_size, num_buffers) the HOST ring would choose for this list, WITHOUT building it.
+
+    The host-shaped sibling of device_ring_sizing. Peers that must agree a ring shape have to know
+    it before any of them allocates, which means asking the question without the answer being a
+    ring.
+
+    DELEGATES to _ring_sizing rather than repeating its arithmetic. with_memory_mode() reaches the
+    same numbers on its way to building an iterator; this is that arithmetic alone. Reimplementing
+    it would let the agreed shape and the built ring drift apart, which is the one thing a caller
+    using this cannot survive.
+
+    memory_limit is REQUIRED, and deliberately not defaulted to the environment. The variable is a
+    NODE total; a caller agreeing a shape across ranks has to divide it by the ranks sharing the
+    host first. Reading it here would hand every rank the whole node's limit, and the group would
+    agree a shape it discovers it cannot afford only at allocation time.
+
+    The extent a slot ends up holding also depends on the probed direct_block, which this does not
+    answer and which no environment can make equal - see slot_memory_of."""
+    return _ring_sizing(_get_memory_mode(memory_limit), files_chunks, memory_limit, ring_buffers)
 
 
 def device_ring_budget(free_bytes: int, files_chunks: List[FileChunks]) -> int:
