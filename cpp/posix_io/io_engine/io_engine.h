@@ -28,9 +28,8 @@ using RequestId = uint64_t;
 // The file, as the engine sees it. A plain value: the fd belongs to whoever opened it, never to the
 // engine.
 //
-// `direct` travels with each request because the engine keeps no per-file state, and two things need
-// it: IOSQE_ASYNC is always set on buffered reads and on direct ones only with
-// AsyncIoConfig::async_direct, and -EINVAL means an alignment bug only on a direct fd.
+// `direct` travels with each request because the engine keeps no per-file state, and -EINVAL means an
+// alignment bug only on a direct fd.
 //
 // A struct, not a bare fd, so a later field is not a signature change.
 struct FileRef
@@ -164,11 +163,6 @@ struct AsyncIoConfig
     //
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
-
-    // io_uring only: issue direct reads on io-wq threads (IOSQE_ASYNC) instead of inline in
-    // io_uring_submit, so pinning and first-touch faults run in parallel rather than on the one worker
-    // (issue #323). False keeps the inline behaviour; the worker turns it on.
-    bool async_direct = false;
 };
 
 // The asynchronous I/O engine: io_uring or libaio, direct or buffered.

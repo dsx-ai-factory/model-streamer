@@ -66,7 +66,6 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
     // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
     // keyed by it, so an engine never serves two mounts that answered differently.
     _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
-    _async_direct = config.async_direct;
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
@@ -105,8 +104,7 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
 
     LOG(INFO) << "io_uring ready: " << _depth << " submission entries"
               << (_depth == config.depth ? "" : " (rounded up from the configured depth)")
-              << ", " << params.cq_entries << " completion entries"
-              << (_async_direct ? ", direct reads via io-wq" : ", direct reads inline");
+              << ", " << params.cq_entries << " completion entries";
 }
 
 IoUringEngine::IoUringEngine(const AsyncIoConfig & config) :
@@ -293,13 +291,10 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
-    // Hand the read to io-wq rather than doing its work inline on our one worker, which also stages,
+    // Every read goes to io-wq rather than running inline on our one worker, which also stages,
     // flushes and reaps for everything. Buffered: the page-cache copy. Direct: pinning the destination,
-    // first-touch faults included, and the block-layer submit (issue #323). Registered reads gain too.
-    if (!file.direct || _async_direct)
-    {
-        io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
-    }
+    // first-touch faults included, and the block-layer submit (issue #323).
+    io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
 
     ++_staged;
     return common::ResponseCode::Success;

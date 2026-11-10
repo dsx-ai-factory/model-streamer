@@ -112,9 +112,6 @@ class IoUringEngine : public IoEngine
     // cannot change while we run and a refused registration costs a syscall per attempt.
     bool _fixed_buffers = false;
 
-    // AsyncIoConfig::async_direct, kept for stage().
-    bool _async_direct = false;
-
     // Prepared with io_uring_get_sqe() and not yet handed to io_uring_submit(). The kernel has not
     // seen these; only flush() makes them real.
     unsigned _staged = 0;

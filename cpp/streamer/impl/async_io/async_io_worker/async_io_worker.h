@@ -210,8 +210,8 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
 
         // What the file WAS opened as, not what we wanted. A direct open can fail on a mount that
         // does not support it, and then this file is buffered while others stay direct. Every read
-        // must carry this rather than the strategy's wish, or the engine would set IOSQE_ASYNC on a
-        // direct read, or skip it on a buffered one.
+        // must carry this rather than the strategy's wish, or a buffered read's -EINVAL would be
+        // mapped as an alignment bug.
         bool direct = false;
 
         common::ResponseCode error = common::ResponseCode::Success;

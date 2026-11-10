@@ -217,9 +217,8 @@ common::ResponseCode LibaioEngine::stage(RequestId id, FileRef file, size_t offs
         return common::ResponseCode::UnknownError;
     }
 
-    // file.direct is not read here, and that is not an oversight. io_uring needs it to decide
-    // IOSQE_ASYNC; libaio has no equivalent knob, and O_DIRECT is already a property of the fd the
-    // caller opened. A buffered fd is accepted and read correctly - it is just read synchronously
+    // file.direct is not read here, and that is not an oversight. O_DIRECT is already a property of
+    // the fd the caller opened. A buffered fd is accepted and read correctly - it is just read synchronously
     // inside io_submit, which is why the caller routes buffered files away from this engine rather
     // than letting them arrive here.
 
