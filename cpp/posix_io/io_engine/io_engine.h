@@ -29,8 +29,8 @@ using RequestId = uint64_t;
 // engine.
 //
 // `direct` travels with each request because the engine keeps no per-file state, and two things need
-// it: IOSQE_ASYNC is always set on buffered reads and only on request on direct ones
-// (AsyncIoConfig::async_direct), and -EINVAL means an alignment bug only on a direct fd.
+// it: IOSQE_ASYNC is always set on buffered reads and on direct ones only with
+// AsyncIoConfig::async_direct, and -EINVAL means an alignment bug only on a direct fd.
 //
 // A struct, not a bare fd, so a later field is not a signature change.
 struct FileRef
@@ -165,20 +165,9 @@ struct AsyncIoConfig
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
 
-    // Whether io_uring hands DIRECT reads to its io-wq kernel threads (IOSQE_ASYNC) instead of issuing
-    // them inline in io_uring_submit. libaio has no equivalent and ignores it.
-    //
-    // An inline direct read pins its destination inside the submit call, on the one worker thread. On
-    // memory nobody has touched yet that pinning is a first-touch fault per page, and the kernel zeroes
-    // every page before the DMA overwrites it - so a fresh host destination is zeroed by one thread, at
-    // one core's speed (issue #323: ~10 GiB/s against a 90 GiB/s disk). Handed to io-wq, those faults
-    // run on several kernel threads at once and the worker goes back to submitting and reaping.
-    //
-    // Reads into a REGISTERED buffer stay inline whatever this says: their pages were pinned at
-    // registration, so there is nothing left to fault and the hand-off would only cost a wake-up.
-    //
-    // Defaults to false so a caller that says nothing gets the behaviour it had before. The worker
-    // decides the production value.
+    // io_uring only: issue direct reads on io-wq threads (IOSQE_ASYNC) instead of inline in
+    // io_uring_submit, so pinning and first-touch faults run in parallel rather than on the one worker
+    // (issue #323). False keeps the inline behaviour; the worker turns it on.
     bool async_direct = false;
 };
 

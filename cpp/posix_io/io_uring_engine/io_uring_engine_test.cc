@@ -865,15 +865,12 @@ TEST(IoUringEngine, Direct_Read_Returns_The_Right_Bytes)
     DirectFixture fixture(Block * 8);
     SKIP_WITHOUT_O_DIRECT(fixture);
 
-    // Both ways of issuing a direct read: inline in io_uring_submit, and handed to io-wq
-    // (async_direct). The second exists to keep page faults off the worker (issue #323), and must not
-    // change what lands in the buffer.
+    // Inline and via io-wq (async_direct) must land the same bytes.
     for (const bool async_direct : { false, true })
     {
         SCOPED_TRACE(async_direct ? "direct reads via io-wq" : "direct reads inline");
 
-        // A fresh buffer per pass, so the io-wq pass also faults its destination in rather than
-        // reading into pages the inline pass already touched.
+        // Fresh per pass, so the io-wq pass faults its own destination in.
         AlignedBuffer buffer(Block * 2);
         ASSERT_NE(buffer.get(), nullptr);
 
@@ -924,8 +921,7 @@ TEST(IoUringEngine, Direct_Read_Is_Refused_When_Misaligned)
         { "buffer address", Block * 3,     Block,     1 },
     };
 
-    // Inline and via io-wq: completion_mapper reads -EINVAL the same way whichever path issued the
-    // read, so both must deliver it as a completion carrying exactly that value.
+    // completion_mapper relies on exactly -EINVAL, whichever path issued the read.
     for (const bool async_direct : { false, true })
     {
         for (const auto & test_case : cases)
@@ -944,6 +940,50 @@ TEST(IoUringEngine, Direct_Read_Is_Refused_When_Misaligned)
                 << (async_direct ? " via io-wq" : " inline")
                 << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
         }
+    }
+}
+
+// A direct read into a registered buffer, inline and via io-wq: registered reads are handed off too.
+TEST(IoUringEngine, Direct_Read_Through_A_Registered_Buffer)
+{
+    SKIP_WITHOUT_RING();
+
+    DirectFixture fixture(Block * 8);
+    SKIP_WITHOUT_O_DIRECT(fixture);
+
+    for (const bool async_direct : { false, true })
+    {
+        SCOPED_TRACE(async_direct ? "direct reads via io-wq" : "direct reads inline");
+
+        AlignedBuffer region(Block * 2);
+        ASSERT_NE(region.get(), nullptr);
+
+        auto config = config_with(8);
+        config.async_direct = async_direct;
+        IoUringEngine engine(config);
+
+        Registration registration;
+        registration.base = region.get();
+        registration.bytesize = Block * 2;
+        registration.id = 0;
+
+        ASSERT_EQ(engine.stage(1, fixture.ref(), Block * 3, Block * 2, region.get(), registration),
+                  common::ResponseCode::Success);
+
+        unsigned issued = 0;
+        ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+        ASSERT_EQ(issued, 1u);
+
+        // The fixed path really ran, where the kernel allows it.
+        EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer(Block * 2) ? 1u : 0u);
+
+        const auto completions = reap(engine, 1);
+        ASSERT_EQ(completions.size(), 1u);
+        ASSERT_FALSE(completions.front().failed()) << completions.front().res;
+        ASSERT_EQ(completions.front().bytes_transferred(), Block * 2);
+
+        EXPECT_EQ(std::vector<char>(region.get(), region.get() + Block * 2),
+                  fixture.expected_at(Block * 3, Block * 2));
     }
 }
 

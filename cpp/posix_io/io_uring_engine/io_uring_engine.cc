@@ -293,22 +293,10 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
-    // IOSQE_ASYNC on buffered reads, always.
-    //
-    // Without it io_uring tries the read INLINE in the submitting task, and a page-cache hit is then
-    // copied on our one worker - which stages, flushes and reaps for everything. It never shows on a
-    // cold read, only on a second pass over the same model, and the benchmark harness drops caches.
-    // So the cost would ship unmeasured.
-    //
-    // On DIRECT reads into unregistered memory when async_direct asks for it. Such a read does no
-    // copy, but it does pin its destination inside io_uring_submit, and on fresh memory that pinning
-    // faults in and zeroes every page on our one worker - the cap in issue #323. io-wq takes those
-    // faults on several kernel threads in parallel instead.
-    //
-    // Never on a registered read: its pages were pinned once at registration, so inline is free and
-    // a hand-off would only add a wake-up.
-    const bool punt = !file.direct || (_async_direct && index < 0);
-    if (punt)
+    // Hand the read to io-wq rather than doing its work inline on our one worker, which also stages,
+    // flushes and reaps for everything. Buffered: the page-cache copy. Direct: pinning the destination,
+    // first-touch faults included, and the block-layer submit (issue #323). Registered reads gain too.
+    if (!file.direct || _async_direct)
     {
         io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
     }
