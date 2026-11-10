@@ -152,6 +152,10 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
     config.direct_block = _block;
     config.register_buffers = _register_buffers;
 
+    // On by default: on fast storage the inline path caps a host destination at one thread's page
+    // zeroing (issue #323). RUNAI_STREAMER_INTERNAL_IO_URING_ASYNC_DIRECT=0 restores inline direct reads.
+    config.async_direct = utils::getenv<bool>("RUNAI_STREAMER_INTERNAL_IO_URING_ASYNC_DIRECT", true);
+
     _engine = _factory(_strategy, config);
     if (_engine == nullptr)
     {

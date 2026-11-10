@@ -865,20 +865,32 @@ TEST(IoUringEngine, Direct_Read_Returns_The_Right_Bytes)
     DirectFixture fixture(Block * 8);
     SKIP_WITHOUT_O_DIRECT(fixture);
 
-    AlignedBuffer buffer(Block * 2);
-    ASSERT_NE(buffer.get(), nullptr);
+    // Both ways of issuing a direct read: inline in io_uring_submit, and handed to io-wq
+    // (async_direct). The second exists to keep page faults off the worker (issue #323), and must not
+    // change what lands in the buffer.
+    for (const bool async_direct : { false, true })
+    {
+        SCOPED_TRACE(async_direct ? "direct reads via io-wq" : "direct reads inline");
 
-    // After the buffers, so the ring goes first - see the note on declaration order above.
-    IoUringEngine engine(config_with(8));
+        // A fresh buffer per pass, so the io-wq pass also faults its destination in rather than
+        // reading into pages the inline pass already touched.
+        AlignedBuffer buffer(Block * 2);
+        ASSERT_NE(buffer.get(), nullptr);
 
-    // Offset, length and address are all multiples of the block size.
-    const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
+        // After the buffers, so the ring goes first - see the note on declaration order above.
+        auto config = config_with(8);
+        config.async_direct = async_direct;
+        IoUringEngine engine(config);
 
-    ASSERT_FALSE(completion.failed());
-    ASSERT_EQ(completion.bytes_transferred(), Block * 2);
+        // Offset, length and address are all multiples of the block size.
+        const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
 
-    EXPECT_EQ(std::vector<char>(buffer.get(), buffer.get() + Block * 2),
-              fixture.expected_at(Block * 3, Block * 2));
+        ASSERT_FALSE(completion.failed());
+        ASSERT_EQ(completion.bytes_transferred(), Block * 2);
+
+        EXPECT_EQ(std::vector<char>(buffer.get(), buffer.get() + Block * 2),
+                  fixture.expected_at(Block * 3, Block * 2));
+    }
 }
 
 // THE TEST THAT MAKES THE ONE ABOVE MEAN SOMETHING.
@@ -912,18 +924,26 @@ TEST(IoUringEngine, Direct_Read_Is_Refused_When_Misaligned)
         { "buffer address", Block * 3,     Block,     1 },
     };
 
-    for (const auto & test_case : cases)
+    // Inline and via io-wq: completion_mapper reads -EINVAL the same way whichever path issued the
+    // read, so both must deliver it as a completion carrying exactly that value.
+    for (const bool async_direct : { false, true })
     {
-        IoUringEngine engine(config_with(8));
+        for (const auto & test_case : cases)
+        {
+            auto config = config_with(8);
+            config.async_direct = async_direct;
+            IoUringEngine engine(config);
 
-        const auto completion = read_once(engine, fixture.ref(), test_case.offset, test_case.bytesize,
-                                          buffer.get() + test_case.address_shift);
+            const auto completion = read_once(engine, fixture.ref(), test_case.offset, test_case.bytesize,
+                                              buffer.get() + test_case.address_shift);
 
-        // EINVAL exactly. This is the value completion_mapper reads to tell an alignment bug from a
-        // storage fault, so the test pins the number and not only "it failed".
-        EXPECT_EQ(completion.res, -EINVAL)
-            << "the kernel accepted a direct read with a misaligned " << test_case.what
-            << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
+            // EINVAL exactly. This is the value completion_mapper reads to tell an alignment bug from a
+            // storage fault, so the test pins the number and not only "it failed".
+            EXPECT_EQ(completion.res, -EINVAL)
+                << "the kernel accepted a direct read with a misaligned " << test_case.what
+                << (async_direct ? " via io-wq" : " inline")
+                << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
+        }
     }
 }
 

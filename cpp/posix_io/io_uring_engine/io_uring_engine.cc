@@ -66,6 +66,7 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
     // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
     // keyed by it, so an engine never serves two mounts that answered differently.
     _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
+    _async_direct = config.async_direct;
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
@@ -104,7 +105,8 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
 
     LOG(INFO) << "io_uring ready: " << _depth << " submission entries"
               << (_depth == config.depth ? "" : " (rounded up from the configured depth)")
-              << ", " << params.cq_entries << " completion entries";
+              << ", " << params.cq_entries << " completion entries"
+              << (_async_direct ? ", direct reads via io-wq" : ", direct reads inline");
 }
 
 IoUringEngine::IoUringEngine(const AsyncIoConfig & config) :
@@ -291,15 +293,23 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
-    if (!file.direct)
+    // IOSQE_ASYNC on buffered reads, always.
+    //
+    // Without it io_uring tries the read INLINE in the submitting task, and a page-cache hit is then
+    // copied on our one worker - which stages, flushes and reaps for everything. It never shows on a
+    // cold read, only on a second pass over the same model, and the benchmark harness drops caches.
+    // So the cost would ship unmeasured.
+    //
+    // On DIRECT reads into unregistered memory when async_direct asks for it. Such a read does no
+    // copy, but it does pin its destination inside io_uring_submit, and on fresh memory that pinning
+    // faults in and zeroes every page on our one worker - the cap in issue #323. io-wq takes those
+    // faults on several kernel threads in parallel instead.
+    //
+    // Never on a registered read: its pages were pinned once at registration, so inline is free and
+    // a hand-off would only add a wake-up.
+    const bool punt = !file.direct || (_async_direct && index < 0);
+    if (punt)
     {
-        // IOSQE_ASYNC on buffered reads, always.
-        //
-        // Without it io_uring tries the read INLINE in the submitting task, and a page-cache hit is
-        // then copied on our one worker - which stages, flushes and reaps for everything. It never
-        // shows on a cold read, only on a second pass over the same model, and the benchmark harness
-        // drops caches. So the cost would ship unmeasured. Direct reads never punt, so the flag is
-        // pointless there.
         io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
     }
 
