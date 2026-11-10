@@ -76,8 +76,6 @@ class StagedDistributionSource:
             offset = next_offset(cursor)
 
             if offset + size > capacity:
-                # Kept for the next slot. A range too large for an empty buffer would be kept for
-                # ever, which the caller prevents by sizing the buffer to the largest range.
                 self._leftover = item
                 break
 
@@ -88,6 +86,14 @@ class StagedDistributionSource:
             cursor = offset + size
 
         if not placed:
+            if self._leftover is not None:
+                # None would read as end of stream, and the loop would broadcast empty batches until
+                # it failed somewhere else. The caller sizes the buffer to the largest range.
+                file_id, range_index, memory = self._leftover
+                raise ValueError(
+                    f"range {range_index} of file {file_id} is {memory.numel()} bytes and does not "
+                    f"fit in a {capacity}-byte send buffer"
+                )
             return None
 
         self._out = True

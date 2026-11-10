@@ -103,10 +103,14 @@ class DistributionSource(Protocol):
        once it has released them - a ring hands the same buffer out again, so what it reads then
        belongs to a later slot.
 
-    MORE THAN ONE SLOT MAY BE OUT AT A TIME. A loop with an asynchronous collective wants to fill
-    the next slot while the previous is still in flight, which is the overlap the ring exists for.
-    So a source must not assume its last slot was released before next_slot() is called again; it
-    blocks when no slot is free, which is a different thing.
+    MORE THAN ONE SLOT MAY BE OUT AT A TIME, where the source has more than one. A loop with an
+    asynchronous collective wants to fill the next slot while the previous is still in flight, which
+    is the overlap a ring exists for. Such a source must not assume its last slot was released
+    before next_slot() is called again; it blocks when no slot is free, which is a different thing.
+
+    A ONE-SLOT SOURCE REFUSES INSTEAD. It has nothing to wait for, so blocking would never end, and
+    a deadlock is worse than an error. A caller that wants the overlap must give the source a ring
+    deep enough for it.
 
     WHAT IS NOT GUARANTEED HERE: how many slots exist, or how long a source will block. Both belong
     to the ring an implementation was built with.

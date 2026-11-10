@@ -156,6 +156,48 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    def test_1_success_one_rank_has_nothing_to_read(self):
+        """A rank whose share is empty still receives from its peers.
+
+        Different from an empty FILE LIST, where no rank reads and the broadcast loop never runs.
+        One file of one chunk goes to one rank, and total_chunks_to_read is 1 on every rank, so the
+        loop does run on the rank that has nothing - as a receiver only."""
+        if self.world_size < 2:
+            self.skipTest("needs at least two ranks")
+
+        file_specs = [{"size": 100, "chunks": [100]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        received = []
+        with patch.dict(os.environ, env_vars):
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True)
+
+                share_is_empty = len(inner.rank_file_chunks_list) == 0
+                self.assertEqual(inner.reading_from_storage, not share_is_empty)
+
+                for req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                    received.append((req_id, chunk_idx, data_tensor.cpu().numpy().tobytes()))
+
+        self.assertEqual(len(received), 1, "every rank sees the one chunk, whoever read it")
+        self.assertEqual(received[0][0], 0)
+        self.assertEqual(received[0][1], 0)
+        self.assertEqual(received[0][2], original)
+
+        # The point of the fixture: this really was the empty-share case on all but one rank, not a
+        # share that happened to be small.
+        empties = [torch.zeros(1, dtype=torch.long) for _ in range(self.world_size)]
+        dist.all_gather(empties, torch.tensor([1 if share_is_empty else 0], dtype=torch.long))
+        self.assertEqual(sum(e.item() for e in empties), self.world_size - 1,
+                         "one rank read the chunk and every other rank had nothing")
+
+        if self.rank == 0:
+            print(f"\n✅ Empty-share rank test verified on all {self.world_size} ranks.")
+
     def test_1_success_random_files(self):
         file_specs = []
         # Use a random number of files (1 to 10)

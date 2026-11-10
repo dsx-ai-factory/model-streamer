@@ -28,7 +28,11 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
     RANGE_OFFSET_ALIGNMENT,
-    next_offset,
+    SlotRange,
+)
+
+from runai_model_streamer.distributed_streamer.staged_source import (
+    StagedDistributionSource,
 )
 
 from runai_model_streamer.distributed_streamer.partition import (
@@ -95,6 +99,17 @@ def dist_device_bytes_required(max_chunk: int) -> int:
 
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
+
+
+def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None:
+    """Describe a filled slot for the ranks that will receive it.
+
+    The row is [file, index, SIZE, OFFSET], which is not SlotRange's field order: broadcast() reads
+    the size from column 2 and the offset from column 3. Row 0 carries the count.
+    """
+    metadata[0, 0] = len(ranges)
+    for i, r in enumerate(ranges):
+        metadata[i + 1].copy_(torch.tensor([r.file_id, r.range_index, r.size, r.offset]))
 
 
 def get_backends() -> dict:
@@ -601,10 +616,10 @@ class _distributedStreamer:
 
         # read files
         #
-        # owned=False whatever the caller asked for: this ring is internal. prefill() copies each chunk
-        # into the staging buffer and keeps no view, so nobody outside holds host memory and giving a
-        # slot away would only buy a fresh allocation per submission. Ownership on this path is the
-        # per tensor clone out of the staging buffer.
+        # owned=False whatever the caller asked for: this ring is internal. The distribution source
+        # copies each range into the send buffer and keeps no view, so nobody outside holds host
+        # memory and giving a slot away would only buy a fresh allocation per submission. Ownership
+        # on this path is the per tensor clone out of the staging buffer.
         self.file_streamer.stream_files(
             self.rank_file_chunks_list, credentials, "cpu",
             memory_limit=self.rank_memory_limit(), owned=False
@@ -662,28 +677,27 @@ class _distributedStreamer:
          batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(self.max_chunk, self.device)
         
         ready_chunks_iterator = self.file_streamer.get_chunks()
-        
-        def chunk_generator():
-            yield from ready_chunks_iterator
-            while True:
-                yield None
+
+        # A rank with no share of its own still takes part in every broadcast, as a receiver. It has
+        # no stream to pull from, so the source is given nothing and answers None at once.
+        source = StagedDistributionSource(
+            ready_chunks_iterator if self.reading_from_storage else iter(()),
+            data_buffer[:BUFFER_BYTESIZE],
+            self.rank_dicts_map,
+            MAX_CHUNKS_PER_BATCH,
+        )
 
         chunks_to_read = [self.total_chunks_to_read]
-        chunk_gen = chunk_generator()
-        leftover_chunk = [None]
 
         try:
             while chunks_to_read[0] > 0:
-                # --- Fill staging buffer ---
-                current_data_size, chunk_count_in_batch = self.prefill(
-                    chunk_gen,
-                    MAX_CHUNKS_PER_BATCH,
-                    BUFFER_BYTESIZE,
-                    data_buffer,
-                    received_buffer,
-                    batch_metadata_tensor,
-                    received_metadata_tensor,
-                    leftover_chunk)
+                # --- Fill the send buffer ---
+                filled = source.next_slot()
+                ranges = filled.ranges if filled else []
+                chunk_count_in_batch = len(ranges)
+                current_data_size = len(filled.memory) if filled else 0
+
+                write_metadata_rows(batch_metadata_tensor, ranges)
 
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Prefilled buffer with {chunk_count_in_batch} chunks and total size {humanize.naturalsize(current_data_size)}")
 
@@ -693,7 +707,7 @@ class _distributedStreamer:
                 # miss - a missed one is a tensor that looks right and is overwritten next round.
                 #
                 # No event is needed, and the clone adds no ordering requirement that was not already
-                # there. data_buffer is next written by prefill()'s copy_ on this same stream;
+                # there. data_buffer is next written by the source's copy_ on this same stream;
                 # received_buffer is next written by dist.broadcast on NCCL's, which torch orders
                 # against this one - a dependency master already relies on for borrowed views.
                 for file_id, chunk_index, buffer in self.broadcast(
@@ -705,7 +719,12 @@ class _distributedStreamer:
                     chunk_count_in_batch,
                     current_data_size):
                     yield file_id, chunk_index, self.own(buffer) if self.owned else buffer
-               
+
+                # AFTER the yields. The slot is this rank's send buffer, and broadcast() hands out
+                # views into it, so releasing earlier would let the next fill overwrite them.
+                if filled:
+                    source.release(filled)
+
         except RuntimeError as e:
             # Check if the error is a timeout
             self.is_error = True
@@ -734,54 +753,6 @@ class _distributedStreamer:
         which SafetensorsStreamer checks on every tensor whatever path produced it.
         """
         return buffer.clone()
-
-    def prefill(self,
-                chunk_gen: Iterator,
-                max_chunks_per_batch: int,
-                buffer_bytesize: int,
-                data_buffer: torch.Tensor,
-                received_buffer: torch.Tensor,
-                batch_metadata_tensor: torch.Tensor,
-                received_metadata_tensor: torch.Tensor,
-                leftover_chunk: List[Tuple[int, int, torch.Tensor]]) -> Tuple[int, int]:
-
-        current_data_size = 0
-        chunk_count_in_batch = 0
-
-        while chunk_count_in_batch < max_chunks_per_batch and self.reading_from_storage:
-
-            # Prioritize the leftover chunk from the previous batch.
-            if leftover_chunk[0]:
-                chunk_item = leftover_chunk[0]
-                leftover_chunk[0] = None
-            else:
-                chunk_item = next(chunk_gen)
-
-            if chunk_item is None:
-                break
-
-            ready_request_id, ready_chunk_index, cpu_buffer = chunk_item
-            chunk_size = cpu_buffer.numel()
-
-            chunk_offset = next_offset(current_data_size)
-            if chunk_offset + chunk_size > buffer_bytesize:
-                # This chunk doesn't fit, so we save it for the next batch.
-                leftover_chunk[0] = chunk_item
-                break
-
-            data_buffer[chunk_offset : chunk_offset + chunk_size].copy_(cpu_buffer.squeeze())
-
-            orig_req_idx, orig_chunk_idx, _ = self.rank_dicts_map[ready_request_id][ready_chunk_index]
-            batch_metadata_tensor[chunk_count_in_batch + 1].copy_(
-                torch.tensor([orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset])
-            )
-
-            current_data_size = chunk_offset + chunk_size
-            chunk_count_in_batch += 1
-
-        batch_metadata_tensor[0, 0] = chunk_count_in_batch
-
-        return current_data_size, chunk_count_in_batch
 
     def broadcast(self,
                   chunks_to_read: List[int],

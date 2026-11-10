@@ -119,6 +119,12 @@ class TestStagedSource(unittest.TestCase):
         source, _ = make(plan=[])
         self.assertIsNone(source.next_slot())
 
+    def test_a_range_that_can_never_fit_names_itself(self):
+        """Returning None here would read as end of stream and lose the range silently."""
+        source, _ = make(capacity=200)
+        with self.assertRaisesRegex(ValueError, "300 bytes and does not fit in a 200-byte"):
+            self.drain(source)
+
     def test_next_slot_refuses_while_a_slot_is_out(self):
         source, _ = make(max_ranges=2)
         filled = source.next_slot()

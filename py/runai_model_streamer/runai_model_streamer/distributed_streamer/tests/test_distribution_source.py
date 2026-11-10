@@ -200,6 +200,23 @@ class TestAnEmptyStreamHonoursTheContract(DistributionSourceContract, unittest.T
         return FakeSource.DEPTH
 
 
+class TestTheLayoutRule(unittest.TestCase):
+    """The rule as NUMBERS.
+
+    Every other test here compares a source against the constant, so all of them stay green if the
+    constant changes. Ranks agree on a value, not on an expression, so the value is pinned."""
+
+    def test_the_alignment_is_512(self):
+        self.assertEqual(RANGE_OFFSET_ALIGNMENT, 512)
+
+    def test_an_offset_is_rounded_up_to_it(self):
+        self.assertEqual(next_offset(0), 0)
+        self.assertEqual(next_offset(1), 512)
+        self.assertEqual(next_offset(511), 512)
+        self.assertEqual(next_offset(512), 512, "already on the rule, so not pushed on")
+        self.assertEqual(next_offset(513), 1024)
+
+
 class TestTheContractRejectsABrokenSource(unittest.TestCase):
     """The suite is only worth something if a broken source fails it.
 
