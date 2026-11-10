@@ -8,6 +8,10 @@ from unittest.mock import MagicMock, call, patch
 
 import torch
 
+from runai_model_streamer.distributed_streamer.distribution_source import (
+    RANGE_OFFSET_ALIGNMENT,
+)
+
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DEFAULT_BUFFER_MIN_BYTESIZE,
     DistributedStreamer,
@@ -15,7 +19,6 @@ from runai_model_streamer.distributed_streamer.distributed_streamer import (
     allocate_dist_staging,
     dist_buffer_bytesize,
     dist_device_bytes_required,
-    get_dist_buffer_alignment,
 )
 
 MIN_BYTESIZE_ENV = "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE"
@@ -54,7 +57,7 @@ class TestDistDeviceBytesRequired(unittest.TestCase):
     @patch.dict(os.environ, {MIN_BYTESIZE_ENV: "4096"}, clear=True)
     def test_both_staging_buffers_start_aligned(self):
         data, received, _, _ = allocate_dist_staging(4096, torch.device("cpu"))
-        alignment = get_dist_buffer_alignment()
+        alignment = RANGE_OFFSET_ALIGNMENT
         for name, buffer in (("data", data), ("received", received)):
             self.assertEqual(buffer.data_ptr() % alignment, 0, f"{name} buffer is not aligned")
             self.assertGreaterEqual(buffer.numel(), 4096, f"{name} buffer lost room to its own padding")

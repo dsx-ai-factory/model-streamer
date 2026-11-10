@@ -17,12 +17,8 @@ from runai_model_streamer.distributed_streamer.distribution_source import (
     RANGE_OFFSET_ALIGNMENT,
     Filled,
     SlotRange,
+    next_offset,
 )
-
-
-def next_offset(cursor: int) -> int:
-    """Where the next range starts, by the interface's layout rule."""
-    return cursor + -cursor % RANGE_OFFSET_ALIGNMENT
 
 
 class FakeSource:

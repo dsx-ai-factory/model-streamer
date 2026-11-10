@@ -26,6 +26,11 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     DEFAULT_MEMORY_LIMIT_STRING,
 )
 
+from runai_model_streamer.distributed_streamer.distribution_source import (
+    RANGE_OFFSET_ALIGNMENT,
+    next_offset,
+)
+
 from runai_model_streamer.distributed_streamer.partition import (
     partition,
     partition_for_rank,
@@ -46,21 +51,6 @@ import humanize
 
 logger = logging.getLogger(__name__)
 
-RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR = "RUNAI_STREAMER_CUDA_ALIGNMENT"
-DEFAULT_DIST_BUFFER_ALIGNMENT = 512
-MAX_DIST_BUFFER_ALIGNMENT = 1024 * 1024
-
-
-def get_dist_buffer_alignment() -> int:
-    """
-    Get the alignment for the distributed buffer.
-    """
-    value = int(os.environ.get(RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR, str(DEFAULT_DIST_BUFFER_ALIGNMENT)))
-    if value < 0 or value > MAX_DIST_BUFFER_ALIGNMENT:
-        raise ValueError(f"Invalid value for RUNAI_STREAMER_CUDA_ALIGNMENT: {value}, must be between 0 and {MAX_DIST_BUFFER_ALIGNMENT} bytes")
-    return value
-
-
 MAX_CHUNKS_PER_BATCH = 256
 DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
 
@@ -79,18 +69,17 @@ def is_global_distribution() -> bool:
 def allocate_dist_staging(max_chunk: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Every device allocation the broadcast loop makes: two staging buffers and two metadata tensors.
 
-    Each staging buffer is over-allocated by the alignment and sliced to the first aligned address, so
-    an offset that is a multiple of the alignment lands aligned in BOTH buffers - which is what a
+    Each staging buffer is over-allocated by RANGE_OFFSET_ALIGNMENT and sliced to the first aligned
+    address, so an offset that is a multiple of it lands aligned in BOTH buffers - which is what a
     receiving rank relies on to read a sender's layout.
 
     dist_device_bytes_required() measures THIS function, and a test allocates from it and compares, so
     the free-memory check cannot disagree with the allocation about how many buffers there are."""
     buffer_bytesize = dist_buffer_bytesize(max_chunk)
-    alignment = get_dist_buffer_alignment()
 
     def staging() -> torch.Tensor:
-        raw = torch.empty(buffer_bytesize + alignment, dtype=torch.uint8, device=device)
-        return raw if alignment <= 1 else raw[(-raw.data_ptr()) % alignment:]
+        raw = torch.empty(buffer_bytesize + RANGE_OFFSET_ALIGNMENT, dtype=torch.uint8, device=device)
+        return raw[(-raw.data_ptr()) % RANGE_OFFSET_ALIGNMENT:]
 
     def metadata() -> torch.Tensor:
         return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
@@ -100,18 +89,9 @@ def allocate_dist_staging(max_chunk: int, device: torch.device) -> Tuple[torch.T
 
 def dist_device_bytes_required(max_chunk: int) -> int:
     """What allocate_dist_staging() takes on the device."""
-    staging = dist_buffer_bytesize(max_chunk) + get_dist_buffer_alignment()
+    staging = dist_buffer_bytesize(max_chunk) + RANGE_OFFSET_ALIGNMENT
     metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
     return 2 * staging + 2 * metadata
-
-
-def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
-    """Return the smallest offset >= current_offset such that (base_ptr + offset) % alignment == 0."""
-    if alignment <= 1:
-        return current_offset
-    total_addr = base_ptr + current_offset
-    padding = (-total_addr) % alignment
-    return current_offset + padding
 
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
@@ -675,7 +655,6 @@ class _distributedStreamer:
             raise ValueError("Streamer not initialized")
         
         BUFFER_BYTESIZE = dist_buffer_bytesize(self.max_chunk)
-        alignment = get_dist_buffer_alignment()
 
         # Allocated THERE, not here, so the free-memory check in set_is_distributed measures the same
         # four allocations this loop makes.
@@ -704,8 +683,7 @@ class _distributedStreamer:
                     received_buffer,
                     batch_metadata_tensor,
                     received_metadata_tensor,
-                    leftover_chunk,
-                    alignment)
+                    leftover_chunk)
 
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Prefilled buffer with {chunk_count_in_batch} chunks and total size {humanize.naturalsize(current_data_size)}")
 
@@ -746,14 +724,14 @@ class _distributedStreamer:
         """A private copy of buffer.
 
         A PLAIN CLONE, and the simplicity is the point. An earlier version over-allocated and sliced
-        to an aligned address, to carry RUNAI_STREAMER_CUDA_ALIGNMENT across the copy. The tensor it
-        returned starts part way into a larger storage, and vLLM died with an illegal address in its
-        first forward pass as soon as it stopped cloning our tensors for us.
+        to an aligned address, to carry the staging alignment across the copy. The tensor it returned
+        starts part way into a larger storage, and vLLM died with an illegal address in its first
+        forward pass as soon as it stopped cloning our tensors for us.
 
-        RUNAI_STREAMER_CUDA_ALIGNMENT is not lost, because it was never a promise about this tensor:
-        it describes where tensors sit INSIDE the staging buffers, so that one rank's offsets are
-        usable on every other, and that layout is unchanged. What a caller needs is alignment for the
-        dtype, which SafetensorsStreamer checks on every tensor whatever path produced it.
+        RANGE_OFFSET_ALIGNMENT is not lost, because it was never a promise about this tensor: it
+        describes where ranges sit INSIDE the staging buffers, so that one rank's offsets are usable
+        on every other, and that layout is unchanged. What a caller needs is alignment for the dtype,
+        which SafetensorsStreamer checks on every tensor whatever path produced it.
         """
         return buffer.clone()
 
@@ -765,12 +743,10 @@ class _distributedStreamer:
                 received_buffer: torch.Tensor,
                 batch_metadata_tensor: torch.Tensor,
                 received_metadata_tensor: torch.Tensor,
-                leftover_chunk: List[Tuple[int, int, torch.Tensor]],
-                alignment: int) -> Tuple[int, int]:
+                leftover_chunk: List[Tuple[int, int, torch.Tensor]]) -> Tuple[int, int]:
 
         current_data_size = 0
         chunk_count_in_batch = 0
-        base_ptr = data_buffer.data_ptr()
 
         while chunk_count_in_batch < max_chunks_per_batch and self.reading_from_storage:
 
@@ -787,7 +763,7 @@ class _distributedStreamer:
             ready_request_id, ready_chunk_index, cpu_buffer = chunk_item
             chunk_size = cpu_buffer.numel()
 
-            chunk_offset = aligned_offset(base_ptr, current_data_size, alignment)
+            chunk_offset = next_offset(current_data_size)
             if chunk_offset + chunk_size > buffer_bytesize:
                 # This chunk doesn't fit, so we save it for the next batch.
                 leftover_chunk[0] = chunk_item

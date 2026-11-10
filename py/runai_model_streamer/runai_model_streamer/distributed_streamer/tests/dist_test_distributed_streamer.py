@@ -14,9 +14,12 @@ import time
 import random
 from unittest.mock import patch
 
+from runai_model_streamer.distributed_streamer.distribution_source import (
+    RANGE_OFFSET_ALIGNMENT,
+)
+
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DistributedStreamer,
-    RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR,
 )
 from runai_model_streamer.file_streamer import FileChunks
 from runai_model_streamer.file_streamer.requests_iterator import (
@@ -213,7 +216,7 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.world_size < 2:
             self.skipTest("Alignment packing test requires at least 2 processes.")
 
-        alignment = 512
+        alignment = RANGE_OFFSET_ALIGNMENT
         num_files = random.randint(1, 20)
         def random_chunks(n):
             return [random.randint(1, alignment * 10) for _ in range(n)]
@@ -227,7 +230,6 @@ class TestDistributedStreamer(unittest.TestCase):
         env_vars = {
             "RUNAI_STREAMER_DIST": "1",
             "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(alignment * 20),
-            RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR: str(alignment),
         }
         # owned=False ON PURPOSE. This alignment describes where tensors sit INSIDE the staging
         # buffers, so that the offsets one rank broadcasts are usable on every other. An owned tensor

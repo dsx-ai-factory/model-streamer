@@ -24,12 +24,25 @@ from __future__ import annotations
 from typing import Any, List, NamedTuple, Optional, Protocol
 
 
-RANGE_OFFSET_ALIGNMENT = 8
-"""The largest element size safetensors has, F64 and I64.
+RANGE_OFFSET_ALIGNMENT = 512
+"""What the distributed path has always rounded range offsets to.
 
 Every range offset is a multiple of it, so a range sits where its dtype can be read from whatever
 the sizes before it were. A caller that takes a view instead of a copy then needs no copy after all.
+8 would be enough for that - it is the largest element size safetensors has - and 512 is kept
+because it is what ranks already agree on, and it matches what the CUDA allocator returns.
+
+A CONSTANT, not a setting. It was read from the environment per rank, so one rank could lay its
+ranges out differently from its peers with nothing to notice.
 """
+
+
+def next_offset(cursor: int) -> int:
+    """Where the next range starts, given where the previous one ended.
+
+    THE LAYOUT RULE, in one place. Every distribution source lays ranges out with it, and later work
+    predicts a peer's layout with it. A second copy of it is a second rule."""
+    return cursor + -cursor % RANGE_OFFSET_ALIGNMENT
 
 
 class SlotRange(NamedTuple):
