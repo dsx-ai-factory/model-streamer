@@ -107,6 +107,14 @@ def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None
     The row is [file, index, SIZE, OFFSET], which is not SlotRange's field order: broadcast() reads
     the size from column 2 and the offset from column 3. Row 0 carries the count.
     """
+    if len(ranges) + 1 > metadata.shape[0]:
+        # Raised before anything is written. Half a row set is worse than none: the collective is
+        # posted either way, and the receivers decode whatever got there.
+        raise ValueError(
+            f"{len(ranges)} ranges need {len(ranges) + 1} metadata rows, and this tensor has "
+            f"{metadata.shape[0]}"
+        )
+
     metadata[0, 0] = len(ranges)
     for i, r in enumerate(ranges):
         metadata[i + 1].copy_(torch.tensor([r.file_id, r.range_index, r.size, r.offset]))

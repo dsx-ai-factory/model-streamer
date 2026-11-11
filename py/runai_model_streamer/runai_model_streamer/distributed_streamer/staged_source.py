@@ -46,6 +46,11 @@ class StagedDistributionSource:
         self._originals = originals
         self._max_ranges_per_slot = max_ranges_per_slot
 
+        if max_ranges_per_slot < 1:
+            raise ValueError(
+                f"a slot must hold at least one range, got {max_ranges_per_slot}"
+            )
+
         self._leftover: Optional[Tuple[int, int, Any]] = None
         self._exhausted = False
         self._out = False

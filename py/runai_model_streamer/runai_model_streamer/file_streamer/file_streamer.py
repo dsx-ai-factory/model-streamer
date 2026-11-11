@@ -728,6 +728,119 @@ class FileStreamer:
         finally:
             self.drain_live_submissions()
 
+    def get_slots(self) -> Iterator:
+        """WHOLE SLOTS instead of ranges, in the order they were submitted.
+
+        The distributed path broadcasts a slot, so it wants the slot and not its contents one at a
+        time. Two differences from get_chunks, and both matter:
+
+        A slot is handed over once every range in it has ARRIVED. get_chunks releases on the last
+        range being HANDED OVER, which is a later moment - there is no per range handover here, so
+        the slot is ready as soon as it is full.
+
+        IN SUBMISSION ORDER, never completion order. Submissions interleave, so a later slot can
+        fill first, while a peer reading this stream expects slot 0 then slot 1. A full slot waits
+        for its turn, the way yield_order parks a range. live_requests is written when a submission
+        is issued and deleted when it retires, so its first key is the oldest one still live.
+
+        Send an event back - gen.send(event) - to say when the slot may be refilled. The slot goes
+        back to the pool on that resume, so the consumer must have finished reading it by then: for
+        a device ring that means an event recorded after the broadcast AND after any copy out of the
+        slot. A host ring takes None, because nothing there is only enqueued.
+
+        ORDERING ACROSS STREAMS IS THE CALLER'S. get_chunks records the event itself, so it can
+        refuse a caller that moved to another stream. Here the event arrives already recorded and
+        nothing can ask which stream that was. A caller that records slot N on one stream and N+1 on
+        another leaves the teardown waiting on the second while the first is still reading.
+
+        It yields the REQUEST, not a description of what is in the slot. Which ids those ranges
+        carry for the consumer is the caller's business - this layer never saw a partition.
+        """
+        if not self.streamer:
+            raise ValueError("Streamer not initialized")
+
+        received: Dict[int, int] = {}
+        finished: Dict[int, Any] = {}
+
+        try:
+            # INSIDE the try and behind the live_requests check, as in get_chunks. A raise out here
+            # would leave every submission undrained, and the workers writing into a ring the next
+            # stream_files frees. Nothing is live when there is no iterator either, so the stream
+            # this records would belong to work that is not ours.
+            #
+            # The teardown reads it. __exit__ frees the ring, and the last slot's readers - a copy
+            # out of it, and on the distributed path a broadcast - are only ENQUEUED.
+            if self.live_requests and self.requests_iterator is not None:
+                slot_memory = self.requests_iterator.slots
+                if slot_memory.new_event is not None:
+                    self._clone_stream = slot_memory.current_stream()
+
+            # self.streamer too: __exit__ ends the handle and clears it, and a generator can be
+            # resumed after that. Asking a freed handle for a response is a use after free, and the
+            # answer could not arrive anyway - runai_end has joined the workers.
+            while self.live_requests and self.streamer:
+                response = runai_response(self.streamer)
+                if response is None:
+                    return    # teardown: no further responses are coming
+
+                ret, submission_id, _, _, done = response
+                self.outstanding -= 1
+
+                request = self.live_requests.get(submission_id)
+                if request is None:
+                    raise ValueError(f"response for unknown submission {submission_id}")
+
+                if done:
+                    self.reported_done.add(submission_id)
+
+                if ret != SUCCESS_ERROR_CODE:
+                    raise ValueError(
+                        f"Could not receive response from libstreamer due to: {runai_response_str(ret)}"
+                    )
+
+                received[submission_id] = received.get(submission_id, 0) + 1
+                if received[submission_id] == request.num_ranges:
+                    if submission_id not in self.reported_done:
+                        raise ValueError(
+                            f"submission {submission_id} received every range before the library "
+                            f"reported it complete"
+                        )
+                    finished[submission_id] = request
+
+                # Oldest first, stopping at the first that is not full.
+                while self.live_requests:
+                    ready_id = next(iter(self.live_requests))
+                    if ready_id not in finished:
+                        break
+                    if self.requests_iterator is None:
+                        # The context exited while this generator was parked at a yield. There is no
+                        # ring left to describe a slot with, and nothing will write into one again.
+                        return
+
+                    ready_request = finished.pop(ready_id)
+
+                    # BEFORE the release, which clears the request's buffer index.
+                    slot = self.requests_iterator.slot_memory_of(ready_request)
+                    ready_event = yield ready_request, slot
+
+                    # Serves the teardown as well as the pool: the newest one is after every read of
+                    # every slot handed over so far.
+                    if ready_event is not None:
+                        self._clone_event = ready_event
+
+                    self.reported_done.discard(ready_id)
+                    del received[ready_id]
+                    self.ranges_not_yielded.pop(ready_id, None)
+                    del self.live_requests[ready_id]
+
+                    # Checked again: the resume above is where the context can have exited, and it
+                    # is this yield that resumes.
+                    if self.requests_iterator is not None:
+                        self.requests_iterator.release(ready_request, ready_event)
+                        self._submit_while_buffers_free()
+        finally:
+            self.drain_live_submissions()
+
     def drain_live_submissions(self) -> None:
         """Consume the responses still owed by every live submission, however this generator ended.
 

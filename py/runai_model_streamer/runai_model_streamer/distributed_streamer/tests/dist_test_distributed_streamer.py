@@ -177,6 +177,7 @@ class TestDistributedStreamer(unittest.TestCase):
                 inner = streamer.distributed_streamer
                 streamer.stream_files(requests, None, "cpu", True)
 
+                group = inner.distribution_group
                 share_is_empty = len(inner.rank_file_chunks_list) == 0
                 self.assertEqual(inner.reading_from_storage, not share_is_empty)
 
@@ -190,10 +191,15 @@ class TestDistributedStreamer(unittest.TestCase):
 
         # The point of the fixture: this really was the empty-share case on all but one rank, not a
         # share that happened to be small.
-        empties = [torch.zeros(1, dtype=torch.long) for _ in range(self.world_size)]
-        dist.all_gather(empties, torch.tensor([1 if share_is_empty else 0], dtype=torch.long))
-        self.assertEqual(sum(e.item() for e in empties), self.world_size - 1,
-                         "one rank read the chunk and every other rank had nothing")
+        #
+        # Over the DISTRIBUTION group, which is per node unless RUNAI_STREAMER_DIST_GLOBAL is set.
+        # Each group partitions the file on its own, so the world would count one reader per group.
+        group_size = dist.get_world_size(group=group)
+        empties = [torch.zeros(1, dtype=torch.long) for _ in range(group_size)]
+        dist.all_gather(empties, torch.tensor([1 if share_is_empty else 0], dtype=torch.long),
+                        group=group)
+        self.assertEqual(sum(e.item() for e in empties), group_size - 1,
+                         "one rank in this group read the chunk and every other rank had nothing")
 
         if self.rank == 0:
             print(f"\n✅ Empty-share rank test verified on all {self.world_size} ranks.")
