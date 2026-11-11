@@ -233,6 +233,56 @@ class TestDistributedMemoryCheck(unittest.TestCase):
         job.events.release_group.assert_not_called()
 
 
+class TestTheAgreedFreeMemoryIsKept(unittest.TestCase):
+    """set_is_distributed reduces a free-memory figure; a ring every rank sends from is sized from
+    THAT, not from what this rank happens to have free. So it has to survive the decision."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.required = dist_device_bytes_required(4096)
+
+    def decide(self, free_by_rank, is_distributed=True, device="cuda:1"):
+        job = DistributedJob(free_by_rank, my_rank=0)
+        streamer = job.streamer()
+        with job.patched():
+            streamer.set_is_distributed(is_distributed, device)
+        return streamer
+
+    def test_the_group_minimum_is_kept(self):
+        streamer = self.decide([10 ** 12, self.required + 7])
+
+        self.assertEqual(streamer.params.min_device_free_memory, self.required + 7,
+                         "not this rank's own figure, the group's smallest")
+
+    def test_it_is_kept_even_when_the_check_turns_distribution_off(self):
+        """The figure is the group's whatever the decision was. A rank that fell back still agreed
+        it, and reading it afterwards must not get this rank's own."""
+        streamer = self.decide([10 ** 12, self.required - 1])
+
+        self.assertFalse(streamer.is_distributed)
+        self.assertEqual(streamer.params.min_device_free_memory, self.required - 1)
+
+    def test_a_stream_that_never_asked_has_no_figure(self):
+        self.assertIsNone(self.decide([10 ** 12, 10 ** 12],
+                                      is_distributed=False).params.min_device_free_memory)
+
+    def test_a_stale_figure_is_cleared_before_the_next_decision(self):
+        """This object is reused across loads. A figure measured before the last model occupied the
+        device would size the next ring far too large, and nothing downstream can tell."""
+        job = DistributedJob([10 ** 12, 10 ** 12], my_rank=0)
+        streamer = job.streamer()
+        with job.patched():
+            streamer.set_is_distributed(True, "cuda:1")
+        self.assertIsNotNone(streamer.params.min_device_free_memory)
+
+        with job.patched():
+            streamer.set_is_distributed(False, "cuda:1")
+        self.assertIsNone(streamer.params.min_device_free_memory,
+                          "the figure from the previous load is still here")
+
+
 class TestASecondReadOnTheSameStreamer(unittest.TestCase):
     """What the fallback must not cost the NEXT read.
 

@@ -22,6 +22,7 @@ from runai_model_streamer.torch_device.torch_device import (
 )
 
 from runai_model_streamer.file_streamer.requests_iterator import (
+    device_ring_sizing,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
 )
@@ -118,6 +119,37 @@ def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None
     metadata[0, 0] = len(ranges)
     for i, r in enumerate(ranges):
         metadata[i + 1].copy_(torch.tensor([r.file_id, r.range_index, r.size, r.offset]))
+
+
+def agreed_slot_shape(min_free_bytes: Optional[int],
+                      file_stream_requests: List[FileChunks],
+                      ring_buffers: Optional[int] = None) -> Optional[Tuple[int, int]]:
+    """(buffer_size, num_buffers) for a ring every rank of the group will send from, or None when
+    no ring fits.
+
+    NO COLLECTIVE OF ITS OWN. It is a pure function of values that are already equal on every rank:
+    the smallest free memory in the group, which get_min_device_free_memory has agreed, and the
+    whole file list, which is the caller's request. Agreement comes from identical inputs, not from
+    another reduction - and a second reduction would be a second place for the ranks to disagree.
+
+    THE WHOLE LIST, never this rank's share. A share is floored by the largest range IN IT, so two
+    ranks would answer differently. And the size is what a RECEIVER allocates too, so it has to hold
+    the largest range any sender will broadcast - which only the whole list knows.
+
+    THE SAME LIST, IN THE SAME ORDER. The sizing packs ranges in list order to score a candidate
+    depth, so the same files in another order can answer differently - a sender and a receiver would
+    then allocate different slot sizes. The caller's request is one list, and SafetensorsStreamer
+    sorts the paths before distributing, so this holds today; it is a requirement, not a given.
+
+    It rests on the assumption this design already makes: every rank is given the same
+    configuration. RUNAI_STREAMER_RING_BUFFERS and the device memory settings are read per rank, so
+    a rank started with different ones answers differently and nothing here notices.
+
+    min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
+    measure, or one not using a device backend at all. There is then no ring to agree on, and the
+    answer is None.
+    """
+    return device_ring_sizing(min_free_bytes, file_stream_requests, ring_buffers)
 
 
 def get_backends() -> dict:
@@ -219,6 +251,11 @@ class DistributedStreamer:
     def set_is_distributed(self, is_distributed: bool, device: str) -> None:
         # check if distributed streaming should be used
 
+        # CLEARED FIRST, because this object is reused across loads. A figure measured before the
+        # last model occupied the device would size a ring far too large, and nothing downstream
+        # can tell a stale reading from a fresh one.
+        self.params.min_device_free_memory = None
+
         if not is_distributed:
             self.is_distributed = False
             return
@@ -275,6 +312,9 @@ class DistributedStreamer:
         # the JOB - there is nothing here for the ranks to agree at runtime.
         if self.is_distributed and can_measure_device_memory(device) and backend_name in ("nccl", "xccl"):
             free_memory = self.get_min_device_free_memory(device)
+            # KEPT, not only compared. It is the one free-memory figure the group agrees on, and a
+            # ring they all send from has to be sized from it rather than from each rank's own.
+            self.params.min_device_free_memory = free_memory
             required = dist_device_bytes_required(self.params.max_chunk)
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")
@@ -374,6 +414,10 @@ class _distributedStreamerParams:
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.max_chunk = 0
+        # The smallest free memory in the group, once it has been agreed; None where no agreement
+        # was needed. A ring every rank sends from is sized from THIS, not from what this rank
+        # happens to have free.
+        self.min_device_free_memory = None
  
     def get_group_size(self) -> int:
         if not dist.is_initialized():
