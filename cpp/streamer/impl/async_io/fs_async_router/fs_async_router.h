@@ -69,6 +69,10 @@ class FsAsyncRouter
         // Whether each group's reads may use registered buffers. Per mount, because it pays on some
         // file systems and costs on others.
         std::vector<bool> registers;
+
+        // Whether each group's direct reads go to the kernel's async workers: yes on a block device,
+        // no on a network or virtual file system. See AsyncIoConfig::async_direct.
+        std::vector<bool> async_direct;
     };
 
     // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
@@ -92,7 +96,7 @@ class FsAsyncRouter
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
-    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool)>;
+    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool, bool)>;
 
     // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
     // by value like everything else here, so a worker outlives this object whatever the order.

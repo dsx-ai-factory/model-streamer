@@ -54,7 +54,8 @@ struct NoopWorker : utils::Worker<Workload>
 // Two factories, because the two are no longer the same type: the filesystem async factory takes the
 // mount's measured block, the object-storage one takes nothing.
 std::unique_ptr<utils::Worker<Workload>> noop_async_factory(dev_t /* device */, size_t /* block */,
-                                                           unsigned /* depth */, bool /* register */)
+                                                           unsigned /* depth */, bool /* register */,
+                                                           bool /* async direct */)
 {
     return std::make_unique<NoopWorker>();
 }
@@ -74,9 +75,9 @@ TEST(BackendPools, DefaultsToOneEngineForAllMounts)
 
     BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(259, 0), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(259, 0), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
 
     EXPECT_EQ(pools.async_engines(), 1u) << "the default cap is 1";
 }
@@ -93,7 +94,7 @@ TEST(BackendPools, AConfiguredDepthSurvivesTheDiscoveryOrder)
     utils::temp::UnsetEnv max_engines(std::string("RUNAI_STREAMER_FS_MAX_ENGINES"));
 
     std::vector<unsigned> built;
-    auto recording = [&built](dev_t, size_t, unsigned depth, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    auto recording = [&built](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
     {
         built.push_back(depth);
         return std::make_unique<NoopWorker>();
@@ -101,9 +102,9 @@ TEST(BackendPools, AConfiguredDepthSurvivesTheDiscoveryOrder)
 
     BackendPools pools(run, recording, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* nfs */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* nfs */, true /* register buffers */, true /* async direct */, Workload{});
 
     EXPECT_EQ(pools.async_engines(), 2u) << "one engine per depth, not one per process";
     EXPECT_EQ(pools.shared_engine_mounts(), 1u) << "the second ext4 mount shares, the NFS one does not";
@@ -124,7 +125,7 @@ TEST(BackendPools, MountsThatDisagreeAboutRegistrationDoNotShareAnEngine)
     utils::temp::UnsetEnv max_engines(std::string("RUNAI_STREAMER_FS_MAX_ENGINES"));
 
     std::vector<bool> built;
-    auto recording = [&built](dev_t, size_t, unsigned, bool registers) -> std::unique_ptr<utils::Worker<Workload>>
+    auto recording = [&built](dev_t, size_t, unsigned, bool registers, bool) -> std::unique_ptr<utils::Worker<Workload>>
     {
         built.push_back(registers);
         return std::make_unique<NoopWorker>();
@@ -132,10 +133,36 @@ TEST(BackendPools, MountsThatDisagreeAboutRegistrationDoNotShareAnEngine)
 
     BackendPools pools(run, recording, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0, 512 /* same depth */, true /* ext4 */, Workload{});
-    pools.push_async(makedev(0, 42), 0, 512 /* same depth */, false /* nfs */, Workload{});
+    pools.push_async(makedev(8, 1), 0, 512 /* same depth */, true /* ext4 */, true /* block device */, Workload{});
+    pools.push_async(makedev(0, 42), 0, 512 /* same depth */, false /* nfs */, false /* no block device */, Workload{});
 
     EXPECT_EQ(pools.async_engines(), 2u) << "one engine each, though the depth is the same";
+    EXPECT_EQ(built, (std::vector<bool>{ true, false })) << "each engine kept its own mount's answer";
+}
+
+// The same for io-wq: whether direct reads go to the kernel's async workers is bound into an engine,
+// and it is right on a block device and wrong on NFS. Two mounts that agree about depth AND
+// registration - the default for every mount but NFS's registration - must still not share, or the
+// first to arrive would decide for both.
+TEST(BackendPools, MountsThatDisagreeAboutIoWqDoNotShareAnEngine)
+{
+    utils::temp::UnsetEnv max_engines(std::string("RUNAI_STREAMER_FS_MAX_ENGINES"));
+
+    std::vector<bool> built;
+    auto recording = [&built](dev_t, size_t, unsigned, bool, bool async_direct) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        built.push_back(async_direct);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+
+    pools.push_async(makedev(8, 1), 0, 512 /* same depth */, false /* same */, true /* block device */, Workload{});
+    pools.push_async(makedev(0, 42), 0, 512 /* same depth */, false /* same */, false /* lustre */, Workload{});
+    pools.push_async(makedev(8, 2), 0, 512 /* same depth */, false /* same */, true /* block device */, Workload{});
+
+    EXPECT_EQ(pools.async_engines(), 2u) << "one engine per answer, though depth and registration agree";
+    EXPECT_EQ(pools.shared_engine_mounts(), 1u) << "the second block device shares with the first";
     EXPECT_EQ(built, (std::vector<bool>{ true, false })) << "each engine kept its own mount's answer";
 }
 
@@ -157,16 +184,16 @@ TEST(BackendPools, WorkloadsRunOnTheEngineOfTheirDepth)
     std::atomic<unsigned> ran_at_512{0};
     std::atomic<unsigned> ran_at_64{0};
 
-    auto counting = [&](dev_t, size_t, unsigned depth, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    auto counting = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
     {
         return std::make_unique<CountingWorker>(depth == 64 ? ran_at_64 : ran_at_512);
     };
 
     BackendPools pools(run, counting, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* nfs */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* ext4 */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* nfs */, true /* register buffers */, true /* async direct */, Workload{});
 
     for (int i = 0; i < 500 && (ran_at_512.load() + ran_at_64.load()) < 3; ++i)
     {
@@ -185,14 +212,14 @@ TEST(BackendPools, TheCapIsPerDepth)
 
     BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 3), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 3), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 2u) << "the third mount at 512 shares";
 
-    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(0, 43), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(0, 44), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(0, 42), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(0, 43), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(0, 44), 0 /* block: not probed in this test */, 64 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 4u) << "the 64 bucket has its own two, and its third mount shares";
 
     EXPECT_EQ(pools.shared_engine_mounts(), 2u);
@@ -205,13 +232,13 @@ TEST(BackendPools, EnginePerMountUpToTheCap)
 
     BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 1u);
 
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 2u);
 
-    pools.push_async(makedev(259, 0), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(259, 0), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 3u);
 }
 
@@ -227,7 +254,7 @@ TEST(BackendPools, AnOversizedEngineCapDoesNotWrapToZero)
 
     BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 1u) << "an engine must still be created";
 }
 
@@ -259,7 +286,7 @@ TEST(BackendPools, SameMountReusesItsEngine)
 
     for (int i = 0; i < 5; ++i)
     {
-        pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+        pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     }
 
     EXPECT_EQ(pools.async_engines(), 1u) << "one mount must never build a second engine";
@@ -273,13 +300,13 @@ TEST(BackendPools, PastTheCapMountsShare)
 
     BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 2u);
 
     // The third and fourth mounts must not create engines, and must not be refused either.
-    pools.push_async(makedev(8, 3), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
-    pools.push_async(makedev(8, 4), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 3), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 4), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 2u) << "the cap must bound engines, not reject work";
 }
 
@@ -294,7 +321,7 @@ TEST(BackendPools, AsyncEnginesAreLazy)
     EXPECT_EQ(pools.async_engines(), 0u);
     EXPECT_EQ(pools.pools_created(), 0u);
 
-    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, Workload{});
+    pools.push_async(makedev(8, 1), 0 /* block: not probed in this test */, 512 /* depth */, true /* register buffers */, true /* async direct */, Workload{});
     EXPECT_EQ(pools.async_engines(), 1u);
     EXPECT_EQ(pools.pools_created(), 1u) << "and it counts among the pools";
 }

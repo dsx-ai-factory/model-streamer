@@ -87,7 +87,7 @@ bool require_io_uring()
         }                                                                                     \
     } while (0)
 
-AsyncIoConfig config_with(unsigned depth)
+AsyncIoConfig config_with(unsigned depth, bool async_direct = false)
 {
     AsyncIoConfig config;
     config.depth = depth;
@@ -96,7 +96,18 @@ AsyncIoConfig config_with(unsigned depth)
     // On, because the registration tests below are the reason this file exists in its current form.
     // The mount policy is tested where it is decided, in the router - not here.
     config.register_buffers = true;
+
+    // Off by default, as for a mount with no block device. The direct-read tests run both ways.
+    config.async_direct = async_direct;
     return config;
+}
+
+// Both answers a mount can give, for the tests a direct read must pass either way.
+constexpr bool BothPaths[] = { false, true };
+
+const char * path_name(bool async_direct)
+{
+    return async_direct ? "via io-wq" : "inline";
 }
 
 // A file of known bytes, plus the fd to read it through.
@@ -868,17 +879,23 @@ TEST(IoUringEngine, Direct_Read_Returns_The_Right_Bytes)
     AlignedBuffer buffer(Block * 2);
     ASSERT_NE(buffer.get(), nullptr);
 
-    // After the buffers, so the ring goes first - see the note on declaration order above.
-    IoUringEngine engine(config_with(8));
+    for (const bool async_direct : BothPaths)
+    {
+        SCOPED_TRACE(path_name(async_direct));
+        std::memset(buffer.get(), 0, Block * 2);
 
-    // Offset, length and address are all multiples of the block size.
-    const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
+        // After the buffers, so the ring goes first - see the note on declaration order above.
+        IoUringEngine engine(config_with(8, async_direct));
 
-    ASSERT_FALSE(completion.failed());
-    ASSERT_EQ(completion.bytes_transferred(), Block * 2);
+        // Offset, length and address are all multiples of the block size.
+        const auto completion = read_once(engine, fixture.ref(), Block * 3, Block * 2, buffer.get());
 
-    EXPECT_EQ(std::vector<char>(buffer.get(), buffer.get() + Block * 2),
-              fixture.expected_at(Block * 3, Block * 2));
+        ASSERT_FALSE(completion.failed());
+        ASSERT_EQ(completion.bytes_transferred(), Block * 2);
+
+        EXPECT_EQ(std::vector<char>(buffer.get(), buffer.get() + Block * 2),
+                  fixture.expected_at(Block * 3, Block * 2));
+    }
 }
 
 // THE TEST THAT MAKES THE ONE ABOVE MEAN SOMETHING.
@@ -912,18 +929,68 @@ TEST(IoUringEngine, Direct_Read_Is_Refused_When_Misaligned)
         { "buffer address", Block * 3,     Block,     1 },
     };
 
-    for (const auto & test_case : cases)
+    // Both paths: completion_mapper reads the same -EINVAL whether io-wq or our worker issued the read.
+    for (const bool async_direct : BothPaths)
     {
-        IoUringEngine engine(config_with(8));
+        SCOPED_TRACE(path_name(async_direct));
 
-        const auto completion = read_once(engine, fixture.ref(), test_case.offset, test_case.bytesize,
-                                          buffer.get() + test_case.address_shift);
+        for (const auto & test_case : cases)
+        {
+            IoUringEngine engine(config_with(8, async_direct));
 
-        // EINVAL exactly. This is the value completion_mapper reads to tell an alignment bug from a
-        // storage fault, so the test pins the number and not only "it failed".
-        EXPECT_EQ(completion.res, -EINVAL)
-            << "the kernel accepted a direct read with a misaligned " << test_case.what
-            << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
+            const auto completion = read_once(engine, fixture.ref(), test_case.offset, test_case.bytesize,
+                                              buffer.get() + test_case.address_shift);
+
+            // EINVAL exactly. This is the value completion_mapper reads to tell an alignment bug from a
+            // storage fault, so the test pins the number and not only "it failed".
+            EXPECT_EQ(completion.res, -EINVAL)
+                << "the kernel accepted a direct read with a misaligned " << test_case.what
+                << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
+        }
+    }
+}
+
+// A direct read into a registered buffer lands the right bytes, inline and via io-wq.
+TEST(IoUringEngine, Direct_Read_Through_A_Registered_Buffer)
+{
+    SKIP_WITHOUT_RING();
+
+    DirectFixture fixture(Block * 8);
+    SKIP_WITHOUT_O_DIRECT(fixture);
+
+    AlignedBuffer region(Block * 2);
+    ASSERT_NE(region.get(), nullptr);
+
+    for (const bool async_direct : BothPaths)
+    {
+        SCOPED_TRACE(path_name(async_direct));
+        std::memset(region.get(), 0, Block * 2);
+
+        // After the buffers, so the ring goes first - see the note on declaration order above.
+        IoUringEngine engine(config_with(8, async_direct));
+
+        Registration registration;
+        registration.base = region.get();
+        registration.bytesize = Block * 2;
+        registration.id = 0;
+
+        ASSERT_EQ(engine.stage(1, fixture.ref(), Block * 3, Block * 2, region.get(), registration),
+                  common::ResponseCode::Success);
+
+        unsigned issued = 0;
+        ASSERT_EQ(engine.flush(issued), common::ResponseCode::Success);
+        ASSERT_EQ(issued, 1u);
+
+        // The fixed path really ran, where the kernel allows it.
+        EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer(Block * 2) ? 1u : 0u);
+
+        const auto completions = reap(engine, 1);
+        ASSERT_EQ(completions.size(), 1u);
+        ASSERT_FALSE(completions.front().failed()) << completions.front().res;
+        ASSERT_EQ(completions.front().bytes_transferred(), Block * 2);
+
+        EXPECT_EQ(std::vector<char>(region.get(), region.get() + Block * 2),
+                  fixture.expected_at(Block * 3, Block * 2));
     }
 }
 

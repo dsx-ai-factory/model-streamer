@@ -112,6 +112,9 @@ class IoUringEngine : public IoEngine
     // cannot change while we run and a refused registration costs a syscall per attempt.
     bool _fixed_buffers = false;
 
+    // Direct reads go to io-wq as well as buffered ones. AsyncIoConfig::async_direct, bound once.
+    bool _async_direct = false;
+
     // Prepared with io_uring_get_sqe() and not yet handed to io_uring_submit(). The kernel has not
     // seen these; only flush() makes them real.
     unsigned _staged = 0;

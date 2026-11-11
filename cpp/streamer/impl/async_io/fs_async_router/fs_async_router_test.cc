@@ -263,6 +263,29 @@ TEST(FsAsyncRouter, Without_A_Policy_Every_Mount_Registers)
     EXPECT_TRUE(groups.registers[0]);
 }
 
+// Whether direct reads go to io-wq is decided per mount too, and from the DEVICE rather than the type
+// name: the router must carry the mount's block_backed answer, whatever the type says. Lustre reads as
+// "lustre" and reports a made-up device number, so it is the case a type-name or major-number rule
+// would get wrong.
+TEST(FsAsyncRouter, Io_Wq_Is_Decided_Per_Mount_From_The_Device)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string & directory)
+    {
+        const bool is_lustre = directory == "/lustre";
+        return posix_io::MountCapability{ is_lustre ? makedev(3965, 7) : makedev(9, 1), false,
+                                          is_lustre ? "lustre" : "ext4",
+                                          !is_lustre /* block_backed */ };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/lustre/a.st", "/raid/b.st" }), FsQueueDepth(512),
+                                      common::Device::host());
+
+    ASSERT_EQ(groups.async_direct.size(), 2u) << "one answer per group, like the depth";
+    EXPECT_FALSE(groups.async_direct[0]) << "no block device under Lustre: direct reads stay inline";
+    EXPECT_TRUE(groups.async_direct[1]) << "ext4 on md RAID: direct reads go to io-wq";
+}
+
 // Directories on one mount share a group, so they share an engine.
 TEST(FsAsyncRouter, One_Group_Per_Mount_Not_Per_Directory)
 {

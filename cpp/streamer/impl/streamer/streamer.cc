@@ -445,7 +445,7 @@ common::ResponseCode Streamer::async_request(
 
                     workloads[next].direct_block = groups.blocks[group];
                     _pools.push_async(groups.devices[group], groups.blocks[group], groups.depths[group],
-                                      groups.registers[group],
+                                      groups.registers[group], groups.async_direct[group],
                                       std::move(workloads[next]));
                 }
             }

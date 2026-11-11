@@ -108,7 +108,8 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
                            EngineFactory factory = posix_io::make_io_engine,
                            std::function<void()> on_engine_dead = {},
                            std::shared_ptr<DeviceWriter> writer = nullptr,
-                           bool register_buffers = false);
+                           bool register_buffers = false,
+                           bool async_direct = false);
     ~AsyncIoWorker() override;
 
     // Bytes copied out of a scratch buffer, over this worker's life.
@@ -210,8 +211,8 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
 
         // What the file WAS opened as, not what we wanted. A direct open can fail on a mount that
         // does not support it, and then this file is buffered while others stay direct. Every read
-        // must carry this rather than the strategy's wish, or the engine would set IOSQE_ASYNC on a
-        // direct read, or skip it on a buffered one.
+        // must carry this rather than the strategy's wish, or the engine would skip IOSQE_ASYNC on a
+        // buffered read, or map a buffered read's -EINVAL as an alignment bug.
         bool direct = false;
 
         common::ResponseCode error = common::ResponseCode::Success;
@@ -426,6 +427,10 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // Whether this mount's reads may use registered buffers. Decided by the router from the file
     // system type, and handed to the engine, which also has the host's answer.
     const bool _register_buffers;
+
+    // Whether this mount's direct reads go to the kernel's async workers. Decided by the router from
+    // whether the mount is a block device - see AsyncIoConfig::async_direct.
+    const bool _async_direct;
 
     // Set once a measurement was refused for being larger than the scratch buffers. It only silences
     // the warning: _block_measured stays false, so a later submission reporting a block this engine

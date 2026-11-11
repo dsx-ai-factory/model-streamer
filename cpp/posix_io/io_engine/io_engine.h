@@ -29,8 +29,8 @@ using RequestId = uint64_t;
 // engine.
 //
 // `direct` travels with each request because the engine keeps no per-file state, and two things need
-// it: IOSQE_ASYNC must be set on buffered reads and not on direct ones, and -EINVAL means an
-// alignment bug only on a direct fd.
+// it: io_uring always sets IOSQE_ASYNC on buffered reads but on direct ones only where the mount asks
+// (AsyncIoConfig::async_direct), and -EINVAL means an alignment bug only on a direct fd.
 //
 // A struct, not a bare fd, so a later field is not a signature change.
 struct FileRef
@@ -164,6 +164,21 @@ struct AsyncIoConfig
     //
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
+
+    // Whether DIRECT reads on this mount are handed to the kernel's async workers (io_uring's
+    // IOSQE_ASYNC) instead of being issued inline by our one worker. Buffered reads always are.
+    //
+    // Per mount, because it pays on block devices and costs on network file systems:
+    //
+    //   block device   An inline O_DIRECT submit pins the destination on the worker, and on fresh
+    //                  host memory that is a first-touch fault and a zeroed page per 4 KiB (issue
+    //                  #323). io-wq spreads it: Qwen3-32B to host memory on a B200 NVMe RAID went
+    //                  from 10.9 s to 0.74 s.
+    //   NFS            The inline submit only sends an RPC, which is cheap. io-wq made the same load
+    //                  1.4-2x slower at 5-10x the CPU (same-node NFS, 5-8 GiB/s).
+    //
+    // Ignored by libaio, which has no such knob. Defaults to false: the behaviour before it existed.
+    bool async_direct = false;
 };
 
 // The asynchronous I/O engine: io_uring or libaio, direct or buffered.

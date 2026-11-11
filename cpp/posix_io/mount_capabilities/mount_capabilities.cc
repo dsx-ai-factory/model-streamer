@@ -259,6 +259,12 @@ const std::map<dev_t, std::string> & fs_types_by_device()
 
 } // namespace
 
+bool is_block_device(dev_t dev, const std::string & sysfs)
+{
+    const auto path = sysfs + "/dev/block/" + std::to_string(major(dev)) + ":" + std::to_string(minor(dev));
+    return ::access(path.c_str(), F_OK) == 0;
+}
+
 std::ostream & operator<<(std::ostream & os, const MountCapability & capability)
 {
     os << "mount " << major(capability.dev) << ":" << minor(capability.dev);
@@ -268,6 +274,7 @@ std::ostream & operator<<(std::ostream & os, const MountCapability & capability)
         os << " (" << capability.fs_type << ")";
     }
 
+    os << (capability.block_backed ? " block device" : " no block device");
     return os << (capability.memory_backed ? " memory-backed" : "");
 }
 
@@ -288,7 +295,8 @@ MountCapability MountCapabilities::remember(dev_t dev, bool memory_backed)
     const auto type = types.find(dev);
 
     const MountCapability capability{ dev, memory_backed,
-                                      type == types.end() ? std::string() : type->second };
+                                      type == types.end() ? std::string() : type->second,
+                                      is_block_device(dev) };
 
     std::unique_lock<std::mutex> lock(_mutex);
 

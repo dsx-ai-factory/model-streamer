@@ -66,6 +66,7 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
     // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
     // keyed by it, so an engine never serves two mounts that answered differently.
     _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
+    _async_direct = config.async_direct;   // keyed the same way, so equally safe to bind here
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
@@ -291,15 +292,12 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
-    if (!file.direct)
+    // io-wq rather than inline on our one worker, which also stages, flushes and reaps for everything.
+    // Buffered reads always: the page-cache copy. Direct reads where the mount asks for it (block
+    // devices): pinning the destination, first-touch faults included (issue #323). See
+    // AsyncIoConfig::async_direct for why not on NFS.
+    if (!file.direct || _async_direct)
     {
-        // IOSQE_ASYNC on buffered reads, always.
-        //
-        // Without it io_uring tries the read INLINE in the submitting task, and a page-cache hit is
-        // then copied on our one worker - which stages, flushes and reaps for everything. It never
-        // shows on a cold read, only on a second pass over the same model, and the benchmark harness
-        // drops caches. So the cost would ship unmeasured. Direct reads never punt, so the flag is
-        // pointless there.
         io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
     }
 

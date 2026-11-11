@@ -47,7 +47,23 @@ struct MountCapability
     // It names the FILESYSTEM, not the device: NVMe and a spinning disk formatted ext4 both say
     // "ext4". So it separates network storage from local, and says nothing about local speed.
     std::string fs_type;
+
+    // Whether `dev` is a real block device: ext4 or xfs on NVMe, md RAID, dm, or a network block
+    // device (EBS, iSCSI, virtio). False for file systems with no device beneath them - NFS, Lustre,
+    // CIFS, FUSE, virtiofs, tmpfs - which the kernel gives an anonymous number, or (Lustre) one it
+    // makes up. See is_block_device() for why the number alone cannot decide it.
+    bool block_backed = false;
 };
+
+// Whether `dev` names a block device, asked of sysfs: /sys/dev/block/<major>:<minor> exists for every
+// block device and for nothing else. `sysfs` is a test seam.
+//
+// Not "major != 0", which is the obvious test and is wrong: Lustre reports major 3965 (measured, FSx
+// for Lustre on kernel 6.12) and has no device at all.
+//
+// False when sysfs is not visible, which errs towards treating the mount as file storage. Measured
+// visible inside unprivileged Kubernetes pods.
+bool is_block_device(dev_t dev, const std::string & sysfs = "/sys");
 
 // Whether a mount can serve O_DIRECT.
 //
