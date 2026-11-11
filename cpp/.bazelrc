@@ -20,6 +20,9 @@ common --enable_bzlmod
 common --noenable_workspace
 common --lockfile_mode=off
 
+# URL rewrites for registry sources that moved (libaio); see the file.
+common --experimental_downloader_config=bazel_downloader.cfg
+
 # Keep architecture-specific output paths used by Python packaging.
 # Select the config matching the native devcontainer architecture.
 build:aarch64 --platform_suffix=aarch64
