@@ -37,6 +37,11 @@ struct FileRef
 {
     int  fd = -1;
     bool direct = false;   // as opened, after any fallback
+
+    // Punt this direct read to io-wq rather than issuing it inline (io_uring's IOSQE_ASYNC). Set only
+    // on mounts listed in RUNAI_STREAMER_FS_DIRECT_ASYNC. Ignored on a buffered read, which is always
+    // punted, and by engines with no such knob.
+    bool punt = false;
 };
 
 // Host memory a caller offers for REGISTRATION with the kernel, so reads into it need no per-read page

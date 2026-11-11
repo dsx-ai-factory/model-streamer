@@ -214,6 +214,13 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         // direct read, or skip it on a buffered one.
         bool direct = false;
 
+        // More direct descriptors on the same file, when the workload asks for several
+        // (Workload::direct_fds). Reads are dealt to `fd` and these in turn. Linux NFS takes a
+        // reference on one lock context per open file for every page of a direct read, so the io-wq
+        // workers that punted reads run on would otherwise all contend on one. Closed with `fd`.
+        std::vector<int> extra;
+        unsigned next = 0;
+
         common::ResponseCode error = common::ResponseCode::Success;
     };
 

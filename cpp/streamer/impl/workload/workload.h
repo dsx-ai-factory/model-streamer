@@ -30,6 +30,12 @@ struct Workload
     // submissions on one streamer - would keep a provisional block for the life of the process.
     size_t direct_block = 0;
 
+    // Whether this workload's mount is listed in RUNAI_STREAMER_FS_DIRECT_ASYNC, and how many direct
+    // descriptors each of its files is read through (RUNAI_STREAMER_FS_DIRECT_FDS, else 1). Per
+    // workload like direct_block, because mounts can share an engine.
+    bool direct_async = false;
+    unsigned direct_fds = 1;
+
     Workload() = default;
     Workload(Workload &&) = default;
     Workload & operator=(Workload &&) = default;

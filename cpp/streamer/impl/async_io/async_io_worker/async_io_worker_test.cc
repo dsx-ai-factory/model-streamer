@@ -827,6 +827,147 @@ TEST(AsyncIoWorker, An_Interrupted_Direct_Read_Is_Not_Demoted)
     EXPECT_EQ(driver.worker.counters().transient_retries, 1u);
 }
 
+// --- punted direct reads (RUNAI_STREAMER_FS_DIRECT_ASYNC / RUNAI_STREAMER_FS_DIRECT_FDS) --------------
+
+namespace
+{
+
+// Four chunks of one file, each destination congruent with its file offset, so every read is direct.
+struct PuntFixture
+{
+    std::vector<char> raw = std::vector<char>(4 * ChunkSize + 4096);
+    char * const aligned = raw.data() + ((-reinterpret_cast<uintptr_t>(raw.data())) % 4096);
+    Fixture fixture{ { ChunkSize, ChunkSize, ChunkSize, ChunkSize } };
+
+    PuntFixture()
+    {
+        for (size_t i = 0; i < 4; ++i)
+        {
+            fixture.request[0].ranges[i].dst = aligned + i * ChunkSize;
+        }
+    }
+
+    Workload workload(bool direct_async, unsigned direct_fds)
+    {
+        auto w = fixture.workload();
+        w.direct_async = direct_async;
+        w.direct_fds = direct_fds;
+        return w;
+    }
+};
+
+} // namespace
+
+// On a listed mount every direct read is marked for punting, and the reads of one file are dealt over
+// that many descriptors - each its own open, still direct.
+TEST(AsyncIoWorker, Punted_Direct_Reads_Are_Spread_Over_Descriptors)
+{
+    PuntFixture punt;
+    Driver driver(Strategy::IoUringDirect);
+
+    driver.execute(punt.workload(true, 4));
+    ASSERT_EQ(driver.engine->staged_count(), 4u);
+
+    std::set<int> fds;
+    for (const auto id : driver.engine->staged())
+    {
+        const auto & file = driver.engine->request(id).file;
+        EXPECT_TRUE(file.direct) << "the setup must produce DIRECT reads";
+        EXPECT_TRUE(file.punt) << "a listed mount's direct reads are punted";
+        fds.insert(file.fd);
+    }
+    EXPECT_EQ(fds.size(), 4u) << "four reads in flight at once, four descriptors";
+
+    for (const int fd : fds)
+    {
+        const int flags = ::fcntl(fd, F_GETFL);
+        ASSERT_NE(flags, -1);
+        EXPECT_NE(flags & O_DIRECT, 0) << "every descriptor is opened direct";
+    }
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+
+    const auto responses = drain_responses(*punt.fixture.responder, 4);
+    ASSERT_EQ(responses.size(), 4u);
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success);
+    }
+}
+
+// Anywhere else nothing changes: no punt, one descriptor.
+TEST(AsyncIoWorker, Unlisted_Mount_Reads_Inline_Through_One_Descriptor)
+{
+    PuntFixture punt;
+    Driver driver(Strategy::IoUringDirect);
+
+    driver.execute(punt.workload(false, 1));
+    ASSERT_EQ(driver.engine->staged_count(), 4u);
+
+    std::set<int> fds;
+    for (const auto id : driver.engine->staged())
+    {
+        const auto & file = driver.engine->request(id).file;
+        EXPECT_TRUE(file.direct);
+        EXPECT_FALSE(file.punt);
+        fds.insert(file.fd);
+    }
+    EXPECT_EQ(fds.size(), 1u);
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+    EXPECT_EQ(drain_responses(*punt.fixture.responder, 4).size(), 4u);
+}
+
+// A refused direct read demotes the WHOLE file, extra descriptors included: requests already staged
+// on their numbers must run buffered too, or their EINVAL would arrive on a file marked buffered.
+TEST(AsyncIoWorker, Demotion_Covers_Every_Descriptor_Of_The_File)
+{
+    PuntFixture punt;
+    Driver driver(Strategy::IoUringDirect);
+
+    driver.execute(punt.workload(true, 4));
+    const auto staged = driver.engine->staged();
+    ASSERT_EQ(staged.size(), 4u);
+
+    std::set<int> fds;
+    for (const auto id : staged)
+    {
+        fds.insert(driver.engine->request(id).file.fd);
+    }
+    ASSERT_EQ(fds.size(), 4u);
+
+    driver.issue();
+    driver.engine->fail(staged.front(), EINVAL);
+    driver.route();
+
+    ASSERT_EQ(driver.engine->staged_count(), 1u) << "the refused chunk is re-issued buffered";
+    const auto & retry = driver.engine->request(driver.engine->staged().back());
+    EXPECT_FALSE(retry.file.direct);
+    EXPECT_FALSE(retry.file.punt) << "a buffered read is punted by the engine anyway, not by this flag";
+
+    for (const int fd : fds)
+    {
+        const int flags = ::fcntl(fd, F_GETFL);
+        ASSERT_NE(flags, -1) << "a descriptor still in use was closed";
+        EXPECT_EQ(flags & O_DIRECT, 0) << "descriptor " << fd << " was left direct";
+    }
+
+    driver.issue();
+    driver.engine->complete_all();
+    driver.route();
+
+    const auto responses = drain_responses(*punt.fixture.responder, 4);
+    ASSERT_EQ(responses.size(), 4u);
+    for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success);
+    }
+}
+
 // THE SPIN THAT A DEFERRAL USED TO CAUSE. An engine that refuses everything, with nothing in flight
 // to free it, left execute() looping at full CPU for ever - proven before the bound existed.
 //

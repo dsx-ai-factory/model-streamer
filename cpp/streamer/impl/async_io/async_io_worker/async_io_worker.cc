@@ -127,6 +127,10 @@ AsyncIoWorker::~AsyncIoWorker()
             {
                 ::close(batch_fd.fd);
             }
+            for (const int extra_fd : batch_fd.extra)
+            {
+                ::close(extra_fd);
+            }
         }
     }
 }
@@ -557,7 +561,8 @@ posix_io::FileRef AsyncIoWorker::file_of(const InflightChunk & entry) const
     }
 
     const auto & batch_fd = wlit->second.fds[entry.batch_index];
-    return posix_io::FileRef{ batch_fd.fd, batch_fd.direct };
+    return posix_io::FileRef{ batch_fd.fd, batch_fd.direct,
+                              batch_fd.direct && wlit->second.workload.direct_async };
 }
 
 size_t AsyncIoWorker::land_bounced_pass(posix_io::RequestId id, size_t bytes_transferred)
@@ -712,6 +717,20 @@ common::ResponseCode AsyncIoWorker::demote_to_buffered(const InflightChunk & ent
         batch_fd.fd = fd;
     }
 
+    // The extra descriptors go buffered the same way and for the same reason: requests staged on
+    // their numbers must run buffered too. Pointed at the one buffered open, which they may share.
+    for (const int extra_fd : batch_fd.extra)
+    {
+        if (::dup2(batch_fd.fd, extra_fd) < 0)
+        {
+            // A direct descriptor would remain under a batch about to be marked buffered, which no
+            // completion mapping describes. Failing the file is the honest answer.
+            LOG(ERROR) << "Cannot replace a direct descriptor for " << path << " with a buffered"
+                       << " one: " << std::strerror(errno);
+            return common::ResponseCode::FileAccessError;
+        }
+    }
+
     batch_fd.direct = false;
 
     // Remembered for the whole mount, not just this file - see _direct_refused. One engine per mount
@@ -742,7 +761,14 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
 
     if (entry.fd >= 0)
     {
-        return entry.fd;
+        if (entry.extra.empty())
+        {
+            return entry.fd;
+        }
+
+        // Dealt in turn, so reads in flight at once spread over every descriptor of the file.
+        const unsigned slot = entry.next++ % (entry.extra.size() + 1);
+        return slot == 0 ? entry.fd : entry.extra[slot - 1];
     }
 
     const auto & path = wl.workload.batches()[batch_index].path;
@@ -753,6 +779,23 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
         if (entry.fd >= 0)
         {
             entry.direct = true;
+
+            // Opened together with the first, while the workload holds the file. A failed open only
+            // means fewer descriptors to share the reads, never a wrong read, so it stops here.
+            for (unsigned i = 1; i < wl.workload.direct_fds; ++i)
+            {
+                const int extra_fd = utils::Fd::open_for_read(path, O_DIRECT);
+                if (extra_fd < 0)
+                {
+                    LOG(DEBUG) << "Reading " << path << " through " << i << " direct descriptors, not "
+                               << wl.workload.direct_fds << ": " << std::strerror(errno);
+                    break;
+                }
+                entry.extra.push_back(extra_fd);
+            }
+
+            // This read takes `fd`, so the turn starts at the first extra one.
+            entry.next = 1;
             return entry.fd;
         }
 
@@ -841,7 +884,7 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
 
     // What the file WAS opened as, not what the strategy wanted. A direct open can fall back per file.
     const bool direct = wlit->second.fds[entry->batch_index].direct;
-    const posix_io::FileRef file{ fd, direct };
+    const posix_io::FileRef file{ fd, direct, direct && wlit->second.workload.direct_async };
 
     // Where this chunk sits inside its staging buffer, now that the open has decided. Before pending()
     // below, because pending() places the destination using it.
@@ -1480,6 +1523,10 @@ void AsyncIoWorker::finalize(InflightMap::iterator it, common::ResponseCode code
         if (batch_fd.fd >= 0)
         {
             ::close(batch_fd.fd);
+        }
+        for (const int extra_fd : batch_fd.extra)
+        {
+            ::close(extra_fd);
         }
     }
 

@@ -291,6 +291,15 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
+    if (file.direct && file.punt)
+    {
+        // A direct read is normally cheap to issue inline: the block layer queues it and returns. Not
+        // on NFS. There the submitting task pins the destination and builds one request per page
+        // before any RPC goes out, so a 64-deep window issued inline runs one read at a time on this
+        // engine's single worker. Punting moves that work to io-wq, which runs it in parallel.
+        io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
+    }
+
     if (!file.direct)
     {
         // IOSQE_ASYNC on buffered reads, always.

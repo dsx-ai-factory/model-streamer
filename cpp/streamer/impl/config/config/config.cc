@@ -81,6 +81,25 @@ std::vector<std::string> Config::split_types(const std::string & value)
     return out;
 }
 
+bool Config::punts_direct_reads(const std::string & fs_type) const
+{
+    const auto type = lowered(fs_type);
+    if (type.empty())
+    {
+        return false;
+    }
+
+    for (const auto & listed : fs_direct_async)
+    {
+        if (type.rfind(listed, 0) == 0)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool Config::registers_buffers(const std::string & fs_type) const
 {
     if (!fs_register_buffers)
@@ -120,7 +139,8 @@ unsigned Config::to_concurrency(unsigned long value, const char * source)
 Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_bytesize, size_t fs_sync_read_block_bytesize,
                bool enforce_minimum, size_t fs_async_chunk_bytesize, FsQueueDepth fs_async_queue_depth,
                std::string fs_strategy_candidates, unsigned long object_storage_retry_timeout_seconds,
-               std::string fs_no_register_buffers, bool fs_register_buffers) :
+               std::string fs_no_register_buffers, bool fs_register_buffers,
+               std::string fs_direct_async, unsigned long fs_direct_fds) :
     concurrency(concurrency),
     s3_concurrency(s3_concurrency),
     s3_block_bytesize(s3_block_bytesize),
@@ -130,8 +150,16 @@ Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_by
     fs_async_queue_depth(std::move(fs_async_queue_depth)),
     fs_no_register_buffers(split_types(fs_no_register_buffers)),
     fs_register_buffers(fs_register_buffers),
+    fs_direct_async(split_types(fs_direct_async)),
+    fs_direct_fds(static_cast<unsigned>(std::clamp(fs_direct_fds, 1UL, max_fs_direct_fds))),
     object_storage_retry_timeout(object_storage_retry_timeout_seconds)
 {
+    if (fs_direct_fds == 0 || fs_direct_fds > max_fs_direct_fds)
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_DIRECT_FDS=" << fs_direct_fds << " is outside 1 to "
+                     << max_fs_direct_fds << "; using " << this->fs_direct_fds;
+    }
+
     // Resolved here, with the other configuration, so a malformed RUNAI_STREAMER_DIRECT_BLOCK fails
     // like every other malformed variable: runai_file_streamer_start builds a Config first and turns any failure
     // into InvalidParameterError, while a failure in the Streamer that follows becomes UnknownError.
@@ -224,7 +252,9 @@ Config::Config(FsSettings fs, bool enforce_minimum) :
            utils::getenv<unsigned long>("RUNAI_STREAMER_S3_TIMEOUT", 0UL),
            utils::getenv<std::string>("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS",
                                       default_fs_no_register_buffers),
-           utils::getenv<bool>("RUNAI_STREAMER_FS_REGISTER_BUFFERS", default_fs_register_buffers))
+           utils::getenv<bool>("RUNAI_STREAMER_FS_REGISTER_BUFFERS", default_fs_register_buffers),
+           utils::getenv<std::string>("RUNAI_STREAMER_FS_DIRECT_ASYNC", default_fs_direct_async),
+           utils::getenv<unsigned long>("RUNAI_STREAMER_FS_DIRECT_FDS", default_fs_direct_fds))
 {}
 
 std::ostream & operator<<(std::ostream & os, const Config & config)

@@ -263,6 +263,41 @@ TEST(FsAsyncRouter, Without_A_Policy_Every_Mount_Registers)
     EXPECT_TRUE(groups.registers[0]);
 }
 
+// Punting direct reads is decided per mount too, from the same file system type.
+TEST(FsAsyncRouter, Punted_Direct_Reads_Are_Decided_Per_Mount)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string & directory)
+    {
+        const bool is_nfs = directory == "/nfs";
+        return posix_io::MountCapability{ is_nfs ? makedev(8, 1) : makedev(8, 2), false,
+                                          is_nfs ? "nfs4" : "ext4" };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st", "/local/b.st" }), FsQueueDepth(512),
+                                      common::Device::host(), nullptr,
+                                      [](const std::string & fs_type) { return fs_type == "nfs4"; });
+
+    ASSERT_EQ(groups.punts.size(), 2u) << "one answer per group, like the depth";
+    EXPECT_TRUE(groups.punts[0]) << "the nfs4 mount was listed";
+    EXPECT_FALSE(groups.punts[1]) << "the ext4 mount was not";
+}
+
+// No policy means no punting: a caller that does not ask keeps inline direct reads.
+TEST(FsAsyncRouter, Without_A_Policy_No_Mount_Punts)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string &)
+    {
+        return posix_io::MountCapability{ makedev(8, 1), false, "nfs4" };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st" }), FsQueueDepth(512), common::Device::host());
+
+    ASSERT_EQ(groups.punts.size(), 1u);
+    EXPECT_FALSE(groups.punts[0]);
+}
+
 // Directories on one mount share a group, so they share an engine.
 TEST(FsAsyncRouter, One_Group_Per_Mount_Not_Per_Directory)
 {
