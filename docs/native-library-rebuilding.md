@@ -8,7 +8,8 @@ core library: rebuild and replace `libstreamer.so` to use a modified dependency.
 
 libaio 0.3.113 is LGPL-2.1-or-later. liburing 2.14 uses its MIT licensing option.
 Each deliverable's `NOTICE` (`py/runai_model_streamer*/NOTICE`, `cpp/NOTICE`) records versions
-and licenses; the `# attribution:` comments in `.devcontainer/Dockerfile` say which library each
+and licenses; the `# attribution:` comments in `cpp/MODULE.bazel` (and, for the libraries
+the development container builds, `.devcontainer/Dockerfile`) say which library each
 component is linked into. The binary deliverables contain shared libraries, public
 SDK headers and notices; they do not include dependency source archives or a
 separate set of relinkable object files. The replacement mechanism described here
@@ -28,10 +29,18 @@ STREAMER_REF=X.Y.Z  # Replace with your release tag or exact commit.
 git checkout "$STREAMER_REF"
 ```
 
-Use the dependency versions, download URLs, checksums and build flags in that
-checkout's [I/O dependency build script](../.devcontainer/scripts/build-io-libs.sh) and the
-`ARG`s of [`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile) that pass them in.
-For older releases the recipe may be inline in `.devcontainer/Dockerfile`.
+Bazel builds both libraries from source as modules of the
+[Bazel Central Registry](https://registry.bazel.build) (BCR). That checkout's
+[`cpp/MODULE.bazel`](../cpp/MODULE.bazel) pins their versions (`bazel_dep`) and names
+any patch applied on top of the registry's (`single_version_override`). For each
+module version, the registry's `source.json`
+(`https://bcr.bazel.build/modules/<name>/<version>/source.json`) gives the upstream
+archive URL and its checksum, and its `overlay/` directory the `BUILD.bazel` that
+compiles it. [`cpp/bazel_downloader.cfg`](../cpp/bazel_downloader.cfg) lists any
+archive Bazel downloads from another mirror than the registry names.
+Older releases built these libraries in the development container instead; for
+them, use the versions, URLs, checksums and flags in that checkout's
+`.devcontainer/scripts/build-io-libs.sh` and `.devcontainer/Dockerfile`.
 Download and retain the complete dependency archives, not just their license
 texts from the `NOTICE` files. The commands below match this
 revision's pins; use the matching recipe when rebuilding another revision.
@@ -44,8 +53,6 @@ x86_64 or aarch64; use the architecture of the binary you are replacing. The
 container supplies the compiler, Bazel, headers and other dependencies. Its
 Dockerfile and scripts are included in the project source so the environment
 can also be built from source. The following commands run **inside that container**.
-They change its private `/opt` dependency installation; do not share that
-installation with a production application.
 
 First download and verify the original source. `mktemp` gives each rebuild its
 own directory, and the original archive remains available after modification.
@@ -61,30 +68,35 @@ cd "$AIO_REBUILD_DIR"
 curl -fsSL --connect-timeout 15 --max-time 60 -o libaio-0.3.113.tar.gz \
   https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz || exit 1
 echo "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b  libaio-0.3.113.tar.gz" | sha256sum -c - || exit 1
-tar -xzf libaio-0.3.113.tar.gz
 ```
 
-Make your changes under `$AIO_REBUILD_DIR/libaio-0.3.113`. Keep a copy of the patch
-and preserve the upstream license and copyright notices. Then compile the static
-archive with position-independent code and replace the container's build input:
+Then let Bazel fetch the module and copy its source tree out of Bazel's cache.
+That tree is the archive above with the registry's `BUILD.bazel` and `MODULE.bazel`
+added, plus any patch `cpp/MODULE.bazel` applies: the exact source the standard
+build compiles. (`libaio~` is the directory name Bazel 7 uses; Bazel 8 names it
+`libaio+`.)
 
 ```sh
-make -C "$AIO_REBUILD_DIR/libaio-0.3.113/src" -B \
-  ENABLE_SHARED=0 CFLAGS="-fPIC -O2 -I."
-cp "$AIO_REBUILD_DIR/libaio-0.3.113/src/libaio.a" "/opt/$ARCH-aio/lib/libaio.a"
-cp "$AIO_REBUILD_DIR/libaio-0.3.113/src/libaio.h" "/opt/$ARCH-aio/include/libaio.h"
-STREAMER_BAZEL_OUTPUT=$(mktemp -d)
 cd "$STREAMER_SOURCE_DIR/cpp"
-bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
-  --config="$ARCH" --noremote_accept_cached --disk_cache=
+bazel fetch @libaio//:aio
+cp -R "$(bazel info output_base)/external/libaio~" "$AIO_REBUILD_DIR/libaio"
 ```
 
-The archives are passed through linker flags, so Bazel does not track their
-contents as inputs. Replacing an archive alone can leave the old core or test
-binary cached. **Create a new `STREAMER_BAZEL_OUTPUT` after every dependency
-change**, as above, and use it for the subsequent builds and tests. These commands
-also disable remote cache reads and the disk cache to prevent reuse of stale
-link results from another output directory.
+Make your changes under `$AIO_REBUILD_DIR/libaio`. Keep a copy of the patch
+and preserve the upstream license and copyright notices. Then build with Bazel
+using your copy in place of the registry's. `--override_module` has the effect of a
+`local_path_override` in `MODULE.bazel`, and the module is still compiled into
+`libstreamer.so` statically, with position-independent code and `-O2`:
+
+```sh
+cd "$STREAMER_SOURCE_DIR/cpp"
+bazel build streamer:libstreamer.so --config="$ARCH" \
+  --override_module=libaio="$AIO_REBUILD_DIR/libaio"
+```
+
+Bazel tracks the copied sources as build inputs, so a later change to them is
+rebuilt without clearing any cache. Pass the same `--override_module` to every
+later build and test command, or Bazel builds the registry's source again.
 
 The resulting library is `cpp/bazel-bin/streamer/libstreamer.so`. Retain a linker
 map to check that the archive supplied code, and inspect ELF dependencies to
@@ -93,9 +105,9 @@ sandbox cannot hide the temporary directory receiving the map:
 
 ```sh
 cd "$STREAMER_SOURCE_DIR/cpp"
-bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
-  --config="$ARCH" --noremote_accept_cached --disk_cache= --strategy=CppLink=local \
-  --linkopt="-Wl,-Map=$AIO_REBUILD_DIR/libstreamer.map"
+bazel build streamer:libstreamer.so --config="$ARCH" \
+  --override_module=libaio="$AIO_REBUILD_DIR/libaio" \
+  --strategy=CppLink=local --linkopt="-Wl,-Map=$AIO_REBUILD_DIR/libstreamer.map"
 grep 'libaio.a' "$AIO_REBUILD_DIR/libstreamer.map"
 readelf -d bazel-bin/streamer/libstreamer.so | grep NEEDED
 ```
@@ -107,11 +119,18 @@ For the project's native engine tests, run:
 
 ```sh
 cd "$STREAMER_SOURCE_DIR/cpp"
-bazel --output_base="$STREAMER_BAZEL_OUTPUT" test \
+bazel test \
   //posix_io/libaio_probe:libaio_probe_test \
   //posix_io/libaio_engine:libaio_engine_test --config="$ARCH" --test_output=errors \
-  --noremote_accept_cached --disk_cache=
+  --override_module=libaio="$AIO_REBUILD_DIR/libaio"
 ```
+
+To keep the change in your own checkout instead of passing the flag, add
+`local_path_override(module_name = "libaio", path = "<your copy>")` to
+`cpp/MODULE.bazel`. To build from a modified archive you host, use
+`archive_override` with its URL, `integrity` and `strip_prefix`; that archive must
+then contain the `BUILD.bazel` and `MODULE.bazel` above, which the registry adds
+only to its own download.
 
 ## Use the rebuilt library
 
@@ -129,7 +148,9 @@ python3 -c 'from importlib.metadata import version; print(version("runai-model-s
 ```
 
 In the build container, set `PACKAGE_VERSION` to that exact version and check
-that you obtained its matching source tag or commit. The core wheel pins its
+that you obtained its matching source tag or commit. The wheel packages
+`cpp/bazel-bin/streamer/libstreamer.so` as it was last built, so make the
+`--override_module` build above the last Bazel build before this step. The core wheel pins its
 cloud extras to this version, so do not replace it with `0.0.0`.
 
 ```sh
@@ -154,27 +175,32 @@ library search path at that prefix. Preserve the original installation for rollb
 
 ## Rebuild liburing
 
-To change liburing too, obtain the complete pinned archive from the I/O build
-script and verify its checksum before editing it. For this revision:
+To change liburing too, obtain the complete pinned archive the registry names
+and verify its checksum before editing. For this revision:
 
 ```sh
 set -euo pipefail
 cd "$AIO_REBUILD_DIR"
 curl -fsSL --connect-timeout 15 --max-time 60 -o liburing-2.14.tar.gz \
-  https://codeload.github.com/axboe/liburing/tar.gz/refs/tags/liburing-2.14 || exit 1
+  https://github.com/axboe/liburing/archive/refs/tags/liburing-2.14.tar.gz || exit 1
 echo "5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c  liburing-2.14.tar.gz" | sha256sum -c - || exit 1
-tar -xzf liburing-2.14.tar.gz
-cd liburing-liburing-2.14
-# Make your source changes before configuring and compiling.
-./configure --use-libc --prefix="/opt/$ARCH-uring" --libdir="/opt/$ARCH-uring/lib"
-make -C src -j4 ENABLE_SHARED=0 CFLAGS="-fPIC -O2"
-make install ENABLE_SHARED=0
-STREAMER_BAZEL_OUTPUT=$(mktemp -d)
-cd "$STREAMER_SOURCE_DIR/cpp"
-bazel --output_base="$STREAMER_BAZEL_OUTPUT" build streamer:libstreamer.so \
-  --config="$ARCH" --noremote_accept_cached --disk_cache=
 ```
 
+Copy the source tree Bazel builds, as for libaio. It already carries the
+registry's `BUILD.bazel`, which runs liburing's `configure --use-libc` during the
+build, and the patch from `cpp/third_party` that `cpp/MODULE.bazel` applies.
+Make your source changes under `$AIO_REBUILD_DIR/liburing`, then rebuild:
+
+```sh
+cd "$STREAMER_SOURCE_DIR/cpp"
+bazel fetch @liburing//:uring
+cp -R "$(bazel info output_base)/external/liburing~" "$AIO_REBUILD_DIR/liburing"
+# Make your source changes before building.
+bazel build streamer:libstreamer.so --config="$ARCH" \
+  --override_module=liburing="$AIO_REBUILD_DIR/liburing"
+```
+
+To rebuild with both libraries modified, pass both `--override_module` flags.
 After changing liburing, repeat [Use the rebuilt library](#use-the-rebuilt-library):
 rebuild and force-reinstall the wheel, or replace the native library again.
 Rebuilding the Bazel library does not update an already installed wheel or SDK.
@@ -191,7 +217,9 @@ Before distributing a binary release, maintainers must provide recipients with:
 - The complete corresponding libaio source archive and any patches used in the
   binary, with its license and notices. A license-text download alone is not source.
 - The dependency versions, checksums and build instructions needed to rebuild
-  the core with a modified library.
+  the core with a modified library: `cpp/MODULE.bazel`, the registry's
+  `source.json` and `BUILD.bazel` overlay for each module version, and the patches
+  under `cpp/third_party`.
 
 Publish those source materials alongside the downloadable binaries and link them
 from the release notes. Check that recipients can download them without employee

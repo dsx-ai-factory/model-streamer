@@ -1,5 +1,5 @@
 {
-  "description": "What ships that no line in this repository says (run-ai/runai-actions Renovate pipeline, renovate/README.md#attribution). Pinned libraries are marked where they are pinned: .devcontainer/Dockerfile, .devcontainer/gcs/MODULE.bazel.",
+  "description": "What ships that no line in this repository says (run-ai/runai-actions Renovate pipeline, renovate/README.md#attribution). Pinned libraries are marked where they are pinned: .devcontainer/Dockerfile, cpp/MODULE.bazel, .devcontainer/gcs/MODULE.bazel.",
   "components": [
     {
       "name": "gcc-runtime",
@@ -23,17 +23,6 @@
       "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.57-archive.tar.xz",
       "sha256": "5bd3ac35ea8e8ab880e595d5054ee373abf6d9e53dcb8cef0a5c75358dbc0ae2",
       "reason": "cuda.h, compiled against (libcuda is loaded at run time); its license asks for the notice. Installed by .devcontainer/scripts/install-cuda-headers.sh; no Renovate datasource serves NVIDIA's redistributables, so update both together"
-    },
-    {
-      "name": "libaio",
-      "version": "0.3.113",
-      "modules": [
-        "py/runai_model_streamer",
-        "cpp"
-      ],
-      "url": "https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz",
-      "sha256": "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b",
-      "reason": "linked statically into libstreamer; built by .devcontainer/scripts/build-io-libs.sh from Debian's orig tarball (no upstream Renovate can look up), so update both together"
     }
   ],
   "skip": [
