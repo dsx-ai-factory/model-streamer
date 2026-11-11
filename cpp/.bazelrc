@@ -14,9 +14,11 @@ build --force_pic
 ## Overridable: `bazel build -c dbg` still wins, because a command-line flag beats an rc file.
 build --compilation_mode=opt
 
-# Disable bzlmod Modules, as this workspace uses WORKSPACE
-# dependency management. See https://bazel.build/external/migration
-build --noenable_bzlmod
+# Dependencies come from MODULE.bazel (Bzlmod) only; WORKSPACE is not read. No lockfile is
+# kept: versions are fixed by MODULE.bazel and the registry.
+common --enable_bzlmod
+common --noenable_workspace
+common --lockfile_mode=off
 
 # Keep architecture-specific output paths used by Python packaging.
 # Select the config matching the native devcontainer architecture.

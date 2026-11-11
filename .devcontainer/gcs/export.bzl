@@ -28,7 +28,6 @@ def _export_sdk_impl(ctx):
 
     manifest = ctx.actions.declare_file(ctx.label.name + ".json")
     ctx.actions.write(manifest, json.encode(struct(
-        source_checksums = ctx.attr.source_checksums,
         headers = [header.path for header in headers],
         includes = depset(transitive = [
             compilation.includes,
@@ -48,6 +47,5 @@ export_sdk = rule(
     implementation = _export_sdk_impl,
     attrs = {
         "deps": attr.label_list(providers = [CcInfo]),
-        "source_checksums": attr.string_dict(mandatory = True),
     },
 )

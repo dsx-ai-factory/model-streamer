@@ -213,7 +213,7 @@ REPOSITORY_RULES = ("http_archive", "http_file", "http_jar", "git_repository", "
 
 
 def _bazel(workspace, *args):
-    return run(["bazel"] + list(args) + ["--noenable_bzlmod"], cwd=workspace)
+    return run(["bazel"] + list(args), cwd=workspace)
 
 
 def bazel_dependencies(repo, workspace):
@@ -225,7 +225,7 @@ def bazel_dependencies(repo, workspace):
     for config in ("x86_64", "aarch64"):  # some dependencies are selected per target architecture
         log("bazel: fetching every repository for %s (this takes a while)" % config)
         _bazel(cpp, "fetch", "--config=" + config, "//...:all")
-    output_base = run(["bazel", "info", "output_base", "--noenable_bzlmod"], cwd=cpp).strip()
+    output_base = run(["bazel", "info", "output_base"], cwd=cpp).strip()
     fetched = {name for name in os.listdir(os.path.join(output_base, "external")) if not name.endswith(".marker")}
     definitions = _bazel(cpp, "query", "--output=build", "//external:*")
     found = []

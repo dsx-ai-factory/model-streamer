@@ -92,7 +92,7 @@ RUN bash /tmp/build-azure-sdk.sh "$TARGETARCH"
 # archives and headers enter the final image, not sources or the Bazel cache.
 FROM base AS gcs-builder
 COPY .devcontainer/gcs/.bazelversion /build/gcs/
-COPY .devcontainer/gcs/.bazelrc .devcontainer/gcs/WORKSPACE .devcontainer/gcs/BUILD.bazel \
+COPY .devcontainer/gcs/.bazelrc .devcontainer/gcs/MODULE.bazel .devcontainer/gcs/BUILD.bazel \
     .devcontainer/gcs/abi_check.cc .devcontainer/gcs/export.bzl .devcontainer/gcs/install.py \
     .devcontainer/gcs/test_install.py /build/gcs/
 COPY .devcontainer/gcs/config/ /build/gcs/config/

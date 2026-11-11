@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""The application build. The GCS SDK is not built here: the devcontainer prebuilds it
+(.devcontainer/gcs) and google_cloud_cpp below is that prebuilt copy, checked against
+this checkout's SDK build inputs."""
+
+module(name = "runai_model_streamer")
+
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
+bazel_dep(name = "googletest", version = "1.16.0", dev_dependency = True, repo_name = "com_google_googletest")
+
+# The SDK's ABI compatibility header and build inputs, shared with the SDK builder.
+bazel_dep(name = "gcs_sdk_config")
+local_path_override(module_name = "gcs_sdk_config", path = "../.devcontainer/gcs/config")
+
+# The native GCC toolchain, configured from the host (devcontainer).
+cc_autoconf_toolchain = use_repo_rule("//toolchain:configure.bzl", "cc_autoconf_toolchain")
+
+cc_autoconf_toolchain(name = "toolchain")
+
+register_toolchains("@toolchain//:all")
+
+# Starlark regression tests for prebuilt SDK validation.
+register_toolchains("@bazel_skylib//toolchains/unittest:bash_toolchain")
+
+# Libraries the devcontainer installs.
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+new_local_repository(
+    name = "cuda",
+    build_file = "//third_party:cuda.BUILD",
+    path = "/usr/local/cuda",
+)
+
+new_local_repository(
+    name = "aws",
+    build_file = "//third_party:aws.BUILD",
+    path = "/opt",
+)
+
+new_local_repository(
+    name = "azure",
+    build_file = "//third_party:azure.BUILD",
+    path = "/opt",
+)
+
+new_local_repository(
+    name = "uring",
+    build_file = "//third_party:uring.BUILD",
+    path = "/opt",
+)
+
+new_local_repository(
+    name = "aio",
+    build_file = "//third_party:aio.BUILD",
+    path = "/opt",
+)
+
+# The devcontainer prebuilds the SDK for its installed architectures.
+# Application builds only compile our GCS adapter and tests.
+prebuilt_gcp = use_repo_rule("//third_party:gcp_repo.bzl", "prebuilt_gcp")
+
+prebuilt_gcp(name = "google_cloud_cpp")

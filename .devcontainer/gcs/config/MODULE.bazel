@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""SDK configuration shared by the SDK builder (.devcontainer/gcs) and the application
+build (cpp/): the ABI compatibility header. Its files are build inputs the application
+checks the prebuilt SDK against."""
+
+module(name = "gcs_sdk_config")
+
+bazel_dep(name = "rules_cc", version = "0.2.17")

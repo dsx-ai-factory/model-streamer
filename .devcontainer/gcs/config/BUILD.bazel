@@ -3,8 +3,6 @@
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-exports_files(["sources.bzl", "deps.bzl"])
-
 cc_library(
     name = "compatibility",
     hdrs = ["model_streamer_gcs_sdk/compatibility.h"],
