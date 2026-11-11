@@ -14,22 +14,22 @@ The build entry point is `.devcontainer/scripts/build-gcs-sdk.sh`. It downloads
 and verifies Bazel, runs the installer tests, builds the native SDK, and exports
 the installation and metadata. The Dockerfile copies its inputs and invokes it.
 
-The SDK has its own `.bazelversion`, `.bazelrc` and standalone Bazel workspace
-here. Bazel detects the native compiler; the application keeps its existing custom
-toolchain. `config/sources.bzl` and `config/deps.bzl` are the single source of SDK
-and shared Bazel dependency pins, loaded by both workspaces. The image does not
-copy or watch any `cpp/` files.
+The SDK has its own `.bazelversion`, `.bazelrc` and standalone Bazel module here
+(`MODULE.bazel`, Bzlmod). Bazel detects the native compiler; the application keeps its
+existing custom toolchain. `MODULE.bazel` pins google-cloud-cpp; Bazel resolves
+everything it depends on (grpc, protobuf, abseil, BoringSSL, ...) from the Bazel
+Central Registry. `config/` is a local module both builds share (the ABI compatibility
+header). The image does not copy or watch any `cpp/` files.
 
 `export.bzl` preserves the transitive `CcInfo` headers, include paths, defines,
 static libraries, always-link requirements and linker flags. `install.py`
 dereferences generated and virtual headers into a standalone Bazel package. The
-final image contains no SDK builder sources or Bazel cache. Application builds
-still fetch protobuf's Bazel rule definitions, which `rules_cc` imports; they do
-not compile protobuf or its dependencies.
+final image contains no SDK builder sources or Bazel cache. Application builds do
+not compile protobuf or the SDK's other dependencies.
 
 Rebuild the devcontainer after changing SDK sources, settings or pins under
 `.devcontainer/gcs/`, or the `build-gcs-sdk.sh` script. The consumer checks these
-SDK-owned inputs, source checksums
+SDK-owned inputs (including `MODULE.bazel`, so a google-cloud-cpp bump is a mismatch)
 and the installed compiler version. Changing this directory's `.bazelversion`
 also requires updating the matching Linux AMD64 and ARM64 Bazel binary checksums
 in `build-gcs-sdk.sh`. The application's `cpp/.bazelversion` can change independently.
