@@ -17,6 +17,7 @@ import unittest
 
 VERSION = "0.17.2"
 BUNDLE_SCRIPT = Path(__file__).with_name("release_bundle.py").resolve()
+REPOSITORY = BUNDLE_SCRIPT.parents[2]
 
 
 class ReleaseBundleTests(unittest.TestCase):
@@ -96,6 +97,14 @@ class ReleaseBundleTests(unittest.TestCase):
                 expected.update({f"{root}/{path.relative_to(directory).as_posix()}": path.read_bytes()
                                  for path in directory.rglob("*") if path.is_file()})
             expected[f"{root}/THIRD_PARTY_NOTICES.txt"] = self.notices.read_bytes()
+            for name in ("main.c", "CMakeLists.txt", "README.md"):
+                expected[f"{root}/examples/hello_streamer/{name}"] = (
+                    REPOSITORY / "examples/hello_streamer" / name).read_bytes()
+            expected[f"{root}/lib/pkgconfig/runai-streamer.pc"] = (
+                REPOSITORY / "cpp/sdk/runai-streamer.pc.in").read_bytes().replace(
+                    b"@VERSION@", VERSION.encode())
+            expected[f"{root}/lib/cmake/runai-streamer/runai-streamer-config.cmake"] = (
+                REPOSITORY / "cpp/sdk/runai-streamer-config.cmake").read_bytes()
             with tarfile.open(self.archive_path(arch)) as archive:
                 self.assertEqual({member.name: archive.extractfile(member).read()
                                   for member in archive.getmembers() if member.isfile()}, expected)
@@ -129,7 +138,8 @@ class ReleaseBundleTests(unittest.TestCase):
                     release_members = {member.name: archive.extractfile(member).read()
                                        for member in archive.getmembers() if member.isfile()}
                 with tarfile.open(pr_files[name]) as archive:
-                    pr_members = {member.name.replace(version, VERSION): archive.extractfile(member).read()
+                    pr_members = {member.name.replace(version, VERSION): archive.extractfile(member).read().replace(
+                                      version.encode(), VERSION.encode())
                                   for member in archive.getmembers() if member.isfile()}
                 self.assertEqual(release_members, pr_members)
         result = self.verify(**options)
