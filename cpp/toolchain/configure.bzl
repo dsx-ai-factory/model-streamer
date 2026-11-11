@@ -37,15 +37,5 @@ _cc_autoconf_toolchain = repository_rule(
     configure = True,
 )
 
-def configure_toolchain(name):
-    """configure_toolchain creates and registers the native toolchain in a repository.
-
-    The native platform can be referenced by "@<name>//:<arch>".
-
-    Args:
-      name: The name of the toolchain repository.
-    """
-    _cc_autoconf_toolchain(name = name)
-    native.register_toolchains(
-        "@%s//:all" % name,
-    )
+# Used from MODULE.bazel with use_repo_rule; the toolchain is registered there.
+cc_autoconf_toolchain = _cc_autoconf_toolchain
