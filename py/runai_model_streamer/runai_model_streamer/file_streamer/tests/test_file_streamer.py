@@ -22,6 +22,37 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 from runai_model_streamer.file_streamer.yield_order import UnorderedYield, YieldOrder
 
 
+class TestAResumeAfterTheContextExited(unittest.TestCase):
+    """__exit__ ends the C handle and clears it, and a generator can be resumed after that.
+
+    Asking a freed handle for a response crashed the process. Closing a generator is safe either
+    way - GeneratorExit lands at the yield, so the response loop is never re-entered - so only an
+    explicit next() or send() past the with block reaches this."""
+
+    RANGE_SIZE = 8
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.temp_dir, ignore_errors=True)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME: str(8 * 4 * 2),
+                             RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "2",
+                             RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME: "0"})
+    def test_get_chunks_ends_instead_of_asking_a_freed_handle(self):
+        path = os.path.join(self.temp_dir, "model.bin")
+        with open(path, "wb") as handle:
+            handle.write(b"".join(f"rng{i:05d}".encode() for i in range(12)))
+        chunks = [FileChunks.contiguous(0, path, 0, [self.RANGE_SIZE] * 12)]
+
+        with FileStreamer() as fs:
+            fs.stream_files(chunks)
+            generator = fs.get_chunks()
+            next(generator)
+
+        with self.assertRaises(StopIteration):
+            next(generator)
+
+
 class TestRingConcurrency(unittest.TestCase):
     """Several submissions in flight at once. Each range carries a distinct, position-encoding payload,
     so a response attributed to the wrong submission or the wrong buffer produces the wrong text rather

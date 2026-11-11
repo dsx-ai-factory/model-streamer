@@ -609,7 +609,10 @@ class FileStreamer:
             if device_ring:
                 self._clone_stream = current_stream()
 
-            while self.live_requests:
+            # self.streamer too: __exit__ ends the handle and clears it, and a generator can be
+            # resumed after that - which passed a freed handle to the library and crashed. Closing
+            # one is safe either way: GeneratorExit lands at the yield, so this loop is not re-entered.
+            while self.live_requests and self.streamer:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
                 # serves whichever submission completed a range first, so responses INTERLEAVE.
                 response = runai_response(self.streamer)
