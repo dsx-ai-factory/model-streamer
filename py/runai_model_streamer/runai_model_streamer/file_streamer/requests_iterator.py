@@ -162,6 +162,35 @@ def _alloc_slot(slot_size: int) -> Slot:
 
 
 
+def _next_offset(cursor: int, alignment: int) -> int:
+    """Where the next range starts. An alignment of 1 packs them one after another."""
+    return cursor + -cursor % alignment
+
+
+def _advance(cursor: int, size: int, alignment: int) -> Tuple[int, int]:
+    """Where this range starts, and where the cursor ends after it.
+
+    A ZERO-SIZED RANGE TAKES NO PAD. It has no bytes to align, and a pad for it would spend slot
+    room a real range could use. An empty tensor in a shard is a real case, and the C++ layer
+    answers a zero-sized range like any other, so it still gets a destination."""
+    if size == 0:
+        return cursor, cursor
+    at = _next_offset(cursor, alignment)
+    return at, at + size
+
+
+def _layout_end(cursor: int, sizes: List[int], alignment: int) -> int:
+    """The cursor after laying these sizes out from `cursor`.
+
+    THE PACKER AND THE PLACER WALK THE SAME WAY. next_chunks decides how many ranges fit and _place
+    decides where each one lands; if those two disagreed, placement would overrun a slot the packer
+    thought was full enough. At alignment 1 this is cursor + sum(sizes), which is what both did
+    before there was a rule to follow."""
+    for size in sizes:
+        _, cursor = _advance(cursor, size, alignment)
+    return cursor
+
+
 class SlotMemory(NamedTuple):
     """What a ring's slots are made of, and what that implies.
 
@@ -210,12 +239,31 @@ HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
                  direct_block: int = DIRECT_IO_BLOCK, owned: bool = True,
-                 slots: SlotMemory = HOST_SLOTS) -> None:
+                 slots: SlotMemory = HOST_SLOTS, range_alignment: int = 1) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
         self.direct_block = direct_block
-        self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks)
+
+        # 0 divides by zero inside the rule, and a negative one moves the cursor BACKWARDS - Python's
+        # % follows the sign of the divisor - which overlaps two ranges in one slot. Both would show
+        # up far from here, as wrong bytes rather than as a bad argument.
+        if range_alignment < 1:
+            raise ValueError(f"range_alignment must be at least 1, got {range_alignment}")
+
+        # A ring that is SENT FROM lays its ranges out by a rule, so a peer can work out where each
+        # one is without being told. A ring that is READ INTO directly places each range congruent
+        # with its file offset instead. The two cannot both hold, and silently preferring one would
+        # give a peer the wrong offsets.
+        if range_alignment > 1 and slots.direct_io:
+            raise ValueError(
+                f"a {slots.label} ring is read into directly, so its ranges are placed congruent "
+                f"with their file offsets and cannot also be aligned to {range_alignment}"
+            )
+        self._range_alignment = range_alignment
+
+        self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks,
+                                                             range_alignment)
         self.buffer_size = buffer_size
         self.num_buffers = num_buffers
         # DEBUG, not INFO: this class cannot know which rank it is on, and every rank builds its own
@@ -246,7 +294,8 @@ class FilesRequestsIteratorWithBuffer:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.
 
         With aligned=True a range may be pushed forward a few bytes so that its address and its file
-        offset leave the same remainder. With aligned=False the ranges are packed one after another.
+        offset leave the same remainder. With aligned=False the ranges follow range_alignment, which
+        is 1 - one after another - unless this ring is sent from.
         """
         dsts = []
         cursor = base
@@ -258,12 +307,24 @@ class FilesRequestsIteratorWithBuffer:
                     # 0 when they already line up, which is the usual case after the first range of a
                     # file.
                     cursor += (offset - cursor) % self.direct_block
+                    if cursor + size > limit:
+                        return None
 
-                if cursor + size > limit:
+                    dsts.append(cursor)
+                    cursor += size
+                    continue
+
+                # FROM THE BASE, not the address: the rule reads sizes only, so two ranks whose
+                # slots sit at different addresses still lay the same ranges out the same way.
+                at, after = _advance(cursor - base, size, self._range_alignment)
+
+                # The packer walks the same way against the same limit, so this cannot trip while
+                # the two agree. It is the net if they ever stop agreeing.
+                if base + at + size > limit:
                     return None
 
-                dsts.append(cursor)
-                cursor += size
+                dsts.append(base + at)
+                cursor = base + after
 
         return dsts
 
@@ -439,8 +500,10 @@ class FilesRequestsIteratorWithBuffer:
         )
 
 class FilesRequestsIterator:
-    def __init__(self, memory_limit: int, files_chunks: List[FileChunks]) -> None:
+    def __init__(self, memory_limit: int, files_chunks: List[FileChunks],
+                 range_alignment: int = 1) -> None:
         self.memory_limit = memory_limit
+        self.range_alignment = range_alignment
         self.q = deque(FileChunksIterator(file_chunks)
             for file_chunks in files_chunks)
         
@@ -472,7 +535,9 @@ class FilesRequestsIterator:
         while self.q:
             file_chunks_iterator = self.q[0]
             file_chunks = file_chunks_iterator.next_chunks(
-                self.memory_limit - current_request_memory_size
+                self.memory_limit - current_request_memory_size,
+                current_request_memory_size,
+                self.range_alignment,
             )
             finished = file_chunks_iterator.is_finished()
             if finished:
@@ -496,7 +561,9 @@ class FilesRequestsIterator:
             # one response per range.
             files_request.append(file_chunks, self.file_to_assigned_ranges[file_chunks.id])
             self.file_to_assigned_ranges[file_chunks.id] += len(file_chunks.sizes)
-            current_request_memory_size += file_chunks.total_size()
+            current_request_memory_size = _layout_end(
+                current_request_memory_size, file_chunks.sizes, self.range_alignment
+            )
 
         if len(files_request.files) == 0:
             files_request = None
@@ -518,12 +585,20 @@ class FileChunksIterator:
     def is_finished(self) -> bool:
         return self.next_index >= len(self.sizes)
 
-    def next_chunks(self, size: int) -> FileChunks:
+    def next_chunks(self, size: int, cursor: int = 0, alignment: int = 1) -> FileChunks:
+        """The next ranges that fit in `size` bytes, laid out from `cursor` by `alignment`.
+
+        cursor is where this file's first range would land inside the request, which the rule needs:
+        the pad before a range depends on where the ranges before it ended, including those from an
+        earlier file in the same request."""
         start = self.next_index
         end = start
-        remaining = size
-        while end < len(self.sizes) and self.sizes[end] <= remaining:
-            remaining -= self.sizes[end]
+        limit = cursor + size
+        while end < len(self.sizes):
+            at, after = _advance(cursor, self.sizes[end], alignment)
+            if at + self.sizes[end] > limit:
+                break
+            cursor = after
             end += 1
         self.next_index = end
         return FileChunks(self.id, self.path, self.offsets[start:end], self.sizes[start:end])

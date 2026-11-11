@@ -7,6 +7,10 @@ import unittest
 import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer.requests_iterator import (
+    _advance,
+    _alloc_slot,
+    _layout_end,
+    _next_offset,
     _packing_fill,
     _device_ring_shape,
     FileChunksIterator,
@@ -18,6 +22,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
     RUNAI_STREAMER_MAX_PADS_PER_BUFFER_ENV_VAR_NAME,
     DIRECT_IO_BLOCK,
+    SlotMemory,
     _max_pads_per_buffer,
     _ring_sizing,
     device_ring_sizing,
@@ -1271,3 +1276,199 @@ class TestHostRingSizingAcrossModes(unittest.TestCase):
         # prevent, and one that no other test would notice.
         with self.assertRaises(TypeError):
             host_ring_sizing(self.chunks([4096]))
+
+
+# A ring nothing reads into directly, which is the only kind that may be sent from.
+SENT_SLOTS = SlotMemory(_alloc_slot, direct_io=False, label="TEST", new_event=None,
+                        current_stream=None)
+
+ALIGNMENT = 512
+
+
+class TestRangeAlignment(unittest.TestCase):
+    """A ring that is SENT FROM lays its ranges out by a rule, so a peer can compute where each one
+    is instead of being told."""
+
+    def ring(self, sizes, buffer_size, alignment=ALIGNMENT, slots=SENT_SLOTS):
+        files = [FileChunks.contiguous(17, "a.txt", 0, sizes)]
+        return FilesRequestsIteratorWithBuffer(
+            buffer_size, 2, files, owned=True, slots=slots, range_alignment=alignment,
+        )
+
+    def offsets_of(self, iterator, request):
+        """Each range's offset inside its slot, measured FROM THE SLOT.
+
+        Not from range_dsts[0]: that would compare the layout with its own first element, and a
+        layout shifted bodily down the slot - one that runs off the end in production - would read
+        as correct."""
+        base = iterator._pool.slot(request.buffer_index).address
+        return [dst - base for dst in request.range_dsts]
+
+    def test_the_offsets_follow_the_rule(self):
+        iterator = self.ring([100, 200, 300], buffer_size=ALIGNMENT * 4)
+        request = iterator.next_request()
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 512, 1024])
+
+    def test_a_size_already_on_the_rule_is_not_pushed_on(self):
+        iterator = self.ring([ALIGNMENT, 100], buffer_size=ALIGNMENT * 4)
+        request = iterator.next_request()
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 512])
+
+    def test_the_packer_counts_the_pads(self):
+        """Three 200-byte ranges fit a 600-byte slot packed tight, and one fits once they are spaced
+        512 apart. A packer that still counted the sizes would fill a slot the placer cannot lay
+        out."""
+        tight = self.ring([200, 200, 200], buffer_size=600, alignment=1)
+        self.assertEqual(len(tight.next_request().range_dsts), 3)
+
+        spaced = self.ring([200, 200, 200], buffer_size=600)
+        self.assertEqual(len(spaced.next_request().range_dsts), 1)
+
+    def test_a_range_ending_the_slot_exactly_still_fits(self):
+        """The last range needs room for its BYTES, not for a pad after it."""
+        iterator = self.ring([ALIGNMENT, 100], buffer_size=ALIGNMENT + 100)
+        request = iterator.next_request()
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 512])
+
+    def test_the_whole_stream_fits_slot_after_slot(self):
+        """The property the two have to share: whatever the packer puts in a request, the placer can
+        lay out. A disagreement raises, so reaching the end of the stream is the assertion."""
+        sizes = [1, 511, 512, 513, 1023, 7, 4096, 3, 2048, 9]
+        iterator = self.ring(sizes, buffer_size=ALIGNMENT * 12)
+
+        placed = 0
+        while True:
+            request = iterator.next_request()
+            if request is None:
+                break
+            offsets = self.offsets_of(iterator, request)
+            self.assertEqual(offsets[0], 0, "every request starts at its slot's base")
+            for offset, size in zip(offsets, [s for f in request.files for s in f.sizes]):
+                if size:
+                    self.assertEqual(offset % ALIGNMENT, 0)
+            extent = len(iterator.slot_memory_of(request))
+            self.assertLessEqual(extent, ALIGNMENT * 12, "the placer overran the packer's slot")
+            placed += len(offsets)
+            iterator.release(request)
+
+        self.assertEqual(placed, len(sizes), "a range never reached a slot")
+
+    def test_the_extent_sent_to_a_peer_includes_the_pads(self):
+        """slot_memory_of is what a caller broadcasts. Under the rule the ranges are spaced, so the
+        sum of the sizes is SHORTER than the extent, and sending that many bytes would truncate the
+        last range."""
+        iterator = self.ring([100, 200, 300], buffer_size=ALIGNMENT * 4)
+        request = iterator.next_request()
+
+        self.assertEqual(len(iterator.slot_memory_of(request)), 1024 + 300)
+        self.assertGreater(len(iterator.slot_memory_of(request)), 100 + 200 + 300)
+
+    def test_the_views_land_where_the_layout_says(self):
+        """Written through the destinations and read back through the views the caller is given.
+
+        Distinct bytes per range, so an overlap or an off-by-one pad reads as another range's data
+        rather than as the right answer."""
+        sizes = [100, 200, 300]
+        iterator = self.ring(sizes, buffer_size=ALIGNMENT * 4)
+        request = iterator.next_request()
+
+        slot = iterator._pool.slot(request.buffer_index)
+        for index, (dst, size) in enumerate(zip(request.range_dsts, sizes)):
+            at = dst - slot.address
+            slot.memory[at:at + size] = index + 1
+
+        for index, size in enumerate(sizes):
+            _, _, view = iterator.get_global_file_and_range(request, 0, index)
+            self.assertEqual(bytes(view), bytes([index + 1]) * size,
+                             f"range {index} did not read back as itself")
+
+    def test_a_trailing_pad_would_cost_a_range(self):
+        """The walk ends at the last range's DATA. A cursor left after a pad would make the packer
+        think less room is left than there is, which this slot is sized to expose: 100 then 412 fit
+        exactly, and only if the cursor after the first range is 100 rather than 512."""
+        iterator = self.ring([100, 412], buffer_size=ALIGNMENT, alignment=1)
+        self.assertEqual(len(iterator.next_request().range_dsts), 2)
+
+        spaced = self.ring([100, 412], buffer_size=ALIGNMENT)
+        self.assertEqual(len(spaced.next_request().range_dsts), 1,
+                         "with the rule the second range no longer fits")
+
+    def test_a_ring_that_is_read_into_directly_is_refused(self):
+        """Congruent placement and the rule cannot both hold, and preferring one silently would give
+        a peer the wrong offsets."""
+        with self.assertRaisesRegex(ValueError, "cannot also be aligned"):
+            self.ring([100], buffer_size=ALIGNMENT * 2, slots=HOST_SLOTS)
+
+    def test_a_second_file_in_the_same_request_keeps_the_cursor(self):
+        """next_chunks is asked per FILE, so the pad before a file's first range depends on where
+        the previous file's ranges ended. A packer that restarted at zero for each file would fill a
+        request the placer cannot lay out."""
+        files = [FileChunks.contiguous(1, "a.txt", 0, [64]),
+                 FileChunks.contiguous(2, "b.txt", 0, [100, 200])]
+        iterator = FilesRequestsIteratorWithBuffer(
+            ALIGNMENT * 4, 2, files, owned=True, slots=SENT_SLOTS, range_alignment=ALIGNMENT,
+        )
+        request = iterator.next_request()
+
+        self.assertEqual([f.id for f in request.files], [1, 2])
+        self.assertEqual(self.offsets_of(iterator, request), [0, 512, 1024])
+
+    def test_an_alignment_that_does_not_divide_the_slot_base(self):
+        """The rule is counted FROM THE BASE. A slot's address is page aligned, so an alignment that
+        divides the page size cannot tell base-relative from absolute - this one cannot."""
+        alignment = 1000
+        iterator = self.ring([100, 200, 300], buffer_size=alignment * 4, alignment=alignment)
+        request = iterator.next_request()
+
+        base = iterator._pool.slot(request.buffer_index).address
+        if base % alignment == 0:
+            # A page-aligned address is a multiple of 1000 every 125 pages. Skipping says the run
+            # proved nothing; failing would be a flake.
+            self.skipTest("this slot address is already aligned, so the test cannot tell the two apart")
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 1000, 2000])
+
+    def test_a_zero_sized_range_takes_no_pad(self):
+        """An empty tensor in a shard is a real case. It has no bytes to align, and a pad for it
+        would spend room a real range could use."""
+        iterator = self.ring([100, 0, 200], buffer_size=ALIGNMENT * 4)
+        request = iterator.next_request()
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 100, 512])
+
+    def test_an_alignment_below_one_is_refused(self):
+        for alignment in (0, -ALIGNMENT):
+            with self.subTest(alignment=alignment):
+                with self.assertRaisesRegex(ValueError, "at least 1"):
+                    self.ring([100], buffer_size=ALIGNMENT * 2, alignment=alignment)
+
+    def test_alignment_one_changes_nothing(self):
+        iterator = self.ring([100, 200, 300], buffer_size=600, alignment=1)
+        request = iterator.next_request()
+
+        self.assertEqual(self.offsets_of(iterator, request), [0, 100, 300])
+
+
+class TestTheLayoutWalk(unittest.TestCase):
+    """The helper the packer and the placer share."""
+
+    def test_the_rule_rounds_up(self):
+        self.assertEqual(_next_offset(0, ALIGNMENT), 0)
+        self.assertEqual(_next_offset(1, ALIGNMENT), 512)
+        self.assertEqual(_next_offset(512, ALIGNMENT), 512)
+        self.assertEqual(_next_offset(513, ALIGNMENT), 1024)
+
+    def test_an_alignment_of_one_is_a_running_sum(self):
+        self.assertEqual(_layout_end(0, [100, 200, 300], 1), 600)
+        self.assertEqual(_next_offset(7, 1), 7)
+
+    def test_a_zero_sized_range_neither_pads_nor_advances(self):
+        self.assertEqual(_advance(100, 0, ALIGNMENT), (100, 100))
+        self.assertEqual(_advance(100, 7, ALIGNMENT), (512, 519))
+
+    def test_the_walk_ends_at_the_last_range(self):
+        """Not at a pad after it: the end of the data is what a caller sends."""
+        self.assertEqual(_layout_end(0, [100, 200], ALIGNMENT), 712)
