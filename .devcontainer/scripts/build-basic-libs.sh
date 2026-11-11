@@ -9,6 +9,11 @@ if (( $# != 1 )); then
     echo "Usage: $0 <amd64|arm64>" >&2
     exit 2
 fi
+# Versions come from the Dockerfile's annotated ARGs, which Renovate keeps current.
+: "${OPENSSL_VERSION:?}" "${CURL_VERSION:?}" "${ZLIB_VERSION:?}" "${LIBXML2_VERSION:?}"
+CURL_DOTTED="${CURL_VERSION//_/.}"
+LIBXML2_SERIES="${LIBXML2_VERSION%.*}"
+
 case "$1" in
     amd64) arch=x86_64 ;;
     arm64) arch=aarch64 ;;
@@ -19,9 +24,9 @@ case "$1" in
 esac
 
 build_openssl() {
-    curl -fsSL -o openssl-3.5.0.tar.gz https://www.openssl.org/source/openssl-3.5.0.tar.gz
-    tar zxf openssl-3.5.0.tar.gz
-    cd openssl-3.5.0
+    curl -fsSL -o openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz
+    tar zxf openssl-${OPENSSL_VERSION}.tar.gz
+    cd openssl-${OPENSSL_VERSION}
 
     ./Configure no-ssl2 no-zlib no-shared no-comp no-dynamic-engine enable-ec_nistp_64_gcc_128 --prefix=/opt/${arch}-ssl --openssldir=/opt/${arch}-ssl --libdir=lib linux-${arch}
     make -j4 > /dev/null
@@ -30,13 +35,13 @@ build_openssl() {
     make distclean > /dev/null
 
     cd -
-    rm -rf openssl-3.5.0 openssl-3.5.0.tar.gz
+    rm -rf openssl-${OPENSSL_VERSION} openssl-${OPENSSL_VERSION}.tar.gz
 }
 
 build_curl() {
-    curl -fsSL -o curl-8.13.0.tar.gz https://github.com/curl/curl/releases/download/curl-8_13_0/curl-8.13.0.tar.gz
-    tar zxf curl-8.13.0.tar.gz
-    cd curl-8.13.0
+    curl -fsSL -o curl-${CURL_DOTTED}.tar.gz https://github.com/curl/curl/releases/download/curl-${CURL_VERSION}/curl-${CURL_DOTTED}.tar.gz
+    tar zxf curl-${CURL_DOTTED}.tar.gz
+    cd curl-${CURL_DOTTED}
 
     CPPFLAGS=-I/opt/${arch}-ssl/include \
     LDFLAGS=-L/opt/${arch}-ssl/lib \
@@ -47,13 +52,13 @@ build_curl() {
     make clean > /dev/null
 
     cd -
-    rm -rf curl-8.13.0 curl-8.13.0.tar.gz
+    rm -rf curl-${CURL_DOTTED} curl-${CURL_DOTTED}.tar.gz
 }
 
 build_zlib() {
-    curl -fsSL -o zlib-1.3.1.tar.gz https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
-    tar zxf zlib-1.3.1.tar.gz
-    cd zlib-1.3.1
+    curl -fsSL -o zlib-${ZLIB_VERSION}.tar.gz https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz
+    tar zxf zlib-${ZLIB_VERSION}.tar.gz
+    cd zlib-${ZLIB_VERSION}
 
     ./configure --static --shared --prefix=/opt/${arch}-zlib
     make -j4 > /dev/null
@@ -61,16 +66,16 @@ build_zlib() {
     make clean > /dev/null
 
     cd -
-    rm -rf zlib-1.3.1 zlib-1.3.1.tar.gz
+    rm -rf zlib-${ZLIB_VERSION} zlib-${ZLIB_VERSION}.tar.gz
 }
 
 # -O2 is explicit because setting CFLAGS at all REPLACES autoconf's own default of "-g -O2".
 # Passing only -fPIC therefore silently removed the optimisation. curl survives the same treatment
 # a few blocks up only because its configure applies --enable-optimize itself; libxml2 does not.
 build_libxml2() {
-    curl -fsSL -o libxml2-2.13.5.tar.xz https://download.gnome.org/sources/libxml2/2.13/libxml2-2.13.5.tar.xz
-    tar xf libxml2-2.13.5.tar.xz
-    cd libxml2-2.13.5
+    curl -fsSL -o libxml2-${LIBXML2_VERSION}.tar.xz https://download.gnome.org/sources/libxml2/${LIBXML2_SERIES}/libxml2-${LIBXML2_VERSION}.tar.xz
+    tar xf libxml2-${LIBXML2_VERSION}.tar.xz
+    cd libxml2-${LIBXML2_VERSION}
 
     CFLAGS="-fPIC -O2" \
     ./configure \
@@ -82,7 +87,7 @@ build_libxml2() {
     make distclean > /dev/null
 
     cd -
-    rm -rf libxml2-2.13.5 libxml2-2.13.5.tar.xz
+    rm -rf libxml2-${LIBXML2_VERSION} libxml2-${LIBXML2_VERSION}.tar.xz
 }
 
 build_openssl
