@@ -12,7 +12,7 @@ runai_cc_auto_library(
         "//posix_io/io_engine",
         "//common/response_code",
         "//utils/logging",
-        "@aio//:aio",
+        "//third_party:aio",
     ],
 )
 
