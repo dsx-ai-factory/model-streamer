@@ -41,7 +41,8 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-s3",
     version=VERSION,
-    license_files=("LICENSE", "THIRD_PARTY_NOTICES.txt"),
+    # attribution: ships NOTICE (third-party notices, kept current by the Renovate pipeline)
+    license_files=("LICENSE", "NOTICE"),
     packages=find_packages(),
     # 1.28.0 is the first boto3 that reads AWS_ENDPOINT_URL / AWS_ENDPOINT_URL_S3 (configured endpoints).
     # The listing client (files.py) relies on that to target the same endpoint as the C++ reads.

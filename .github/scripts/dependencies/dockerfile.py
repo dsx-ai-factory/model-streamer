@@ -205,19 +205,57 @@ def script_variables(text):
 
 
 def _expand(text, variables):
-    """Replace `${NAME}` by the value of NAME, also inside the values."""
+    """Replace `${NAME}` by the value of NAME, also inside the values, and the two shell forms the
+    scripts use on a version: `${NAME//a/b}` (replace every a) and `${NAME%pattern}` (drop the
+    shortest matching suffix, pattern a glob)."""
+    import fnmatch
+
+    def value(match):
+        name, operator, argument = match.group(1), match.group(2), match.group(3)
+        if name not in variables:
+            return match.group(0)
+        found = variables[name]
+        if operator == "//":
+            old, _, new = argument.partition("/")
+            return found.replace(old, new)
+        if operator == "%":
+            for cut in range(len(found), -1, -1):
+                if fnmatch.fnmatchcase(found[cut:], argument):
+                    return found[:cut]
+        return found
+
     for _ in range(5):
-        replaced = re.sub(r"\$\{(\w+)\}", lambda m: variables.get(m.group(1), m.group(0)), text)
+        replaced = re.sub(r"\$\{(\w+)(?:(//|%)([^}]*))?\}", value, text)
         if replaced == text:
             break
         text = replaced
     return text
 
 
+def dockerfile_arguments(path=None):
+    """The default of every `ARG NAME=value` in the Dockerfile: the versions it passes to the
+    scripts it runs (`RUN NAME="$NAME" bash script.sh`)."""
+    import os
+
+    path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))), DOCKERFILE)
+    found = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                match = re.match(r"\s*ARG\s+([A-Za-z_]\w*)=(\S*)", line)
+                if match and match.group(1) not in found:
+                    found[match.group(1)] = match.group(2).strip("\"'")
+    except OSError:
+        pass
+    return found
+
+
 def _script_environment(text, arch):
     """The variables of a script when it runs for `arch` (a key of SCRIPT_ARCHES)."""
     common, specific = script_variables(text)
-    variables = dict(common)
+    variables = dockerfile_arguments()
+    variables.update(common)
     variables.update(specific[arch])
     for name, value in common.items():
         if value == "$1":  # `target_arch=$1`: the architecture argument

@@ -1,0 +1,121 @@
+{
+  "description": "What ships that no line in this repository says (run-ai/runai-actions Renovate pipeline, renovate/README.md#attribution). Pinned libraries are marked where they are pinned: .devcontainer/Dockerfile, .devcontainer/gcs/MODULE.bazel.",
+  "components": [
+    {
+      "name": "gcc-runtime",
+      "version": "9",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "reason": "libstdc++ and libgcc, linked statically into every native library; Ubuntu 20.04's gcc-9 (the devcontainer's base image)"
+    },
+    {
+      "name": "glibc-nonshared",
+      "version": "2.31",
+      "license": "LGPL-2.1-or-later",
+      "reason": "libc_nonshared.a start-up stubs, linked statically; Ubuntu 20.04's glibc 2.31"
+    },
+    {
+      "name": "nvidia-cuda-headers",
+      "version": "12.8.57",
+      "modules": [
+        "py/runai_model_streamer",
+        "cpp"
+      ],
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.57-archive.tar.xz",
+      "sha256": "5bd3ac35ea8e8ab880e595d5054ee373abf6d9e53dcb8cef0a5c75358dbc0ae2",
+      "reason": "cuda.h, compiled against (libcuda is loaded at run time); its license asks for the notice. Installed by .devcontainer/scripts/install-cuda-headers.sh; no Renovate datasource serves NVIDIA's redistributables, so update both together"
+    },
+    {
+      "name": "libaio",
+      "version": "0.3.113",
+      "modules": [
+        "py/runai_model_streamer",
+        "cpp"
+      ],
+      "url": "https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz",
+      "sha256": "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b",
+      "reason": "linked statically into libstreamer; built by .devcontainer/scripts/build-io-libs.sh from Debian's orig tarball (no upstream Renovate can look up), so update both together"
+    }
+  ],
+  "skip": [
+    {
+      "name": "rules_cc",
+      "reason": "Bazel rules and tooling that carry a few C/C++ or .proto files of their own; the build runs them, nothing links them"
+    },
+    {
+      "name": "rules_proto",
+      "reason": "Bazel rules and tooling that carry a few C/C++ or .proto files of their own; the build runs them, nothing links them"
+    },
+    {
+      "name": "rules_swift",
+      "reason": "Bazel rules and tooling that carry a few C/C++ or .proto files of their own; the build runs them, nothing links them"
+    },
+    {
+      "name": "apple_support",
+      "reason": "Bazel rules and tooling that carry a few C/C++ or .proto files of their own; the build runs them, nothing links them"
+    },
+    {
+      "name": "gazelle",
+      "reason": "Bazel rules and tooling that carry a few C/C++ or .proto files of their own; the build runs them, nothing links them"
+    },
+    {
+      "name": "googletest",
+      "reason": "test and benchmark frameworks (jsoncpp: protobuf's conformance tests); only test binaries link them"
+    },
+    {
+      "name": "google_benchmark",
+      "reason": "test and benchmark frameworks (jsoncpp: protobuf's conformance tests); only test binaries link them"
+    },
+    {
+      "name": "jsoncpp",
+      "reason": "test and benchmark frameworks (jsoncpp: protobuf's conformance tests); only test binaries link them"
+    },
+    {
+      "name": "cython",
+      "reason": "grpc's Python bindings tooling; not linked into the C++ SDK"
+    },
+    {
+      "name": "prometheus-cpp",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "civetweb",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "opentracing-cpp",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "rapidyaml",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "c4core",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "fast_float",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "opentelemetry-proto",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "zipkin-api",
+      "reason": "opentelemetry-cpp's optional exporters and configuration; the SDK links only its API"
+    },
+    {
+      "name": "opencensus-cpp",
+      "reason": "grpc's optional OpenCensus plugin and xDS CEL protos; not built into the SDK (the removed linker-map manifest did not list them)"
+    },
+    {
+      "name": "rapidjson",
+      "reason": "grpc's optional OpenCensus plugin and xDS CEL protos; not built into the SDK (the removed linker-map manifest did not list them)"
+    },
+    {
+      "name": "cel-spec",
+      "reason": "grpc's optional OpenCensus plugin and xDS CEL protos; not built into the SDK (the removed linker-map manifest did not list them)"
+    }
+  ]
+}
