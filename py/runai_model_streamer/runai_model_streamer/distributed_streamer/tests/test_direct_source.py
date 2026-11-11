@@ -16,7 +16,10 @@ from runai_model_streamer.distributed_streamer.distribution_source import (
 from runai_model_streamer.distributed_streamer.tests.test_distribution_source import (
     DistributionSourceContract,
 )
+from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
+from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
+from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
 from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     FilesRequestsIteratorWithBuffer,
@@ -159,6 +162,67 @@ class TestAnEmptyShareHonoursTheContract(DirectSourceFixture, DistributionSource
 
     def release_event(self):
         return FakeEvent()
+
+
+class TestTheRingStreamFilesBuilds(DirectSourceFixture, unittest.TestCase):
+    """The two halves, joined.
+
+    Every other test here builds the ring by hand. This one asks stream_files for a sent-from ring
+    and feeds that to the source, so nothing stands between the flag and the thing that checks it."""
+
+    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                            current_stream=lambda device: FakeStream())
+
+    def test_a_sent_from_ring_is_one_this_source_accepts(self):
+        chunks = self.chunks()
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096):
+            with FileStreamer() as fs:
+                # The shape the group agreed. Two of these ranges a slot, once they are spaced.
+                fs.stream_files(chunks, device="cpu", sent_from=True,
+                                slot_shape=(RANGE_OFFSET_ALIGNMENT * 2, 2))
+
+                source = DirectDistributionSource(fs, ORIGINALS)
+
+                got, seen = b"", []
+                while True:
+                    filled = source.next_slot()
+                    if filled is None:
+                        break
+                    # A TORCH tensor, where the rings built by hand above are numpy: what a slot is
+                    # made of belongs to the path that built it, and a real device ring is torch.
+                    memory = filled.memory.numpy().tobytes()
+                    for r in filled.ranges:
+                        seen.append((r.file_id, r.range_index))
+                        got += memory[r.offset:r.offset + r.size]
+                    source.release(filled, FakeEvent())
+
+        expected = b""
+        for name in ("model0.bin", "model1.bin"):
+            with open(os.path.join(self.temp_dir, name), "rb") as handle:
+                expected += handle.read()
+
+        self.assertEqual(set(seen), CALLER_RANGES)
+        self.assertEqual(got, expected, "the slots did not reassemble the files in order")
+
+    def test_a_ring_stream_files_did_not_mark_as_sent_from_is_refused(self):
+        chunks = self.chunks()
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(chunks, device="cpu",
+                                slot_shape=(RANGE_OFFSET_ALIGNMENT * 2, 2))
+
+                with self.assertRaisesRegex(ValueError, "wrong offsets"):
+                    DirectDistributionSource(fs, ORIGINALS)
+
+                fs.drain_live_submissions()
 
 
 class TestDirectSource(DirectSourceFixture, unittest.TestCase):

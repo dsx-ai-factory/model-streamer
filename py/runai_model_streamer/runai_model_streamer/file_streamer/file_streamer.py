@@ -18,6 +18,7 @@ from runai_model_streamer.file_streamer.yield_order import UnorderedYield, yield
 from runai_model_streamer.file_streamer.device_support import device_support
 from runai_model_streamer.torch_device.torch_device import device_free_memory
 from runai_model_streamer.file_streamer.requests_iterator import (
+    RANGE_OFFSET_ALIGNMENT,
     DIRECT_IO_BLOCK,
     FilesRequestsIteratorWithBuffer,
     FilesRequest,
@@ -294,8 +295,19 @@ class FileStreamer:
             owned: bool = True,
             ring_buffers: Optional[int] = None,
             slot_shape: Optional[Tuple[int, int]] = None,
+            sent_from: bool = False,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
+
+        sent_from says this caller will BROADCAST the ring's slots, so the ranges are placed by
+        RANGE_OFFSET_ALIGNMENT and a peer can work out where each one is without being told.
+
+        It asks two things of the caller, and refuses rather than give back a ring that cannot be
+        sent. A DEVICE the library can write into, because a host ring places its ranges congruent
+        with their file offsets - a layout that depends on the mount and on this rank's address. And
+        a DICTATED slot_shape, because agreeing where a range sits inside a slot is worth nothing
+        without agreeing which ranges are in it. That shape also settles the depth, so ring_buffers
+        says nothing here, as owned and memory_limit already do not.
 
         A caller always owns what it receives: to a device the tensor is a copy, by .to() out of a
         host ring or by a clone out of a device one, so the slot is never handed over and owned=False
@@ -314,7 +326,8 @@ class FileStreamer:
         to different slot sizes lay their ranges out differently.
 
         It says what SIZE, never WHERE. A device the C++ layer cannot write into still falls back to
-        the host ring, and takes the dictated shape there instead.
+        the host ring, and takes the dictated shape there instead - unless sent_from is set, which
+        refuses instead of falling back.
 
         A dictated shape REPLACES the sizing, and with it both of the sizing's safety nets. The
         free-memory fraction is not consulted, so a device that cannot hold the shape raises an
@@ -404,6 +417,25 @@ class FileStreamer:
                     f"a ring needs at least one buffer, got {dictated_count}"
                 )
 
+        # A RING THIS CALLER WILL SEND FROM, slot by slot, to peers that work out where each range
+        # is rather than being told. It places its ranges by RANGE_OFFSET_ALIGNMENT instead of
+        # packing them one after another.
+        #
+        # A flag, not the number: the alignment is what every rank agrees on, so a caller must not
+        # be able to pick its own.
+        range_alignment = RANGE_OFFSET_ALIGNMENT if sent_from else 1
+
+        if sent_from and slot_shape is None:
+            # A derived size is floored by the largest range in THIS rank's share, so peers derive
+            # different sizes, split the range list across slots differently, and each decodes the
+            # other's slot with the wrong list of ranges. The alignment alone does not save them:
+            # agreeing where a range sits inside a slot is worth nothing without agreeing which
+            # ranges are in it.
+            raise ValueError(
+                "a ring that will be sent from needs the slot shape its peers agreed, and this "
+                "stream dictated none"
+            )
+
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
         sizing = None
@@ -429,6 +461,7 @@ class FileStreamer:
                 self.requests_iterator = FilesRequestsIteratorWithBuffer(
                     buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
                     slots=device_slots(str(resolved), support.new_event, support.current_stream),
+                    range_alignment=range_alignment,
                 )
             except torch.cuda.OutOfMemoryError as error:
                 if slot_shape is None:
@@ -463,6 +496,21 @@ class FileStreamer:
             # here, and an unowned pool never allocates again.
             support.current_stream(str(resolved)).synchronize()
         else:
+            if sent_from:
+                # REFUSE, never fall back, WHATEVER brought us here. This branch is every route to
+                # a host ring, and a host ring is read into directly: its ranges are placed
+                # congruent with their file offsets, a layout that depends on the mount and on this
+                # rank's address, which a peer computing the layout cannot reproduce. A rank that
+                # took it alone would send bytes its peers decode at the wrong offsets.
+                #
+                # Guarded on sent_from alone rather than on the cause, so a later change that opens
+                # a new way into this branch cannot quietly give a sender a ring it cannot send.
+                why = ("the library cannot read into that device" if support is None
+                       else "no ring fits on it")
+                raise ValueError(
+                    f"no ring on {self.device_str} that this stream can be sent from: {why}"
+                )
+
             if support is not None:
                 # The BUDGET, not free memory: it is the number that refused the ring, and a limit
                 # far below free memory is the usual reason.

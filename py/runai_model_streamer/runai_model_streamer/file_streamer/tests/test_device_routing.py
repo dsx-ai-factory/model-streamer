@@ -13,6 +13,7 @@ from runai_model_streamer.file_streamer import file_streamer as file_streamer_mo
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import (
+    RANGE_OFFSET_ALIGNMENT,
     FileChunks,
     FilesRequestsIteratorWithBuffer,
     RunaiStreamerMemoryLimitException,
@@ -459,3 +460,108 @@ class TestDeviceRoutingOnCuda(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestASentFromRing(unittest.TestCase):
+    """stream_files(sent_from=True): a ring whose slots this caller will broadcast.
+
+    Forced through the device_support seam, so it runs on a host with no device."""
+
+    SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeCudaEvent,
+                            current_stream=FAKE_STREAM)
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("".join(chr(97 + i % 26) * RANGE_SIZE for i in range(RANGES)))
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def chunks(self):
+        return [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+
+    # What the group agreed: two slots, each holding two of these ranges once they are spaced.
+    SHAPE = (RANGE_OFFSET_ALIGNMENT * 2, 2)
+
+    def stream(self, sent_from, supported=True, slot_shape=SHAPE):
+        """The ring stream_files built: its alignment, and whether it is the device one.
+
+        Free memory is not a parameter: a dictated shape replaces the sizing, so it decides
+        nothing here."""
+        with patch.object(file_streamer_module, "device_support",
+                          return_value=self.SUPPORT if supported else None), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096):
+            with FileStreamer() as fs:
+                # "cpu" with the seam forced: the slots are CPU tensors while the submission
+                # declares CUDA, as in TestDeviceRouting above. What is read here is the DECISION.
+                fs.stream_files(self.chunks(), device="cpu", sent_from=sent_from,
+                                slot_shape=slot_shape)
+                ring = fs.requests_iterator
+                fs.drain_live_submissions()
+                return ring.range_alignment, ring.slots.reuse_needs_event
+
+    def test_a_sent_from_ring_is_placed_by_the_rule(self):
+        self.assertEqual(self.stream(sent_from=True), (RANGE_OFFSET_ALIGNMENT, True))
+
+    def test_an_ordinary_ring_packs_one_after_another(self):
+        self.assertEqual(self.stream(sent_from=False), (1, True))
+
+    def test_the_ranges_are_spaced_by_the_rule_in_the_ring_it_built(self):
+        """Not only the setting: the shape holds two ranges a slot once they are spaced, where a
+        tight layout would have fitted far more."""
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(self.chunks(), device="cpu", sent_from=True,
+                                slot_shape=self.SHAPE)
+                # The requests stream_files already submitted: they hold the ring's slots, so
+                # asking for another would find none free.
+                request = next(iter(fs.live_requests.values()))
+
+                self.assertEqual(fs.requests_iterator.range_offsets_of(request),
+                                 [0, RANGE_OFFSET_ALIGNMENT])
+                fs.drain_live_submissions()
+
+    def test_a_device_the_library_cannot_write_into_is_refused(self):
+        """Never a silent host ring: its ranges are placed congruent with their file offsets, which
+        depends on the mount and on this rank's address, so a peer cannot reproduce it."""
+        with self.assertRaisesRegex(ValueError, "cannot read into that device"):
+            self.stream(sent_from=True, supported=False)
+
+    def test_a_sender_without_an_agreed_shape_is_refused(self):
+        """A derived size is floored by the largest range in THIS share, so peers would split the
+        ranges across slots differently - and the alignment says nothing about which ranges are in
+        a slot, only where they sit inside one."""
+        with self.assertRaisesRegex(ValueError, "slot shape its peers agreed"):
+            self.stream(sent_from=True, slot_shape=None)
+
+    def test_an_ordinary_stream_still_falls_back(self):
+        """Neither refusal applies to a caller that did not ask to send from the ring.
+
+        The HOST ring, said by what its slots are: a host slot is reusable the moment its copy
+        returns, so it needs no event, where a device slot does."""
+        alignment, needs_event = self.stream(sent_from=False, supported=False, slot_shape=None)
+
+        self.assertEqual(alignment, 1)
+        self.assertFalse(needs_event, "this is the device ring, so nothing fell back")
+
+    def test_a_sender_is_refused_when_the_shape_cannot_be_allocated(self):
+        """The other way out of the device branch. A sender must not reach the host ring by it
+        either - and that protection comes from the dictated shape, so it is pinned here."""
+        def out_of_memory(*args, **kwargs):
+            raise torch.cuda.OutOfMemoryError("out of memory")
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096), \
+                patch.object(file_streamer_module, "FilesRequestsIteratorWithBuffer",
+                             side_effect=out_of_memory):
+            with FileStreamer() as fs:
+                with self.assertRaises(RunaiStreamerMemoryLimitException):
+                    fs.stream_files(self.chunks(), device="cpu", sent_from=True,
+                                    slot_shape=self.SHAPE)

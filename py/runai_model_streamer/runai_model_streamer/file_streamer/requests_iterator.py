@@ -162,6 +162,19 @@ def _alloc_slot(slot_size: int) -> Slot:
 
 
 
+RANGE_OFFSET_ALIGNMENT = 512
+"""What a ring that is SENT FROM rounds its range offsets to.
+
+Every range offset is a multiple of it, so a range sits where its dtype can be read from whatever
+the sizes before it were. 8 would be enough for that - it is the largest element size safetensors
+has - and 512 is kept because it is what ranks already agree on, and it matches what the CUDA
+allocator returns.
+
+A CONSTANT, not a setting. It was read from the environment per rank, so one rank could lay its
+ranges out differently from its peers with nothing to notice.
+"""
+
+
 def next_offset(cursor: int, alignment: int) -> int:
     """Where the next range starts. An alignment of 1 packs them one after another."""
     return cursor + -cursor % alignment
