@@ -92,6 +92,48 @@ class SlotIsFree(unittest.TestCase):
         self.assertIsNone(support.asked_for[0].index,
                           "an unresolved device reaches the stream lookup unchanged")
 
+    def test_a_caller_that_moved_streams_is_refused(self):
+        """One event marks the work on ONE stream.
+
+        Clones left on a stream the event never covers are not waited for, so the library refills
+        the slot while they are still reading it: wrong bytes, and nothing raised. The
+        non-distributed ring refuses the same move."""
+        support = FakeSupport()
+        streamer = self.streamer("cuda:0")
+
+        with patch(
+            "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
+            return_value=support,
+        ):
+            with self.assertRaises(ValueError) as caught:
+                streamer.slot_is_free(started_on="stream of cuda:7")
+
+        self.assertIn("moved to another stream", str(caught.exception))
+        self.assertEqual(support.events, [], "and no event is recorded for a slot it cannot mark")
+
+    def test_the_stream_it_started_on_is_accepted(self):
+        support = FakeSupport()
+        streamer = self.streamer("cuda:0")
+
+        with patch(
+            "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
+            return_value=support,
+        ):
+            done = streamer.slot_is_free(started_on="stream of cuda:0")
+
+        self.assertIs(done, support.events[0])
+
+    def test_no_stream_given_means_no_check(self):
+        """A staged source ignores the event, so there is nothing for a moved stream to break."""
+        support = FakeSupport()
+        streamer = self.streamer("cuda:0")
+
+        with patch(
+            "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
+            return_value=support,
+        ):
+            self.assertIsNotNone(streamer.slot_is_free())
+
     def test_each_round_gets_its_own_event(self):
         """One event marks one slot. Re-recording a shared event would move the mark of a slot that
         is still out."""

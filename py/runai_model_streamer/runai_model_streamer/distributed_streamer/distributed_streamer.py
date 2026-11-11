@@ -24,6 +24,7 @@ from runai_model_streamer.torch_device.torch_device import (
 )
 
 from runai_model_streamer.file_streamer.requests_iterator import (
+    RunaiStreamerMemoryLimitException,
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
@@ -794,14 +795,56 @@ class _distributedStreamer:
         if self.sends_directly:
             # memory_limit is not passed: it caps HOST memory, and this ring is on the device. The
             # shape is what bounds it, and sent_from refuses a ring the library cannot write into.
-            self.file_streamer.stream_files(
-                self.rank_file_chunks_list, credentials, str(self.device),
-                owned=False, slot_shape=self.slot_shape, sent_from=True,
-                # The same number the metadata tensor has rows for. The ring packs by bytes, so
-                # without this a slot of small tensors holds more ranges than a peer can be told
-                # about, and write_metadata_rows refuses the batch.
-                max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
-            )
+            #
+            # The same max_ranges_per_slot the metadata tensor has rows for. The ring packs by
+            # bytes, so without it a slot of small tensors holds more ranges than a peer can be told
+            # about, and write_metadata_rows refuses the batch.
+            shallower = None
+            try:
+                self.file_streamer.stream_files(
+                    self.rank_file_chunks_list, credentials, str(self.device),
+                    owned=False, slot_shape=self.slot_shape, sent_from=True,
+                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
+                )
+            except RunaiStreamerMemoryLimitException as error:
+                # SHALLOWER, never smaller, and never a host ring. The slot size is what the group
+                # broadcasts, so a rank that changed it would send something its peers cannot
+                # receive, and a host ring cannot be broadcast from at all - NCCL does not send host
+                # memory. Depth is the only part of the shape this rank may decide alone.
+                #
+                # The shape was sized from the group's MINIMUM free memory, so reaching here means
+                # something took device memory on this rank after the group agreed. The broadcasts
+                # are synchronous, so the overlap this gives up slows every peer, not just this one.
+                # ONLY THE RING'S OWN OOM. That exception also carries a dictated shape this
+                # layer refused outright, and a packing failure raised after the submissions are
+                # already live - retrying either asks for the same refusal again, and the second
+                # trips the streamer's "a stream is still live" guard, which would replace the real
+                # diagnosis. The allocator's error is what a shallower ring can answer.
+                if not isinstance(error.__cause__, torch.cuda.OutOfMemoryError):
+                    raise
+
+                if self.slot_shape[1] <= 1:
+                    raise
+
+                shallower = (self.slot_shape[0], 1)
+
+            # OUTSIDE the handler, so the attempt that failed has let go of its memory. The pool
+            # allocates every slot up front, and while an exception is being handled its traceback
+            # keeps the slots it did manage to take - retrying in there asks for one more on top of
+            # them, and can fail where this succeeds.
+            if shallower is not None:
+                self.slot_shape = shallower
+                logger.warning(
+                    f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: not enough "
+                    f"device memory for the ring the group agreed - retrying with one slot of "
+                    f"{humanize.naturalsize(self.slot_shape[0], binary=True)}, which reads and "
+                    f"sends in turn instead of together"
+                )
+                self.file_streamer.stream_files(
+                    self.rank_file_chunks_list, credentials, str(self.device),
+                    owned=False, slot_shape=self.slot_shape, sent_from=True,
+                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
+                )
         else:
             self.file_streamer.stream_files(
                 self.rank_file_chunks_list, credentials, "cpu",
@@ -884,12 +927,24 @@ class _distributedStreamer:
                 MAX_CHUNKS_PER_BATCH,
             )
 
+        # The stream the clones and the collective run on. Held so slot_is_free can see it move,
+        # and only where a source refills its slots - a staged source ignores the event.
+        send_stream = None
+        if self.sends_directly:
+            support = device_support(self.device)
+            if support is not None:
+                send_stream = support.current_stream(self.device)
+
         chunks_to_read = [self.total_chunks_to_read]
+
+        # The slot this rank is holding, outside the loop so the finally can find it.
+        outstanding = None
 
         try:
             while chunks_to_read[0] > 0:
                 # --- Fill the send buffer ---
                 filled = source.next_slot()
+                outstanding = filled
                 ranges = filled.ranges if filled else []
                 chunk_count_in_batch = len(ranges)
                 current_data_size = len(filled.memory) if filled else 0
@@ -920,7 +975,8 @@ class _distributedStreamer:
                 # AFTER the yields. The slot is this rank's send buffer, and broadcast() hands out
                 # views into it, so releasing earlier would let the next fill overwrite them.
                 if filled:
-                    source.release(filled, self.slot_is_free())
+                    source.release(filled, self.slot_is_free(send_stream))
+                outstanding = None
 
         except RuntimeError as e:
             # Check if the error is a timeout
@@ -934,9 +990,46 @@ class _distributedStreamer:
             self.is_error = True
             logger.exception(f"[RunAI Streamer][Distributed] rank {self.original_group_rank} error: {e}")
             raise e
+        except GeneratorExit:
+            # A caller that walked away. The slot is NOT given back here: releasing resumes the
+            # library's own generator, which reads a whole further slot before it returns, and a
+            # generator nobody kept is closed by the collector - so that read would happen at an
+            # arbitrary moment, possibly during interpreter shutdown.
+            #
+            # Nothing is lost by skipping it. The streamer's teardown waits on the stream this slot
+            # was read on when the slot is still taken, and the clones and the collective both run
+            # on that same stream, so the broadcast is covered. It waits for more than it has to,
+            # on a load that is being abandoned anyway.
+            outstanding = None
+            raise
+        finally:
+            # A FINALLY, because an exception from the broadcast leaves the slot held with no
+            # other path back. A source the library refills is resumed BY the release, and the
+            # event goes with it, so the pool can wait on that event instead of the whole stream.
+            if outstanding is not None:
+                try:
+                    # NO GUARD HERE, deliberately. Asking it again would re-raise whatever stopped
+                    # the loop - a caller that moved streams fails the check at the release above,
+                    # leaves the slot held, and would fail it a second time here, so the slot is
+                    # never given back and the ring is stranded by the very code meant to save it.
+                    #
+                    # The event then marks the stream that is current now. After a move no event
+                    # can cover every clone, and this path is already an error: a stranded ring is
+                    # the worse of the two.
+                    source.release(outstanding, self.slot_is_free())
+                except Exception:
+                    # NEVER RAISES OUT OF HERE. This runs while another exception is on its way up,
+                    # or while the generator is being closed, and replacing either with a failure to
+                    # tidy up would hide what actually went wrong.
+                    logger.exception(
+                        f"[RunAI Streamer][Distributed] rank {self.original_group_rank}: could not "
+                        f"release the slot that was in flight"
+                    )
 
-    def slot_is_free(self) -> Optional[Any]:
+    def slot_is_free(self, started_on: Any = None) -> Optional[Any]:
         """An event marking the end of this round, or None where the device has no events.
+
+        started_on is the stream this stream began on, or None to ask for no check.
 
         Recorded after both the collective and the clones are enqueued, so it follows both. It does
         NOT cover what a caller does later with a borrowed view: under owned=False the yields are
@@ -951,8 +1044,23 @@ class _distributedStreamer:
         if support is None:
             return None
 
+        stream = support.current_stream(self.device)
+
+        # One event marks the work on ONE stream. A caller that moves leaves clones on a stream
+        # this event never covers, and the library refills the slot while they still read it -
+        # wrong bytes, nothing raised. The non-distributed ring refuses the same move.
+        #
+        # SAMPLED AT RELEASE, so it catches a caller that moved and stayed, not one that moved and
+        # came back before releasing. The other site checks no more than this.
+        if started_on is not None and stream != started_on:
+            raise ValueError(
+                "get_chunks moved to another stream part way through - every range of one stream "
+                "must be read on the stream it started on, because one event per slot can only "
+                "mark the work on one"
+            )
+
         done = support.new_event()
-        done.record(support.current_stream(self.device))
+        done.record(stream)
         return done
 
     @staticmethod
