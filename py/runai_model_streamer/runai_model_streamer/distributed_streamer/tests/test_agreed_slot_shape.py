@@ -154,18 +154,103 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         budget = device_ring_budget(FREE, self.whole())
         self.assertLessEqual((num_buffers + 1) * buffer_size, budget)
 
-    def test_it_costs_depth_and_never_slot_size(self):
-        """The slot is the broadcast unit. Shrinking it would break every peer; one buffer fewer
-        costs this rank some overlap and nobody else anything."""
+    def test_depth_pays_for_it_while_two_slots_are_left(self):
+        """A depth of 4 can lose one and still overlap, so the slot size is untouched."""
+        unreserved = device_ring_sizing(FREE, self.whole(), 4)
+        reserved = agreed_slot_shape(FREE, self.whole(), 4)
+
+        self.assertEqual(unreserved[1], 4, "the fixture must start deep enough to lose one")
+        self.assertEqual(reserved[0], unreserved[0], "the slot size is untouched")
+        self.assertEqual(reserved[1], 3, "exactly one buffer pays for it")
+
+    def test_the_slot_shrinks_rather_than_leave_a_ring_that_cannot_overlap(self):
+        """A depth of 2 cannot lose one: the library refills a slot only once the collective has
+        handed it back, so one slot means reading and sending never run together.
+
+        Shrinking is safe because every rank computes this from the same numbers. What would break a
+        peer is one rank alone choosing a different size."""
         unreserved = device_ring_sizing(FREE, self.whole())
         reserved = agreed_slot_shape(FREE, self.whole())
 
-        self.assertEqual(reserved[0], unreserved[0], "the slot size is untouched")
-        self.assertEqual(reserved[1], unreserved[1] - 1, "exactly one buffer pays for it")
+        self.assertEqual(unreserved[1], 2, "the fixture must start at the depth that cannot lose one")
+        self.assertEqual(reserved[1], 2, "two slots are kept")
+        self.assertLess(reserved[0], unreserved[0], "and the slot pays instead")
 
-    def test_a_budget_with_room_for_one_slot_only_falls_back(self):
-        """Room for a ring but not for a ring AND somewhere to receive into. Every rank reaches that
-        from the same numbers, so the whole group falls back together."""
+    def test_a_slot_always_holds_the_largest_range(self):
+        """The shrink has a floor: a range carries one address and cannot span two slots."""
+        buffer_size, _ = agreed_slot_shape(FREE, self.whole())
+        largest = max(max(fc.sizes) for fc in self.whole())
+
+        self.assertGreaterEqual(buffer_size, largest)
+
+    def test_a_budget_too_tight_for_two_slots_keeps_one(self):
+        """The shrink has a floor, and here it refuses - but the ring survives.
+
+        Free memory is picked so the budget sits between two and three of the largest range: enough
+        for a ring by itself, not enough for two slots AND somewhere to receive into. Returning a
+        slot smaller than the largest range could hold no range at all, so the shrink is refused
+        and the ring stays at one slot."""
+        largest = 1 << 20
+        tight = files([[largest] * 8])
+        free = 5 << 20
+
+        budget = device_ring_budget(free, tight)
+        self.assertGreater(budget, 2 * largest, "a ring alone still fits, so this is not the floor")
+        self.assertLess(budget, 3 * largest, "but two slots and a receive buffer do not")
+
+        self.assertIsNotNone(device_ring_sizing(free, tight),
+                             "the ring sizing on its own would say yes")
+
+        shape = agreed_slot_shape(free, tight)
+        self.assertIsNotNone(shape, "one slot still beats the host path, which copies every range")
+        self.assertEqual(shape[1], 1, "but only one of them")
+        self.assertLessEqual(2 * shape[0], budget, "with room to receive a peer's slot")
+
+    def test_two_slots_are_preferred_over_one_that_cannot_span(self):
+        """A ring of one slot the stream does not fit reads and sends in turn, never together.
+
+        The reservation can leave that state and so can the sizing, so the question is put to the
+        ring that is RETURNED - asking before the reservation once accepted a two slot ring that had
+        already become a one slot ring."""
+        reserved = agreed_slot_shape(FREE, self.whole())
+        streamed = sum(sum(fc.sizes) for fc in self.whole())
+
+        self.assertEqual(reserved[1], 2, "two slots, bought by shrinking one of them")
+        self.assertLess(reserved[0], streamed, "and one slot really would not hold the stream")
+
+    def test_one_slot_is_kept_when_two_do_not_fit(self):
+        """Losing the overlap is not a reason to lose the device ring.
+
+        The host path copies every range, so a single slot still avoids that copy. What a one slot
+        ring costs is the overlap, not the ring."""
+        two_big = files([[200 << 20, 200 << 20]])
+        budget = device_ring_budget(FREE, two_big)
+        sizing = device_ring_sizing(FREE, two_big)
+
+        self.assertEqual(sizing[1], 2, "the sizing offers two slots")
+        self.assertGreater(3 * sizing[0], budget, "which do not fit with a receive buffer")
+        self.assertLessEqual(2 * sizing[0], budget, "while one slot and a receive buffer do")
+
+        self.assertEqual(agreed_slot_shape(FREE, two_big), (sizing[0], 1))
+
+    def test_the_group_falls_back_only_when_not_even_one_slot_fits(self):
+        """A depth the caller asked for, spending the whole budget on one slot.
+
+        There is then nowhere to receive a peer's slot of the same size, and no smaller ring to
+        retreat to, so the whole group takes the host path - from numbers every rank shares."""
+        self.assertIsNone(agreed_slot_shape(FREE, self.whole(), 1))
+
+    def test_a_stream_that_fits_one_slot_keeps_it(self):
+        """Nothing to overlap, so one slot is not a loss - and refusing would send the group to the
+        host path for no gain."""
+        small = files([[1 << 20]])
+        shape = agreed_slot_shape(FREE, small)
+
+        self.assertIsNotNone(shape)
+        self.assertGreaterEqual(shape[0] * shape[1], 1 << 20)
+
+    def test_a_tight_budget_still_leaves_room_to_receive(self):
+        """Whatever shape comes back at the floor, the ring and the receive buffer fit together."""
         one_big = files([[1 << 20]])
         tight = device_ring_floor_free(one_big)
 

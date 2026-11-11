@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import logging
 import unittest
 import hashlib
 import os
@@ -51,6 +53,26 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0 and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
             
+    @contextlib.contextmanager
+    def collected_logs(self, name):
+        """Every message a logger emits, including none.
+
+        assertLogs FAILS when nothing was logged, and "nothing" is what most ranks must do for a
+        line that is said once by the first of them."""
+        records = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger(name)
+        handler = Collect()
+        log.addHandler(handler)
+        try:
+            yield records
+        finally:
+            log.removeHandler(handler)
+
     def _prepare_file_requests(self, file_specs: List[dict]) -> List[FileChunks]:
         # rank 0 creates the file requests and broadcasts them to all ranks
         if self.rank == 0:
@@ -156,6 +178,50 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    def test_1_losing_the_device_ring_is_logged_once(self):
+        """A device the library could fill, with no shape the group can send from.
+
+        That combination stages through host memory and used to leave no trace. It is said by ONE
+        rank, because every rank reaches it from the same numbers."""
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        class FakeEvent:
+            def record(self, stream=None):
+                pass
+
+            def query(self):
+                return True
+
+            def synchronize(self):
+                pass
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                                current_stream=lambda device=None: None)
+
+        requests = self._prepare_file_requests([{"size": 2048, "chunks": [1024, 1024]}])
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", return_value=None), \
+             patch(f"{module}.device_ring_budget", return_value=1 << 20):
+            with self.collected_logs(module) as logs:
+                with DistributedStreamer() as streamer:
+                    inner = streamer.distributed_streamer
+                    streamer.stream_files(requests, None, "cpu", True)
+                    list(streamer.get_chunks())
+
+        self.assertFalse(inner.sends_directly, "the fixture must take the staged path")
+
+        said = [line for line in logs if "no ring fits" in line]
+        if inner.original_group_rank == 0:
+            self.assertEqual(len(said), 1, "said once, by the first rank")
+            self.assertIn("staging through host memory instead", said[0])
+        else:
+            self.assertEqual(said, [], "and by no other rank")
+
     def test_1_the_direct_source_is_used_where_the_library_can_fill_the_ring(self):
         for owned in (True, False):
             with self.subTest(owned=owned):
@@ -223,7 +289,8 @@ class TestDistributedStreamer(unittest.TestCase):
              patch.object(fs_module, "device_free_memory", return_value=1 << 30), \
              patch(f"{module}.device_support", return_value=support), \
              patch(f"{module}.agreed_slot_shape", side_effect=record_shape), \
-             patch(f"{module}.DirectDistributionSource", side_effect=record_source):
+             patch(f"{module}.DirectDistributionSource", side_effect=record_source), \
+             self.collected_logs(module) as logs:
             with DistributedStreamer() as streamer:
                 inner = streamer.distributed_streamer
                 streamer.stream_files(requests, None, "cpu", True, owned=owned, ring_buffers=5)
@@ -273,6 +340,8 @@ class TestDistributedStreamer(unittest.TestCase):
 
         # UNCONDITIONAL. Behind an `if reading_from_storage` this assertion quietly disappears the
         # day the partition gives a rank nothing, and the test still passes.
+        self.assertEqual([line for line in logs if "no ring fits" in line], [],
+                         "nothing fell back, so nothing should say it did")
         self.assertEqual(len(sources), 1 if inner.reading_from_storage else 0,
                          "a rank that reads sends from the ring itself, and one that does not sends"
                          " nothing")

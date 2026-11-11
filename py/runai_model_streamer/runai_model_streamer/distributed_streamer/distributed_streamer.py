@@ -25,6 +25,7 @@ from runai_model_streamer.torch_device.torch_device import (
 
 from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
+    device_ring_floor,
     device_ring_sizing,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
@@ -179,9 +180,18 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     ONE SLOT OF THE BUDGET IS NOT THE RING'S. A rank that sends its slots also receives its peers',
     into a buffer of the same size, and get_chunks allocates that AFTER stream_files has already
     taken the ring. Sizing the ring to the whole budget would leave nothing for it, and the failure
-    would be a raw allocation error on some ranks while the others wait in the collective. The
-    reservation costs depth, never slot size: the slot is the broadcast unit, and shrinking it on
-    one rank would break every peer.
+    would be a raw allocation error on some ranks while the others wait in the collective.
+
+    DEPTH PAYS FOR IT FIRST, and the slot size only when depth cannot. Two slots is the least that
+    can overlap - the library refills a slot only once the collective has handed it back - so a
+    reservation that would leave one slot shrinks the slot instead and keeps two. Shrinking is safe
+    because every rank computes this from the same numbers and so shrinks together; what would break
+    a peer is one rank alone choosing a different size.
+
+    A one slot ring is still right when the stream fits inside it - there is nothing to overlap
+    there - and it is still better than the host path when it does not. The host path copies every
+    range, so what a single slot costs is the overlap, not the device ring. A caller that asks for a
+    depth of 1 is taken at its word.
     """
     shape = device_ring_sizing(min_free_bytes, file_stream_requests, ring_buffers)
     if shape is None:
@@ -189,16 +199,33 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
 
     buffer_size, num_buffers = shape
     budget = device_ring_budget(min_free_bytes, file_stream_requests)
+    streamed = sum(size for file_chunks in file_stream_requests for size in file_chunks.sizes)
 
     if (num_buffers + 1) * buffer_size > budget:
         num_buffers -= 1
 
-    if num_buffers < 1 or (num_buffers + 1) * buffer_size > budget:
-        # Room for a ring but not for a ring AND somewhere to receive into: the host path, which
-        # every rank reaches from the same numbers.
-        return None
+    # AFTER the reservation, never before it. The reservation is what can leave a single slot, so a
+    # ring that spanned the stream at the sizing's depth may no longer span it at this one.
+    if num_buffers >= 2 or (num_buffers == 1 and buffer_size >= streamed):
+        return buffer_size, num_buffers
 
-    return buffer_size, num_buffers
+    # ONE SLOT, and the stream does not fit in it, so reading and sending cannot run together. Two
+    # smaller slots are worth more than one large one here, as long as a slot still holds the
+    # largest range. The reservation above can leave this state, and so can the sizing on its own.
+    if ring_buffers != 1:
+        two_slots = budget // 3
+        # The floor is two of the largest range, so two slots below it cannot hold one.
+        if 2 * two_slots >= device_ring_floor(file_stream_requests):
+            return two_slots, 2
+
+    # No room for two. The one slot ring is still better than the host path, which copies every
+    # range - overlap is what is lost here, not the device ring itself.
+    if num_buffers == 1 and 2 * buffer_size <= budget:
+        return buffer_size, 1
+
+    # Not even one slot and somewhere to receive into. Every rank reaches that from the same
+    # numbers, so the whole group takes the host path together.
+    return None
 
 
 def get_backends() -> dict:
@@ -733,6 +760,25 @@ class _distributedStreamer:
         self.sends_directly = (
             device_support(self.device) is not None and self.slot_shape is not None
         )
+
+        # A device that COULD be filled, with no shape the group can send from. Said once, by one
+        # rank, because every rank reaches it from the same numbers - and said at all because the
+        # stream otherwise stages through host memory with nothing to show why.
+        if (self.original_group_rank == 0
+                and not self.sends_directly
+                and device_support(self.device) is not None):
+            if params.min_device_free_memory is None:
+                why = "the group agreed no free memory figure to size one from"
+            else:
+                budget = device_ring_budget(params.min_device_free_memory, file_stream_requests)
+                largest = device_ring_floor(file_stream_requests) // 2
+                why = (f"{humanize.naturalsize(budget, binary=True)} does not hold a slot to send, "
+                       f"one to receive and the largest range "
+                       f"({humanize.naturalsize(largest, binary=True)})")
+            logger.info(
+                f"[RunAI Streamer][Distributed] no ring fits on {self.device} that a slot can be "
+                f"broadcast from: {why} - staging through host memory instead"
+            )
 
         if len(self.rank_file_chunks_list) == 0:
             self.reading_from_storage = False
