@@ -296,11 +296,17 @@ class FileStreamer:
             ring_buffers: Optional[int] = None,
             slot_shape: Optional[Tuple[int, int]] = None,
             sent_from: bool = False,
+            max_ranges_per_slot: Optional[int] = None,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
         sent_from says this caller will BROADCAST the ring's slots, so the ranges are placed by
         RANGE_OFFSET_ALIGNMENT and a peer can work out where each one is without being told.
+
+        max_ranges_per_slot caps how many ranges a slot may hold. A caller that describes a slot to
+        its peers has a fixed number of rows to describe it in, and the byte budget does not bound
+        the count - a four byte range takes a whole row. Without it the ring packs by bytes alone
+        and a slot of small tensors overflows whatever the peers agreed to read.
 
         It asks two things of the caller, and refuses rather than give back a ring that cannot be
         sent. A DEVICE the library can write into, because a host ring places its ranges congruent
@@ -462,6 +468,7 @@ class FileStreamer:
                     buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
                     slots=device_slots(str(resolved), support.new_event, support.current_stream),
                     range_alignment=range_alignment,
+                    max_ranges_per_slot=max_ranges_per_slot,
                 )
             except torch.cuda.OutOfMemoryError as error:
                 if slot_shape is None:

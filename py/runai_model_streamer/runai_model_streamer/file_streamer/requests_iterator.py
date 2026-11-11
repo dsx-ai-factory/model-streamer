@@ -252,7 +252,8 @@ HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
                  direct_block: int = DIRECT_IO_BLOCK, owned: bool = True,
-                 slots: SlotMemory = HOST_SLOTS, range_alignment: int = 1) -> None:
+                 slots: SlotMemory = HOST_SLOTS, range_alignment: int = 1,
+                 max_ranges_per_slot: Optional[int] = None) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
@@ -276,7 +277,9 @@ class FilesRequestsIteratorWithBuffer:
         self._range_alignment = range_alignment
 
         self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks,
-                                                             range_alignment)
+                                                             range_alignment,
+                                                             max_ranges_per_slot)
+        self.max_ranges_per_slot = max_ranges_per_slot
         self.buffer_size = buffer_size
         self.num_buffers = num_buffers
         # DEBUG, not INFO: this class cannot know which rank it is on, and every rank builds its own
@@ -536,9 +539,14 @@ class FilesRequestsIteratorWithBuffer:
 
 class FilesRequestsIterator:
     def __init__(self, memory_limit: int, files_chunks: List[FileChunks],
-                 range_alignment: int = 1) -> None:
+                 range_alignment: int = 1, max_ranges_per_request: Optional[int] = None) -> None:
+        if max_ranges_per_request is not None and max_ranges_per_request < 1:
+            raise ValueError(
+                f"max_ranges_per_request must be at least 1, got {max_ranges_per_request}"
+            )
         self.memory_limit = memory_limit
         self.range_alignment = range_alignment
+        self.max_ranges_per_request = max_ranges_per_request
         self.q = deque(FileChunksIterator(file_chunks)
             for file_chunks in files_chunks)
         
@@ -568,11 +576,19 @@ class FilesRequestsIterator:
         files_request = FilesRequest()
         current_request_memory_size = 0
         while self.q:
+            # Spent across the files of ONE request, not per file: the cap describes the request,
+            # which is what a peer receives.
+            remaining_ranges = (None if self.max_ranges_per_request is None
+                                else self.max_ranges_per_request - files_request.num_ranges)
+            if remaining_ranges is not None and remaining_ranges <= 0:
+                break
+
             file_chunks_iterator = self.q[0]
             file_chunks = file_chunks_iterator.next_chunks(
                 self.memory_limit - current_request_memory_size,
                 current_request_memory_size,
                 self.range_alignment,
+                remaining_ranges,
             )
             finished = file_chunks_iterator.is_finished()
             if finished:
@@ -620,16 +636,22 @@ class FileChunksIterator:
     def is_finished(self) -> bool:
         return self.next_index >= len(self.sizes)
 
-    def next_chunks(self, size: int, cursor: int = 0, alignment: int = 1) -> FileChunks:
+    def next_chunks(self, size: int, cursor: int = 0, alignment: int = 1,
+                    max_ranges: Optional[int] = None) -> FileChunks:
         """The next ranges that fit in `size` bytes, laid out from `cursor` by `alignment`.
 
         cursor is where this file's first range would land inside the request, which the rule needs:
         the pad before a range depends on where the ranges before it ended, including those from an
-        earlier file in the same request."""
+        earlier file in the same request.
+
+        max_ranges stops the packing by COUNT as well as by bytes. A caller that describes a slot to
+        someone else has a fixed number of rows to describe it in, and bytes alone do not bound the
+        count: a range of any size takes one row, and small ranges pack by the thousand."""
         start = self.next_index
         end = start
         limit = cursor + size
-        while end < len(self.sizes):
+        stop_at = len(self.sizes) if max_ranges is None else min(len(self.sizes), start + max_ranges)
+        while end < stop_at:
             at, after = advance(cursor, self.sizes[end], alignment)
             if at + self.sizes[end] > limit:
                 break
