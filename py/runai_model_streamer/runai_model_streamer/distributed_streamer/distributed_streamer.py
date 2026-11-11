@@ -758,18 +758,19 @@ class _distributedStreamer:
                 # Owned here rather than at broadcast()'s two yields, so there is no second site to
                 # miss - a missed one is a tensor that looks right and is overwritten next round.
                 #
-                # No event is needed, and the clone adds no ordering requirement that was not already
-                # there. data_buffer is next written by the source's copy_ on this same stream;
-                # received_buffer is next written by dist.broadcast on NCCL's, which torch orders
+                # No event is needed for a staged slot, and the clone adds no ordering requirement
+                # that was not already there: the slot is next written by the source's copy_ on this
+                # same stream, and received_buffer by dist.broadcast on NCCL's, which torch orders
                 # against this one - a dependency master already relies on for borrowed views.
+                # A slot the library refills has no such ordering, and that is what release() takes
+                # an event for.
                 for file_id, chunk_index, buffer in self.broadcast(
                     chunks_to_read,
                     batch_metadata_tensor,
                     received_metadata_tensor,
-                    data_buffer,
+                    filled.memory if filled else None,
                     received_buffer,
-                    chunk_count_in_batch,
-                    current_data_size):
+                    chunk_count_in_batch):
                     yield file_id, chunk_index, self.own(buffer) if self.owned else buffer
 
                 # AFTER the yields. The slot is this rank's send buffer, and broadcast() hands out
@@ -810,10 +811,14 @@ class _distributedStreamer:
                   chunks_to_read: List[int],
                   batch_metadata_tensor: torch.Tensor,
                   received_metadata_tensor: torch.Tensor,
-                  data_buffer: torch.Tensor,
+                  sent: Optional[torch.Tensor],
                   received_buffer: torch.Tensor,
-                  chunk_count_in_batch: int,
-                  current_data_size: int) -> Iterator:        
+                  chunk_count_in_batch: int) -> Iterator:
+        """sent is this rank's outgoing slot, or None when it has nothing to send this round.
+
+        It comes from the distribution source, so it is already the used prefix and already on the
+        device the collective sends from. A direct source is read into its slot, so there is no
+        buffer of ours to take a view of."""
 
         total_broadcast_chunks = 0
 
@@ -831,12 +836,12 @@ class _distributedStreamer:
 
                 # broadcast data
                 if chunk_count_in_batch > 0:
-                    logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Broadcasting data of size {humanize.naturalsize(current_data_size)}")
-                    dist.broadcast(data_buffer[:current_data_size], global_broadcasting_rank, group=self.distribution_group)
+                    logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Broadcasting data of size {humanize.naturalsize(len(sent))}")
+                    dist.broadcast(sent, global_broadcasting_rank, group=self.distribution_group)
 
                 # yield
                     for orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset in batch_metadata_tensor[1 : chunk_count_in_batch + 1].tolist():
-                        yield orig_req_idx, orig_chunk_idx, data_buffer[chunk_offset : chunk_offset + chunk_size]
+                        yield orig_req_idx, orig_chunk_idx, sent[chunk_offset : chunk_offset + chunk_size]
             else:
                 # receive metadata
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Receiving metadata from rank {global_broadcasting_rank}")
