@@ -62,7 +62,6 @@ struct Fixture
         concurrency(std::string("RUNAI_STREAMER_CONCURRENCY"), static_cast<unsigned long>(concurrency)),
         chunk_bytesize(std::string("RUNAI_STREAMER_FS_CHUNK_BYTESIZE"), static_cast<unsigned long>(ChunkSize)),
         depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), queue_depth),
-        group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 1UL),
         sizes(range_sizes),
         total(std::accumulate(range_sizes.begin(), range_sizes.end(), static_cast<size_t>(0))),
         config(std::make_shared<Config>(false /* do not force minimum */)),
@@ -131,7 +130,6 @@ struct Fixture
     utils::temp::Env concurrency;
     utils::temp::Env chunk_bytesize;
     utils::temp::Env depth;
-    utils::temp::Env group;
 
     std::vector<size_t> sizes;
     size_t total;

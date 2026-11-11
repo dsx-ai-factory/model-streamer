@@ -58,6 +58,10 @@ struct ObjectClientConfig_t
     // it, so the total stays the same whatever the count. Passed rather than read from the
     // environment, so the value has one source. S3 ignores it: its target is per client.
     unsigned concurrent_readers;
+
+    // How many streamer processes share the node. Azure divides its per-client threads by it as
+    // well. Appended last, so a plugin built before it reads the fields it knows.
+    unsigned process_group_size;
 };
 
 struct ObjectRange_t

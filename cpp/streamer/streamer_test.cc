@@ -155,6 +155,19 @@ TEST_F(StreamerTest, Creation)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+TEST(ProcessGroupSize, Is_Validated_At_The_Boundary)
+{
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    const auto invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
+    EXPECT_EQ(runai_file_streamer_set_process_group_size(nullptr, 4), invalid);
+    EXPECT_EQ(runai_file_streamer_set_process_group_size(streamer, 0), invalid);
+    EXPECT_EQ(runai_file_streamer_set_process_group_size(streamer, 4), static_cast<int>(common::ResponseCode::Success));
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
 // Replaces AssignerTest.Mismatched_Input_Sizes, which asserted the old per-file vector length check.
 // Lengths cannot disagree now - num_ranges describes the flat arrays - so what remains checkable at the C
 // boundary is null-ness, validated in submit_request before anything is dereferenced.

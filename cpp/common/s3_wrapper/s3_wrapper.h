@@ -85,6 +85,9 @@ struct S3ClientWrapper
 
          // How many clients the caller will run at once.
          unsigned concurrent_readers;
+
+         // How many streamer processes share the node.
+         unsigned process_group_size = 1;
          const common::backend_api::ObjectClientConfig_t to_config(std::vector<common::backend_api::ObjectConfigParam_t> & initial_params) const;
 
        private:

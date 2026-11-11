@@ -102,13 +102,16 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // `writer` is the streamer's copy path onto a device. Shared by every worker, and untouched by a
     // workload whose destinations are host memory - so it is taken unconditionally, not conditionally.
     // Null in tests that read to the host only.
+    // `process_group_size` is the number of streamer processes on this node, which divides
+    // `node_wide_depth`.
     explicit AsyncIoWorker(posix_io::Strategy strategy,
                            size_t block = 0,
                            unsigned node_wide_depth = Config::default_fs_async_queue_depth,
                            EngineFactory factory = posix_io::make_io_engine,
                            std::function<void()> on_engine_dead = {},
                            std::shared_ptr<DeviceWriter> writer = nullptr,
-                           bool register_buffers = false);
+                           bool register_buffers = false,
+                           unsigned process_group_size = 1);
     ~AsyncIoWorker() override;
 
     // Bytes copied out of a scratch buffer, over this worker's life.
@@ -150,14 +153,6 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     //
     // Here because CapacityWorker asks for the window size here, and the window size IS the engine's
     // depth - so one place decides both, and they cannot disagree.
-    //
-    // The timing constraint is weaker than it looks, and worth stating so nobody moves this on a
-    // wrong premise: depth is divided by RUNAI_STREAMER_PROCESS_GROUP_SIZE, which Python writes in
-    // stream_files() (distributed_streamer.py:154) just before the first runai_file_streamer_request. That rules
-    // out building at STREAMER construction - runai_file_streamer_start() returns before stream_files() runs, so it
-    // would read the unset default of 1, skip the division, and give the device the full depth per
-    // process. It does NOT rule out building at this worker's construction: the async pool is created
-    // lazily on first push, which is already inside that first request.
     //
     // The returned capacity IS the in-flight bound, and the only one: ids are monotonic rather than
     // indices into a fixed table (5.3), so nothing else can disagree about how many may be outstanding.
@@ -422,6 +417,7 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     bool _block_measured = false;
 
     const unsigned _node_wide_depth;
+    const unsigned _process_group_size;
 
     // Whether this mount's reads may use registered buffers. Decided by the router from the file
     // system type, and handed to the engine, which also has the host's answer.

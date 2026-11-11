@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "utils/env/env.h"
 #include "utils/logging/logging.h"
 #include "utils/scope_guard/scope_guard.h"
 
@@ -44,6 +45,9 @@ Streamer::Streamer() : Streamer(Config())
 
 Streamer::Streamer(Config config, Environment environment) :
     _config(std::make_shared<Config>(config)),
+    _process_group_size(std::make_shared<std::atomic<unsigned>>(
+        utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U))),
+    _process_group_size_from_env(utils::env_exists("RUNAI_STREAMER_PROCESS_GROUP_SIZE")),
     _router(config.fs_strategy_candidates, std::move(environment)),
     // The LOOKUP, not a backend and not one type's factory: the device a submission names picks the
     // implementation, and nothing is loaded until a submission names one. CUDA is the only type
@@ -59,7 +63,7 @@ Streamer::Streamer(Config config, Environment environment) :
         {
             return std::make_unique<FileSystemWorker>(writer, issuer, block);
         },
-        _router.worker_factory(_device_writer),
+        _router.worker_factory(_device_writer, _process_group_size),
         // each object-storage worker reads the streamer's credentials once, at client creation, via this
         // provider. It captures the shared credentials state by value, so the state outlives the worker
         // regardless of destruction order (it never captures `this`).
@@ -214,6 +218,29 @@ common::ResponseCode Streamer::set_fs_strategy(const std::string & candidates)
 posix_io::Strategy Streamer::fs_strategy() const
 {
     return _router.strategy();
+}
+
+common::ResponseCode Streamer::set_process_group_size(unsigned process_group_size)
+{
+    if (process_group_size == 0)
+    {
+        return common::ResponseCode::InvalidParameterError;
+    }
+
+    if (_process_group_size_from_env)
+    {
+        LOG(INFO) << "Process group size " << process_group_size << " ignored: RUNAI_STREAMER_PROCESS_GROUP_SIZE is "
+                  << _process_group_size->load();
+        return common::ResponseCode::Success;
+    }
+
+    _process_group_size->store(process_group_size);
+    return common::ResponseCode::Success;
+}
+
+unsigned Streamer::process_group_size() const
+{
+    return _process_group_size->load();
 }
 
 bool Streamer::async_pool_used() const
@@ -696,7 +723,9 @@ common::s3::S3ClientWrapper::Params Streamer::handle_s3(unsigned file_index, con
 
     // Batch params carry only the URI (used by the per-read path) - no credentials. Credentials are applied
     // once, at client creation, from the streamer's credentials() (see ObjectStorageWorker::capacity).
-    return common::s3::S3ClientWrapper::Params(uri, _config->s3_block_bytesize, _config->s3_concurrency);
+    common::s3::S3ClientWrapper::Params params(uri, _config->s3_block_bytesize, _config->s3_concurrency);
+    params.process_group_size = process_group_size();
+    return params;
 }
 
 std::vector<std::pair<std::string, size_t>> Streamer::list_files(
@@ -739,6 +768,7 @@ std::vector<std::pair<std::string, size_t>> Streamer::list_files(
         // listing builds a client, so read the streamer's credentials here (a client-creation point)
         common::s3::S3ClientWrapper::Params params(uri, credentials(), _config->s3_block_bytesize,
                                                   _config->s3_concurrency);
+        params.process_group_size = process_group_size();
         common::s3::S3ClientWrapper wrapper(params);
 
         common::backend_api::ObjectFileEntry_t * entries = nullptr;
