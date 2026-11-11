@@ -156,6 +156,91 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    def test_1_the_slot_is_released_with_an_event_where_the_device_has_them(self):
+        """The loop marks the end of a round, and a source that refills waits for that mark.
+
+        Gloo on the host has no events, so the path is only reachable here by standing a vendor row
+        in. What is being checked is the LOOP: that it records after the broadcast and the clones,
+        and hands the mark over with the slot."""
+        releases = []
+
+        built = []
+
+        class Watched:
+            """The staged source, with every release recorded."""
+
+            def __init__(self, inner):
+                built.append(self)
+                self._inner = inner
+
+            def next_slot(self):
+                return self._inner.next_slot()
+
+            def release(self, filled, done=None):
+                releases.append(done)
+                self._inner.release(filled, done)
+
+        clones = []
+
+        class FakeEvent:
+            def __init__(self):
+                self.stream = None
+                self.clones_at_record = None
+
+            def record(self, stream=None):
+                self.stream = stream
+                # WHEN it was recorded, which is the whole point. An event built before the yields
+                # would be handed over looking exactly the same.
+                self.clones_at_record = len(clones)
+
+        class FakeSupport:
+            new_event = FakeEvent
+
+            @staticmethod
+            def current_stream(device):
+                return f"stream of {device}"
+
+        file_specs = [{"size": 2048, "chunks": [1024, 1024]}]
+        requests = self._prepare_file_requests(file_specs)
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        real_source = __import__(module, fromlist=["StagedDistributionSource"]).StagedDistributionSource
+
+        inner_cls = __import__(module, fromlist=["_distributedStreamer"])._distributedStreamer
+        real_own = inner_cls.own
+
+        def counting_own(buffer):
+            clones.append(buffer)
+            return real_own(buffer)
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.device_support", return_value=FakeSupport), \
+             patch.object(inner_cls, "own", staticmethod(counting_own)), \
+             patch(f"{module}.StagedDistributionSource",
+                   side_effect=lambda *a, **k: Watched(real_source(*a, **k))):
+            with DistributedStreamer() as streamer:
+                streamer.stream_files(requests, None, "cpu", True, owned=True)
+                chunks = list(streamer.get_chunks())
+
+        self.assertEqual(len(chunks), 2, "both chunks reach every rank")
+
+        # Every rank on the distributed path builds a source, even one with an empty share. Without
+        # this, a run that never distributed at all would skip below and read as a pass.
+        self.assertEqual(len(built), 1, "the distributed path ran on this rank")
+        self.assertEqual(len(clones), 2, "both chunks were cloned out of a slot")
+
+        if not releases:
+            self.skipTest("this rank read nothing, so it never released a slot")
+
+        for done in releases:
+            self.assertIsInstance(done, FakeEvent,
+                                  "the loop must hand an event over with the slot")
+            self.assertEqual(done.stream, "stream of cpu",
+                             "recorded on the stream of THIS streamer's device")
+            self.assertEqual(done.clones_at_record, 2,
+                             "recorded AFTER the round's clones, not before the loop")
+
     def test_1_success_one_rank_has_nothing_to_read(self):
         """A rank whose share is empty still receives from its peers.
 

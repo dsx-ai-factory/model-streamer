@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from typing import List, Iterator, Optional, Tuple
+from typing import Any, List, Iterator, Optional, Tuple
 import torch
 import torch.distributed as dist
 import os
@@ -15,6 +15,8 @@ from runai_model_streamer.file_streamer import (
 )
 
 from runai_model_streamer.file_streamer.file_streamer import host_or_device
+
+from runai_model_streamer.file_streamer.device_support import device_support
 
 from runai_model_streamer.torch_device.torch_device import (
     can_measure_device_memory,
@@ -612,7 +614,10 @@ class _distributedStreamer:
             owned: bool,
     ) -> None:
 
-        self.device = torch.device(device)
+        # RESOLVED, not just parsed. "cuda" with no ordinal means whichever device is current,
+        # and that can answer differently later - so the staging buffers and the stream an event is
+        # recorded on would drift apart. Asking torch once pins both to one device.
+        self.device = torch.empty(0, device=device).device
         self.owned = owned
         self.max_chunk = params.max_chunk
         # the ranks sharing this host: the divisor for the node-total memory limit (see rank_memory_limit)
@@ -758,12 +763,11 @@ class _distributedStreamer:
                 # Owned here rather than at broadcast()'s two yields, so there is no second site to
                 # miss - a missed one is a tensor that looks right and is overwritten next round.
                 #
-                # No event is needed for a staged slot, and the clone adds no ordering requirement
-                # that was not already there: the slot is next written by the source's copy_ on this
-                # same stream, and received_buffer by dist.broadcast on NCCL's, which torch orders
-                # against this one - a dependency master already relies on for borrowed views.
-                # A slot the library refills has no such ordering, and that is what release() takes
-                # an event for.
+                # The staged source needs no event and ignores the one it is given: the slot is
+                # next written by its copy_ on this same stream, and received_buffer by
+                # dist.broadcast on NCCL's, which torch orders against this one - a dependency
+                # master already relies on for borrowed views. A source the library refills has no
+                # such ordering, and that is what release() takes an event for.
                 for file_id, chunk_index, buffer in self.broadcast(
                     chunks_to_read,
                     batch_metadata_tensor,
@@ -776,7 +780,7 @@ class _distributedStreamer:
                 # AFTER the yields. The slot is this rank's send buffer, and broadcast() hands out
                 # views into it, so releasing earlier would let the next fill overwrite them.
                 if filled:
-                    source.release(filled)
+                    source.release(filled, self.slot_is_free())
 
         except RuntimeError as e:
             # Check if the error is a timeout
@@ -790,6 +794,26 @@ class _distributedStreamer:
             self.is_error = True
             logger.exception(f"[RunAI Streamer][Distributed] rank {self.original_group_rank} error: {e}")
             raise e
+
+    def slot_is_free(self) -> Optional[Any]:
+        """An event marking the end of this round, or None where the device has no events.
+
+        Recorded after both the collective and the clones are enqueued, so it follows both. It does
+        NOT cover what a caller does later with a borrowed view: under owned=False the yields are
+        views into the slot, and the caller may still hold them. Releasing after the yields is what
+        bounds that, not this event.
+
+        The stream is the one of THIS streamer's device, which stream_files resolved to an ordinal.
+        An event given no stream records on whichever device happens to be current, which is the
+        right one only while a process serves a single GPU.
+        """
+        support = device_support(self.device)
+        if support is None:
+            return None
+
+        done = support.new_event()
+        done.record(support.current_stream(self.device))
+        return done
 
     @staticmethod
     def own(buffer: torch.Tensor) -> torch.Tensor:
