@@ -175,7 +175,7 @@ def main():
     parser.add_argument("command", choices=("create", "verify"))
     parser.add_argument("--version", required=True)
     parser.add_argument("--allow-development-version", action="store_true",
-                        help="also accept PR versions of the form 0.0.0+dev.<7-character SHA>")
+                        help="also accept X.Y.Z.dev<PR number>+g<7-character SHA> PR versions")
     parser.add_argument("--bundle", type=Path, default=Path("release-bundle"))
     parser.add_argument("--wheels", type=Path, default=Path("packages"))
     parser.add_argument("--cpp", type=Path, default=Path("cpp-artifacts"))
@@ -184,7 +184,8 @@ def main():
     args = parser.parse_args()
     try:
         development_version = args.allow_development_version and re.fullmatch(
-            r"0\.0\.0\+dev\.[0-9a-f]{7}", args.version)
+            r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+            r"\.dev[1-9][0-9]*\+g[0-9a-f]{7}", args.version)
         require(development_version or re.fullmatch(
                     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", args.version),
                 "Release version must have the form X.Y.Z")

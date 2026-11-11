@@ -98,3 +98,20 @@ ci-test-integration: ci-install
 
 # Entry points of the real-GPU tests (make gpu-help)
 include tests/gpu/gpu.mk
+
+# Run these in the same isolated environment, after installing the framework.
+PYTHON ?= python3
+FRAMEWORK_WHEELS ?= candidate-wheels
+FRAMEWORK_STATE_DIR ?= .
+
+.PHONY: ci-framework-baseline ci-test-framework-install
+
+ci-framework-baseline:
+	$(PYTHON) .github/scripts/framework_install.py snapshot --directory "$(FRAMEWORK_STATE_DIR)"
+
+ci-test-framework-install:
+	@test -n "$(FRAMEWORK)" || { echo "FRAMEWORK is required (e.g. vllm==0.33.0)" >&2; exit 1; }
+	@test -n "$(PACKAGE_VERSION)" || { echo "PACKAGE_VERSION is required" >&2; exit 1; }
+	$(PYTHON) .github/scripts/framework_install.py install \
+		--directory "$(FRAMEWORK_STATE_DIR)" --wheel-directory "$(FRAMEWORK_WHEELS)" \
+		--package-version "$(PACKAGE_VERSION)" --framework "$(FRAMEWORK)"

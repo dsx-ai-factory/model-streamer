@@ -108,7 +108,7 @@ class ReleaseBundleTests(unittest.TestCase):
     def test_development_bundle_matches_release_layout(self):
         """Check PR and release asset parity, successful PR verification, and tampering detection."""
         self.collect_ok()
-        version = "0.0.0+dev.abc1234"
+        version = "0.18.0.dev348+gabc1234"
         for path in self.paths:
             path.rename(path.with_name(path.name.replace(VERSION, version)))
         options = {"bundle": "pr-bundle", "version": version,
@@ -143,14 +143,17 @@ class ReleaseBundleTests(unittest.TestCase):
         """Reject development versions during creation and verification unless explicitly allowed."""
         for operation in (self.collect, self.verify):
             with self.subTest(operation=operation.__name__):
-                result = operation(version="0.0.0+dev.abc1234")
+                result = operation(version="0.18.0.dev348+gabc1234")
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("form X.Y.Z", result.stderr)
 
     def test_invalid_development_versions_rejected(self):
         """Reject malformed development versions even when development versions are enabled."""
-        for version in ("0.0.0+dev.abc123", "0.0.0+dev.abc12345", "0.0.0+dev.xyz1234",
-                        "0.17.2+dev.abc1234", "0.0.0+dev.abc1234/../../output", "0.0.0+dev.abc1234\n"):
+        for version in ("0.18.0.dev348+gabc123", "0.18.0.dev348+gabc12345",
+                        "0.18.0.dev348+gxyz1234", "0.18.0.dev0+gabc1234",
+                        "0.18.0.dev0348+gabc1234", "00.18.0.dev348+gabc1234",
+                        "0.0.0+dev.abc1234", "0.18.0.dev348+gabc1234/../../output",
+                        "0.18.0.dev348+gabc1234\n"):
             for operation in (self.collect, self.verify):
                 with self.subTest(version=version, operation=operation.__name__):
                     result = operation(version=version, extra_args=("--allow-development-version",))
