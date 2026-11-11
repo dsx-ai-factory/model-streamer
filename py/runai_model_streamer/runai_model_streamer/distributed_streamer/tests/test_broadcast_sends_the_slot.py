@@ -130,5 +130,102 @@ class Sender(unittest.TestCase):
         self.assertEqual(len(self.sent_tensors), 1, "the metadata, and no data collective")
 
 
+class Receiver(unittest.TestCase):
+    """The other half of the loop, which no other test enters.
+
+    Every test above sets group_size to 1, so this rank is always the broadcasting one and the
+    receiving branch never runs. Two ranks are enough to reach it: rank 0 sends, we are rank 1."""
+
+    RECEIVE_CAPACITY = 4096
+
+    def setUp(self):
+        self.streamer = _distributedStreamer.__new__(_distributedStreamer)
+        self.streamer.group_size = 2
+        self.streamer.original_group_rank = 1
+        self.streamer.local_group_global_ranks = [0, 1]
+        self.streamer.distribution_group = GROUP
+        self.streamer.rank = 1
+
+        self.received_buffer = torch.arange(
+            1, 1 + self.RECEIVE_CAPACITY, dtype=torch.int64).to(torch.uint8)
+        self.received_metadata = torch.zeros(16, 4, dtype=torch.int64)
+        self.sent_tensors = []
+
+    def receive(self, offset, size):
+        """Run one round where rank 0 sends a batch of one range at (offset, size).
+
+        The metadata arrives through the collective, so the fake writes it into the tensor the
+        production code hands over - which is how the real one learns what is coming."""
+        peer_rows = [(7, 3, size, offset)]
+
+        def fake(tensor, src=None, group=None):
+            self.sent_tensors.append((tensor, src))
+            if tensor is self.received_metadata:
+                tensor[0, 0] = len(peer_rows)
+                for i, row in enumerate(peer_rows):
+                    tensor[i + 1] = torch.tensor(list(row))
+
+        chunks_to_read = [1]
+        with patch(
+            "runai_model_streamer.distributed_streamer.distributed_streamer.dist.broadcast",
+            side_effect=fake,
+        ):
+            return list(
+                self.streamer.broadcast(
+                    chunks_to_read,
+                    torch.zeros(16, 4, dtype=torch.int64),
+                    self.received_metadata,
+                    None,                       # nothing of our own to send
+                    self.received_buffer,
+                    0,
+                )
+            )
+
+    def test_a_peer_sending_more_than_this_rank_can_hold_is_refused(self):
+        """Slicing would CLAMP instead, and the collective would then disagree about its size: an
+        abort under gloo, a hang under NCCL."""
+        with self.assertRaises(RuntimeError) as caught:
+            self.receive(offset=0, size=self.RECEIVE_CAPACITY + 1)
+
+        message = str(caught.exception)
+        self.assertIn(str(self.RECEIVE_CAPACITY + 1), message, "it names what the peer is sending")
+        self.assertIn(str(self.RECEIVE_CAPACITY), message, "and what this rank can hold")
+
+    def test_it_refuses_before_posting_the_data_collective(self):
+        """Posting it and then raising is a different failure: the peer would already be sending
+        into a collective this rank has abandoned."""
+        with self.assertRaises(RuntimeError):
+            self.receive(offset=0, size=self.RECEIVE_CAPACITY + 1)
+
+        self.assertEqual(len(self.sent_tensors), 1, "the metadata, and nothing after it")
+        self.assertIs(self.sent_tensors[0][0], self.received_metadata)
+
+    def test_a_batch_that_exactly_fills_this_rank_is_accepted(self):
+        """The boundary the real fixture sits on: a slot's used prefix is the whole receive size."""
+        yielded = self.receive(offset=0, size=self.RECEIVE_CAPACITY)
+
+        self.assertEqual(len(yielded), 1)
+        file_id, range_index, buffer = yielded[0]
+        self.assertEqual((file_id, range_index), (7, 3))
+        self.assertEqual(len(buffer), self.RECEIVE_CAPACITY)
+        self.assertEqual(buffer.data_ptr(), self.received_buffer.data_ptr())
+
+    def test_a_shorter_batch_yields_the_prefix_and_not_the_whole_buffer(self):
+        yielded = self.receive(offset=512, size=1024)
+
+        _, _, buffer = yielded[0]
+        self.assertEqual(len(buffer), 1024)
+        self.assertEqual(buffer.data_ptr(), self.received_buffer.data_ptr() + 512)
+        self.assertEqual(buffer.tolist(), self.received_buffer[512:1536].tolist())
+
+    def test_what_is_received_into_is_only_the_prefix_the_peer_filled(self):
+        """The data collective must be posted with the peer's size, not with the whole buffer."""
+        self.receive(offset=0, size=1024)
+
+        data = self.sent_tensors[1][0]
+        self.assertEqual(data.numel(), 1024)
+        self.assertEqual(data.data_ptr(), self.received_buffer.data_ptr())
+
+
 if __name__ == "__main__":
     unittest.main()

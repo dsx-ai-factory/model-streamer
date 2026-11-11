@@ -156,6 +156,130 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    def test_1_the_direct_source_is_used_where_the_library_can_fill_the_ring(self):
+        for owned in (True, False):
+            with self.subTest(owned=owned):
+                self._direct_source_round_trip(owned)
+
+    def _direct_source_round_trip(self, owned):
+        """The whole 5d switch, end to end, on a host-only runner.
+
+        Two device facts a host-only runner cannot produce are stood in: the vendor row, and the
+        slot shape the group agrees from its reduced free memory - that reduction runs only under a
+        device backend, so under gloo there is no shape and the switch would always say staged.
+        With both in place the library builds a ring it treats as device memory, stream_files is
+        asked for a sent-from ring, and the loop broadcasts its slots instead of staging through a
+        host ring. The bytes must still come back whole."""
+        from runai_model_streamer.file_streamer import file_streamer as fs_module
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        class FakeStream:
+            def synchronize(self):
+                pass
+
+        class FakeEvent:
+            def record(self, stream=None):
+                pass
+
+            def query(self):
+                return True
+
+            def synchronize(self):
+                pass
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                                current_stream=lambda device=None: FakeStream())
+
+        # MORE THAN THE RING HOLDS: 10 ranges of 2048 into 2 slots that take one each, so the
+        # slowest rank still gets more ranges than slots and has to recycle. The release and its
+        # event run between rounds - with a ring that spans the stream they never would.
+        file_specs = [{"size": 12288, "chunks": [2048] * 6},
+                      {"size": 8192, "chunks": [2048] * 4}]
+        requests = self._prepare_file_requests(file_specs)
+        originals = {}
+        for req in requests:
+            with open(req.path, "rb") as handle:
+                originals[req.id] = handle.read()
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        sources = []
+        real_direct = __import__(module, fromlist=["DirectDistributionSource"]).DirectDistributionSource
+
+        shape_calls = []
+
+        def record_shape(*a, **k):
+            shape_calls.append(a)
+            return (2048, 2)
+
+        def record_source(*a, **k):
+            source = real_direct(*a, **k)
+            sources.append(source)
+            return source
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch.object(fs_module, "device_support", return_value=support), \
+             patch.object(fs_module, "device_free_memory", return_value=1 << 30), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", side_effect=record_shape), \
+             patch(f"{module}.DirectDistributionSource", side_effect=record_source):
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True, owned=owned, ring_buffers=5)
+
+                self.assertTrue(inner.sends_directly,
+                                "the switch must choose the direct source here")
+                # The shape itself is patched in, so asserting it is not None would say nothing.
+                # What the production code decides is the CAP it dictates with that shape: the ring
+                # packs by bytes, and a slot may hold no more ranges than the metadata has rows.
+                from runai_model_streamer.distributed_streamer.distributed_streamer import (
+                    MAX_CHUNKS_PER_BATCH,
+                )
+                self.assertEqual(
+                    inner.file_streamer.requests_iterator.max_ranges_per_slot,
+                    MAX_CHUNKS_PER_BATCH,
+                    "a sent ring must be capped at the rows a peer will read",
+                )
+
+                # WHAT THE PRODUCTION CODE PASSES, which patching a return value leaves unexamined.
+                # The whole list and not this rank's share - a share is floored by the largest range
+                # IN IT, so two ranks would size differently - and the caller's depth, which used to
+                # be dropped on this path while the environment variable was still honoured.
+                self.assertEqual(len(shape_calls), 1)
+                _, whole, depth = shape_calls[0]
+                self.assertIs(whole, requests, "the WHOLE file list, never this rank's share")
+                self.assertEqual(depth, 5, "the caller's ring_buffers reaches the agreed shape")
+
+                # The ring really is reused, which is what drives the release and its event. A ring
+                # that spans the stream never recycles, and then the hardest part of the direct
+                # source - handing a slot back and having it refilled - is never exercised. Read
+                # HERE: __exit__ frees the ring and leaves requests_iterator None.
+                ring = inner.file_streamer.requests_iterator
+                mine = sum(len(fc.sizes) for fc in inner.rank_file_chunks_list)
+                self.assertGreater(mine, ring.num_buffers,
+                                   "this rank needs more ranges than slots, or nothing recycles")
+
+                got = {}
+                for req_id, chunk_idx, tensor in streamer.get_chunks():
+                    got.setdefault(req_id, {})[chunk_idx] = tensor.cpu().numpy().tobytes()
+
+        # The bytes, not just the count: a wrong slot or a wrong offset still yields the right
+        # number of chunks.
+        for req in requests:
+            rebuilt = b"".join(got[req.id][i] for i in sorted(got[req.id]))
+            self.assertEqual(rebuilt, originals[req.id],
+                             f"request {req.id} did not reassemble")
+
+        # UNCONDITIONAL. Behind an `if reading_from_storage` this assertion quietly disappears the
+        # day the partition gives a rank nothing, and the test still passes.
+        self.assertEqual(len(sources), 1 if inner.reading_from_storage else 0,
+                         "a rank that reads sends from the ring itself, and one that does not sends"
+                         " nothing")
+
+        if self.rank == 0:
+            print(f"\n✅ Direct source (owned={owned}) verified on all {self.world_size} ranks.")
+
     def test_1_the_slot_is_released_with_an_event_where_the_device_has_them(self):
         """The loop marks the end of a round, and a source that refills waits for that mark.
 
@@ -220,6 +344,7 @@ class TestDistributedStreamer(unittest.TestCase):
              patch(f"{module}.StagedDistributionSource",
                    side_effect=lambda *a, **k: Watched(real_source(*a, **k))):
             with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
                 streamer.stream_files(requests, None, "cpu", True, owned=True)
                 chunks = list(streamer.get_chunks())
 
@@ -228,6 +353,10 @@ class TestDistributedStreamer(unittest.TestCase):
         # Every rank on the distributed path builds a source, even one with an empty share. Without
         # this, a run that never distributed at all would skip below and read as a pass.
         self.assertEqual(len(built), 1, "the distributed path ran on this rank")
+        # It is about the STAGED release. device_support is patched above, so the only reason this
+        # rank still stages is that gloo never agreed a slot shape - which is worth saying, or the
+        # next person reads a confusing failure in a test about events.
+        self.assertFalse(inner.sends_directly, "this test is about the staged release path")
         self.assertEqual(len(clones), 2, "both chunks were cloned out of a slot")
 
         if not releases:

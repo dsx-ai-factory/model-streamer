@@ -31,7 +31,8 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 
 # Re-exported, not restated: the ring places the ranges, so the value it rounds to is the one ranks
 # agree on. See requests_iterator for what it is and why it is a constant.
-__all__ = ["RANGE_OFFSET_ALIGNMENT", "SlotRange", "Filled", "DistributionSource", "advance"]
+__all__ = ["RANGE_OFFSET_ALIGNMENT", "SlotRange", "Filled", "DistributionSource",
+           "EmptyDistributionSource", "advance"]
 
 
 def advance(cursor: int, size: int) -> Tuple[int, int]:
@@ -126,3 +127,20 @@ class DistributionSource(Protocol):
 
         The caller must not touch `filled` afterwards."""
         ...
+
+
+class EmptyDistributionSource:
+    """A source with nothing to send.
+
+    A rank whose share is empty still takes part in every broadcast, as a receiver. It has no ring
+    behind it and no buffer to stage through, so the other two sources would both have to be given
+    something to hold - and on the direct path there is no send buffer to give.
+
+    It is a source rather than a None, because the loop asks a source every round and a rank with
+    nothing to send is not a rank with nothing to do."""
+
+    def next_slot(self) -> Optional[Filled]:
+        return None
+
+    def release(self, filled: Filled, done: Any = None) -> None:
+        raise RuntimeError("release() on a source that never handed a slot out")

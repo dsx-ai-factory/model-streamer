@@ -24,18 +24,24 @@ from runai_model_streamer.torch_device.torch_device import (
 )
 
 from runai_model_streamer.file_streamer.requests_iterator import (
+    device_ring_budget,
     device_ring_sizing,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
 )
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
+    EmptyDistributionSource,
     RANGE_OFFSET_ALIGNMENT,
     SlotRange,
 )
 
 from runai_model_streamer.distributed_streamer.staged_source import (
     StagedDistributionSource,
+)
+
+from runai_model_streamer.distributed_streamer.direct_source import (
+    DirectDistributionSource,
 )
 
 from runai_model_streamer.distributed_streamer.partition import (
@@ -73,29 +79,48 @@ def is_global_distribution() -> bool:
     return int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
 
 
-def allocate_dist_staging(max_chunk: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Every device allocation the broadcast loop makes: two staging buffers and two metadata tensors.
+def allocate_dist_staging(max_chunk: int, device: torch.device,
+                          receive_bytesize: Optional[int] = None,
+                          send_buffer: bool = True) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Every device allocation the broadcast loop makes: the staging buffers and two metadata tensors.
 
     Each staging buffer is over-allocated by RANGE_OFFSET_ALIGNMENT and sliced to the first aligned
     address, so an offset that is a multiple of it lands aligned in BOTH buffers - which is what a
     receiving rank relies on to read a sender's layout.
 
+    receive_bytesize is what the LARGEST sender will broadcast, which is the slot size where the
+    ranks send their ring slots. It defaults to this rank's own staging size, which is right only
+    while every rank stages.
+
+    send_buffer is False for a rank that sends its ring slots: it has nothing to stage through, and
+    the buffer would be a device allocation nothing ever writes to.
+
     dist_device_bytes_required() measures THIS function, and a test allocates from it and compares, so
     the free-memory check cannot disagree with the allocation about how many buffers there are."""
     buffer_bytesize = dist_buffer_bytesize(max_chunk)
+    receive_bytesize = buffer_bytesize if receive_bytesize is None else receive_bytesize
 
-    def staging() -> torch.Tensor:
-        raw = torch.empty(buffer_bytesize + RANGE_OFFSET_ALIGNMENT, dtype=torch.uint8, device=device)
+    def staging(bytesize: int) -> torch.Tensor:
+        raw = torch.empty(bytesize + RANGE_OFFSET_ALIGNMENT, dtype=torch.uint8, device=device)
         return raw[(-raw.data_ptr()) % RANGE_OFFSET_ALIGNMENT:]
 
     def metadata() -> torch.Tensor:
         return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
 
-    return staging(), staging(), metadata(), metadata()
+    send = staging(buffer_bytesize) if send_buffer else None
+    return send, staging(receive_bytesize), metadata(), metadata()
 
 
 def dist_device_bytes_required(max_chunk: int) -> int:
-    """What allocate_dist_staging() takes on the device."""
+    """What allocate_dist_staging() takes on the device WHEN THE RANKS STAGE.
+
+    It is the gate in set_is_distributed, which runs before the group has a slot shape, so it cannot
+    describe a rank that sends its ring slots: that rank allocates no send buffer, sizes its receive
+    buffer from the agreed slot, and takes a device ring on top that this never counted. What bounds
+    THAT rank is device_ring_budget, out of which agreed_slot_shape reserves the receive buffer.
+
+    So this stays the staged figure, which is the larger of the two per buffer, and the gate stays
+    conservative rather than exact."""
     staging = dist_buffer_bytesize(max_chunk) + RANGE_OFFSET_ALIGNMENT
     metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
     return 2 * staging + 2 * metadata
@@ -150,8 +175,30 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
     measure, or one not using a device backend at all. There is then no ring to agree on, and the
     answer is None.
+
+    ONE SLOT OF THE BUDGET IS NOT THE RING'S. A rank that sends its slots also receives its peers',
+    into a buffer of the same size, and get_chunks allocates that AFTER stream_files has already
+    taken the ring. Sizing the ring to the whole budget would leave nothing for it, and the failure
+    would be a raw allocation error on some ranks while the others wait in the collective. The
+    reservation costs depth, never slot size: the slot is the broadcast unit, and shrinking it on
+    one rank would break every peer.
     """
-    return device_ring_sizing(min_free_bytes, file_stream_requests, ring_buffers)
+    shape = device_ring_sizing(min_free_bytes, file_stream_requests, ring_buffers)
+    if shape is None:
+        return None
+
+    buffer_size, num_buffers = shape
+    budget = device_ring_budget(min_free_bytes, file_stream_requests)
+
+    if (num_buffers + 1) * buffer_size > budget:
+        num_buffers -= 1
+
+    if num_buffers < 1 or (num_buffers + 1) * buffer_size > budget:
+        # Room for a ring but not for a ring AND somewhere to receive into: the host path, which
+        # every rank reaches from the same numbers.
+        return None
+
+    return buffer_size, num_buffers
 
 
 def get_backends() -> dict:
@@ -361,7 +408,9 @@ class DistributedStreamer:
             )
             built_ring = True
         else:
-            self.distributed_streamer.stream_files(file_stream_requests, credentials, device, self.params, owned=owned)
+            self.distributed_streamer.stream_files(file_stream_requests, credentials, device,
+                                                   self.params, owned=owned,
+                                                   ring_buffers=ring_buffers)
             # A rank whose share of the partition is empty returns before building anything, leaving the
             # iterator from the safetensors metadata read in place. Reporting THAT as the model ring is
             # worse than reporting nothing: `1 x 8 Bytes` against the model's byte total reads exactly
@@ -508,6 +557,8 @@ class _distributedStreamer:
     def __init__(self, file_streamer : FileStreamer) -> None:
         self.file_streamer = file_streamer
         self.device = None
+        self.sends_directly = False
+        self.slot_shape = None
         self.rank_file_chunks_list = {} # post Partitioning FileChunks to be streamed by this rank
         self.rank_dicts_map = {} # maps post partitioning FileChunks.id and chunk index to the original FileChunks.id and chunk index and chunk size
         self.total_chunks_to_read = 0
@@ -612,7 +663,13 @@ class _distributedStreamer:
             device: str,
             params : _distributedStreamerParams,
             owned: bool,
+            ring_buffers: Optional[int] = None,
     ) -> None:
+        """ring_buffers is the caller's depth, honoured here as it is undistributed.
+
+        It reaches the agreed shape, not this rank's own ring: a depth one rank applied alone would
+        give it a different slot size from its peers, and the slot is the broadcast unit. Every rank
+        is given the same argument by the same caller, so the agreement holds."""
 
         # RESOLVED, not just parsed. "cuda" with no ordinal means whichever device is current,
         # and that can answer differently later - so the staging buffers and the stream an event is
@@ -666,6 +723,17 @@ class _distributedStreamer:
 
         log_rank_span_info(self.original_group_rank, my_span.partition)
 
+        # Send the ring's own slots where the library can fill them, and stage through a host ring
+        # where it cannot. NO COLLECTIVE: device_support reads the device kind and the torch build,
+        # and agreed_slot_shape is a pure function of the free memory the group already reduced and
+        # of the WHOLE file list. Every rank answers the same from the same inputs, the way the
+        # backend and the memory check already do.
+        self.slot_shape = agreed_slot_shape(params.min_device_free_memory, file_stream_requests,
+                                            ring_buffers)
+        self.sends_directly = (
+            device_support(self.device) is not None and self.slot_shape is not None
+        )
+
         if len(self.rank_file_chunks_list) == 0:
             self.reading_from_storage = False
             logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: No chunks to read from storage")
@@ -673,14 +741,26 @@ class _distributedStreamer:
 
         # read files
         #
-        # owned=False whatever the caller asked for: this ring is internal. The distribution source
-        # copies each range into the send buffer and keeps no view, so nobody outside holds host
-        # memory and giving a slot away would only buy a fresh allocation per submission. Ownership
-        # on this path is the per tensor clone out of the staging buffer.
-        self.file_streamer.stream_files(
-            self.rank_file_chunks_list, credentials, "cpu",
-            memory_limit=self.rank_memory_limit(), owned=False
-        )
+        # owned=False whatever the caller asked for: this ring is internal. Nobody outside holds a
+        # slot - a staged source copies each range out of it, and a sent slot is broadcast and then
+        # cloned - so giving one away would only buy a fresh allocation per submission. Ownership on
+        # both paths is the per tensor clone the loop makes.
+        if self.sends_directly:
+            # memory_limit is not passed: it caps HOST memory, and this ring is on the device. The
+            # shape is what bounds it, and sent_from refuses a ring the library cannot write into.
+            self.file_streamer.stream_files(
+                self.rank_file_chunks_list, credentials, str(self.device),
+                owned=False, slot_shape=self.slot_shape, sent_from=True,
+                # The same number the metadata tensor has rows for. The ring packs by bytes, so
+                # without this a slot of small tensors holds more ranges than a peer can be told
+                # about, and write_metadata_rows refuses the batch.
+                max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
+            )
+        else:
+            self.file_streamer.stream_files(
+                self.rank_file_chunks_list, credentials, "cpu",
+                memory_limit=self.rank_memory_limit(), owned=False
+            )
         self.reading_from_storage = True
 
     def rank_memory_limit(self) -> int:
@@ -728,21 +808,35 @@ class _distributedStreamer:
         
         BUFFER_BYTESIZE = dist_buffer_bytesize(self.max_chunk)
 
+        # The receive buffer must hold the LARGEST slot any peer will broadcast. Where the ranks send
+        # their ring slots that is the agreed slot size, not this rank's staging size - and a receive
+        # buffer that is too small does not raise, because slicing it CLAMPS, so the mismatch would
+        # reach the collective as a size disagreement.
+        #
         # Allocated THERE, not here, so the free-memory check in set_is_distributed measures the same
-        # four allocations this loop makes.
+        # allocations this loop makes.
         (data_buffer, received_buffer,
-         batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(self.max_chunk, self.device)
-        
-        ready_chunks_iterator = self.file_streamer.get_chunks()
-
-        # A rank with no share of its own still takes part in every broadcast, as a receiver. It has
-        # no stream to pull from, so the source is given nothing and answers None at once.
-        source = StagedDistributionSource(
-            ready_chunks_iterator if self.reading_from_storage else iter(()),
-            data_buffer[:BUFFER_BYTESIZE],
-            self.rank_dicts_map,
-            MAX_CHUNKS_PER_BATCH,
+         batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(
+            self.max_chunk, self.device,
+            receive_bytesize=self.slot_shape[0] if self.sends_directly else None,
+            # Only a rank that STAGES something needs one. A rank sending its ring slots has no use
+            # for it, and a rank with an empty share sends nothing at all.
+            send_buffer=self.reading_from_storage and not self.sends_directly,
         )
+        
+        if not self.reading_from_storage:
+            source = EmptyDistributionSource()
+        elif self.sends_directly:
+            source = DirectDistributionSource(self.file_streamer, self.rank_dicts_map)
+        else:
+            # Opened HERE, not above: the direct source pulls whole slots through get_slots instead,
+            # and starting this generator as well would leave two of them live on one streamer.
+            source = StagedDistributionSource(
+                self.file_streamer.get_chunks(),
+                data_buffer[:BUFFER_BYTESIZE],
+                self.rank_dicts_map,
+                MAX_CHUNKS_PER_BATCH,
+            )
 
         chunks_to_read = [self.total_chunks_to_read]
 
@@ -885,6 +979,16 @@ class _distributedStreamer:
                 total_data_size = last_meta[3].item() + last_meta[2].item() # offset plus size of last chunk in batch
 
                 chunks_to_read[0] -= received_chunk_count_in_batch
+
+                # CHECKED, because the slice would otherwise clamp: a receive buffer smaller than
+                # what the sender broadcasts becomes a size mismatch inside the collective, which is
+                # an abort under gloo and a hang under NCCL.
+                if total_data_size > len(received_buffer):
+                    raise RuntimeError(
+                        f"rank {global_broadcasting_rank} is broadcasting {total_data_size} bytes "
+                        f"and this rank's receive buffer holds {len(received_buffer)}; the ranks "
+                        f"did not agree on a slot size"
+                    )
 
                 received_data_buf_view = received_buffer[:total_data_size]
 
