@@ -281,12 +281,18 @@ Model Streamer is licensed under the [Apache License 2.0](LICENSE).
 
 - `py/runai_model_streamer*/LICENSE` are symbolic links to the root [LICENSE](LICENSE), so
   that each Python wheel carries the license text. They are the same license, not a separate one.
-- The native libraries statically link third-party code. Their notices and the full upstream
-  license texts live in [`third_party_notices/`](third_party_notices/README.md):
-  - `third_party_notices/licenses/<component>/` holds the verbatim license and NOTICE files
-    of each third-party component (Apache-2.0, MIT, BSD, zlib, curl, LGPL-2.1 and others).
-  - `libstreamer.txt`, `libstreamers3.txt`, `libstreamergcs.txt` and `libstreamerazure.txt`
-    are the consolidated notices for each wheel. `sdk.txt` is the notice for the C/C++ SDK archive.
+- The native libraries statically link third-party code. Each deliverable carries a `NOTICE`
+  listing what it links, with each component's version, license and full upstream license and
+  NOTICE texts:
+  - `py/runai_model_streamer*/NOTICE`: one per wheel, packed into its `.dist-info`.
+  - `cpp/NOTICE`: the C/C++ SDK archive's, packed as `THIRD_PARTY_NOTICES.txt`.
+  - [`COPYRIGHT`](COPYRIGHT): all of them merged.
+
+  They are generated, not edited by hand: the
+  [run-ai/runai-actions Renovate pipeline](https://github.com/run-ai/runai-actions/tree/main/renovate)
+  regenerates them in every dependency update PR, from the `# renovate:` and
+  `# attribution:` comments in `.devcontainer/Dockerfile` and `.devcontainer/gcs/config/sources.bzl`
+  (which modules ship each library, its git submodules, its Bazel dependencies, code it vendors).
 
 For source delivery and replacing the statically linked I/O libraries, see
 [Native library sources and rebuilding](docs/native-library-rebuilding.md).

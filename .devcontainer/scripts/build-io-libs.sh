@@ -36,10 +36,10 @@ esac
 # and a loud failure that needs a one-line update beats an unverified dependency in a release
 # artifact.
 build_liburing() {
-    curl -fsSL -o liburing-2.14.tar.gz https://github.com/axboe/liburing/archive/refs/tags/liburing-2.14.tar.gz
-    echo "5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c  liburing-2.14.tar.gz" | sha256sum -c -
-    tar zxf liburing-2.14.tar.gz
-    cd liburing-liburing-2.14
+    curl -fsSL -o liburing-${LIBURING_VERSION:?}.tar.gz "${LIBURING_URL:?}"
+    echo "${LIBURING_SHA256:?}  liburing-${LIBURING_VERSION}.tar.gz" | sha256sum -c -
+    tar zxf liburing-${LIBURING_VERSION}.tar.gz
+    cd liburing-liburing-${LIBURING_VERSION}
 
     ./configure --use-libc --prefix=/opt/${arch}-uring --libdir=/opt/${arch}-uring/lib
     make -C src -j4 ENABLE_SHARED=0 CFLAGS="-fPIC -O2" > /dev/null
@@ -47,7 +47,7 @@ build_liburing() {
     make clean > /dev/null
 
     cd -
-    rm -rf liburing-liburing-2.14 liburing-2.14.tar.gz
+    rm -rf liburing-liburing-${LIBURING_VERSION} liburing-${LIBURING_VERSION}.tar.gz
 }
 
 # libaio, for the fallback engine where io_uring is unavailable. Static only, same reasoning as

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "cpp-common is not on run-ai/runai-actions main yet: until it is, a trial passes it with the workflow's presets input. Add github>run-ai/runai-actions//renovate/presets/cpp-common to extends once it is.",
+  "extends": [
+    "config:recommended",
+    "github>run-ai/runai-actions//renovate/presets/custom_annotation",
+    "github>run-ai/runai-actions//renovate/presets/notice",
+    "github>run-ai/runai-actions//renovate/presets/copyright"
+  ],
+  "dependencyDashboard": false,
+  "includePaths": [
+    "cpp/**",
+    ".devcontainer/**",
+    "py/**"
+  ],
+  "packageRules": [
+    {
+      "description": "The devcontainer runs Python 3.8 (ubuntu:20.04, kept for the glibc 2.31 wheel tags), and these pins are the newest releases that still install on it: pip 25.1, setuptools 76, wheel 0.46, pytest 8.4 and boto3 1.38 need Python 3.9. Re-enable them when the image's Python moves.",
+      "matchManagers": [
+        "pip_requirements",
+        "dockerfile",
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "pip",
+        "setuptools",
+        "wheel",
+        "pytest",
+        "boto3"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions are not updated by Renovate here.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "The devcontainer stays on ubuntu:20.04 on purpose: its glibc 2.31 sets the wheels' manylinux tags, and its Python 3.8 is what the pins above hold for. Moving the base image is a deliberate change, not a version bump.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchPackageNames": [
+        "ubuntu"
+      ],
+      "enabled": false
+    }
+  ]
+}

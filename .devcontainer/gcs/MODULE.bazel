@@ -6,6 +6,9 @@ Bazel Central Registry. Built once per image by .devcontainer/scripts/build-gcs-
 
 module(name = "model_streamer_gcs_sdk")
 
+# Linked into libstreamergcs, with everything it depends on (grpc, abseil, BoringSSL, ...)
+# and the code they vendor.
+# attribution: shipped module=py/runai_model_streamer_gcs,cpp vendored
 bazel_dep(name = "google_cloud_cpp", version = "3.7.0")
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
