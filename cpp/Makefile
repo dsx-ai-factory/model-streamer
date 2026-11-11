@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# attribution: ships NOTICE (cpp/NOTICE goes into each SDK archive as THIRD_PARTY_NOTICES.txt,
+# .github/scripts/release_bundle.py)
+
 .PHONY: build build_mock build_azure_test test test_strategy clean
 
 ARCH := $$(uname -m)

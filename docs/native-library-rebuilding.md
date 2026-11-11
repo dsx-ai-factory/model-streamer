@@ -7,8 +7,9 @@ replacement system `libaio.so` or `liburing.so` does not change the code in the
 core library: rebuild and replace `libstreamer.so` to use a modified dependency.
 
 libaio 0.3.113 is LGPL-2.1-or-later. liburing 2.14 uses its MIT licensing option.
-The [component manifest](../third_party_notices/components.json) records versions,
-licenses and linkage. The binary deliverables contain shared libraries, public
+Each deliverable's `NOTICE` (`py/runai_model_streamer*/NOTICE`, `cpp/NOTICE`) records versions
+and licenses; the `# attribution:` comments in `.devcontainer/Dockerfile` say which library each
+component is linked into. The binary deliverables contain shared libraries, public
 SDK headers and notices; they do not include dependency source archives or a
 separate set of relinkable object files. The replacement mechanism described here
 is a full rebuild from source.
@@ -28,10 +29,11 @@ git checkout "$STREAMER_REF"
 ```
 
 Use the dependency versions, download URLs, checksums and build flags in that
-checkout's [I/O dependency build script](../.devcontainer/scripts/build-io-libs.sh).
+checkout's [I/O dependency build script](../.devcontainer/scripts/build-io-libs.sh) and the
+`ARG`s of [`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile) that pass them in.
 For older releases the recipe may be inline in `.devcontainer/Dockerfile`.
 Download and retain the complete dependency archives, not just their license
-texts from `third_party_notices/licenses/`. The commands below match this
+texts from the `NOTICE` files. The commands below match this
 revision's pins; use the matching recipe when rebuilding another revision.
 
 ## Rebuild with modified libaio

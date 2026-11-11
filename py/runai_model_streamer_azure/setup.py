@@ -41,7 +41,8 @@ assert_lib_exists()
 setup(
     name="runai-model-streamer-azure",
     version=VERSION,
-    license_files=("LICENSE", "THIRD_PARTY_NOTICES.txt"),
+    # attribution: ships NOTICE (third-party notices, kept current by the Renovate pipeline)
+    license_files=("LICENSE", "NOTICE"),
     packages=find_packages(),
     install_requires=["azure-storage-blob", "azure-identity"],
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],
