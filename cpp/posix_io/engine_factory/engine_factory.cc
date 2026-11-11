@@ -98,7 +98,8 @@ std::unique_ptr<IoEngine> make_io_engine(Strategy strategy, const AsyncIoConfig 
         // Both strategies use the same builder, because both use the same ring.
         //
         // O_DIRECT is a property of the open file, not of the ring. Each request carries its own
-        // FileRef. There is no ring-wide setting to choose here.
+        // FileRef, and the engine reads that request's `direct` flag when it decides whether to set
+        // IOSQE_ASYNC. There is no ring-wide setting to choose here.
         //
         // Under IoUringDirect the worker still decides file by file. It reads a file buffered if the
         // file offset is not congruent with the destination, or if the mount refuses O_DIRECT. So one

@@ -96,13 +96,15 @@ bool reads_through_staging(const common::Device & destination)
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
                              EngineFactory factory, std::function<void()> on_engine_dead,
-                             std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
+                             std::shared_ptr<DeviceWriter> writer, bool register_buffers,
+                             bool async_direct) :
     _writer(std::move(writer)),
     _strategy(strategy),
     _block(block != 0 ? block : posix_io::MaxProbeBlock),
     _block_measured(block != 0),
     _node_wide_depth(node_wide_depth),
     _register_buffers(register_buffers),
+    _async_direct(async_direct),
     _factory(std::move(factory)),
     _on_engine_dead(std::move(on_engine_dead))
 {
@@ -151,6 +153,7 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
 
     config.direct_block = _block;
     config.register_buffers = _register_buffers;
+    config.async_direct = _async_direct;
 
     _engine = _factory(_strategy, config);
     if (_engine == nullptr)
@@ -212,7 +215,8 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
 
     _device_out = std::make_unique<DeviceWriterClient>(_writer, buffers, _engine->depth() + _copy_depth);
 
-    LOG(INFO) << "Async io worker ready: " << _strategy << ", " << *_settings;
+    LOG(INFO) << "Async io worker ready: " << _strategy << ", " << *_settings << ", direct reads "
+              << (_async_direct ? "via io-wq (block device)" : "inline (no block device)");
 
     // Harvest into a buffer sized once - nothing is allocated while completing.
     _completions.resize(_engine->depth());

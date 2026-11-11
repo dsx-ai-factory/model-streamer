@@ -59,7 +59,8 @@ void BackendPools::push(Pool pool, Workload && workload)
     _filesystem_pool->push(std::move(workload));
 }
 
-void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool register_buffers, Workload && workload)
+void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool register_buffers,
+                              bool async_direct, Workload && workload)
 {
     utils::ThreadPool<Workload> * pool = nullptr;
 
@@ -76,10 +77,11 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
         else
         {
             // Routed by what is BOUND into an engine and cannot change afterwards: the depth the
-            // mount resolved, and whether it registers buffers. So a mount never lands on an engine
+            // mount resolved, whether it registers buffers, and whether its direct reads go to io-wq.
+            // So a mount never lands on an engine
             // built for another answer, and the cap applies within each - which is why discovery
-            // order cannot cost a mount either of its configured values.
-            auto & engines = _async_pools[{ depth, register_buffers }];
+            // order cannot cost a mount any of its configured values.
+            auto & engines = _async_pools[{ depth, register_buffers, async_direct }];
 
             if (engines.size() < _max_async_engines)
             {
@@ -89,8 +91,8 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                 // no agreement at all. (The mutex above guards the map, not a decision.)
                 // The block is bound HERE and never changes for this engine.
                 auto created = std::make_unique<utils::ThreadPool<Workload>>(
-                    [factory = _filesystem_async_factory, device, block, depth, register_buffers]()
-                    { return factory(device, block, depth, register_buffers); }, 1);
+                    [factory = _filesystem_async_factory, device, block, depth, register_buffers, async_direct]()
+                    { return factory(device, block, depth, register_buffers, async_direct); }, 1);
                 pool = created.get();
                 engines.push_back(std::move(created));
 

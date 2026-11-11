@@ -65,12 +65,13 @@ FsAsyncRouter::WorkerFactory FsAsyncRouter::worker_factory(std::shared_ptr<Devic
     // first push, which is after resolution.
     return [resolver = _strategy_resolver, workers = _workers, dead = _dead_mounts,
             engine = _environment.engine, writer = std::move(writer)]
-           (dev_t device, size_t block, unsigned depth, bool register_buffers) -> std::unique_ptr<utils::Worker<Workload>>
+           (dev_t device, size_t block, unsigned depth, bool register_buffers, bool async_direct)
+           -> std::unique_ptr<utils::Worker<Workload>>
     {
         auto worker = std::make_unique<AsyncIoWorker>(resolver->resolved(), block, depth,
                                                       engine ? engine : posix_io::make_io_engine,
                                                       [dead, device]() { dead->add(device); },
-                                                      writer, register_buffers);
+                                                      writer, register_buffers, async_direct);
 
         // Registered here, the last point at which the concrete type is still known: the pool stores
         // it as a Worker<Workload>, which knows nothing of counters.
@@ -173,10 +174,15 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
                         const bool may_register = registers == nullptr || registers(capability.fs_type);
                         out.registers.push_back(may_register);
 
+                        // From the device, not the type name: a list of network file system names
+                        // would miss the ones nobody wrote down, and those would get io-wq.
+                        out.async_direct.push_back(capability.block_backed);
+
                         LOG(DEBUG) << "Mount " << major(capability.dev) << ":" << minor(capability.dev)
                                    << " is " << capability.fs_type << " and reads at a queue depth of "
                                    << resolved << (may_register ? " with" : " without")
-                                   << " registered buffers";
+                                   << " registered buffers, direct reads "
+                                   << (capability.block_backed ? "via io-wq" : "inline");
                     }
                 }
             }
