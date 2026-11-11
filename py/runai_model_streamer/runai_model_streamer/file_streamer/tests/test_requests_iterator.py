@@ -7,10 +7,10 @@ import unittest
 import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer.requests_iterator import (
-    _advance,
+    advance,
     _alloc_slot,
     _layout_end,
-    _next_offset,
+    next_offset,
     _packing_fill,
     _device_ring_shape,
     FileChunksIterator,
@@ -1452,22 +1452,63 @@ class TestRangeAlignment(unittest.TestCase):
         self.assertEqual(self.offsets_of(iterator, request), [0, 100, 300])
 
 
+class TestTheRingAccessors(unittest.TestCase):
+    """What a caller that will SEND a slot asks the ring."""
+
+    def ring(self, sizes, alignment=ALIGNMENT):
+        files = [FileChunks.contiguous(17, "a.txt", 0, sizes)]
+        return FilesRequestsIteratorWithBuffer(
+            ALIGNMENT * 4, 2, files, owned=True, slots=SENT_SLOTS, range_alignment=alignment,
+        )
+
+    def test_the_alignment_is_the_one_the_ring_was_built_with(self):
+        self.assertEqual(self.ring([100]).range_alignment, ALIGNMENT)
+        self.assertEqual(self.ring([100], alignment=1).range_alignment, 1)
+
+    def test_the_offsets_start_at_the_slot_not_at_the_first_range(self):
+        """The reason this is asked of the ring: range_dsts[0] is the layout's own first element."""
+        iterator = self.ring([100, 200])
+        request = iterator.next_request()
+
+        self.assertEqual(iterator.range_offsets_of(request), [0, 512])
+        # Independent of how the accessor finds the base: whatever it is, the ranges sit this far
+        # apart, and the first one starts at it.
+        self.assertEqual(request.range_dsts[1] - request.range_dsts[0], 512)
+
+    def test_a_shifted_layout_is_visible_here(self):
+        """A layout that did not start at the slot base reads as such, where range_dsts[0] would
+        have hidden it."""
+        iterator = self.ring([100, 200])
+        request = iterator.next_request()
+        request.range_dsts = [dst + ALIGNMENT for dst in request.range_dsts]
+
+        self.assertEqual(iterator.range_offsets_of(request), [512, 1024])
+
+    def test_a_released_request_has_no_offsets(self):
+        iterator = self.ring([100])
+        request = iterator.next_request()
+        iterator.release(request)
+
+        with self.assertRaisesRegex(RuntimeError, "already been released"):
+            iterator.range_offsets_of(request)
+
+
 class TestTheLayoutWalk(unittest.TestCase):
     """The helper the packer and the placer share."""
 
     def test_the_rule_rounds_up(self):
-        self.assertEqual(_next_offset(0, ALIGNMENT), 0)
-        self.assertEqual(_next_offset(1, ALIGNMENT), 512)
-        self.assertEqual(_next_offset(512, ALIGNMENT), 512)
-        self.assertEqual(_next_offset(513, ALIGNMENT), 1024)
+        self.assertEqual(next_offset(0, ALIGNMENT), 0)
+        self.assertEqual(next_offset(1, ALIGNMENT), 512)
+        self.assertEqual(next_offset(512, ALIGNMENT), 512)
+        self.assertEqual(next_offset(513, ALIGNMENT), 1024)
 
     def test_an_alignment_of_one_is_a_running_sum(self):
         self.assertEqual(_layout_end(0, [100, 200, 300], 1), 600)
-        self.assertEqual(_next_offset(7, 1), 7)
+        self.assertEqual(next_offset(7, 1), 7)
 
     def test_a_zero_sized_range_neither_pads_nor_advances(self):
-        self.assertEqual(_advance(100, 0, ALIGNMENT), (100, 100))
-        self.assertEqual(_advance(100, 7, ALIGNMENT), (512, 519))
+        self.assertEqual(advance(100, 0, ALIGNMENT), (100, 100))
+        self.assertEqual(advance(100, 7, ALIGNMENT), (512, 519))
 
     def test_the_walk_ends_at_the_last_range(self):
         """Not at a pad after it: the end of the data is what a caller sends."""

@@ -17,7 +17,7 @@ from runai_model_streamer.distributed_streamer.distribution_source import (
     RANGE_OFFSET_ALIGNMENT,
     Filled,
     SlotRange,
-    next_offset,
+    advance,
 )
 
 
@@ -49,9 +49,8 @@ class FakeSource:
 
         ranges, cursor = [], 0
         for file_id, range_index, size in entries:
-            offset = next_offset(cursor)
+            offset, cursor = advance(cursor, size)
             ranges.append(SlotRange(file_id, range_index, offset, size))
-            cursor = offset + size
 
         # A real source blocks until the bytes are in the slot. This one has nothing to wait for.
         view = memoryview(buffer)[:cursor]
@@ -81,6 +80,13 @@ class DistributionSourceContract:
         a rank short of device memory gets one slot."""
         return None
 
+    def release_event(self):
+        """An event this source may be released with, or None when it needs none.
+
+        ASKED, because a source may REQUIRE one: a ring whose slots are refilled by another stream
+        refuses a release without an event, and nothing generic can invent one it would accept."""
+        return None
+
     def each_slot(self, source):
         """Yield every slot, letting the test assert BEFORE it is released.
 
@@ -91,7 +97,7 @@ class DistributionSourceContract:
             if filled is None:
                 return
             yield filled
-            source.release(filled, None)
+            source.release(filled, self.release_event())
 
     def test_the_memory_is_the_used_prefix(self):
         for filled in self.each_slot(self.make_source()):
@@ -105,12 +111,19 @@ class DistributionSourceContract:
         Order alone is not enough. A source that packed tightly and one that padded by its own width
         are both in order, and a peer's computed layout is wrong for either."""
         for filled in self.each_slot(self.make_source()):
-            cursor = 0
+            cursor, previous_end = 0, 0
             for r in filled.ranges:
-                self.assertEqual(r.offset, next_offset(cursor),
+                at, cursor = advance(cursor, r.size)
+                self.assertEqual(r.offset, at,
                                  "the previous end, rounded up - no tighter, no wider")
-                self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
-                cursor = r.offset + r.size
+
+                # Said WITHOUT the helper, so a rule that was wrong in the same way in both places
+                # cannot pass: a range with bytes starts where its dtype can read it, and a pad is
+                # never wide enough to fit another range before it.
+                if r.size:
+                    self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
+                    self.assertLess(r.offset - previous_end, RANGE_OFFSET_ALIGNMENT)
+                previous_end = r.offset + r.size
             self.assertEqual(cursor, len(filled.memory),
                              "the used prefix ends at the last range, with no pad after it")
 
@@ -126,21 +139,40 @@ class DistributionSourceContract:
             pass
         self.assertIsNone(source.next_slot(), "a finished stream keeps answering None")
 
-    def test_release_takes_an_event_or_nothing(self):
-        """Both forms are accepted.
+    def test_release_takes_the_event_this_source_needs(self):
+        """It checks no more than that the call is accepted.
 
-        It checks no more than that. Whether a source really WAITS for the event before refilling
-        is not observable through this interface - the loop hands the event over and has no way to
-        watch what happens to it. That part of guarantee 4 belongs to the implementation's own
-        tests, against its own ring."""
+        Whether a source really WAITS for the event before refilling is not observable through this
+        interface - the loop hands the event over and has no way to watch what happens to it. That
+        part of guarantee 4 belongs to the implementation's own tests, against its own ring."""
         source = self.make_source()
         filled = source.next_slot()
         if filled is None:
             self.skipTest("an empty stream has no slot to release")
-        source.release(filled, object())        # an event
+        source.release(filled, self.release_event())
+
+    def test_a_source_that_needs_no_event_still_accepts_one(self):
+        """Guarantee 4 says `done` may be an event OR None, so neither form may be refused."""
+        if self.release_event() is not None:
+            self.skipTest("this source is covered by the test above")
+
+        source = self.make_source()
         filled = source.next_slot()
-        if filled is not None:
-            source.release(filled)              # and nothing
+        if filled is None:
+            self.skipTest("an empty stream has no slot to release")
+        source.release(filled, object())
+
+    def test_a_source_that_needs_no_event_takes_the_one_argument_form(self):
+        """Guarantee 4's "or None when nothing is enqueued". Skipped for a source that needs an
+        event, which cannot honour it - and that is why the suite asks rather than assumes."""
+        if self.release_event() is not None:
+            self.skipTest("this source is released with an event")
+
+        source = self.make_source()
+        filled = source.next_slot()
+        if filled is None:
+            self.skipTest("an empty stream has no slot to release")
+        source.release(filled)
 
     def test_two_slots_may_be_out_at_once(self):
         """A loop with an asynchronous collective fills the next slot while the previous is still
@@ -159,8 +191,8 @@ class DistributionSourceContract:
         if second is None:
             self.skipTest("this plan has only one slot")
         self.assertIsNot(first.memory, second.memory, "two slots out at once must not share memory")
-        source.release(first, None)
-        source.release(second, None)
+        source.release(first, self.release_event())
+        source.release(second, self.release_event())
 
 
 PLAN = [
@@ -210,11 +242,16 @@ class TestTheLayoutRule(unittest.TestCase):
         self.assertEqual(RANGE_OFFSET_ALIGNMENT, 512)
 
     def test_an_offset_is_rounded_up_to_it(self):
-        self.assertEqual(next_offset(0), 0)
-        self.assertEqual(next_offset(1), 512)
-        self.assertEqual(next_offset(511), 512)
-        self.assertEqual(next_offset(512), 512, "already on the rule, so not pushed on")
-        self.assertEqual(next_offset(513), 1024)
+        self.assertEqual(advance(0, 1)[0], 0)
+        self.assertEqual(advance(1, 1)[0], 512)
+        self.assertEqual(advance(511, 1)[0], 512)
+        self.assertEqual(advance(512, 1)[0], 512, "already on the rule, so not pushed on")
+        self.assertEqual(advance(513, 1)[0], 1024)
+
+    def test_a_zero_sized_range_takes_no_pad(self):
+        """The ring places them this way, so the rule must say so too: a source that padded them
+        would describe a slot the ring laid out differently."""
+        self.assertEqual(advance(100, 0), (100, 100))
 
 
 class TestTheContractRejectsABrokenSource(unittest.TestCase):
@@ -268,7 +305,7 @@ class TestTheContractRejectsABrokenSource(unittest.TestCase):
                     return None
                 ranges, cursor = [], 0
                 for r in filled.ranges:
-                    offset = next_offset(cursor) + RANGE_OFFSET_ALIGNMENT
+                    offset = advance(cursor, r.size)[0] + RANGE_OFFSET_ALIGNMENT
                     ranges.append(SlotRange(r.file_id, r.range_index, offset, r.size))
                     cursor = offset + r.size
                 return Filled(memory=filled.memory, ranges=ranges)

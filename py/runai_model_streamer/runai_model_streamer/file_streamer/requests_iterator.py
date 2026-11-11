@@ -162,12 +162,12 @@ def _alloc_slot(slot_size: int) -> Slot:
 
 
 
-def _next_offset(cursor: int, alignment: int) -> int:
+def next_offset(cursor: int, alignment: int) -> int:
     """Where the next range starts. An alignment of 1 packs them one after another."""
     return cursor + -cursor % alignment
 
 
-def _advance(cursor: int, size: int, alignment: int) -> Tuple[int, int]:
+def advance(cursor: int, size: int, alignment: int) -> Tuple[int, int]:
     """Where this range starts, and where the cursor ends after it.
 
     A ZERO-SIZED RANGE TAKES NO PAD. It has no bytes to align, and a pad for it would spend slot
@@ -175,7 +175,7 @@ def _advance(cursor: int, size: int, alignment: int) -> Tuple[int, int]:
     answers a zero-sized range like any other, so it still gets a destination."""
     if size == 0:
         return cursor, cursor
-    at = _next_offset(cursor, alignment)
+    at = next_offset(cursor, alignment)
     return at, at + size
 
 
@@ -187,7 +187,7 @@ def _layout_end(cursor: int, sizes: List[int], alignment: int) -> int:
     thought was full enough. At alignment 1 this is cursor + sum(sizes), which is what both did
     before there was a rule to follow."""
     for size in sizes:
-        _, cursor = _advance(cursor, size, alignment)
+        _, cursor = advance(cursor, size, alignment)
     return cursor
 
 
@@ -316,7 +316,7 @@ class FilesRequestsIteratorWithBuffer:
 
                 # FROM THE BASE, not the address: the rule reads sizes only, so two ranks whose
                 # slots sit at different addresses still lay the same ranges out the same way.
-                at, after = _advance(cursor - base, size, self._range_alignment)
+                at, after = advance(cursor - base, size, self._range_alignment)
 
                 # The packer walks the same way against the same limit, so this cannot trip while
                 # the two agree. It is the net if they ever stop agreeing.
@@ -327,6 +327,28 @@ class FilesRequestsIteratorWithBuffer:
                 cursor = base + after
 
         return dsts
+
+    @property
+    def range_alignment(self) -> int:
+        """The rule this ring's ranges are placed by. 1 means one after another.
+
+        A caller that will SEND a slot checks this: a ring placed by another rule gives a peer
+        offsets that do not match what arrives."""
+        return self._range_alignment
+
+    def range_offsets_of(self, request: FilesRequest) -> List[int]:
+        """Each range's offset INSIDE its slot.
+
+        What a receiver can use: it reads its own copy at its own address, so only the offset inside
+        the slot means the same thing on both sides.
+
+        ASKED OF THE RING, not derived from range_dsts[0]. That is the layout's own first element,
+        so a layout shifted down the slot would still read as starting at 0."""
+        if request.buffer_index is None:
+            raise RuntimeError("range_offsets_of on a request whose slot has already been released")
+
+        base = self._pool.slot(request.buffer_index).address
+        return [dst - base for dst in request.range_dsts]
 
     def slot_memory_of(self, request: FilesRequest):
         """The USED prefix of this request's slot, as the slot is made of.
@@ -595,7 +617,7 @@ class FileChunksIterator:
         end = start
         limit = cursor + size
         while end < len(self.sizes):
-            at, after = _advance(cursor, self.sizes[end], alignment)
+            at, after = advance(cursor, self.sizes[end], alignment)
             if at + self.sizes[end] > limit:
                 break
             cursor = after

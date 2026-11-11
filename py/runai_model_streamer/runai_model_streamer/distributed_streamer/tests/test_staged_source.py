@@ -7,7 +7,7 @@ import torch
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
     RANGE_OFFSET_ALIGNMENT,
-    next_offset,
+    advance,
 )
 from runai_model_streamer.distributed_streamer.staged_source import (
     StagedDistributionSource,
@@ -18,9 +18,12 @@ from runai_model_streamer.distributed_streamer.tests.test_distribution_source im
 
 
 # Sizes that are NOT multiples of the alignment, so every slot has to pad.
+# A zero-sized range among them: an empty tensor in a shard is a real case, and the rule gives it
+# no pad, so it is the one range whose offset is not a multiple of the alignment.
 PLAN = [
     (0, 0, 100),
-    (0, 1, 200),
+    (0, 1, 0),
+    (0, 2, 200),
     (1, 0, 300),
     (1, 1, 50),
 ]
@@ -28,11 +31,11 @@ PLAN = [
 # This rank's numbering -> the caller's. Deliberately NOT the identity, and not order preserving, so
 # a source that forgot to convert cannot pass by accident.
 ORIGINALS = {
-    0: {0: (7, 3, 100), 1: (7, 1, 200)},
+    0: {0: (7, 3, 100), 1: (7, 4, 0), 2: (7, 1, 200)},
     1: {0: (2, 0, 300), 1: (7, 2, 50)},
 }
 
-CALLER_RANGES = {(7, 3), (7, 1), (2, 0), (7, 2)}
+CALLER_RANGES = {(7, 3), (7, 4), (7, 1), (2, 0), (7, 2)}
 
 
 def payload(file_id: int, range_index: int, size: int) -> torch.Tensor:
@@ -90,29 +93,31 @@ class TestStagedSource(unittest.TestCase):
             )
 
     def test_a_range_that_does_not_fit_waits_for_the_next_slot(self):
-        # A 1000-byte buffer holds 100 and 200 (ending at 712) and not the 300 after them, so the
-        # split falls inside the plan rather than at its end.
+        # A 1000-byte buffer holds 100, the zero range, and 200 (ending at 712), and not the 300
+        # after them, so the split falls inside the plan rather than at its end.
         source, _ = make(capacity=1000)
         slots = self.drain(source)
 
-        self.assertEqual([len(ranges) for ranges, _ in slots], [2, 2])
-        self.assertEqual([r.offset for r in slots[0][0]], [0, 512])
+        self.assertEqual([len(ranges) for ranges, _ in slots], [3, 2])
+        self.assertEqual([r.offset for r in slots[0][0]], [0, 100, 512])
         self.assertEqual(len(slots[0][1]), 712)
         self.assertEqual([(r.file_id, r.range_index) for r in slots[1][0]], [(2, 0), (7, 2)])
 
     def test_a_slot_holds_no_more_ranges_than_it_was_given(self):
         source, _ = make(max_ranges=3)
-        self.assertEqual([len(ranges) for ranges, _ in self.drain(source)], [3, 1])
+        self.assertEqual([len(ranges) for ranges, _ in self.drain(source)], [3, 2])
 
     def test_the_offsets_follow_the_layout_rule(self):
         source, _ = make()
         ranges, memory = self.drain(source)[0]
 
-        # 100 -> pad to 512 -> +200 -> pad to 1024 -> +300 -> pad to 1536 -> +50.
-        self.assertEqual([r.offset for r in ranges], [0, 512, 1024, 1536])
+        # 100 -> the zero range at 100, taking no pad -> pad to 512 -> +200 -> pad to 1024 -> +300
+        # -> pad to 1536 -> +50.
+        self.assertEqual([r.offset for r in ranges], [0, 100, 512, 1024, 1536])
         for r in ranges:
-            self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
-        self.assertEqual(next_offset(512), 512, "an offset already on the rule is not pushed on")
+            if r.size:
+                self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
+        self.assertEqual(advance(512, 1)[0], 512, "an offset already on the rule is not pushed on")
         self.assertEqual(len(memory), 1586, "the used prefix ends at the last range, not at a pad")
 
     def test_an_empty_share_answers_none(self):

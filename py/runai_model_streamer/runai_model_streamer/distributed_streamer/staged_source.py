@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from runai_model_streamer.distributed_streamer.distribution_source import (
     Filled,
     SlotRange,
-    next_offset,
+    advance,
 )
 
 
@@ -78,7 +78,7 @@ class StagedDistributionSource:
 
             file_id, range_index, memory = item
             size = memory.numel()
-            offset = next_offset(cursor)
+            offset, after = advance(cursor, size)
 
             if offset + size > capacity:
                 self._leftover = item
@@ -88,7 +88,7 @@ class StagedDistributionSource:
 
             caller_file, caller_range, _ = self._originals[file_id][range_index]
             placed.append(SlotRange(caller_file, caller_range, offset, size))
-            cursor = offset + size
+            cursor = after
 
         if not placed:
             if self._leftover is not None:

@@ -21,7 +21,9 @@ if the collective does.
 """
 
 from __future__ import annotations
-from typing import Any, List, NamedTuple, Optional, Protocol
+from typing import Any, List, NamedTuple, Optional, Protocol, Tuple
+
+from runai_model_streamer.file_streamer.requests_iterator import advance as _ring_advance
 
 
 RANGE_OFFSET_ALIGNMENT = 512
@@ -37,12 +39,13 @@ ranges out differently from its peers with nothing to notice.
 """
 
 
-def next_offset(cursor: int) -> int:
-    """Where the next range starts, given where the previous one ended.
+def advance(cursor: int, size: int) -> Tuple[int, int]:
+    """Where this range starts, and where the cursor ends after it.
 
-    THE LAYOUT RULE, in one place. Every distribution source lays ranges out with it, and later work
-    predicts a peer's layout with it. A second copy of it is a second rule."""
-    return cursor + -cursor % RANGE_OFFSET_ALIGNMENT
+    THE LAYOUT RULE, and it is the RING'S. A source that is sent from directly does not place its
+    own ranges - the ring did, when it built the request - so restating the rule here would make a
+    second one, and a zero-sized range already shows the two can differ."""
+    return _ring_advance(cursor, size, RANGE_OFFSET_ALIGNMENT)
 
 
 class SlotRange(NamedTuple):
@@ -88,9 +91,10 @@ class DistributionSource(Protocol):
        sending stream - and the loop must not learn which, or every new source becomes a branch
        in the loop.
     2. memory is the USED PREFIX, never the whole slot.
-    3. ranges follow ONE LAYOUT RULE: the first starts at offset 0, and each next one starts at the
-       previous range's end, rounded up to a multiple of RANGE_OFFSET_ALIGNMENT. No reordering, and
-       never a wider pad than the rule asks for.
+    3. ranges follow ONE LAYOUT RULE, `advance`: the first starts at offset 0, and each next one
+       starts at the previous range's end, rounded up to a multiple of RANGE_OFFSET_ALIGNMENT. No
+       reordering, and never a wider pad than the rule asks for. A ZERO-SIZED RANGE TAKES NO PAD -
+       it has no bytes to align, and a pad for it would spend slot room a real range could use.
 
        The rule reads sizes only, never an address, so every rank computes the same layout. Later
        work computes what a peer will send instead of being told, and two rules would disagree
