@@ -33,7 +33,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 path = directory / f"{package}-{VERSION}-py3-none-manylinux_2_28_{arch}.whl"
                 path.write_bytes(b"fixture wheel content")
                 self.paths.append(path)
-        self.notices = self.root / "third_party_notices" / "sdk.txt"
+        self.notices = self.root / "cpp" / "NOTICE"
         self.notices.parent.mkdir()
         self.notices.write_text("fixture third-party notices\n")
         self.cpp = self.root / "cpp-artifacts"
