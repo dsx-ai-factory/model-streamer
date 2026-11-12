@@ -93,6 +93,46 @@ Positive integer, at most 1024. A larger value is capped, with a warning.
 
 1
 
+### RUNAI_STREAMER_FS_DIRECT_ASYNC
+
+The file system types whose direct reads the `io_uring_direct` strategy punts to the kernel's io-wq
+workers (`IOSQE_ASYNC`) instead of issuing them inline. Types are as `/proc/self/mountinfo` reports
+them, matched as prefixes and case-insensitively, so `nfs` covers `nfs4`.
+
+On a local file system a direct read is queued cheaply inline. On NFS it is not: the submitting
+thread pins the destination and builds one request per page before any RPC is sent, and each engine
+has one thread, so a deep queue is read one request at a time. On NFSv4.2 over RDMA (200 Gb/s), one
+process loading a 141 GB checkpoint averaged 1.01 reads in flight and 5.6 GB/s inline, and 62 reads
+in flight and 20.9 GB/s punted, with `RUNAI_STREAMER_FS_DIRECT_FDS=8`.
+
+Buffered reads are always punted and are not affected. `libaio_direct` has no equivalent and is not
+affected.
+
+#### Values accepted
+
+Comma-separated file system types. An empty value punts on no mount.
+
+#### Default value
+
+`nfs`
+
+### RUNAI_STREAMER_FS_DIRECT_FDS
+
+On mounts listed in `RUNAI_STREAMER_FS_DIRECT_ASYNC`, how many direct descriptors each file is read
+through. Reads are dealt to them in turn.
+
+The Linux NFS client takes a reference on one lock context per open file for every page of a direct
+read, so punted reads that share one descriptor contend on it. On the load above, punting through a
+single descriptor reached 16.9 GB/s and used 5.5 times the CPU of eight descriptors.
+
+#### Values accepted
+
+Integer from 1 to 64. A value outside that range is clamped, with a warning.
+
+#### Default value
+
+8
+
 ### RUNAI_STREAMER_CHUNK_BYTESIZE
 
 Controls the maximum size of memory each OS thread reads from the file at once.

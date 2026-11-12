@@ -13,11 +13,13 @@
 #include "posix_io/completion_mapper/completion_mapper.h"
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
@@ -126,6 +128,10 @@ AsyncIoWorker::~AsyncIoWorker()
             if (batch_fd.fd >= 0)
             {
                 ::close(batch_fd.fd);
+            }
+            for (const int extra_fd : batch_fd.extra)
+            {
+                ::close(extra_fd);
             }
         }
     }
@@ -333,6 +339,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
     Inflight & wl = it->second;
     wl.workload = std::move(workload);
     wl.fds.resize(wl.workload.batches().size());   // nothing is opened yet
+    _primaries_reserved += wl.fds.size();
 
     size_t queued_chunks = 0;
 
@@ -396,6 +403,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
             const auto id = _chunks.add(chunk, workload_id, batch_index);
             _queue->enqueue(QueuedChunk{ id, chunk.offset, chunk.bytesize, chunk.buffer }, 1);   // cost 1
             ++queued_chunks;
+            ++wl.fds[batch_index].pending_chunks;
         }
     }
 
@@ -542,6 +550,26 @@ size_t AsyncIoWorker::bytes_read() const
     return _bytes_read.load(std::memory_order_relaxed);
 }
 
+size_t AsyncIoWorker::extra_fd_budget(uint64_t soft_limit, size_t primaries, size_t extras_open)
+{
+    const uint64_t quota = soft_limit / 4;
+    const uint64_t used = static_cast<uint64_t>(primaries) + extras_open;
+    return quota > used ? static_cast<size_t>(std::min<uint64_t>(quota - used, SIZE_MAX)) : 0;
+}
+
+void AsyncIoWorker::close_extras(BatchFd & batch_fd)
+{
+    for (const int extra_fd : batch_fd.extra)
+    {
+        ::close(extra_fd);
+    }
+
+    ASSERT(_extra_fds_open >= batch_fd.extra.size()) << "closing optional descriptors never counted";
+    _extra_fds_open -= batch_fd.extra.size();
+    batch_fd.extra.clear();
+    batch_fd.next = 0;
+}
+
 posix_io::FileRef AsyncIoWorker::file_of(const InflightChunk & entry) const
 {
     // The file this request was staged against, rebuilt from what the worker already recorded. The
@@ -557,7 +585,8 @@ posix_io::FileRef AsyncIoWorker::file_of(const InflightChunk & entry) const
     }
 
     const auto & batch_fd = wlit->second.fds[entry.batch_index];
-    return posix_io::FileRef{ batch_fd.fd, batch_fd.direct };
+    return posix_io::FileRef{ batch_fd.fd, batch_fd.direct,
+                              batch_fd.direct && wlit->second.workload.direct_async };
 }
 
 size_t AsyncIoWorker::land_bounced_pass(posix_io::RequestId id, size_t bytes_transferred)
@@ -712,6 +741,28 @@ common::ResponseCode AsyncIoWorker::demote_to_buffered(const InflightChunk & ent
         batch_fd.fd = fd;
     }
 
+    // The extra descriptors go buffered the same way and for the same reason: requests staged on
+    // their numbers must run buffered too. Pointed at the one buffered open, which they may share.
+    for (const int extra_fd : batch_fd.extra)
+    {
+        // Retried on EINTR: the primary is already buffered, so giving up on a signal would fail a
+        // file that is still readable.
+        int replaced;
+        do
+        {
+            replaced = ::dup2(batch_fd.fd, extra_fd);
+        } while (replaced < 0 && errno == EINTR);
+
+        if (replaced < 0)
+        {
+            // A direct descriptor would remain under a batch about to be marked buffered, which no
+            // completion mapping describes. Failing the file is the honest answer.
+            LOG(ERROR) << "Cannot replace a direct descriptor for " << path << " with a buffered"
+                       << " one: " << std::strerror(errno);
+            return common::ResponseCode::FileAccessError;
+        }
+    }
+
     batch_fd.direct = false;
 
     // Remembered for the whole mount, not just this file - see _direct_refused. One engine per mount
@@ -742,7 +793,14 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
 
     if (entry.fd >= 0)
     {
-        return entry.fd;
+        if (entry.extra.empty())
+        {
+            return entry.fd;
+        }
+
+        // Dealt in turn, so reads in flight at once spread over every descriptor of the file.
+        const unsigned slot = entry.next++ % (entry.extra.size() + 1);
+        return slot == 0 ? entry.fd : entry.extra[slot - 1];
     }
 
     const auto & path = wl.workload.batches()[batch_index].path;
@@ -753,6 +811,55 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
         if (entry.fd >= 0)
         {
             entry.direct = true;
+
+            // Opened together with the first. All of it is optional: a failed open, a different
+            // file, or no budget left only means fewer descriptors to share the reads, never a
+            // wrong read or a failed one, so each of those stops here.
+            const size_t wanted = wl.workload.direct_fds > 1 ? wl.workload.direct_fds - 1 : 0;
+            size_t allowed = 0;
+            if (wanted > 0)
+            {
+                struct rlimit limit{};
+                const uint64_t soft = ::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY
+                                    ? static_cast<uint64_t>(limit.rlim_cur) : UINT64_MAX;
+                allowed = std::min(wanted, extra_fd_budget(soft, _primaries_reserved, _extra_fds_open));
+            }
+
+            struct stat primary{};
+            if (allowed > 0 && ::fstat(entry.fd, &primary) != 0)
+            {
+                allowed = 0;
+            }
+
+            // Room first, so a descriptor is never open without a place that will close it.
+            entry.extra.reserve(allowed);
+            for (size_t i = 0; i < allowed; ++i)
+            {
+                const int extra_fd = utils::Fd::open_for_read(path, O_DIRECT);
+                if (extra_fd < 0)
+                {
+                    LOG(DEBUG) << "Reading " << path << " through " << i + 1 << " direct descriptors, not "
+                               << wanted + 1 << ": " << std::strerror(errno);
+                    break;
+                }
+
+                // The same file, or reads dealt to it would mix bytes of two files: the path can
+                // be replaced between two opens.
+                struct stat other{};
+                if (::fstat(extra_fd, &other) != 0 || other.st_dev != primary.st_dev || other.st_ino != primary.st_ino)
+                {
+                    LOG(WARNING) << path << " changed while it was being opened; reading it through "
+                                 << i + 1 << " descriptors";
+                    ::close(extra_fd);
+                    break;
+                }
+
+                entry.extra.push_back(extra_fd);   // reserved above, so this cannot throw
+                ++_extra_fds_open;
+            }
+
+            // This read takes `fd`, so the turn starts at the first extra one.
+            entry.next = 1;
             return entry.fd;
         }
 
@@ -841,7 +948,7 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
 
     // What the file WAS opened as, not what the strategy wanted. A direct open can fall back per file.
     const bool direct = wlit->second.fds[entry->batch_index].direct;
-    const posix_io::FileRef file{ fd, direct };
+    const posix_io::FileRef file{ fd, direct, direct && wlit->second.workload.direct_async };
 
     // Where this chunk sits inside its staging buffer, now that the open has decided. Before pending()
     // below, because pending() places the destination using it.
@@ -1417,6 +1524,16 @@ void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode r
         }
     }
 
+    // This batch's last chunk: nothing staged or in flight names its descriptors any more, so the
+    // optional ones go now rather than when the workload ends - a workload of many files would
+    // otherwise hold every file's extras at once.
+    BatchFd & batch_fd = wl.fds[batch_index];
+    ASSERT(batch_fd.pending_chunks > 0) << "completing a chunk of a batch with none outstanding";
+    if (--batch_fd.pending_chunks == 0)
+    {
+        close_extras(batch_fd);
+    }
+
     // Once per chunk, after its tasks are answered. Counting chunks rather than tasks keeps this
     // independent of which tasks the span happened to contain.
     ASSERT(wl.remaining_chunks > 0) << "completing a chunk of a workload with none outstanding";
@@ -1481,7 +1598,11 @@ void AsyncIoWorker::finalize(InflightMap::iterator it, common::ResponseCode code
         {
             ::close(batch_fd.fd);
         }
+        close_extras(batch_fd);
     }
+
+    ASSERT(_primaries_reserved >= it->second.fds.size()) << "releasing descriptors never reserved";
+    _primaries_reserved -= it->second.fds.size();
 
     _inflight.erase(it);
 }

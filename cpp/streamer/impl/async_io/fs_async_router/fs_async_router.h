@@ -69,6 +69,10 @@ class FsAsyncRouter
         // Whether each group's reads may use registered buffers. Per mount, because it pays on some
         // file systems and costs on others.
         std::vector<bool> registers;
+
+        // Whether each group's direct reads are punted and spread over several descriptors
+        // (Config::punts_direct_reads). Per mount for the same reason.
+        std::vector<bool> punts;
     };
 
     // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
@@ -87,8 +91,11 @@ class FsAsyncRouter
     // `device` is where the submission's bytes are going. NO DEFAULT, for the reason Batch gives for
     // the same parameter: defaulting to the host would quietly treat a device destination as host
     // memory, and here that decides which reader serves the file.
+    //
+    // `punts` is answered the same way, for direct reads; a null one punts nowhere.
     Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
-                  common::Device destination, const RegisterPolicy & registers = nullptr);
+                  common::Device destination, const RegisterPolicy & registers = nullptr,
+                  const RegisterPolicy & punts = nullptr);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.

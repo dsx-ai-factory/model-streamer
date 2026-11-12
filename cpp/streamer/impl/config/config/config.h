@@ -47,7 +47,9 @@ struct Config
            std::string fs_strategy_candidates = default_fs_strategy_candidates,
            unsigned long object_storage_retry_timeout_seconds = 0,
            std::string fs_no_register_buffers = default_fs_no_register_buffers,
-           bool fs_register_buffers = default_fs_register_buffers);
+           bool fs_register_buffers = default_fs_register_buffers,
+           std::string fs_direct_async = default_fs_direct_async,
+           unsigned long fs_direct_fds = default_fs_direct_fds);
     Config(bool enforce_minimum = true);
 
  private:
@@ -101,6 +103,24 @@ struct Config
     // show it.
     static constexpr bool default_fs_register_buffers = true;
 
+    // RUNAI_STREAMER_FS_DIRECT_ASYNC: the file system types whose direct reads are punted to io-wq
+    // instead of issued inline, comma separated and prefix matched like the list above.
+    //
+    // NFS by default because inline issue serializes there. A direct read on NFS pins the destination
+    // and builds one request per page in the submitting task before any RPC is sent, and each engine
+    // has one worker, so a deep window reads one request at a time. Measured on NFSv4.2 over RDMA,
+    // 200 Gb/s: one process loading a 141 GB checkpoint averaged 1.01 reads in flight and 5.6 GB/s;
+    // punted with RUNAI_STREAMER_FS_DIRECT_FDS descriptors, 62 in flight and 20.9 GB/s. Local file
+    // systems queue a direct read cheaply inline and are not listed.
+    static constexpr const char * default_fs_direct_async = "nfs";
+
+    // RUNAI_STREAMER_FS_DIRECT_FDS: on those mounts, how many direct descriptors each file is read
+    // through, dealt in turn. NFS keeps one lock context per open file and takes a reference on it
+    // for every page of a direct read, so punted reads sharing one descriptor contend on it: on the
+    // load above, punting alone reached 16.9 GB/s at 5.5 times the CPU of eight descriptors.
+    static constexpr unsigned long default_fs_direct_fds = 8;
+    static constexpr unsigned long max_fs_direct_fds = 64;
+
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
     // than a queue slot.
     static constexpr unsigned default_concurrency = 16;
@@ -152,6 +172,16 @@ struct Config
     // covers `nfs4`. An unknown or empty type registers - we deny what we have measured, not what we
     // have not seen.
     bool registers_buffers(const std::string & fs_type) const;
+
+    // The types from RUNAI_STREAMER_FS_DIRECT_ASYNC, lowercased, in the order written.
+    std::vector<std::string> fs_direct_async;
+
+    // Direct descriptors per file on those mounts, 1 to max_fs_direct_fds.
+    unsigned fs_direct_fds;
+
+    // Whether direct reads on a mount of this type are punted, and read through fs_direct_fds
+    // descriptors. Prefix matched, so `nfs` covers `nfs4`. An unknown or empty type is not punted.
+    bool punts_direct_reads(const std::string & fs_type) const;
 
     // Application-level retry budget for each object chunk, starting when that chunk is first submitted to
     // the backend. Zero preserves fail-fast behavior after the storage plugin's native retry policy expires.

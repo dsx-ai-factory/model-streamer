@@ -111,7 +111,8 @@ std::string directory_of(const std::string & path)
 FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & request,
                                             const FsQueueDepth & depth,
                                             common::Device destination,
-                                            const RegisterPolicy & registers)
+                                            const RegisterPolicy & registers,
+                                            const RegisterPolicy & punts)
 {
     Groups out;
     out.by_file.assign(request.size(), -1);
@@ -173,10 +174,13 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
                         const bool may_register = registers == nullptr || registers(capability.fs_type);
                         out.registers.push_back(may_register);
 
+                        const bool punt = punts != nullptr && punts(capability.fs_type);
+                        out.punts.push_back(punt);
+
                         LOG(DEBUG) << "Mount " << major(capability.dev) << ":" << minor(capability.dev)
                                    << " is " << capability.fs_type << " and reads at a queue depth of "
                                    << resolved << (may_register ? " with" : " without")
-                                   << " registered buffers";
+                                   << " registered buffers" << (punt ? ", direct reads punted" : "");
                     }
                 }
             }

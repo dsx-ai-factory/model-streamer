@@ -312,6 +312,58 @@ TEST_F(Creation, Register_Buffers_Denies_Nfs_By_Default)
     EXPECT_FALSE(config.registers_buffers("nfs4")) << "a prefix must cover the versioned name";
 }
 
+// Direct reads are punted on NFS by default, where issuing them inline serializes, and nowhere else.
+TEST_F(Creation, Direct_Async_Punts_Nfs_By_Default)
+{
+    const Config config;
+
+    EXPECT_TRUE(config.punts_direct_reads("nfs"));
+    EXPECT_TRUE(config.punts_direct_reads("nfs4")) << "a prefix must cover the versioned name";
+
+    EXPECT_FALSE(config.punts_direct_reads("ext4"));
+    EXPECT_FALSE(config.punts_direct_reads("xfs"));
+    EXPECT_FALSE(config.punts_direct_reads("virtiofs"));
+    EXPECT_FALSE(config.punts_direct_reads("")) << "an unknown mount keeps the inline default";
+
+    EXPECT_EQ(config.fs_direct_fds, Config::default_fs_direct_fds);
+}
+
+TEST_F(Creation, Direct_Async_List_Is_Configurable)
+{
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_ASYNC", "nfs,Lustre");
+        const Config config;
+
+        EXPECT_TRUE(config.punts_direct_reads("lustre")) << "types are matched case-insensitively";
+        EXPECT_TRUE(config.punts_direct_reads("nfs4"));
+        EXPECT_FALSE(config.punts_direct_reads("ext4"));
+    }
+
+    {
+        // Empty turns punting off everywhere, NFS included.
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_ASYNC", "");
+        const Config config;
+
+        EXPECT_FALSE(config.punts_direct_reads("nfs4"));
+    }
+}
+
+TEST_F(Creation, Direct_Fds_Is_Clamped)
+{
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_FDS", 16UL);
+        EXPECT_EQ(Config().fs_direct_fds, 16u);
+    }
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_FDS", 0UL);
+        EXPECT_EQ(Config().fs_direct_fds, 1u) << "zero still reads through the one descriptor";
+    }
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_FDS", 100000UL);
+        EXPECT_EQ(Config().fs_direct_fds, static_cast<unsigned>(Config::max_fs_direct_fds));
+    }
+}
+
 // We have measured three file systems and a site may have a fourth, so the list is not a constant.
 TEST_F(Creation, Register_Buffers_Deny_List_Is_Configurable)
 {
