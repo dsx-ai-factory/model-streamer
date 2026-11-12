@@ -45,7 +45,7 @@ def pull_files(model_path: str,
         destination_file = _safe_destination_path(dst, base_dir, file)
         local_dir = Path(destination_file).parent
         os.makedirs(local_dir, exist_ok=True)
-        bucket = gcs.get_bucket(bucket_name)
+        bucket = gcs.bucket(bucket_name)
         blob = bucket.blob(file)
         blob.download_to_filename(destination_file)
 
@@ -66,7 +66,7 @@ def list_files(
         # This ensures a trailing slash without double-slashing
         prefix = posixpath.join(prefix, '')
 
-    bucket = gcs.get_bucket(bucket_name)
+    bucket = gcs.bucket(bucket_name)
 
     # Use delimiter to control recursion
     # delimiter='/' stops at the next folder level
