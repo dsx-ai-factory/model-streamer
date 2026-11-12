@@ -124,6 +124,15 @@ Controls how the CPU Memory buffer to which tensors are read from the file is be
 
 40 GB. Under distributed streaming this is a node total, divided between the ranks on that node.
 
+#### Containers with a memory limit
+
+The buffer can grow up to this limit, so with the default the streamer may hold up to 40 GB of host memory per process.
+In a container or pod whose memory limit (cgroup) is lower than that, plus what the process itself needs, loading a
+large model can end in an out-of-memory kill. Set `RUNAI_STREAMER_MEMORY_LIMIT` below the container limit, for example
+`RUNAI_STREAMER_MEMORY_LIMIT=8000000000` for an 8 GB buffer, keeping it at least as large as the largest tensor in the
+file. When the streamer runs inside vLLM, the same value can be passed as `memory_limit` in
+`--model-loader-extra-config`.
+
 ### RUNAI_STREAMER_RING_BUFFERS
 
 How many buffers the streamer's memory is divided into.
