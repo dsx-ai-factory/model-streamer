@@ -13,11 +13,13 @@
 #include "posix_io/completion_mapper/completion_mapper.h"
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
@@ -337,6 +339,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
     Inflight & wl = it->second;
     wl.workload = std::move(workload);
     wl.fds.resize(wl.workload.batches().size());   // nothing is opened yet
+    _primaries_reserved += wl.fds.size();
 
     size_t queued_chunks = 0;
 
@@ -400,6 +403,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
             const auto id = _chunks.add(chunk, workload_id, batch_index);
             _queue->enqueue(QueuedChunk{ id, chunk.offset, chunk.bytesize, chunk.buffer }, 1);   // cost 1
             ++queued_chunks;
+            ++wl.fds[batch_index].pending_chunks;
         }
     }
 
@@ -544,6 +548,26 @@ AsyncIoCounters AsyncIoWorker::counters() const
 size_t AsyncIoWorker::bytes_read() const
 {
     return _bytes_read.load(std::memory_order_relaxed);
+}
+
+size_t AsyncIoWorker::extra_fd_budget(uint64_t soft_limit, size_t primaries, size_t extras_open)
+{
+    const uint64_t quota = soft_limit / 4;
+    const uint64_t used = static_cast<uint64_t>(primaries) + extras_open;
+    return quota > used ? static_cast<size_t>(std::min<uint64_t>(quota - used, SIZE_MAX)) : 0;
+}
+
+void AsyncIoWorker::close_extras(BatchFd & batch_fd)
+{
+    for (const int extra_fd : batch_fd.extra)
+    {
+        ::close(extra_fd);
+    }
+
+    ASSERT(_extra_fds_open >= batch_fd.extra.size()) << "closing optional descriptors never counted";
+    _extra_fds_open -= batch_fd.extra.size();
+    batch_fd.extra.clear();
+    batch_fd.next = 0;
 }
 
 posix_io::FileRef AsyncIoWorker::file_of(const InflightChunk & entry) const
@@ -780,18 +804,50 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
         {
             entry.direct = true;
 
-            // Opened together with the first, while the workload holds the file. A failed open only
-            // means fewer descriptors to share the reads, never a wrong read, so it stops here.
-            for (unsigned i = 1; i < wl.workload.direct_fds; ++i)
+            // Opened together with the first. All of it is optional: a failed open, a different
+            // file, or no budget left only means fewer descriptors to share the reads, never a
+            // wrong read or a failed one, so each of those stops here.
+            const size_t wanted = wl.workload.direct_fds > 1 ? wl.workload.direct_fds - 1 : 0;
+            size_t allowed = 0;
+            if (wanted > 0)
+            {
+                struct rlimit limit{};
+                const uint64_t soft = ::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY
+                                    ? static_cast<uint64_t>(limit.rlim_cur) : UINT64_MAX;
+                allowed = std::min(wanted, extra_fd_budget(soft, _primaries_reserved, _extra_fds_open));
+            }
+
+            struct stat primary{};
+            if (allowed > 0 && ::fstat(entry.fd, &primary) != 0)
+            {
+                allowed = 0;
+            }
+
+            // Room first, so a descriptor is never open without a place that will close it.
+            entry.extra.reserve(allowed);
+            for (size_t i = 0; i < allowed; ++i)
             {
                 const int extra_fd = utils::Fd::open_for_read(path, O_DIRECT);
                 if (extra_fd < 0)
                 {
-                    LOG(DEBUG) << "Reading " << path << " through " << i << " direct descriptors, not "
-                               << wl.workload.direct_fds << ": " << std::strerror(errno);
+                    LOG(DEBUG) << "Reading " << path << " through " << i + 1 << " direct descriptors, not "
+                               << wanted + 1 << ": " << std::strerror(errno);
                     break;
                 }
-                entry.extra.push_back(extra_fd);
+
+                // The same file, or reads dealt to it would mix bytes of two files: the path can
+                // be replaced between two opens.
+                struct stat other{};
+                if (::fstat(extra_fd, &other) != 0 || other.st_dev != primary.st_dev || other.st_ino != primary.st_ino)
+                {
+                    LOG(WARNING) << path << " changed while it was being opened; reading it through "
+                                 << i + 1 << " descriptors";
+                    ::close(extra_fd);
+                    break;
+                }
+
+                entry.extra.push_back(extra_fd);   // reserved above, so this cannot throw
+                ++_extra_fds_open;
             }
 
             // This read takes `fd`, so the turn starts at the first extra one.
@@ -1460,6 +1516,16 @@ void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode r
         }
     }
 
+    // This batch's last chunk: nothing staged or in flight names its descriptors any more, so the
+    // optional ones go now rather than when the workload ends - a workload of many files would
+    // otherwise hold every file's extras at once.
+    BatchFd & batch_fd = wl.fds[batch_index];
+    ASSERT(batch_fd.pending_chunks > 0) << "completing a chunk of a batch with none outstanding";
+    if (--batch_fd.pending_chunks == 0)
+    {
+        close_extras(batch_fd);
+    }
+
     // Once per chunk, after its tasks are answered. Counting chunks rather than tasks keeps this
     // independent of which tasks the span happened to contain.
     ASSERT(wl.remaining_chunks > 0) << "completing a chunk of a workload with none outstanding";
@@ -1524,11 +1590,11 @@ void AsyncIoWorker::finalize(InflightMap::iterator it, common::ResponseCode code
         {
             ::close(batch_fd.fd);
         }
-        for (const int extra_fd : batch_fd.extra)
-        {
-            ::close(extra_fd);
-        }
+        close_extras(batch_fd);
     }
+
+    ASSERT(_primaries_reserved >= it->second.fds.size()) << "releasing descriptors never reserved";
+    _primaries_reserved -= it->second.fds.size();
 
     _inflight.erase(it);
 }

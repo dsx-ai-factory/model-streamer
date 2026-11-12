@@ -12,6 +12,8 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -963,6 +965,159 @@ TEST(AsyncIoWorker, Demotion_Covers_Every_Descriptor_Of_The_File)
     const auto responses = drain_responses(*punt.fixture.responder, 4);
     ASSERT_EQ(responses.size(), 4u);
     for (const auto & response : responses)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success);
+    }
+}
+
+// A quarter of the soft limit is for optional descriptors, less one for every batch in flight and
+// those already open; never negative.
+TEST(AsyncIoWorker, Extra_Fd_Budget_Leaves_Room_For_Required_Opens)
+{
+    EXPECT_EQ(AsyncIoWorker::extra_fd_budget(1024, 0, 0), 256u);
+    EXPECT_EQ(AsyncIoWorker::extra_fd_budget(1024, 200, 0), 56u) << "200 files still each get a primary";
+    EXPECT_EQ(AsyncIoWorker::extra_fd_budget(1024, 200, 50), 6u);
+    EXPECT_EQ(AsyncIoWorker::extra_fd_budget(1024, 300, 0), 0u) << "past the quarter, no extras at all";
+    EXPECT_EQ(AsyncIoWorker::extra_fd_budget(1024, 0, 400), 0u);
+    EXPECT_GT(AsyncIoWorker::extra_fd_budget(UINT64_MAX, 1000, 1000), 1000000u) << "an unlimited soft limit";
+}
+
+namespace
+{
+
+ino_t inode_of(int fd)
+{
+    struct stat st{};
+    return ::fstat(fd, &st) == 0 ? st.st_ino : 0;
+}
+
+bool is_open(int fd)
+{
+    return ::fcntl(fd, F_GETFD) != -1;
+}
+
+// One workload reading two files, each through the given number of direct descriptors.
+Workload two_files(PuntFixture & a, PuntFixture & b, unsigned direct_fds)
+{
+    auto w = a.workload(true, direct_fds);
+    auto second = b.workload(true, direct_fds);
+    for (auto & batch : second.batches())
+    {
+        EXPECT_EQ(w.add_batch(std::move(batch)), common::ResponseCode::Success);
+    }
+    return w;
+}
+
+} // namespace
+
+// A file's optional descriptors close when its own reads are done, not when the whole workload is:
+// a workload of many files would otherwise hold every file's extras at once.
+TEST(AsyncIoWorker, Extras_Close_When_Their_File_Is_Done)
+{
+    PuntFixture a;
+    PuntFixture b;
+    Driver driver(Strategy::IoUringDirect);
+
+    driver.execute(two_files(a, b, 4));
+    const auto staged = driver.engine->staged();
+    ASSERT_EQ(staged.size(), 8u);
+
+    const ino_t file_a = inode_of(driver.engine->request(staged.front()).file.fd);
+    std::set<int> fds_a;
+    std::set<int> fds_b;
+    for (const auto id : staged)
+    {
+        const int fd = driver.engine->request(id).file.fd;
+        (inode_of(fd) == file_a ? fds_a : fds_b).insert(fd);
+    }
+    ASSERT_EQ(fds_a.size(), 4u);
+    ASSERT_EQ(fds_b.size(), 4u);
+
+    driver.issue();
+    for (const auto id : staged)
+    {
+        if (fds_a.count(driver.engine->request(id).file.fd) != 0)
+        {
+            driver.engine->complete(id);
+        }
+    }
+    driver.route();
+
+    size_t closed_a = 0;
+    for (const int fd : fds_a)
+    {
+        closed_a += is_open(fd) ? 0 : 1;
+    }
+    EXPECT_EQ(closed_a, 3u) << "file A's three extras close; its primary stays with the workload";
+    for (const int fd : fds_b)
+    {
+        EXPECT_TRUE(is_open(fd)) << "file B is still being read";
+    }
+
+    driver.engine->complete_all();
+    driver.route();
+
+    EXPECT_EQ(drain_responses(*a.fixture.responder, 4).size(), 4u);
+    EXPECT_EQ(drain_responses(*b.fixture.responder, 4).size(), 4u);
+}
+
+// Under a low descriptor limit the extras shrink to what the budget allows, and every read still
+// succeeds: the optional descriptors never cost a required open.
+TEST(AsyncIoWorker, Extras_Stay_Within_The_Descriptor_Budget)
+{
+    struct rlimit original{};
+    ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &original), 0);
+
+    // Open now, plus room for both primaries, a few extras and the test's own needs.
+    size_t open_now = 0;
+    if (DIR * dir = ::opendir("/proc/self/fd"))
+    {
+        while (::readdir(dir) != nullptr)
+        {
+            ++open_now;
+        }
+        ::closedir(dir);
+    }
+    const rlim_t soft = static_cast<rlim_t>(open_now + 16);
+    const size_t budget = AsyncIoWorker::extra_fd_budget(soft, 2, 0);
+    if (budget >= 6 || soft > original.rlim_max)
+    {
+        GTEST_SKIP() << "too many descriptors open already to make the budget bind (" << open_now << ")";
+    }
+
+    PuntFixture a;
+    PuntFixture b;
+
+    struct rlimit lowered = original;
+    lowered.rlim_cur = soft;
+    ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &lowered), 0);
+
+    std::set<int> fds;
+    std::vector<common::Response> responses_a;
+    std::vector<common::Response> responses_b;
+    {
+        Driver driver(Strategy::IoUringDirect);
+        driver.execute(two_files(a, b, 4));
+        for (const auto id : driver.engine->staged())
+        {
+            fds.insert(driver.engine->request(id).file.fd);
+        }
+        driver.issue();
+        driver.engine->complete_all();
+        driver.route();
+        responses_a = drain_responses(*a.fixture.responder, 4);
+        responses_b = drain_responses(*b.fixture.responder, 4);
+    }
+    ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &original), 0);
+
+    EXPECT_LE(fds.size(), 2u + budget) << "two primaries plus at most the budget";
+    ASSERT_EQ(responses_a.size(), 4u);
+    ASSERT_EQ(responses_b.size(), 4u);
+    for (const auto & response : responses_a)
+    {
+        EXPECT_EQ(response.ret, common::ResponseCode::Success);
+    }
+    for (const auto & response : responses_b)
     {
         EXPECT_EQ(response.ret, common::ResponseCode::Success);
     }

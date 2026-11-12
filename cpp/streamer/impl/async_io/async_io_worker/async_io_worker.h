@@ -217,9 +217,16 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         // More direct descriptors on the same file, when the workload asks for several
         // (Workload::direct_fds). Reads are dealt to `fd` and these in turn. Linux NFS takes a
         // reference on one lock context per open file for every page of a direct read, so the io-wq
-        // workers that punted reads run on would otherwise all contend on one. Closed with `fd`.
+        // workers that punted reads run on would otherwise all contend on one.
+        //
+        // Optional, so they never cost a required open: their number is bounded by
+        // extra_fd_budget(), and they close as soon as this batch's last chunk is accounted rather
+        // than with `fd` when the workload ends.
         std::vector<int> extra;
         unsigned next = 0;
+
+        // This batch's chunks not yet accounted. Zero means no read of it is staged or in flight.
+        size_t pending_chunks = 0;
 
         common::ResponseCode error = common::ResponseCode::Success;
     };
@@ -236,6 +243,24 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     };
 
     using InflightMap = std::map<uint64_t, Inflight>;
+
+ public:
+    // How many more optional direct descriptors may be opened. A quarter of the soft RLIMIT_NOFILE
+    // is set aside for them, less one descriptor for every batch an in-flight workload holds or will
+    // still open (`primaries`), less those already open (`extras_open`). So required opens keep the
+    // rest of the limit, and a load with many files gets fewer extras instead of failing.
+    // A static function of its inputs so the arithmetic is tested on its own.
+    static size_t extra_fd_budget(uint64_t soft_limit, size_t primaries, size_t extras_open);
+
+ private:
+    // Closes a batch's optional descriptors. Only once nothing staged can still name them.
+    void close_extras(BatchFd & batch_fd);
+
+    // Every batch of every in-flight workload, each of which holds or will open one descriptor.
+    size_t _primaries_reserved = 0;
+
+    // Optional descriptors open across this worker's batches.
+    size_t _extra_fds_open = 0;
 
     // Stage the outstanding part of a request - the whole chunk the first time, the remainder after a
     // short read. Resolves it here if it cannot be staged, since no completion would then arrive.
