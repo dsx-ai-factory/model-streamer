@@ -132,7 +132,7 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         with self.assertRaises(ValueError):
             files.pull_files("gs://bucket/models/llama/", self.dst)
 
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.assert_not_called()
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.assert_not_called()
         self.assertEqual(os.listdir(self.dst), [])
 
     @patch("runai_model_streamer_gcs.files.files._create_client")
@@ -147,7 +147,7 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         def fake_download_to_filename(destination_file):
             with open(destination_file, "wb") as f:
                 f.write(b"content")
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.side_effect = (
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.side_effect = (
             fake_download_to_filename)
 
         files.pull_files("gs://bucket/models/llama/", self.dst)
@@ -166,7 +166,7 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         def fake_download_to_filename(destination_file):
             with open(destination_file, "wb") as f:
                 f.write(b"content")
-        mock_gcs.get_bucket.return_value.blob.return_value.download_to_filename.side_effect = (
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.side_effect = (
             fake_download_to_filename)
 
         files.pull_files("gs://bucket/models/llama/", self.dst)
