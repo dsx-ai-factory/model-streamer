@@ -745,7 +745,15 @@ common::ResponseCode AsyncIoWorker::demote_to_buffered(const InflightChunk & ent
     // their numbers must run buffered too. Pointed at the one buffered open, which they may share.
     for (const int extra_fd : batch_fd.extra)
     {
-        if (::dup2(batch_fd.fd, extra_fd) < 0)
+        // Retried on EINTR: the primary is already buffered, so giving up on a signal would fail a
+        // file that is still readable.
+        int replaced;
+        do
+        {
+            replaced = ::dup2(batch_fd.fd, extra_fd);
+        } while (replaced < 0 && errno == EINTR);
+
+        if (replaced < 0)
         {
             // A direct descriptor would remain under a batch about to be marked buffered, which no
             // completion mapping describes. Failing the file is the honest answer.
