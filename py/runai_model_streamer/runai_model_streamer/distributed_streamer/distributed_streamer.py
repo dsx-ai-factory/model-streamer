@@ -1289,6 +1289,9 @@ class _distributedStreamer:
                 if mine:
                     if started:
                         source.release(outstanding[0], pending_event)
+                        # CLEARED AS IT GOES BACK. next_slot below can raise, and the finally in
+                        # get_chunks would otherwise hand the same slot back a second time.
+                        outstanding[0] = None
                     filled = source.next_slot()
                     outstanding[0] = filled
                     started = True
