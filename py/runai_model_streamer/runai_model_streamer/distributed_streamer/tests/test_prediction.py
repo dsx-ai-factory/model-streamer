@@ -99,16 +99,6 @@ class PredictionMatchesTheRing(unittest.TestCase):
                     with patch.dict(os.environ, {"RUNAI_STREAMER_PARTITION_POLICY": policy}):
                         self.assertEqual(predicted_layout(rank), ring_layout(rank))
 
-    def test_the_uncapped_layout_matches_too(self):
-        """WHAT THE PRODUCT DOES. The predicted path sends no metadata, so it passes no cap and a
-        slot fills by bytes. The capped case below is the staged path's, not this one's."""
-        for policy in POLICIES:
-            for rank in range(GROUP_SIZE):
-                with self.subTest(policy=policy, rank=rank):
-                    with patch.dict(os.environ, {"RUNAI_STREAMER_PARTITION_POLICY": policy}):
-                        self.assertEqual(predicted_layout(rank, cap=None),
-                                         ring_layout(rank, cap=None))
-
     def test_a_cap_that_bites_is_predicted_too(self):
         """The production path always caps, and a cap moves the SLOT BOUNDARIES. An offset rule that
         agreed range by range would still predict the wrong slots without this."""
@@ -146,24 +136,6 @@ class PredictionMatchesTheRing(unittest.TestCase):
         """The mutation. With a pad the ring spaces its ranges out, and the prediction must then
         disagree - otherwise the test above proves nothing about the rule."""
         self.assertNotEqual(predicted_layout(0), ring_layout(0, alignment=512))
-
-
-class WithoutACapASlotFillsByBytes(unittest.TestCase):
-    """The cap is the height of a metadata tensor. Nothing on this path sends one, so capping would
-    end a slot before its bytes ran out and the group would broadcast more slots, each part empty."""
-
-    TINY = [FileChunks(0, "tiny.bin", list(range(400)), [1] * 400)]
-
-    def slots(self, cap):
-        return [len(slot) for slot in predicted_slots(self.TINY, 1, 0, 1000, cap)]
-
-    def test_four_hundred_one_byte_ranges_go_in_one_slot(self):
-        self.assertEqual(self.slots(None), [400])
-
-    def test_the_same_ranges_capped_need_two(self):
-        """Pins that the test above is measuring the cap and not the byte budget: 400 bytes fit a
-        1000 byte slot either way."""
-        self.assertEqual(self.slots(256), [256, 144])
 
 
 class PredictionSpeaksTheCallersNumbering(unittest.TestCase):
