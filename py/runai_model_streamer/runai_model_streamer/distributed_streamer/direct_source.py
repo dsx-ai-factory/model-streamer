@@ -14,7 +14,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
-    RANGE_OFFSET_ALIGNMENT,
     Filled,
     SlotRange,
 )
@@ -48,12 +47,12 @@ class DirectDistributionSource:
         if ring is None:
             raise ValueError("the streamer has no ring; stream_files has not run")
 
-        # CHECKED, not assumed. A ring placed by another rule - a host ring is placed congruent with
-        # its file offsets - puts its ranges where a peer computing the layout will not look.
-        if ring.range_alignment != RANGE_OFFSET_ALIGNMENT:
+        # CHECKED, not assumed. A ring built any other way puts its ranges where a peer computing
+        # the layout from sizes will not look, and the ring is what the constructor vouched for.
+        if not ring.sent_from:
             raise ValueError(
-                f"this ring places its ranges by {ring.range_alignment} and a sent slot must use "
-                f"{RANGE_OFFSET_ALIGNMENT}, or a peer reads it at the wrong offsets"
+                "this ring was not built to be sent from, so its ranges are not where a peer "
+                "computing the layout would read them"
             )
 
         # HELD, not re-read. stream_files builds a new ring, and asking the streamer later would

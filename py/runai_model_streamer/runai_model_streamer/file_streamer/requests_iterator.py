@@ -162,17 +162,6 @@ def _alloc_slot(slot_size: int) -> Slot:
 
 
 
-RANGE_OFFSET_ALIGNMENT = 512
-"""What a ring that is SENT FROM rounds its range offsets to.
-
-Every range offset is a multiple of it, so a range sits where its dtype can be read from whatever
-the sizes before it were. 8 would be enough for that - it is the largest element size safetensors
-has - and 512 is kept because it is what ranks already agree on, and it matches what the CUDA
-allocator returns.
-
-A CONSTANT, not a setting. It was read from the environment per rank, so one rank could lay its
-ranges out differently from its peers with nothing to notice.
-"""
 
 
 def next_offset(cursor: int, alignment: int) -> int:
@@ -253,6 +242,7 @@ class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
                  direct_block: int = DIRECT_IO_BLOCK, owned: bool = True,
                  slots: SlotMemory = HOST_SLOTS, range_alignment: int = 1,
+                 sent_from: bool = False,
                  max_ranges_per_slot: Optional[int] = None) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
@@ -275,6 +265,22 @@ class FilesRequestsIteratorWithBuffer:
                 f"with their file offsets and cannot also be aligned to {range_alignment}"
             )
         self._range_alignment = range_alignment
+
+        # A RING WHOSE SLOTS GO ON THE WIRE. Its ranges are packed one after another, so a peer
+        # works out where each one is from the sizes alone. Both of these would move a range
+        # somewhere that peer will not look, and neither shows up as anything but wrong weights.
+        if sent_from:
+            if slots.direct_io:
+                raise ValueError(
+                    f"a {slots.label} ring is read into directly, so its ranges sit congruent with "
+                    f"their file offsets and cannot be sent from"
+                )
+            if range_alignment != 1:
+                raise ValueError(
+                    f"a ring that is sent from packs its ranges one after another, not by "
+                    f"{range_alignment}"
+                )
+        self._sent_from = sent_from
 
         self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks,
                                                              range_alignment,
@@ -311,7 +317,7 @@ class FilesRequestsIteratorWithBuffer:
 
         With aligned=True a range may be pushed forward a few bytes so that its address and its file
         offset leave the same remainder. With aligned=False the ranges follow range_alignment, which
-        is 1 - one after another - unless this ring is sent from.
+        is 1 - one after another.
         """
         dsts = []
         cursor = base
@@ -351,6 +357,14 @@ class FilesRequestsIteratorWithBuffer:
         A caller that will SEND a slot checks this: a ring placed by another rule gives a peer
         offsets that do not match what arrives."""
         return self._range_alignment
+
+    @property
+    def sent_from(self) -> bool:
+        """Whether this ring was built for its slots to be broadcast.
+
+        The mark a sender checks. The constructor refuses the layouts that would break it, so this
+        is a true statement about the ranges and not only about what the caller asked for."""
+        return self._sent_from
 
     def range_offsets_of(self, request: FilesRequest) -> List[int]:
         """Each range's offset INSIDE its slot.

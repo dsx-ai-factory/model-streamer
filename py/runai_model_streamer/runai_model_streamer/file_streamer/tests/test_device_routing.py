@@ -13,7 +13,6 @@ from runai_model_streamer.file_streamer import file_streamer as file_streamer_mo
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
 from runai_model_streamer.file_streamer.requests_iterator import (
-    RANGE_OFFSET_ALIGNMENT,
     FileChunks,
     FilesRequestsIteratorWithBuffer,
     RunaiStreamerMemoryLimitException,
@@ -480,11 +479,11 @@ class TestASentFromRing(unittest.TestCase):
     def chunks(self):
         return [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
 
-    # What the group agreed: two slots, each holding two of these ranges once they are spaced.
-    SHAPE = (RANGE_OFFSET_ALIGNMENT * 2, 2)
+    # What the group agreed: two slots, each holding two of these ranges.
+    SHAPE = (RANGE_SIZE * 2, 2)
 
     def stream(self, sent_from, supported=True, slot_shape=SHAPE):
-        """The ring stream_files built: its alignment, and whether it is the device one.
+        """The ring stream_files built: how it places ranges, and whether it is the device one.
 
         Free memory is not a parameter: a dictated shape replaces the sizing, so it decides
         nothing here."""
@@ -502,15 +501,15 @@ class TestASentFromRing(unittest.TestCase):
                 fs.drain_live_submissions()
                 return ring.range_alignment, ring.slots.reuse_needs_event
 
-    def test_a_sent_from_ring_is_placed_by_the_rule(self):
-        self.assertEqual(self.stream(sent_from=True), (RANGE_OFFSET_ALIGNMENT, True))
+    def test_a_sent_from_ring_packs_one_after_another(self):
+        self.assertEqual(self.stream(sent_from=True), (1, True))
 
     def test_an_ordinary_ring_packs_one_after_another(self):
         self.assertEqual(self.stream(sent_from=False), (1, True))
 
-    def test_the_ranges_are_spaced_by_the_rule_in_the_ring_it_built(self):
-        """Not only the setting: the shape holds two ranges a slot once they are spaced, where a
-        tight layout would have fitted far more."""
+    def test_the_ranges_are_packed_one_after_another_in_the_ring_it_built(self):
+        """Not only the setting: the second range starts where the first ended, which a padded
+        layout would push on."""
         with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
                 patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
                 patch.object(file_streamer_module, "runai_probe_direct_block_size",
@@ -523,7 +522,7 @@ class TestASentFromRing(unittest.TestCase):
                 request = next(iter(fs.live_requests.values()))
 
                 self.assertEqual(fs.requests_iterator.range_offsets_of(request),
-                                 [0, RANGE_OFFSET_ALIGNMENT])
+                                 [0, RANGE_SIZE])
                 fs.drain_live_submissions()
 
     def test_a_device_the_library_cannot_write_into_is_refused(self):

@@ -24,15 +24,11 @@ from __future__ import annotations
 from typing import Any, List, NamedTuple, Optional, Protocol, Tuple
 
 from runai_model_streamer.file_streamer.requests_iterator import (
-    RANGE_OFFSET_ALIGNMENT,
     advance as _ring_advance,
 )
 
 
-# Re-exported, not restated: the ring places the ranges, so the value it rounds to is the one ranks
-# agree on. See requests_iterator for what it is and why it is a constant.
-__all__ = ["RANGE_OFFSET_ALIGNMENT", "SlotRange", "Filled", "DistributionSource",
-           "EmptyDistributionSource", "advance"]
+__all__ = ["SlotRange", "Filled", "DistributionSource", "EmptyDistributionSource", "advance"]
 
 
 def advance(cursor: int, size: int) -> Tuple[int, int]:
@@ -40,8 +36,13 @@ def advance(cursor: int, size: int) -> Tuple[int, int]:
 
     THE LAYOUT RULE, and it is the RING'S. A source that is sent from directly does not place its
     own ranges - the ring did, when it built the request - so restating the rule here would make a
-    second one, and a zero-sized range already shows the two can differ."""
-    return _ring_advance(cursor, size, RANGE_OFFSET_ALIGNMENT)
+    second one, and a zero-sized range already shows the two can differ.
+
+    Ranges are PACKED END TO END. A pad would cost bytes on the wire and slot room, and it would
+    split the read layer's whole-slot copy into one copy per range. A range whose dtype cannot be
+    read at the offset it lands on is copied once by the caller, which is cheaper than padding all
+    of them."""
+    return _ring_advance(cursor, size, 1)
 
 
 class SlotRange(NamedTuple):
@@ -88,9 +89,7 @@ class DistributionSource(Protocol):
        in the loop.
     2. memory is the USED PREFIX, never the whole slot.
     3. ranges follow ONE LAYOUT RULE, `advance`: the first starts at offset 0, and each next one
-       starts at the previous range's end, rounded up to a multiple of RANGE_OFFSET_ALIGNMENT. No
-       reordering, and never a wider pad than the rule asks for. A ZERO-SIZED RANGE TAKES NO PAD -
-       it has no bytes to align, and a pad for it would spend slot room a real range could use.
+       starts at the previous range's end. No padding and no reordering.
 
        The rule reads sizes only, never an address, so every rank computes the same layout. Later
        work computes what a peer will send instead of being told, and two rules would disagree

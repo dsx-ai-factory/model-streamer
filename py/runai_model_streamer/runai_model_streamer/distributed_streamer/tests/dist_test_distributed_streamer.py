@@ -18,7 +18,6 @@ import random
 from unittest.mock import patch
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
-    RANGE_OFFSET_ALIGNMENT,
 )
 
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
@@ -760,7 +759,7 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.world_size < 2:
             self.skipTest("Alignment packing test requires at least 2 processes.")
 
-        alignment = RANGE_OFFSET_ALIGNMENT
+        alignment = 512
         num_files = random.randint(1, 20)
         def random_chunks(n):
             return [random.randint(1, alignment * 10) for _ in range(n)]

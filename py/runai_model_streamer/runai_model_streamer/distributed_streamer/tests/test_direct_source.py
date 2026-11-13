@@ -10,9 +10,6 @@ from unittest.mock import patch
 from runai_model_streamer.distributed_streamer.direct_source import (
     DirectDistributionSource,
 )
-from runai_model_streamer.distributed_streamer.distribution_source import (
-    RANGE_OFFSET_ALIGNMENT,
-)
 from runai_model_streamer.distributed_streamer.tests.test_distribution_source import (
     DistributionSourceContract,
 )
@@ -28,6 +25,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 )
 
 RANGE_SIZE = 100
+# Two ranges to a slot, so a second slot is reached. A sent ring packs tightly, so this is just
+# the bytes the two take.
+SLOT = RANGE_SIZE * 2
 
 class FakeStream:
     """A torch CUDA stream is unavailable on a host-only runner."""
@@ -91,16 +91,16 @@ class DirectSourceFixture:
 
         return files
 
-    def streamer(self, alignment=RANGE_OFFSET_ALIGNMENT, buffers=2):
-        """A FileStreamer whose ring is built with `alignment`. Closed by the test's cleanup."""
+    def streamer(self, buffers=2, sent_from=True):
+        """A FileStreamer whose ring is built here. Closed by the test's cleanup."""
         chunks = self.chunks()
 
         def build(*args, **kwargs):
             # owned=False: a slot that is sent from is REUSED, so the ring takes it back with an
             # event. An owned pool hands its slots away and refuses one.
             return FilesRequestsIteratorWithBuffer(
-                RANGE_OFFSET_ALIGNMENT * 2, buffers, chunks, owned=False,
-                slots=SENT_SLOTS, range_alignment=alignment,
+                SLOT, buffers, chunks, owned=False,
+                slots=SENT_SLOTS, sent_from=sent_from,
             )
 
         patcher = patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build)
@@ -117,8 +117,8 @@ class DirectSourceFixture:
         """A rank whose share is empty still builds a ring, so the source is constructible."""
         def build(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_OFFSET_ALIGNMENT * 2, 2, [], owned=False,
-                slots=SENT_SLOTS, range_alignment=RANGE_OFFSET_ALIGNMENT,
+                SLOT, 2, [], owned=False,
+                slots=SENT_SLOTS, sent_from=True,
             )
 
         patcher = patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build)
@@ -181,9 +181,9 @@ class TestTheRingStreamFilesBuilds(DirectSourceFixture, unittest.TestCase):
                 patch.object(file_streamer_module, "runai_probe_direct_block_size",
                              return_value=4096):
             with FileStreamer() as fs:
-                # The shape the group agreed. Two of these ranges a slot, once they are spaced.
+                # The shape the group agreed. Two of these ranges a slot.
                 fs.stream_files(chunks, device="cpu", sent_from=True,
-                                slot_shape=(RANGE_OFFSET_ALIGNMENT * 2, 2))
+                                slot_shape=(SLOT, 2))
 
                 source = DirectDistributionSource(fs, ORIGINALS)
 
@@ -209,6 +209,7 @@ class TestTheRingStreamFilesBuilds(DirectSourceFixture, unittest.TestCase):
         self.assertEqual(got, expected, "the slots did not reassemble the files in order")
 
     def test_a_ring_stream_files_did_not_mark_as_sent_from_is_refused(self):
+        """stream_files is what sets the mark, so this joins the flag to the check."""
         chunks = self.chunks()
 
         with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
@@ -217,9 +218,9 @@ class TestTheRingStreamFilesBuilds(DirectSourceFixture, unittest.TestCase):
                              return_value=4096):
             with FileStreamer() as fs:
                 fs.stream_files(chunks, device="cpu",
-                                slot_shape=(RANGE_OFFSET_ALIGNMENT * 2, 2))
+                                slot_shape=(SLOT, 2))
 
-                with self.assertRaisesRegex(ValueError, "wrong offsets"):
+                with self.assertRaisesRegex(ValueError, "not built to be sent from"):
                     DirectDistributionSource(fs, ORIGINALS)
 
                 fs.drain_live_submissions()
@@ -237,13 +238,13 @@ class TestDirectSource(DirectSourceFixture, unittest.TestCase):
             source.release(filled, FakeEvent())
 
     def test_the_offsets_are_the_ones_the_ring_placed(self):
-        """Two 100-byte ranges per slot, spaced by the rule, so the slot holds 512 + 100 bytes."""
+        """Two 100-byte ranges per slot, packed one after another."""
         source = DirectDistributionSource(self.streamer(), ORIGINALS)
         slots = self.drain(source)
 
         self.assertEqual([[r.offset for r in ranges] for ranges, _ in slots],
-                         [[0, 512], [0, 512], [0]])
-        self.assertEqual([len(memory) for _, memory in slots], [612, 612, 100])
+                         [[0, 100], [0, 100], [0]])
+        self.assertEqual([len(memory) for _, memory in slots], [200, 200, 100])
 
     def test_the_ranges_are_in_the_callers_numbering(self):
         source = DirectDistributionSource(self.streamer(), ORIGINALS)
@@ -340,8 +341,8 @@ class TestDirectSource(DirectSourceFixture, unittest.TestCase):
         self.assertEqual(seen, 5)
 
     def test_a_zero_sized_range_is_described_where_the_ring_put_it(self):
-        """An empty tensor in a shard. The ring gives it no pad, so the source must not invent one -
-        it reports the layout, it does not compute it."""
+        """An empty tensor in a shard. It takes no room, so the range after it starts where it
+        started - the source reports the layout, it does not compute it."""
         path = os.path.join(self.temp_dir, "zero.bin")
         with open(path, "wb") as handle:
             handle.write(b"\x01" * RANGE_SIZE + b"\x02" * RANGE_SIZE)
@@ -349,8 +350,8 @@ class TestDirectSource(DirectSourceFixture, unittest.TestCase):
 
         def build(*args, **kwargs):
             return FilesRequestsIteratorWithBuffer(
-                RANGE_OFFSET_ALIGNMENT * 2, 2, files, owned=False,
-                slots=SENT_SLOTS, range_alignment=RANGE_OFFSET_ALIGNMENT,
+                SLOT, 2, files, owned=False,
+                slots=SENT_SLOTS, sent_from=True,
             )
 
         patcher = patch.object(FilesRequestsIteratorWithBuffer, "with_memory_mode", build)
@@ -368,13 +369,21 @@ class TestDirectSource(DirectSourceFixture, unittest.TestCase):
         ranges, _ = self.drain(source)[0]
 
         self.assertEqual([(r.offset, r.size) for r in ranges],
-                         [(0, RANGE_SIZE), (RANGE_SIZE, 0), (512, RANGE_SIZE)])
+                         [(0, RANGE_SIZE), (RANGE_SIZE, 0), (RANGE_SIZE, RANGE_SIZE)])
 
-    def test_a_ring_placed_by_another_rule_is_refused(self):
-        """A host ring places its ranges congruent with their file offsets, which a peer computing
-        the layout would not find."""
-        with self.assertRaisesRegex(ValueError, "wrong offsets"):
-            DirectDistributionSource(self.streamer(alignment=1), ORIGINALS)
+    def test_a_ring_not_built_to_be_sent_from_is_refused(self):
+        """Nothing else tells the two apart once both pack tightly, so the mark is what is read."""
+        with self.assertRaisesRegex(ValueError, "not built to be sent from"):
+            DirectDistributionSource(self.streamer(sent_from=False), ORIGINALS)
+
+    def test_a_ring_that_pads_cannot_be_built_to_be_sent_from(self):
+        """The other half, and it is refused where the ring is made: a pad widens an offset, so a
+        peer computing the layout from sizes looks in the wrong place."""
+        with self.assertRaisesRegex(ValueError, "one after another"):
+            FilesRequestsIteratorWithBuffer(
+                SLOT, 2, self.chunks(), owned=False,
+                slots=SENT_SLOTS, sent_from=True, range_alignment=512,
+            )
 
     def test_a_streamer_with_no_ring_is_refused(self):
         with FileStreamer() as streamer:

@@ -14,7 +14,6 @@ implementing exactly the Protocol failed three of its own contract tests.
 import unittest
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
-    RANGE_OFFSET_ALIGNMENT,
     Filled,
     SlotRange,
     advance,
@@ -114,15 +113,11 @@ class DistributionSourceContract:
             cursor, previous_end = 0, 0
             for r in filled.ranges:
                 at, cursor = advance(cursor, r.size)
-                self.assertEqual(r.offset, at,
-                                 "the previous end, rounded up - no tighter, no wider")
+                self.assertEqual(r.offset, at, "the previous end exactly - no gap, no overlap")
 
                 # Said WITHOUT the helper, so a rule that was wrong in the same way in both places
-                # cannot pass: a range with bytes starts where its dtype can read it, and a pad is
-                # never wide enough to fit another range before it.
-                if r.size:
-                    self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
-                    self.assertLess(r.offset - previous_end, RANGE_OFFSET_ALIGNMENT)
+                # cannot pass.
+                self.assertEqual(r.offset, previous_end)
                 previous_end = r.offset + r.size
             self.assertEqual(cursor, len(filled.memory),
                              "the used prefix ends at the last range, with no pad after it")
@@ -235,22 +230,23 @@ class TestAnEmptyStreamHonoursTheContract(DistributionSourceContract, unittest.T
 class TestTheLayoutRule(unittest.TestCase):
     """The rule as NUMBERS.
 
-    Every other test here compares a source against the constant, so all of them stay green if the
-    constant changes. Ranks agree on a value, not on an expression, so the value is pinned."""
+    Every other test here walks the rule with the rule, so all of them stay green if it changes.
+    Ranks agree on a layout, not on an expression, so the numbers are pinned."""
 
-    def test_the_alignment_is_512(self):
-        self.assertEqual(RANGE_OFFSET_ALIGNMENT, 512)
-
-    def test_an_offset_is_rounded_up_to_it(self):
+    def test_a_range_starts_where_the_last_one_ended(self):
         self.assertEqual(advance(0, 1)[0], 0)
-        self.assertEqual(advance(1, 1)[0], 512)
-        self.assertEqual(advance(511, 1)[0], 512)
-        self.assertEqual(advance(512, 1)[0], 512, "already on the rule, so not pushed on")
-        self.assertEqual(advance(513, 1)[0], 1024)
+        self.assertEqual(advance(1, 1)[0], 1)
+        self.assertEqual(advance(511, 1)[0], 511)
+        self.assertEqual(advance(512, 300)[0], 512)
 
-    def test_a_zero_sized_range_takes_no_pad(self):
-        """The ring places them this way, so the rule must say so too: a source that padded them
-        would describe a slot the ring laid out differently."""
+    def test_nothing_is_padded(self):
+        """Pins the change. Any alignment above 1 pushes this offset on."""
+        self.assertEqual(advance(1, 1)[1], 2)
+        self.assertEqual(advance(100, 300), (100, 400))
+
+    def test_a_zero_sized_range_takes_no_room(self):
+        """The ring places them this way, so the rule must say so too: a source that moved the
+        cursor on would describe a slot the ring laid out differently."""
         self.assertEqual(advance(100, 0), (100, 100))
 
 
@@ -297,7 +293,7 @@ class TestTheContractRejectsABrokenSource(unittest.TestCase):
                               "test_the_memory_is_the_used_prefix")
 
     def test_a_wider_pad_than_the_rule_asks_for_is_caught(self):
-        """Still a multiple of the alignment, so only the RULE separates it from a correct source."""
+        """A plausible layout, so only the RULE separates it from a correct source."""
         class Padded(FakeSource):
             def next_slot(self):
                 filled = super().next_slot()
@@ -305,28 +301,12 @@ class TestTheContractRejectsABrokenSource(unittest.TestCase):
                     return None
                 ranges, cursor = [], 0
                 for r in filled.ranges:
-                    offset = advance(cursor, r.size)[0] + RANGE_OFFSET_ALIGNMENT
+                    offset = advance(cursor, r.size)[0] + 512
                     ranges.append(SlotRange(r.file_id, r.range_index, offset, r.size))
                     cursor = offset + r.size
                 return Filled(memory=filled.memory, ranges=ranges)
 
         self.assert_caught_by(self.contract_result(lambda: Padded(PLAN)),
-                              "test_the_ranges_follow_the_shared_layout_rule")
-
-    def test_tight_packing_is_caught(self):
-        """What the staged source did before this rule, and what a new one would reach for."""
-        class Tight(FakeSource):
-            def next_slot(self):
-                filled = super().next_slot()
-                if filled is None:
-                    return None
-                ranges, cursor = [], 0
-                for r in filled.ranges:
-                    ranges.append(SlotRange(r.file_id, r.range_index, cursor, r.size))
-                    cursor += r.size
-                return Filled(memory=filled.memory, ranges=ranges)
-
-        self.assert_caught_by(self.contract_result(lambda: Tight(PLAN)),
                               "test_the_ranges_follow_the_shared_layout_rule")
 
     def test_dropping_a_range_is_caught(self):

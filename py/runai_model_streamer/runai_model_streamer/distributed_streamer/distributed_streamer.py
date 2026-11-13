@@ -34,7 +34,6 @@ from runai_model_streamer.file_streamer.requests_iterator import (
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
     EmptyDistributionSource,
-    RANGE_OFFSET_ALIGNMENT,
     SlotRange,
 )
 
@@ -67,6 +66,12 @@ import humanize
 logger = logging.getLogger(__name__)
 
 MAX_CHUNKS_PER_BATCH = 256
+
+DIST_BUFFER_ALIGNMENT = 512
+"""What a staging buffer's START is aligned to, not its contents.
+
+The ranges inside are packed one after another. This only makes both buffers begin at the same
+remainder, so an offset means the same thing in a sender's buffer and in a receiver's copy."""
 DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
 
 
@@ -86,8 +91,8 @@ def allocate_dist_staging(max_chunk: int, device: torch.device,
                           send_buffer: bool = True) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
     """Every device allocation the broadcast loop makes: the staging buffers and two metadata tensors.
 
-    Each staging buffer is over-allocated by RANGE_OFFSET_ALIGNMENT and sliced to the first aligned
-    address, so an offset that is a multiple of it lands aligned in BOTH buffers - which is what a
+    Each staging buffer is over-allocated by DIST_BUFFER_ALIGNMENT and sliced to the first aligned
+    address, so the same offset lands on the same remainder in BOTH buffers - which is what a
     receiving rank relies on to read a sender's layout.
 
     receive_bytesize is what the LARGEST sender will broadcast, which is the slot size where the
@@ -103,8 +108,8 @@ def allocate_dist_staging(max_chunk: int, device: torch.device,
     receive_bytesize = buffer_bytesize if receive_bytesize is None else receive_bytesize
 
     def staging(bytesize: int) -> torch.Tensor:
-        raw = torch.empty(bytesize + RANGE_OFFSET_ALIGNMENT, dtype=torch.uint8, device=device)
-        return raw[(-raw.data_ptr()) % RANGE_OFFSET_ALIGNMENT:]
+        raw = torch.empty(bytesize + DIST_BUFFER_ALIGNMENT, dtype=torch.uint8, device=device)
+        return raw[(-raw.data_ptr()) % DIST_BUFFER_ALIGNMENT:]
 
     def metadata() -> torch.Tensor:
         return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
@@ -123,7 +128,7 @@ def dist_device_bytes_required(max_chunk: int) -> int:
 
     So this stays the staged figure, which is the larger of the two per buffer, and the gate stays
     conservative rather than exact."""
-    staging = dist_buffer_bytesize(max_chunk) + RANGE_OFFSET_ALIGNMENT
+    staging = dist_buffer_bytesize(max_chunk) + DIST_BUFFER_ALIGNMENT
     metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
     return 2 * staging + 2 * metadata
 
@@ -1069,9 +1074,9 @@ class _distributedStreamer:
         starts part way into a larger storage, and vLLM died with an illegal address in its first
         forward pass as soon as it stopped cloning our tensors for us.
 
-        RANGE_OFFSET_ALIGNMENT is not lost, because it was never a promise about this tensor: it
-        describes where ranges sit INSIDE the staging buffers, so that one rank's offsets are usable
-        on every other, and that layout is unchanged. What a caller needs is alignment for the dtype,
+        The slot layout is not lost, because it was never a promise about this tensor: it says
+        where ranges sit INSIDE the staging buffers, so that one rank's offsets are usable on every
+        other, and that layout is unchanged. What a caller needs is alignment for the dtype,
         which SafetensorsStreamer checks on every tensor whatever path produced it.
         """
         return buffer.clone()

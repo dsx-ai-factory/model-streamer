@@ -18,7 +18,6 @@ from runai_model_streamer.file_streamer.yield_order import UnorderedYield, yield
 from runai_model_streamer.file_streamer.device_support import device_support
 from runai_model_streamer.torch_device.torch_device import device_free_memory
 from runai_model_streamer.file_streamer.requests_iterator import (
-    RANGE_OFFSET_ALIGNMENT,
     DIRECT_IO_BLOCK,
     FilesRequestsIteratorWithBuffer,
     FilesRequest,
@@ -300,8 +299,8 @@ class FileStreamer:
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
-        sent_from says this caller will BROADCAST the ring's slots, so the ranges are placed by
-        RANGE_OFFSET_ALIGNMENT and a peer can work out where each one is without being told.
+        sent_from says this caller will BROADCAST the ring's slots, so the ranges are packed one
+        after another and a peer can work out where each one is without being told.
 
         max_ranges_per_slot caps how many ranges a slot may hold. A caller that describes a slot to
         its peers has a fixed number of rows to describe it in, and the byte budget does not bound
@@ -315,11 +314,14 @@ class FileStreamer:
         without agreeing which ranges are in it. That shape also settles the depth, so ring_buffers
         says nothing here, as owned and memory_limit already do not.
 
-        A caller always owns what it receives: to a device the tensor is a copy, by .to() out of a
-        host ring or by a clone out of a device one, so the slot is never handed over and owned=False
-        saves nothing there. It cannot be honoured literally either - yielding views would make a
-        range's dtype view depend on its offset lining up with its element size, which the packing
-        does not promise across mixed dtypes.
+        A caller of THIS ring always owns what it receives: to a device the tensor is a copy, by
+        .to() out of a host ring or by a clone out of a device one, so the slot is never handed over
+        and owned=False saves nothing here. It cannot be honoured literally either - yielding views
+        would make a range's dtype view depend on its offset lining up with its element size, which
+        the packing does not promise across mixed dtypes.
+
+        A caller that takes slots through get_slots instead makes its own arrangement, and may hand
+        views on. Ownership there belongs to that caller, not to this method.
 
         memory_limit caps HOST memory, and says nothing about a GPU. A device ring is bounded by a
         fraction of free DEVICE memory, with RUNAI_STREAMER_DEVICE_MEMORY_LIMIT as a target that the
@@ -423,14 +425,6 @@ class FileStreamer:
                     f"a ring needs at least one buffer, got {dictated_count}"
                 )
 
-        # A RING THIS CALLER WILL SEND FROM, slot by slot, to peers that work out where each range
-        # is rather than being told. It places its ranges by RANGE_OFFSET_ALIGNMENT instead of
-        # packing them one after another.
-        #
-        # A flag, not the number: the alignment is what every rank agrees on, so a caller must not
-        # be able to pick its own.
-        range_alignment = RANGE_OFFSET_ALIGNMENT if sent_from else 1
-
         if sent_from and slot_shape is None:
             # A derived size is floored by the largest range in THIS rank's share, so peers derive
             # different sizes, split the range list across slots differently, and each decodes the
@@ -467,7 +461,7 @@ class FileStreamer:
                 self.requests_iterator = FilesRequestsIteratorWithBuffer(
                     buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
                     slots=device_slots(str(resolved), support.new_event, support.current_stream),
-                    range_alignment=range_alignment,
+                    sent_from=sent_from,
                     max_ranges_per_slot=max_ranges_per_slot,
                 )
             except torch.cuda.OutOfMemoryError as error:

@@ -6,7 +6,6 @@ import unittest
 import torch
 
 from runai_model_streamer.distributed_streamer.distribution_source import (
-    RANGE_OFFSET_ALIGNMENT,
     advance,
 )
 from runai_model_streamer.distributed_streamer.staged_source import (
@@ -93,14 +92,14 @@ class TestStagedSource(unittest.TestCase):
             )
 
     def test_a_range_that_does_not_fit_waits_for_the_next_slot(self):
-        # A 1000-byte buffer holds 100, the zero range, and 200 (ending at 712), and not the 300
+        # A 400-byte buffer holds 100, the zero range, and 200 (ending at 300), and not the 300
         # after them, so the split falls inside the plan rather than at its end.
-        source, _ = make(capacity=1000)
+        source, _ = make(capacity=400)
         slots = self.drain(source)
 
         self.assertEqual([len(ranges) for ranges, _ in slots], [3, 2])
-        self.assertEqual([r.offset for r in slots[0][0]], [0, 100, 512])
-        self.assertEqual(len(slots[0][1]), 712)
+        self.assertEqual([r.offset for r in slots[0][0]], [0, 100, 100])
+        self.assertEqual(len(slots[0][1]), 300)
         self.assertEqual([(r.file_id, r.range_index) for r in slots[1][0]], [(2, 0), (7, 2)])
 
     def test_a_slot_holds_no_more_ranges_than_it_was_given(self):
@@ -111,14 +110,10 @@ class TestStagedSource(unittest.TestCase):
         source, _ = make()
         ranges, memory = self.drain(source)[0]
 
-        # 100 -> the zero range at 100, taking no pad -> pad to 512 -> +200 -> pad to 1024 -> +300
-        # -> pad to 1536 -> +50.
-        self.assertEqual([r.offset for r in ranges], [0, 100, 512, 1024, 1536])
-        for r in ranges:
-            if r.size:
-                self.assertEqual(r.offset % RANGE_OFFSET_ALIGNMENT, 0)
-        self.assertEqual(advance(512, 1)[0], 512, "an offset already on the rule is not pushed on")
-        self.assertEqual(len(memory), 1586, "the used prefix ends at the last range, not at a pad")
+        # 100 -> the zero range at 100, taking no room -> +200 -> +300 -> +50.
+        self.assertEqual([r.offset for r in ranges], [0, 100, 100, 300, 600])
+        self.assertEqual(advance(100, 0), (100, 100), "a zero-sized range moves nothing on")
+        self.assertEqual(len(memory), 650, "the used prefix ends at the last range")
 
     def test_an_empty_share_answers_none(self):
         source, _ = make(plan=[])
