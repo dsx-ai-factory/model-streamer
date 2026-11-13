@@ -529,7 +529,7 @@ class _distributedStreamerParams:
 
         # 1. Discover all peers on all nodes (this is a global collective)
         # create global group just for discovering the local ranks
-        sandbox_global_group = dist.new_group(ranks=list(range(world_size)), timeout=self.broadcast_timeout)
+        sandbox_global_group = dist.new_group(ranks=list(range(world_size)), timeout=self.broadcast_timeout, backend="gloo")
         all_hostnames = [None] * world_size
         dist.all_gather_object(all_hostnames, socket.gethostname(), group=sandbox_global_group)
         dist.destroy_process_group(group=sandbox_global_group)
