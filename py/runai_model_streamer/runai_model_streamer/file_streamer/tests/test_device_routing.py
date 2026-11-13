@@ -483,7 +483,12 @@ class TestASentFromRing(unittest.TestCase):
     SHAPE = (RANGE_SIZE * 2, 2)
 
     def stream(self, sent_from, supported=True, slot_shape=SHAPE):
-        """The ring stream_files built: how it places ranges, and whether it is the device one.
+        """The ring stream_files built: its MARK, how it places ranges, and whether it is the
+        device one.
+
+        The mark first, because it is the only one of the three that sent_from still moves. Both
+        rings pack one after another now, so a test reading the alignment alone cannot tell a ring
+        that may be broadcast from one that may not.
 
         Free memory is not a parameter: a dictated shape replaces the sizing, so it decides
         nothing here."""
@@ -499,13 +504,16 @@ class TestASentFromRing(unittest.TestCase):
                                 slot_shape=slot_shape)
                 ring = fs.requests_iterator
                 fs.drain_live_submissions()
-                return ring.range_alignment, ring.slots.reuse_needs_event
+                return ring.sent_from, ring.range_alignment, ring.slots.reuse_needs_event
 
-    def test_a_sent_from_ring_packs_one_after_another(self):
-        self.assertEqual(self.stream(sent_from=True), (1, True))
+    def test_a_sent_from_ring_is_marked_as_one(self):
+        """The flag has to reach the ring. Nothing downstream reads it from stream_files, so a
+        pass-through that dropped it would show up only on a real multi-rank load."""
+        self.assertEqual(self.stream(sent_from=True), (True, 1, True))
 
-    def test_an_ordinary_ring_packs_one_after_another(self):
-        self.assertEqual(self.stream(sent_from=False), (1, True))
+    def test_an_ordinary_ring_is_not_marked(self):
+        """Same layout, different mark - which is why the mark is what a sender checks."""
+        self.assertEqual(self.stream(sent_from=False), (False, 1, True))
 
     def test_the_ranges_are_packed_one_after_another_in_the_ring_it_built(self):
         """Not only the setting: the second range starts where the first ended, which a padded
@@ -543,8 +551,10 @@ class TestASentFromRing(unittest.TestCase):
 
         The HOST ring, said by what its slots are: a host slot is reusable the moment its copy
         returns, so it needs no event, where a device slot does."""
-        alignment, needs_event = self.stream(sent_from=False, supported=False, slot_shape=None)
+        marked, alignment, needs_event = self.stream(sent_from=False, supported=False,
+                                                     slot_shape=None)
 
+        self.assertFalse(marked, "nothing asked to send from this ring")
         self.assertEqual(alignment, 1)
         self.assertFalse(needs_event, "this is the device ring, so nothing fell back")
 

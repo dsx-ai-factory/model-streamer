@@ -75,8 +75,9 @@ MAX_CHUNKS_PER_BATCH = 256
 DIST_BUFFER_ALIGNMENT = 512
 """What a staging buffer's START is aligned to, not its contents.
 
-The ranges inside are packed one after another. This only makes both buffers begin at the same
-remainder, so an offset means the same thing in a sender's buffer and in a receiver's copy."""
+The ranges inside are packed one after another, so whether one can be read as its dtype follows
+from its own offset. A buffer starting at an odd address would make that follow from wherever torch
+allocated instead, and every range would be copied."""
 DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
 
 
@@ -1256,11 +1257,10 @@ class _distributedStreamer:
                 yield row.file_id, row.range_index, buffer[row.offset: row.offset + row.size]
             if mine:
                 return self.slot_is_free(send_stream)
-            if support is not None:
-                # The clones out of this receive buffer. Posting into it again waits here.
-                event = support.new_event()
-                event.record(support.current_stream(self.device))
-                reusable[index] = event
+            # The clones out of this receive buffer. Posting into it again waits here.
+            event = support.new_event()
+            event.record(support.current_stream(self.device))
+            reusable[index] = event
             return None
 
         for turn in range(turns):
@@ -1295,7 +1295,8 @@ class _distributedStreamer:
                     self.check_fill_matches_prediction(rows, filled.ranges if filled else [],
                                                        filled.memory if filled else None)
                     buffer = filled.memory
-                    index = -1
+                    # NOT an index: a send has no receive buffer. -1 would be a valid one.
+                    index = None
                 else:
                     index = receives % len(receiving)
                     receives += 1
@@ -1335,7 +1336,7 @@ class _distributedStreamer:
             )
 
     def check_fill_matches_prediction(self, rows: List[SlotRange],
-                                      ranges: Optional[List[SlotRange]],
+                                      ranges: List[SlotRange],
                                       sent: Optional[torch.Tensor]) -> None:
         """The ring filled exactly what this rank's peers predicted it would.
 
@@ -1343,12 +1344,6 @@ class _distributedStreamer:
         and name them by the ids they predicted, so an id or an offset that differs sends the right
         bytes under the wrong names - and every peer agrees, so nothing downstream can notice. The
         real layout is in hand here, which makes the exact comparison the cheap one."""
-        if ranges is None:
-            raise RuntimeError(
-                f"rank {self.original_group_rank}: the predicted path needs the layout the ring "
-                f"really built, and none was passed"
-            )
-
         if list(rows) != list(ranges):
             raise RuntimeError(
                 f"rank {self.original_group_rank}: the ring laid out {list(ranges)} and the "

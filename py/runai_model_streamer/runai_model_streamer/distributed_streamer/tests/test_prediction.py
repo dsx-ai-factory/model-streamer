@@ -152,8 +152,6 @@ class PredictionSpeaksTheCallersNumbering(unittest.TestCase):
         self.assertEqual(got, wanted)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ASharedPartitionPredictsTheSame(unittest.TestCase):
@@ -182,3 +180,7 @@ class ASharedPartitionPredictsTheSame(unittest.TestCase):
         """Pins that the comparison above has something to compare."""
         alone, _ = self.spans_and_whole(0, "spans")
         self.assertGreater(sum(len(slot) for slot in alone), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

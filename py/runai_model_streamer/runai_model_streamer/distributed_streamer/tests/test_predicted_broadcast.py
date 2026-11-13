@@ -135,8 +135,39 @@ class Sender(Harness):
         self.assertIn("wrong names", str(caught.exception))
 
 
+class ASenderWithSeveralTurns(Harness):
+    """A group of one: every turn is this rank's, so one send follows the one before it with no
+    receive between them. That is the ONLY shape where the posted turn is also a send, and it is
+    the shape the mid-loop consume exists for."""
+
+    def plan(self, turns):
+        return [Filled(torch.arange(TOTAL, dtype=torch.uint8), ROWS) for _ in range(turns)]
+
+    def test_each_slot_is_given_back_with_the_event_of_its_own_broadcast(self):
+        """A slot goes back only once its broadcast has been consumed, so the event goes with it.
+        Released without one, the ring refills a slot the collective is still reading."""
+        s = streamer(0, 1, [[ROWS, ROWS]])
+        source = FakeSource(self.plan(2))
+        posts, out, _ = self.drive(s, source)
+
+        self.assertEqual(len(posts), 2)
+        self.assertEqual([event for _, event in source.released], ["EVENT_A", "EVENT_A"])
+        self.assertEqual([(f, i) for f, i, _ in out], [(7, 3), (2, 0)] * 2)
+
+    def test_one_slot_is_out_at_a_time(self):
+        """Pins why the consume comes first: asking for a slot gives the previous one back, so the
+        release must already have happened."""
+        s = streamer(0, 1, [[ROWS, ROWS, ROWS]])
+        source = FakeSource(self.plan(3))
+        self.drive(s, source)
+        self.assertEqual(len(source.released), 3)
+
+
 class Receiver(Harness):
-    """Rank 1 of two, so rank 0's turn is a receive."""
+    """Rank 1 of two with nothing to send, so every turn that carries rows is a receive.
+
+    Rank 1 and not rank 2: a rank outside its own group is not a configuration that can exist, and
+    a setup value has to mean what it says."""
 
     def test_it_posts_one_transfer_sized_from_the_prediction(self):
         s = streamer(1, 2, [[ROWS], []])
@@ -155,7 +186,7 @@ class Receiver(Harness):
 
     def test_a_receive_buffer_is_not_reposted_before_its_clones_finish(self):
         """Two buffers alternate, so the third turn returns to the first and must wait on it."""
-        s = streamer(2, 2, [[ROWS, ROWS, ROWS], []])
+        s = streamer(1, 2, [[ROWS, ROWS, ROWS], []])
         posts, _, stream = self.drive(s, FakeSource([]))
         self.assertEqual(len(posts), 3)
         self.assertEqual(len(stream.waited_on), 1)
@@ -163,7 +194,7 @@ class Receiver(Harness):
     def test_one_receive_buffer_waits_on_every_turn_but_the_first(self):
         """A budget with no room for a second buffer. The same transfers are posted, and the same
         bytes come out - what is given up is the overlap, which shows as a wait per turn."""
-        s = streamer(2, 2, [[ROWS, ROWS, ROWS], []], receive_buffers=1)
+        s = streamer(1, 2, [[ROWS, ROWS, ROWS], []], receive_buffers=1)
         posts, out, stream = self.drive(s, FakeSource([]))
         self.assertEqual(len(posts), 3)
         self.assertEqual(len(stream.waited_on), 2)
@@ -173,7 +204,7 @@ class Receiver(Harness):
         """Both must begin on the same remainder - an offset means the same thing in a sender's
         buffer and a receiver's copy only then. empty_like of an already sliced tensor promises
         nothing about where it starts."""
-        s = streamer(2, 2, [[ROWS, ROWS], []])
+        s = streamer(1, 2, [[ROWS, ROWS], []])
         received = torch.zeros(TOTAL + 64, dtype=torch.uint8)
         with patch.object(module, "aligned_device_buffer",
                           return_value=torch.zeros(TOTAL + 64, dtype=torch.uint8)) as made:
@@ -183,7 +214,7 @@ class Receiver(Harness):
     def test_a_rank_that_cannot_afford_a_second_buffer_keeps_loading(self):
         """The count is local and changes no collective, so a rank short of memory gives up the
         overlap rather than failing the whole group. It then behaves as a one buffer rank."""
-        s = streamer(2, 2, [[ROWS, ROWS, ROWS], []])
+        s = streamer(1, 2, [[ROWS, ROWS, ROWS], []])
         with patch.object(module, "aligned_device_buffer",
                           side_effect=torch.cuda.OutOfMemoryError("no room")):
             posts, out, stream = self.drive(s, FakeSource([]))
@@ -193,9 +224,9 @@ class Receiver(Harness):
 
     def test_two_buffers_are_only_used_when_the_group_agreed_them(self):
         """Pins that the pair above differ by the buffer count and nothing else."""
-        s = streamer(2, 2, [[ROWS, ROWS, ROWS], []])
+        s = streamer(1, 2, [[ROWS, ROWS, ROWS], []])
         _, two, _ = self.drive(s, FakeSource([]))
-        s = streamer(2, 2, [[ROWS, ROWS, ROWS], []], receive_buffers=1)
+        s = streamer(1, 2, [[ROWS, ROWS, ROWS], []], receive_buffers=1)
         _, one, _ = self.drive(s, FakeSource([]))
         self.assertEqual([(f, i) for f, i, _ in two], [(f, i) for f, i, _ in one])
 

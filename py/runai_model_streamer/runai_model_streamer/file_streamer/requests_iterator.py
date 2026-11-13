@@ -354,8 +354,8 @@ class FilesRequestsIteratorWithBuffer:
     def range_alignment(self) -> int:
         """The rule this ring's ranges are placed by. 1 means one after another.
 
-        A caller that will SEND a slot checks this: a ring placed by another rule gives a peer
-        offsets that do not match what arrives."""
+        A sender reads `sent_from` rather than this: both rings pack one after another now, so the
+        number no longer tells them apart. Kept because the placement still follows it."""
         return self._range_alignment
 
     @property

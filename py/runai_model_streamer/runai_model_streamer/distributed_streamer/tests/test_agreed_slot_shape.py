@@ -118,8 +118,6 @@ class TestAgreedSlotShape(unittest.TestCase):
         self.assertLess(small[0] * small[1], big[0] * big[1])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
@@ -262,10 +260,12 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         tight = device_ring_floor_free(one_big)
 
         agreed = agreed_slot_shape(tight, one_big)
-        if agreed is not None:
-            self.assertLessEqual(
-                (agreed.num_buffers + agreed.receive_buffers) * agreed.buffer_size,
-                device_ring_budget(tight, one_big))
+        # NOT "if it came back": a None here is the host path, which is a different answer from the
+        # one this pins. The test should say so rather than go quiet.
+        self.assertIsNotNone(agreed, "the floor should still leave a ring")
+        self.assertLessEqual(
+            (agreed.num_buffers + agreed.receive_buffers) * agreed.buffer_size,
+            device_ring_budget(tight, one_big))
 
     def test_an_empty_file_list_is_unchanged(self):
         """Nothing to size, and the reservation must not turn that into a fallback."""
@@ -279,3 +279,7 @@ def device_ring_floor_free(files_chunks):
         _device_memory_fraction,
     )
     return int(device_ring_floor(files_chunks) / _device_memory_fraction())
+
+
+if __name__ == "__main__":
+    unittest.main()

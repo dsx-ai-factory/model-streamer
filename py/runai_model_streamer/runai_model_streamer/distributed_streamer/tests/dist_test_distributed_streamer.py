@@ -759,10 +759,11 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.world_size < 2:
             self.skipTest("Alignment packing test requires at least 2 processes.")
 
-        alignment = 512
+        # A size scale, not an alignment: ranges are packed one after another now.
+        scale = 512
         num_files = random.randint(1, 20)
         def random_chunks(n):
-            return [random.randint(1, alignment * 10) for _ in range(n)]
+            return [random.randint(1, scale * 10) for _ in range(n)]
 
         chunks_per_file = [random_chunks(4) for _ in range(num_files)]
         file_specs = [
