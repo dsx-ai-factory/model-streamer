@@ -29,6 +29,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_floor,
     device_ring_sizing,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
 )
 
@@ -211,9 +212,9 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     wait on collectives its peers never post. Depth buys little past a few slots, so there is
     nothing to lose by agreeing it.
 
-    The device memory limit and fraction are still read per rank, inside the budget. A rank started
-    with different ones answers differently here, and nothing notices - the same exposure the range
-    layout rule was fixed in code to remove.
+    EVERY INPUT IS READ PER RANK, and three of them move the answer: RUNAI_STREAMER_RING_BUFFERS
+    through the depth target, and the device memory limit and its fraction through the budget. A
+    rank given different ones packs differently, which is what check_the_group_agreed is for.
 
     min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
     measure, or one not using a device backend at all. There is then no ring to agree on, and the
@@ -811,10 +812,9 @@ class _distributedStreamer:
         log_rank_span_info(self.original_group_rank, my_span.partition)
 
         # Send the ring's own slots where the library can fill them, and stage through a host ring
-        # where it cannot. NO COLLECTIVE: device_support reads the device kind and the torch build,
-        # and agreed_slot_shape is a pure function of the free memory the group already reduced and
-        # of the WHOLE file list. Every rank answers the same from the same inputs, the way the
-        # backend and the memory check already do.
+        # where it cannot. agreed_slot_shape is a pure function of the free memory the group already
+        # reduced and of the WHOLE file list, so every rank should answer the same - and the check
+        # below is there because "should" is not "does".
         #
         # THE CALLER'S DEPTH IS NOT HONOURED HERE, and that is the point. The shape decides which
         # path the whole group takes, so a rank that answered differently would wait for collectives
@@ -826,6 +826,7 @@ class _distributedStreamer:
         self.sends_directly = (
             device_support(self.device) is not None and self.slot_shape is not None
         )
+        self.check_the_group_agreed()
 
         # A device that COULD be filled, with no shape the group can send from. Said once, by one
         # rank, because every rank reaches it from the same numbers - and said at all because the
@@ -941,6 +942,34 @@ class _distributedStreamer:
                 memory_limit=self.rank_memory_limit(), owned=False
             )
         self.reading_from_storage = True
+
+    def check_the_group_agreed(self) -> None:
+        """Every rank packs to the same slot size, or they read each other at the wrong offsets.
+
+        The inputs are meant to be equal everywhere, but some are read per rank - the ring depth
+        setting, the device memory limit and its fraction - and any of them moves the slot size. A
+        rank that packed differently is not an error anyone would see: the load finishes and the
+        weights are wrong.
+
+        Zero where this rank stages through host memory, so a group that split between the two
+        paths is caught here rather than in a collective its peers never post.
+
+        ONE COLLECTIVE PER STREAM, carrying the value and its negation so a single MAX answers both
+        ends."""
+        if self.distribution_group is None:
+            return
+
+        size = self.slot_shape[0] if self.sends_directly else 0
+        both = torch.tensor([size, -size], dtype=torch.int64, device=self.device)
+        dist.all_reduce(both, op=dist.ReduceOp.MAX, group=self.distribution_group)
+        largest, smallest = int(both[0].item()), -int(both[1].item())
+        if largest != smallest:
+            raise RuntimeError(
+                f"the ranks of this group did not agree on the slot size - {smallest} to {largest} "
+                f"bytes - so they would lay their ranges out differently. It is part of the "
+                f"contract between ranks, not a local choice: check that every rank was given the "
+                f"same {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME}, device memory limit and fraction"
+            )
 
     def rank_memory_limit(self) -> int:
         """This rank's share of RUNAI_STREAMER_MEMORY_LIMIT, which is a NODE total.
