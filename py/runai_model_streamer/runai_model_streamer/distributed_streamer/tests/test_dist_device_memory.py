@@ -157,16 +157,15 @@ class TestMinFreeMemory(unittest.TestCase):
         with job.patched():
             self.assertEqual(job.streamer().get_min_device_free_memory("cuda:0"), 70)
 
-    def test_the_communicator_is_created_before_free_memory_is_read(self):
-        """The first collective takes the communicator's device memory, so it must come before the
-        reading, or a rank just above the requirement passes and then cannot allocate its buffers."""
+    def test_the_group_carries_one_collective_and_it_is_the_reduction(self):
+        """The reduction is the only collective here, so it is the one that creates the communicator.
+        The reading therefore does not include that memory, which is why we use half of it."""
         job = DistributedJob([50, 40])
         streamer = job.streamer()
         with job.patched():
             streamer.get_min_device_free_memory("cuda:0")
         self.assertEqual(job.events.mock_calls,
                          [call.create_group(streamer.params),
-                          call.broadcast(0, job.group),
                           call.read_free_memory("cuda:0"),
                           call.all_reduce(torch.distributed.ReduceOp.MIN, job.group)])
 

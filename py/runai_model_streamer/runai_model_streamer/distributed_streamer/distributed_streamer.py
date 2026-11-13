@@ -293,12 +293,6 @@ class DistributedStreamer:
         its own free memory is."""
         group = self.distributed_streamer.create_group(self.params)
 
-        # The first collective on a group creates its NCCL communicator, which takes device memory.
-        # Done first, with the operation the stream uses, so the free memory read below is what is
-        # left for the staging buffers.
-        warmup = torch.zeros(1, dtype=torch.uint8, device=device)
-        dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
-
         # A RANK THAT CANNOT MEASURE STILL REDUCES, with -1. Raising here instead would leave its
         # peers in the all_reduce below until the group timeout, and they would wait for a reading
         # that is never coming. Free memory is never negative, so nothing else produces this value.
@@ -310,6 +304,9 @@ class DistributedStreamer:
                 device, error)
             mine = -1
 
+        # This is the first collective on the group, so it creates the NCCL communicator. The
+        # reading above does not yet show that memory. We use half of what we read, which leaves
+        # room for it.
         free_memory = torch.tensor([mine], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
         smallest = int(free_memory.item())
