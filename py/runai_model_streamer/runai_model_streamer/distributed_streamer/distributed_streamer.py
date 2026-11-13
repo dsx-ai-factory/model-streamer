@@ -71,6 +71,10 @@ import humanize
 logger = logging.getLogger(__name__)
 
 MAX_CHUNKS_PER_BATCH = 256
+"""How many ranges one METADATA ROW SET can describe, so how many a staged slot may hold.
+
+It is the height of the metadata tensor, nothing more. A predicted slot is never described to
+anyone - every rank works the layout out - so that path passes no cap and fills its slots."""
 
 DIST_BUFFER_ALIGNMENT = 512
 """What a staging buffer's START is aligned to, not its contents.
@@ -869,7 +873,7 @@ class _distributedStreamer:
             # the one before it, so it has to know how many turns there are before it starts.
             self.predicted = [
                 list(predicted_slots(file_stream_requests, self.group_size, rank,
-                                     self.slot_shape[0], MAX_CHUNKS_PER_BATCH, shares[rank]))
+                                     self.slot_shape[0], None, shares[rank]))
                 for rank in range(self.group_size)
             ]
 
@@ -888,15 +892,14 @@ class _distributedStreamer:
             # memory_limit is not passed: it caps HOST memory, and this ring is on the device. The
             # shape is what bounds it, and sent_from refuses a ring the library cannot write into.
             #
-            # The same max_ranges_per_slot the metadata tensor has rows for. The ring packs by
-            # bytes, so without it a slot of small tensors holds more ranges than a peer can be told
-            # about, and write_metadata_rows refuses the batch.
+            # NO max_ranges_per_slot. The cap is the metadata tensor's height, and this path sends
+            # no metadata: every rank works the layout out instead. Capping here would end a slot
+            # before its bytes ran out, so the group would broadcast more slots, each part empty.
             shallower = None
             try:
                 self.file_streamer.stream_files(
                     self.rank_file_chunks_list, credentials, str(self.device),
                     owned=False, slot_shape=self.slot_shape, sent_from=True,
-                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
                 )
             except RunaiStreamerMemoryLimitException as error:
                 # SHALLOWER, never smaller, and never a host ring. The slot size is what the group
@@ -935,7 +938,6 @@ class _distributedStreamer:
                 self.file_streamer.stream_files(
                     self.rank_file_chunks_list, credentials, str(self.device),
                     owned=False, slot_shape=self.slot_shape, sent_from=True,
-                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
                 )
         else:
             self.file_streamer.stream_files(
