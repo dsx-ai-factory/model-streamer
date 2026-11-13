@@ -79,14 +79,14 @@ class TestAgreedSlotShape(unittest.TestCase):
     def test_an_empty_request_asks_for_nothing(self):
         """RECORDED. A caller with no ranges gets a zero-sized shape rather than None, and a ring
         built from it would hold nothing - the caller is expected not to stream an empty list."""
-        self.assertEqual(agreed_slot_shape(FREE, []), (0, 1))
+        self.assertEqual(agreed_slot_shape(FREE, []).shape, (0, 1))
 
     def test_the_largest_range_in_the_whole_list_fits(self):
         """A receiver allocates this size too, so it must hold the largest range ANY rank sends -
         including one this rank has no share of."""
         whole = files([[8], [1 << 20]])
 
-        buffer_size, _ = agreed_slot_shape(FREE, whole)
+        buffer_size, _ = agreed_slot_shape(FREE, whole).shape
         self.assertGreaterEqual(buffer_size, 1 << 20)
 
     def test_a_share_would_have_given_a_smaller_answer(self):
@@ -145,23 +145,30 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         self.assertGreater((num_buffers + 1) * buffer_size, budget,
                            "an unreserved ring must leave no room for a receive buffer here")
 
-    def test_the_ring_leaves_room_for_one_more_slot(self):
-        """The property, stated as arithmetic rather than as a depth: ring plus receive fits."""
-        shape = agreed_slot_shape(FREE, self.whole())
-        self.assertIsNotNone(shape)
+    def test_the_ring_leaves_room_for_what_it_receives_into(self):
+        """The property, as arithmetic rather than as a depth: the ring plus every buffer it
+        receives into fits the budget. The peak must be what the group agreed, not more."""
+        agreed = agreed_slot_shape(FREE, self.whole())
+        self.assertIsNotNone(agreed)
 
-        buffer_size, num_buffers = shape
         budget = device_ring_budget(FREE, self.whole())
-        self.assertLessEqual((num_buffers + 1) * buffer_size, budget)
+        self.assertLessEqual(
+            (agreed.num_buffers + agreed.receive_buffers) * agreed.buffer_size, budget)
+
+    def test_a_ring_too_shallow_to_pay_receives_into_one(self):
+        """This fixture starts at depth 2, which is the floor, so there is nothing to sell. One
+        buffer then - losing the overlap beats losing the second ring slot that hides storage."""
+        self.assertEqual(agreed_slot_shape(FREE, self.whole()).receive_buffers, 1)
 
     def test_depth_pays_for_it_while_two_slots_are_left(self):
-        """A depth of 4 can lose one and still overlap, so the slot size is untouched."""
+        """A depth of 4 can lose two and still overlap, so the slot size is untouched."""
         unreserved = device_ring_sizing(FREE, self.whole(), 4)
         reserved = agreed_slot_shape(FREE, self.whole(), 4)
 
-        self.assertEqual(unreserved[1], 4, "the fixture must start deep enough to lose one")
-        self.assertEqual(reserved[0], unreserved[0], "the slot size is untouched")
-        self.assertEqual(reserved[1], 3, "exactly one buffer pays for it")
+        self.assertEqual(unreserved[1], 4, "the fixture must start deep enough to lose two")
+        self.assertEqual(reserved.buffer_size, unreserved[0], "the slot size is untouched")
+        self.assertEqual(reserved.num_buffers, 2, "two buffers pay for it")
+        self.assertEqual(reserved.receive_buffers, 2)
 
     def test_the_slot_shrinks_rather_than_leave_a_ring_that_cannot_overlap(self):
         """A depth of 2 cannot lose one: the library refills a slot only once the collective has
@@ -173,12 +180,12 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         reserved = agreed_slot_shape(FREE, self.whole())
 
         self.assertEqual(unreserved[1], 2, "the fixture must start at the depth that cannot lose one")
-        self.assertEqual(reserved[1], 2, "two slots are kept")
-        self.assertLess(reserved[0], unreserved[0], "and the slot pays instead")
+        self.assertEqual(reserved.num_buffers, 2, "two slots are kept")
+        self.assertLess(reserved.buffer_size, unreserved[0], "and the slot pays instead")
 
     def test_a_slot_always_holds_the_largest_range(self):
         """The shrink has a floor: a range carries one address and cannot span two slots."""
-        buffer_size, _ = agreed_slot_shape(FREE, self.whole())
+        buffer_size, _ = agreed_slot_shape(FREE, self.whole()).shape
         largest = max(max(fc.sizes) for fc in self.whole())
 
         self.assertGreaterEqual(buffer_size, largest)
@@ -231,7 +238,7 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         self.assertGreater(3 * sizing[0], budget, "which do not fit with a receive buffer")
         self.assertLessEqual(2 * sizing[0], budget, "while one slot and a receive buffer do")
 
-        self.assertEqual(agreed_slot_shape(FREE, two_big), (sizing[0], 1))
+        self.assertEqual(agreed_slot_shape(FREE, two_big).shape, (sizing[0], 1))
 
     def test_the_group_falls_back_only_when_not_even_one_slot_fits(self):
         """A depth the caller asked for, spending the whole budget on one slot.
@@ -254,15 +261,15 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         one_big = files([[1 << 20]])
         tight = device_ring_floor_free(one_big)
 
-        shape = agreed_slot_shape(tight, one_big)
-        if shape is not None:
-            buffer_size, num_buffers = shape
-            self.assertLessEqual((num_buffers + 1) * buffer_size,
-                                 device_ring_budget(tight, one_big))
+        agreed = agreed_slot_shape(tight, one_big)
+        if agreed is not None:
+            self.assertLessEqual(
+                (agreed.num_buffers + agreed.receive_buffers) * agreed.buffer_size,
+                device_ring_budget(tight, one_big))
 
     def test_an_empty_file_list_is_unchanged(self):
         """Nothing to size, and the reservation must not turn that into a fallback."""
-        self.assertEqual(agreed_slot_shape(FREE, []), (0, 1))
+        self.assertEqual(agreed_slot_shape(FREE, []).shape, (0, 1))
 
 
 def device_ring_floor_free(files_chunks):
