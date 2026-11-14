@@ -89,6 +89,28 @@ TEST_F(Creation, ObjectStorageRetryTimeout)
 }
 
 // The legacy variable alone still configures both backends.
+// THE ASSIGNER SIZES AN ARRAY FROM THIS NUMBER, so an uncapped one overflows that arithmetic
+// before any allocation could refuse it - the ceiling wraps to zero and the writes land on an
+// empty vector. Capped like the two concurrencies and the engine count.
+TEST_F(Creation, WorkersPerMountAboveTheLimitIsCapped)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4294967295UL);
+    EXPECT_EQ(Config::fs_workers_per_mount(), Config::max_concurrency);
+}
+
+// Capping does not floor, and a mount with no readers is a pool with no threads.
+TEST_F(Creation, WorkersPerMountIsAtLeastOne)
+{
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 0UL);
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+    {
+        utils::temp::UnsetEnv readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+}
+
 TEST_F(Creation, Concurrency)
 {
     const auto expected = utils::random::number<int>(1, 1000);

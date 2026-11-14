@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -107,6 +108,57 @@ TEST(BackendPools, WorkersPerMountBuildsThatManyWorkersForOneMount)
     pools.push_async(makedev(8, 1), 0 /* block */, 512, true /* register buffers */, true /* async direct */, Workload{});
 
     EXPECT_EQ(built.load(), 3u) << "one mount must get the configured number of workers";
+}
+
+// THE DEPTH IS A BUDGET FOR THE MOUNT, SHARED BETWEEN ITS READERS. Handing each the full number
+// would multiply the node's in-flight requests by the reader count, which is the one thing the
+// node-wide promise rules out - and measured on a VAST mount, four shallow rings beat one deep one
+// AND beat four deep ones.
+TEST(BackendPools, TheMountsDepthIsSharedBetweenItsReaders)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    ASSERT_EQ(depths.size(), 4u);
+    for (const auto depth : depths)
+    {
+        EXPECT_EQ(depth, 16u) << "64 shared between 4 readers is 16 each, not 64 each";
+    }
+}
+
+// A reader must always have a request it may issue, however many readers share a shallow budget.
+TEST(BackendPools, AReaderNeverGetsAZeroDepth)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 4, true /* register buffers */, true /* async direct */, Workload{});
+
+    ASSERT_EQ(depths.size(), 8u);
+    for (const auto depth : depths)
+    {
+        EXPECT_EQ(depth, 1u) << "4 between 8 readers floors at one each, never zero";
+    }
 }
 
 // The setting is read per ENGINE, not once per process, so a second streamer sees the value it was

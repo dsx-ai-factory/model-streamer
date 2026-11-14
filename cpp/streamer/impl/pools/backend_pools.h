@@ -29,11 +29,13 @@ namespace runai::llm::streamer::impl
 //   FileSystem       synchronous pread on `concurrency` threads. EXACTLY ONE POOL, always - the
 //                    synchronous reader is not modified by the async work, and it has no shared
 //                    submission point to wedge, so there is nothing to isolate by splitting it.
-//   FileSystemAsync  ONE POOL PER MOUNT. Each pool has one thread, which owns an AsyncIoWorker and
-//                    its IoEngine. One thread per pool, because the engine is not thread safe (5.2).
-//                    A separate pool per mount, not one pool with several workers: all workers in a
-//                    pool take work from the same queue, so one pool could not keep a mount's work
-//                    on one engine.
+//   FileSystemAsync  ONE POOL PER MOUNT, with RUNAI_STREAMER_FS_WORKERS_PER_MOUNT threads in it -
+//                    one by default. Each thread owns its OWN AsyncIoWorker and IoEngine, built by
+//                    the pool's factory once per thread, so the engine is never shared and its not
+//                    being thread safe (5.2) still holds. Several readers on one mount is what a
+//                    filer rewards: shallow rings in parallel beat one deep ring.
+//                    A separate pool per mount, not one pool serving several: all threads in a pool
+//                    take from the same queue, so one pool could not keep a mount's work together.
 //   ObjectStorage    `s3_concurrency` threads, each worker owning a plugin client and its own
 //                    in-flight window.
 //

@@ -85,12 +85,13 @@ struct Assigner
     // A submission may now be heterogeneous, which it never was before: object storage and filesystem
     // still cannot mix (Streamer::lock_object_plugin rejects that), but the filesystem side can split
     // between the synchronous pool and the async one. Files are therefore GROUPED by that split and
-    // each group divided for the pool that will serve it - one workload for the async pool, which has
-    // one worker, and `concurrency` for the synchronous one.
+    // each group divided for the pool that will serve it - one workload per READER on that mount for
+    // the async pool, and `concurrency` for the synchronous one.
     //
-    // Dividing a group for the wrong pool is not a correctness bug, only a meaningless one: the async
-    // window spans workloads, so 16 slices arriving at one worker still fill it. But the slices do not
-    // align to chunk boundaries, so each one leaves a partial chunk at its edges.
+    // A mount's readers must each get a workload or they idle: the pool builds that many threads, and
+    // a group cut into fewer pieces leaves the rest with nothing to take. The slices do not align to
+    // chunk boundaries, so each one leaves a partial chunk at its edges - the async worker bounces
+    // those through its scratch pool, and the parallelism is worth more than the ragged ends.
     Assigner(const std::vector<FileRanges> & request,
              std::shared_ptr<const Config> config,
              std::vector<int> group_by_file = {});
@@ -101,8 +102,8 @@ struct Assigner
     const std::vector<ContiguousTransfer> & transfers() const;
 
     // The worker count for the SYNCHRONOUS group (or for object storage): concurrency, or
-    // s3_concurrency. NOT a submission-wide figure - the async group always uses one, because its
-    // pool has one worker.
+    // s3_concurrency. NOT a submission-wide figure - an async group uses one workload per reader on
+    // its mount, which is RUNAI_STREAMER_FS_WORKERS_PER_MOUNT.
     unsigned get_num_workers() const;
 
     unsigned num_workloads() const;

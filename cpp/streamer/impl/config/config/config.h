@@ -119,6 +119,19 @@ struct Config
     // misunderstanding, not a typo, and the load should still run.
     static constexpr unsigned max_concurrency = 1024;
 
+    // RUNAI_STREAMER_FS_WORKERS_PER_MOUNT: how many independent readers one mount gets.
+    //
+    // One is the default, and it is one thread with one ring. On storage fast enough to outrun a
+    // single thread - a scale-out filer answers many parallel requests far better than one stream -
+    // several workers read it the way several processes would, each owning its own engine.
+    //
+    // READ IN TWO PLACES and so defined in one: the pools build this many threads per mount, and
+    // the assigner must cut that mount's work into this many workloads or the extra threads have
+    // nothing to pull. The two must agree.
+    //
+    // Costs pinned memory and queue depth per worker, so it is opt in.
+    static unsigned fs_workers_per_mount();
+
     // Caps a worker count at max_concurrency and narrows it, naming the variable it came from. Takes
     // the wide type the variables are parsed as, because capping after the narrowing is too late.
     static unsigned to_concurrency(unsigned long value, const char * source);

@@ -101,6 +101,18 @@ bool Config::registers_buffers(const std::string & fs_type) const
     return true;
 }
 
+unsigned Config::fs_workers_per_mount()
+{
+    // CAPPED like the two concurrencies and the engine count, and warned about the same way. Each
+    // reader costs a thread, a ring and a staging slab - and the assigner sizes an array from this
+    // number, so an unbounded one overflows that arithmetic before any allocation can refuse.
+    // AT LEAST ONE, because to_concurrency caps but does not floor: a mount with no readers is a
+    // pool with no threads, which reads nothing at all.
+    return std::max(1u, Config::to_concurrency(
+        utils::getenv<unsigned long>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1UL),
+        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+}
+
 unsigned Config::to_concurrency(unsigned long value, const char * source)
 {
     // Caps BEFORE narrowing. The variables are parsed as 64-bit, so a cast alone would wrap:
