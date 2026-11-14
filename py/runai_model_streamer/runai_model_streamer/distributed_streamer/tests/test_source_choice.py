@@ -39,6 +39,7 @@ class SourceChoice(unittest.TestCase):
         streamer.file_streamer = MagicMock()
         streamer.device = torch.device("cpu")
         streamer.max_chunk = 2048
+        streamer.metadata_rows = 2
         streamer.rank_dicts_map = {}
         streamer.total_chunks_to_read = 0
         streamer.reading_from_storage = reading_from_storage

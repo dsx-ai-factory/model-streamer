@@ -3,16 +3,17 @@
 
 import logging
 import os
+import random
 import unittest
 import weakref
 from unittest.mock import patch
 from runai_model_streamer.file_streamer.requests_iterator import (
     advance,
     _alloc_slot,
-    _layout_end,
     next_offset,
-    _packing_fill,
-    _device_ring_shape,
+    SlotBounds,
+    pack,
+    rows_ended_a_slot,
     FileChunksIterator,
     FilesRequestsIterator,
     FilesRequestsIteratorWithBuffer,
@@ -26,7 +27,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     _max_pads_per_buffer,
     _ring_sizing,
     device_ring_sizing,
-    DEFAULT_DEVICE_MEMORY_LIMIT,
+    DEVICE_RING_MIN_SLOT,
+    DEVICE_RING_SLOTS,
+    device_slot_size,
     RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
     HOST_SLOTS,
@@ -912,19 +915,66 @@ class TestSubmissionsAreIssuedInOrdinalOrder(unittest.TestCase):
 GiB = 1 << 30
 
 
-class TestPackingFill(unittest.TestCase):
-    """How full the buffers get. A range cannot span two buffers, so what does not fit is waste."""
+class TestPacking(unittest.TestCase):
+    """What a slot size really achieves. A range cannot span two slots, so what does not fit is
+    waste - and a slot can also end on its range cap, with its bytes still free."""
 
-    def test_ranges_that_tile_the_buffer_exactly_waste_nothing(self):
-        self.assertEqual(_packing_fill([4, 4, 4, 4], 8), 1.0)
+    def files(self, *sizes):
+        return [FileChunks.contiguous(0, "f.bin", 0, list(sizes))]
 
-    def test_a_range_that_does_not_fit_leaves_the_rest_of_the_buffer_unused(self):
-        # 5 then 5: the second cannot join the first, so each buffer of 8 holds one. 10 of 16 used.
-        self.assertEqual(_packing_fill([5, 5], 8), 10 / 16)
+    def test_ranges_that_tile_the_slot_exactly_waste_nothing(self):
+        self.assertEqual(pack(self.files(4, 4, 4, 4), 8, SlotBounds()).fill, 1.0)
 
-    def test_a_buffer_the_size_of_one_range_is_still_full(self):
+    def test_a_range_that_does_not_fit_leaves_the_rest_of_the_slot_unused(self):
+        # 5 then 5: the second cannot join the first, so each slot of 8 holds one. 10 of 16 used.
+        self.assertEqual(pack(self.files(5, 5), 8, SlotBounds()).fill, 10 / 16)
+
+    def test_a_slot_the_size_of_one_range_is_still_full(self):
         # The floor is not automatically bad packing - this is what made the first hypothesis wrong.
-        self.assertEqual(_packing_fill([8, 8, 8], 8), 1.0)
+        self.assertEqual(pack(self.files(8, 8, 8), 8, SlotBounds()).fill, 1.0)
+
+
+class TestPackingHonoursEveryBound(unittest.TestCase):
+    """THE DEFECT THIS REPLACED. The sizing used to count bytes only, while the caller passed a
+    range cap - so it scored slots the ring could not produce and picked a size 40% larger than the
+    cap could fill."""
+
+    def files(self, *sizes):
+        return [FileChunks.contiguous(0, "f.bin", 0, list(sizes))]
+
+    def test_a_range_cap_ends_a_slot_before_its_bytes_run_out(self):
+        packing = pack(self.files(*([1] * 8)), 100, SlotBounds(max_ranges=2))
+        self.assertEqual(packing.slots, 4)
+        self.assertEqual(packing.fill, 8 / 400)
+
+    def test_the_same_ranges_uncapped_need_one_slot(self):
+        """Pins that the test above measures the cap: 8 bytes fit a 100 byte slot either way."""
+        packing = pack(self.files(*([1] * 8)), 100, SlotBounds())
+        self.assertEqual(packing.slots, 1)
+        self.assertEqual(packing.fill, 8 / 100)
+
+    def test_it_reports_when_rows_ended_a_slot_rather_than_bytes(self):
+        # 8 ranges of 1 fit a slot of 100 by bytes; a cap of 2 splits them into four slots.
+        self.assertTrue(rows_ended_a_slot(self.files(*([1] * 8)), 100, SlotBounds(max_ranges=2)))
+
+    def test_a_cap_that_never_binds_is_not_reported(self):
+        self.assertFalse(rows_ended_a_slot(self.files(*([1] * 8)), 100, SlotBounds(max_ranges=99)))
+
+    def test_a_cap_the_bytes_reach_first_is_not_reported(self):
+        """THE FALSE POSITIVE a row count alone would give. Four ranges of 25 fill a slot of 100
+        exactly, so a slot holds four and stops - on its bytes. A cap of 4 changes nothing, and
+        saying the cap ended the slot would send someone to look at the wrong number."""
+        self.assertEqual(pack(self.files(*([25] * 8)), 100, SlotBounds(max_ranges=4)).widest, 4)
+        self.assertFalse(rows_ended_a_slot(self.files(*([25] * 8)), 100, SlotBounds(max_ranges=4)))
+
+    def test_no_cap_is_never_reported(self):
+        self.assertFalse(rows_ended_a_slot(self.files(*([1] * 8)), 100, SlotBounds()))
+
+    def test_alignment_is_honoured_too(self):
+        """The other bound the byte-only count ignored. Three ranges of 3 packed one after another
+        fit a slot of 9; aligned to 4 they start at 0, 4 and 8, so the third needs its own slot."""
+        self.assertEqual(pack(self.files(3, 3, 3), 9, SlotBounds()).slots, 1)
+        self.assertEqual(pack(self.files(3, 3, 3), 9, SlotBounds(range_alignment=4)).slots, 2)
 
 
 class TestDeviceRingShape(unittest.TestCase):
@@ -935,66 +985,78 @@ class TestDeviceRingShape(unittest.TestCase):
                 for i, sizes in enumerate(sizes_per_file)]
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_it_prefers_the_size_that_packs_best(self):
-        """Ranges of 7 against a budget of 24, which must recycle because the stream is 140.
-
-        The achievable buffers are 24//2 = 12 and 24//3 = 8. Both rings cost the whole 24, so memory
-        cannot choose between them - only packing can:
-
-            12 holds ONE range of 7 and wastes 5   -> 58% full
-             8 holds ONE range of 7 and wastes 1   -> 88% full
-
-        The deepest-first order offers 12 first, so a search that does not actually weigh packing
-        keeps it. That is what this pins."""
-        chunks = self.files([7] * 20)
-        buffer_size, buffers = _device_ring_shape(chunks, 24)
-
-        self.assertEqual(buffer_size, 8,
-                         f"chose a buffer of {buffer_size}; 8 packs to 88% where 12 packs to 58%")
-        self.assertEqual(buffers, 3)
-        self.assertLessEqual(buffer_size * buffers, 24, "the ring is over its budget")
+    def test_the_slot_is_the_largest_range_when_that_is_the_bigger_floor(self):
+        """The data decides. A range carries one destination address, so it cannot span two slots -
+        the largest is a hard floor, and nothing above it is asked for."""
+        size = device_slot_size(self.files([3 * GiB, GiB, GiB]))
+        self.assertEqual(size, 3 * GiB)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_the_ring_never_exceeds_its_budget(self):
-        for budget in (20, 24, 31, 64, 100):
-            with self.subTest(budget=budget):
-                chunks = self.files([7] * 40)
-                buffer_size, buffers = _device_ring_shape(chunks, budget)
-                self.assertLessEqual(buffer_size * buffers, budget)
-                self.assertGreaterEqual(buffer_size, 7, "a buffer must hold the largest range")
-
-    @patch.dict(os.environ, {"RUNAI_STREAMER_RING_BUFFERS": "4"}, clear=True)
-    def test_a_set_depth_is_used_as_given(self):
-        """Ranges of 6 against a budget of 24, where the search would answer with TWO buffers.
-
-        Buffers of 12 hold two ranges each and buffers of 6 hold one each, so both pack to 100% and
-        both cost the whole 24. The tie goes to the first candidate, which is the shallow one - so a
-        search that treats the setting as a ceiling answers 2 where 4 was asked for, and says
-        nothing. That is what this pins."""
-        buffer_size, buffers = _device_ring_shape(self.files([6] * 20), 24)
-
-        self.assertEqual(buffers, 4, f"asked for 4 buffers and got {buffers}")
-        self.assertEqual(buffer_size, 6)
-
-    @patch.dict(os.environ, {"RUNAI_STREAMER_RING_BUFFERS": "9"}, clear=True)
-    def test_a_set_depth_still_shrinks_to_what_the_budget_pays_for(self):
-        """A buffer cannot be smaller than the largest range, so a budget of 24 affords three of 7
-        and no more. The setting is honoured as far as it can be, not beyond."""
-        buffer_size, buffers = _device_ring_shape(self.files([7] * 20), 24)
-
-        self.assertEqual(buffers, 3)
-        self.assertGreaterEqual(buffer_size, 7)
-        self.assertLessEqual(buffer_size * buffers, 24)
+    def test_small_ranges_get_the_minimum_slot_rather_than_a_tiny_one(self):
+        """THE REGIME NO BENCHMARK COVERS. Without this floor a model of 8 KiB tensors would get a
+        slot of 8 KiB and one collective per slot."""
+        size = device_slot_size(self.files([8 << 10] * 100000))
+        self.assertEqual(size, DEVICE_RING_MIN_SLOT)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_a_stream_the_budget_spans_is_not_packed_at_all(self):
-        """Nothing is recycled there, so waste is unused memory rather than lost read-ahead - and one
-        range must still get one buffer rather than a ring it cannot overlap with."""
-        self.assertEqual(_device_ring_shape(self.files([GiB]), 8 * GiB)[1], 1)
+    def test_a_slot_is_never_bigger_than_the_whole_stream(self):
+        """A ring cannot read ahead past the end, so reserving for bytes that do not exist is the
+        waste this rule exists to stop."""
+        self.assertEqual(device_slot_size(self.files([4096])), 4096)
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_nothing_to_read_asks_for_nothing(self):
+        self.assertEqual(device_slot_size([]), 0)
+        self.assertEqual(device_slot_size(self.files([])), 0)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_depth_is_the_overlap_floor_and_the_memory_follows(self):
+        """Two slots, because one never overlaps anything - and the ring asks for exactly that,
+        not for whatever a configured budget would have paid for."""
+        size, slots = device_ring_sizing(100 * GiB, self.files([3 * GiB] * 8))
+        self.assertEqual((size, slots), (3 * GiB, DEVICE_RING_SLOTS))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_what_the_caller_will_allocate_beside_the_ring_is_counted_here(self):
+        """One solver. A reservation taken afterwards would shrink a shape this already chose."""
+        size, slots = device_ring_sizing(30 * GiB, self.files([3 * GiB] * 8), extra_slots=2)
+        self.assertLessEqual((slots + 2) * size, int(30 * GiB * 0.5))
+        self.assertEqual(slots, DEVICE_RING_SLOTS, "the overlap must survive the reservation")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_slot_gives_way_before_the_depth_does(self):
+        """Dropping to one slot is the one cliff both models measure. A slot somewhat below what
+        the data asked for is flat over a wide range, so that is what gives."""
+        size, slots = device_ring_sizing(5 * GiB, self.files([GiB] * 8))
+        self.assertEqual(slots, DEVICE_RING_SLOTS)
+        self.assertGreaterEqual(size, GiB, "never below the largest range")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_two_slots_beat_one_that_cannot_span_the_stream(self):
+        """THE REGRESSION. The one-slot shortcut once ran BEFORE the shrink, so a shape was pinned
+        at one slot using a size the allowance could not pay for - the slot then shrank below the
+        stream and the ring could neither span it nor overlap, where two smaller slots fitted the
+        same allowance."""
+        MiB = 1 << 20
+        stream = self.files([10 * MiB] * 20)                 # 200 MiB in 10 MiB ranges
+        size, slots = device_ring_sizing(600 * MiB, stream, extra_slots=2)
+
+        self.assertEqual(slots, 2, "one slot here cannot span the stream, so it must not be chosen")
+        self.assertLess(size, 200 * MiB, "and the fixture really does not fit in one slot")
+        self.assertLessEqual((slots + 2) * size, 300 * MiB, "within the allowance")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_one_slot_is_still_right_when_it_does_span(self):
+        """Pins that the test above is about SPANNING and not about always answering two: a stream
+        a slot holds whole recycles nothing, so a second slot could never be filled."""
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB]))[1], 1)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_too_little_for_one_slot_is_the_host_path(self):
+        self.assertIsNone(device_ring_sizing(GiB, self.files([4 * GiB])))
 
 class TestDeviceRingSizing(unittest.TestCase):
-    """The budget for a ring in device memory: the configured limit, capped at a fraction of free.
+    """What the ring asks for, and the two backstops that can lower it.
 
     free_bytes is a parameter, so none of this needs a GPU."""
 
@@ -1003,31 +1065,42 @@ class TestDeviceRingSizing(unittest.TestCase):
                 for i, sizes in enumerate(sizes_per_file)]
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_the_limit_binds_when_the_device_is_mostly_free(self):
-        # 100 GiB free would allow 50, but the default limit is 4 GiB.
+    def test_an_empty_device_does_not_make_the_ring_bigger(self):
+        """THE POINT OF THE RULE. 100 GiB free would allow 50, and the ring still takes two slots
+        of what the data needs. The old rule turned free memory into a budget and the budget into a
+        slot size, so a model got a bigger slot for being loaded on an emptier device."""
         buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
-        self.assertLessEqual(buffer_size * num_buffers, DEFAULT_DEVICE_MEMORY_LIMIT)
+        self.assertEqual((buffer_size, num_buffers), (GiB, DEVICE_RING_SLOTS))
+
+    @patch.dict(os.environ, {"RUNAI_STREAMER_DEVICE_MEMORY_LIMIT": str(3 * GiB)}, clear=True)
+    def test_a_limit_that_is_set_is_a_hard_cap(self):
+        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        self.assertLessEqual(buffer_size * num_buffers, 3 * GiB)
         self.assertGreaterEqual(buffer_size, GiB)      # never below the largest range
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_an_unset_limit_caps_nothing(self):
+        """Pins that the test above measures the setting. The same call without it is not capped."""
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 8)),
+                         (GiB, DEVICE_RING_SLOTS))
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_the_fraction_binds_when_little_is_free(self):
-        # 4 GiB free -> 2 GiB budget, which is below the 4 GiB limit.
+        # 4 GiB free -> 2 GiB allowed, and two slots of the largest range is exactly that.
         buffer_size, num_buffers = device_ring_sizing(4 * GiB, self.files([GiB] * 8))
         self.assertLessEqual(buffer_size * num_buffers, 2 * GiB)
 
-    @patch.dict(os.environ, {}, clear=True)
-    def test_a_caller_named_depth_is_used_as_given(self):
-        # The host path honours ring_buffers, so the device path must too - a caller that names a
-        # depth knows something the packing search cannot, and silently ignoring it would make the
-        # same argument mean two different things depending on the destination.
-        asked = 3
-        _, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8), ring_buffers=asked)
-        self.assertEqual(num_buffers, asked)
-
-        # The DEFAULT differs here, which is what makes the assertion above mean something: a test
-        # whose two paths agree would pass with the argument thrown away.
-        _, by_search = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
-        self.assertNotEqual(by_search, asked)
+    def test_nothing_outside_can_name_the_device_depth(self):
+        """The host ring takes a caller's depth; the device ring does not. A depth from outside
+        could only ask for memory the data does not need - naming 100 once claimed 50 GiB - and on
+        the distributed path a rank choosing its own would agree a shape its peers did not."""
+        plain = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
+        for value in ("1", "4", "18", "100"):
+            with self.subTest(setting=value):
+                with patch.dict(os.environ,
+                                {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: value}, clear=True):
+                    self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 8)), plain)
+        self.assertEqual(plain[1], DEVICE_RING_SLOTS)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_below_two_largest_ranges_it_falls_back(self):
@@ -1493,8 +1566,18 @@ class TestTheRingAccessors(unittest.TestCase):
             iterator.range_offsets_of(request)
 
 
+def walk_end(sizes, alignment, room=1 << 30):
+    """Where the packer's cursor ends after taking these sizes.
+
+    Asked of the PACKER, which is the only thing that walks a layout now. It used to be a free
+    helper the request loop called to re-walk ranges the packer had already walked."""
+    iterator = FileChunksIterator(FileChunks.contiguous(0, "f.bin", 0, list(sizes)))
+    iterator.next_chunks(room, 0, alignment)
+    return iterator.cursor_after
+
+
 class TestTheLayoutWalk(unittest.TestCase):
-    """The helper the packer and the placer share."""
+    """The rule the packer and the placer share."""
 
     def test_the_rule_rounds_up(self):
         self.assertEqual(next_offset(0, ALIGNMENT), 0)
@@ -1503,7 +1586,7 @@ class TestTheLayoutWalk(unittest.TestCase):
         self.assertEqual(next_offset(513, ALIGNMENT), 1024)
 
     def test_an_alignment_of_one_is_a_running_sum(self):
-        self.assertEqual(_layout_end(0, [100, 200, 300], 1), 600)
+        self.assertEqual(walk_end([100, 200, 300], 1), 600)
         self.assertEqual(next_offset(7, 1), 7)
 
     def test_a_zero_sized_range_neither_pads_nor_advances(self):
@@ -1512,4 +1595,32 @@ class TestTheLayoutWalk(unittest.TestCase):
 
     def test_the_walk_ends_at_the_last_range(self):
         """Not at a pad after it: the end of the data is what a caller sends."""
-        self.assertEqual(_layout_end(0, [100, 200], ALIGNMENT), 712)
+        self.assertEqual(walk_end([100, 200], ALIGNMENT), 712)
+
+    def test_the_cursor_is_where_laying_the_ranges_out_again_would_end(self):
+        """THE SECOND WALK, kept as a CHECK rather than as production code.
+
+        next_chunks hands back the cursor it reached while deciding what fits, and the request loop
+        trusts it. This recomputes it the long way over a randomised corpus - including zero-sized
+        ranges, which take no pad - so a packer whose cursor drifted from its own placement would
+        be caught here rather than by a peer reading the wrong offsets."""
+        rng = random.Random(20261114)
+        for trial in range(200):
+            sizes = [rng.choice([0, 1, 7, 100, 512, 513, 4096]) for _ in range(rng.randint(1, 40))]
+            alignment = rng.choice([1, 8, 512])
+            with self.subTest(trial=trial, alignment=alignment):
+                expected = 0
+                for size in sizes:
+                    _, expected = advance(expected, size, alignment)
+                self.assertEqual(walk_end(sizes, alignment), expected)
+
+    def test_nothing_handed_out_leaves_the_cursor_where_it_was(self):
+        """A file whose first range does not fit contributes nothing, and the request's cursor must
+        stay where the files before it left it.
+
+        FROM A NON-ZERO CURSOR, so this can tell a real answer from one that echoes its argument:
+        at cursor 0 an implementation that always reported 0 would pass."""
+        iterator = FileChunksIterator(FileChunks.contiguous(0, "f.bin", 0, [100]))
+        self.assertEqual(iterator.cursor_after, 0, "nothing handed out yet")
+        iterator.next_chunks(10, 64, 1)
+        self.assertEqual(iterator.cursor_after, 64, "a range that did not fit moved the cursor")

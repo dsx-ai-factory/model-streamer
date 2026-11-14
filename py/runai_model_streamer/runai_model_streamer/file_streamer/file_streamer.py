@@ -26,6 +26,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    SlotBounds,
     _largest_range,
     RunaiStreamerMemoryLimitException,
 )
@@ -440,8 +441,11 @@ class FileStreamer:
         free = device_free_memory(self.device_str) if support else None
         sizing = None
         if support is not None:
+            # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without it
+            # is a size for a packing the ring cannot produce.
             sizing = (slot_shape if slot_shape is not None
-                      else device_ring_sizing(free, file_stream_requests, ring_buffers))
+                      else device_ring_sizing(free, file_stream_requests,
+                                              SlotBounds(max_ranges=max_ranges_per_slot)))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing

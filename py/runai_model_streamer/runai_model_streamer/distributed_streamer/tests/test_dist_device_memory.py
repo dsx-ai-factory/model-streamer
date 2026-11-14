@@ -47,13 +47,15 @@ class TestDistDeviceBytesRequired(unittest.TestCase):
         A staging buffer is handed out as a slice of its over-allocated base, and a slice shares that
         base's storage - so each tensor's own storage is what the device gave up, counted once."""
         chunk = 4096
-        tensors = allocate_dist_staging(chunk, torch.device("cpu"))
-        allocated = sum(t.untyped_storage().nbytes() for t in tensors)
-        self.assertEqual(dist_device_bytes_required(chunk), allocated)
+        for rows in (1, 256, 75944):
+            with self.subTest(rows=rows):
+                tensors = allocate_dist_staging(chunk, torch.device("cpu"), rows=rows)
+                allocated = sum(t.untyped_storage().nbytes() for t in tensors)
+                self.assertEqual(dist_device_bytes_required(chunk, rows), allocated)
 
     @patch.dict(os.environ, {MIN_BYTESIZE_ENV: "4096"}, clear=True)
     def test_both_staging_buffers_start_aligned(self):
-        data, received, _, _ = allocate_dist_staging(4096, torch.device("cpu"))
+        data, received, _, _ = allocate_dist_staging(4096, torch.device("cpu"), rows=256)
         alignment = DIST_BUFFER_ALIGNMENT
         for name, buffer in (("data", data), ("received", received)):
             self.assertEqual(buffer.data_ptr() % alignment, 0, f"{name} buffer is not aligned")
@@ -61,8 +63,14 @@ class TestDistDeviceBytesRequired(unittest.TestCase):
 
     @patch.dict(os.environ, {}, clear=True)
     def test_a_small_chunk_still_needs_two_minimum_buffers(self):
-        required = dist_device_bytes_required(2 * 1024 * 1024)
+        required = dist_device_bytes_required(2 * 1024 * 1024, rows=256)
         self.assertGreaterEqual(required, 2 * DEFAULT_BUFFER_MIN_BYTESIZE)
+
+
+# set_is_distributed is called here without a request, so the streamer's params carry the height an
+# empty one gives. The check and this figure have to come from the same number or the test guards
+# nothing.
+EMPTY_REQUEST_ROWS = 1
 
 
 class DistributedJob:
@@ -181,7 +189,7 @@ class TestDistributedMemoryCheck(unittest.TestCase):
         patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.required = dist_device_bytes_required(4096)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
 
     def decide(self, free_by_rank, my_rank=0, group_ranks=None):
         job = DistributedJob(free_by_rank, my_rank=my_rank, group_ranks=group_ranks)
@@ -237,7 +245,7 @@ class TestTheAgreedFreeMemoryIsKept(unittest.TestCase):
         patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.required = dist_device_bytes_required(4096)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
 
     def decide(self, free_by_rank, is_distributed=True, device="cuda:1"):
         job = DistributedJob(free_by_rank, my_rank=0)
@@ -293,7 +301,7 @@ class TestASecondReadOnTheSameStreamer(unittest.TestCase):
         patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.required = dist_device_bytes_required(4096)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
 
     def two_reads(self, free_by_rank, my_rank, group_ranks, groups_by_ranks):
         """Two reads on one streamer. Returns the decision and the new_group calls each read made."""

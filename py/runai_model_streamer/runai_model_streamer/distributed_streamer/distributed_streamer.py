@@ -28,8 +28,10 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    SlotBounds,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
-    RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
 )
 
@@ -70,7 +72,29 @@ import humanize
 
 logger = logging.getLogger(__name__)
 
-MAX_CHUNKS_PER_BATCH = 256
+def metadata_rows(file_stream_requests: List[FileChunks]) -> int:
+    """How many ranges one metadata tensor must be able to describe.
+
+    EVERY RANGE IN THE REQUEST. A slot cannot hold more than the share it is filled from, and a
+    share cannot hold more than the whole list - so this bounds any slot without modelling how the
+    ranges pack. A height derived from the packing would be a second copy of a rule that has
+    already drifted once, and it would fail mid-load, with the collective already posted.
+
+    Every rank computes it from the same list, which is what makes the broadcast shapes match. At
+    32 bytes a row it costs about 2.4 MiB for a model of 76 thousand ranges, against a staging
+    buffer of at least a gibibyte."""
+    return max(1, sum(len(file_chunks.sizes) for file_chunks in file_stream_requests))
+
+
+SENT_RING_BOUNDS = SlotBounds()
+"""The bounds a sent ring is built with, and so the bounds its size must be chosen under.
+
+NO RANGE CAP. A cap belongs to a metadata tensor's height, and nothing describes a predicted slot -
+every rank works the layout out instead. Capping here would end a slot before its bytes ran out, so
+the group would broadcast more slots, each one part empty.
+
+ONE VALUE for the sizing, the prediction and the ring. They were separate parameters, and the
+sizing read only the byte budget - so it chose a slot the row cap could never fill."""
 
 DIST_BUFFER_ALIGNMENT = 512
 """What a staging buffer's START is aligned to, not its contents.
@@ -102,7 +126,7 @@ def aligned_device_buffer(bytesize: int, device: torch.device) -> torch.Tensor:
     return raw[(-raw.data_ptr()) % DIST_BUFFER_ALIGNMENT:]
 
 
-def allocate_dist_staging(max_chunk: int, device: torch.device,
+def allocate_dist_staging(max_chunk: int, device: torch.device, rows: int,
                           receive_bytesize: Optional[int] = None,
                           send_buffer: bool = True) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
     """Every device allocation the broadcast loop makes: the staging buffers and two metadata tensors.
@@ -127,13 +151,14 @@ def allocate_dist_staging(max_chunk: int, device: torch.device,
         return aligned_device_buffer(bytesize, device)
 
     def metadata() -> torch.Tensor:
-        return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
+        # One row per range, plus row 0 for the count.
+        return torch.zeros(rows + 1, 4, dtype=torch.int64, device=device)
 
     send = staging(buffer_bytesize) if send_buffer else None
     return send, staging(receive_bytesize), metadata(), metadata()
 
 
-def dist_device_bytes_required(max_chunk: int) -> int:
+def dist_device_bytes_required(max_chunk: int, rows: int) -> int:
     """What allocate_dist_staging() takes on the device WHEN THE RANKS STAGE.
 
     It is the gate in set_is_distributed, which runs before the group has a slot shape, so it cannot
@@ -142,10 +167,12 @@ def dist_device_bytes_required(max_chunk: int) -> int:
     THAT rank is device_ring_budget, out of which agreed_slot_shape reserves the buffers it receives
     into - two where depth can pay for them, one where it cannot.
 
-    So this stays the staged figure, which is the larger of the two per buffer, and the gate stays
-    conservative rather than exact."""
+    So this stays the STAGED figure. On the direct path it is not even conservative: that rank
+    receives into a buffer the size of the agreed slot, which is at least the largest range, while
+    this counts dist_buffer_bytesize(max_chunk). The gate runs before the group has a slot shape,
+    so it cannot know the real figure; what bounds that rank is device_ring_budget instead."""
     staging = dist_buffer_bytesize(max_chunk) + DIST_BUFFER_ALIGNMENT
-    metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
+    metadata = (rows + 1) * 4 * 8      # int64
     return 2 * staging + 2 * metadata
 
 
@@ -167,8 +194,13 @@ def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None
         )
 
     metadata[0, 0] = len(ranges)
-    for i, r in enumerate(ranges):
-        metadata[i + 1].copy_(torch.tensor([r.file_id, r.range_index, r.size, r.offset]))
+    if ranges:
+        # ONE TENSOR FOR THE WHOLE BLOCK. A tensor built per row is a construction and a copy each
+        # time, and a slot can carry tens of thousands of rows - and on a device metadata tensor
+        # each of those copies is its own transfer.
+        rows = torch.tensor([(r.file_id, r.range_index, r.size, r.offset) for r in ranges],
+                            dtype=metadata.dtype)
+        metadata[1:len(ranges) + 1].copy_(rows)
 
 
 class AgreedRing(NamedTuple):
@@ -190,7 +222,7 @@ class AgreedRing(NamedTuple):
 
 def agreed_slot_shape(min_free_bytes: Optional[int],
                       file_stream_requests: List[FileChunks],
-                      ring_buffers: Optional[int] = None) -> Optional[AgreedRing]:
+                      bounds: SlotBounds = SENT_RING_BOUNDS) -> Optional[AgreedRing]:
     """The ring every rank of the group will send from, with what it receives into, or None when no
     ring fits.
 
@@ -203,19 +235,17 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     ranks would answer differently. And the size is what a RECEIVER allocates too, so it has to hold
     the largest range any sender will broadcast - which only the whole list knows.
 
-    THE SAME LIST, IN THE SAME ORDER. The sizing packs ranges in list order to score a candidate
-    depth, so the same files in another order can answer differently - a sender and a receiver would
-    then allocate different slot sizes. The caller's request is one list, and SafetensorsStreamer
-    sorts the paths before distributing, so this holds today; it is a requirement, not a given.
+    THE SAME LIST. Not in the same order, any more: the size comes from the largest range and the
+    total, and neither moves when the list is shuffled. It used to be packed in list order to score
+    a candidate depth, which made ORDER part of the contract between ranks.
 
-    ring_buffers is for callers that are NOT distributing. The distributed path does not pass it:
-    the shape decides which path the whole group takes, and a rank that chose its own depth would
-    wait on collectives its peers never post. Depth buys little past a few slots, so there is
-    nothing to lose by agreeing it.
+    NO CALLER-NAMED DEPTH anywhere on this path. A rank that chose its own would wait on
+    collectives its peers never post, and the device ring no longer takes one from anybody: its
+    depth is the two slots that let reading and sending overlap.
 
-    EVERY INPUT IS READ PER RANK, and three of them move the answer: RUNAI_STREAMER_RING_BUFFERS
-    through the depth target, and the device memory limit and its fraction through the budget. A
-    rank given different ones packs differently, which is what check_the_group_agreed is for.
+    EVERY INPUT IS READ PER RANK, and two of them still move the answer: the device memory limit
+    and its fraction, which only ever LOWER what the data asked for. A rank given different ones
+    sizes differently, which is what check_the_group_agreed is for.
 
     min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
     measure, or one not using a device backend at all. There is then no ring to agree on, and the
@@ -226,56 +256,26 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     taken the ring. Sizing the ring to the whole budget would leave nothing for it, and the failure
     would be a raw allocation error on some ranks while the others wait in the collective.
 
-    DEPTH PAYS FOR IT FIRST, and the slot size only when depth cannot. Two slots is the least that
-    can overlap - the library refills a slot only once the collective has handed it back - so a
-    reservation that would leave one slot shrinks the slot instead and keeps two. Shrinking is safe
-    because every rank computes this from the same numbers and so shrinks together; what would break
-    a peer is one rank alone choosing a different size.
+    THE SLOT PAYS FOR IT, down to the largest range, and the depth only when the slot cannot. Two
+    slots is the least that can overlap - the library refills a slot only once the collective has
+    handed it back - and losing that is the one cliff both models measure, while a slot somewhat
+    below what the data asked for is flat over a wide range. Shrinking is safe because every rank
+    computes this from the same numbers and so shrinks together; what would break a peer is one
+    rank alone choosing a different size.
 
     A one slot ring is still right when the stream fits inside it - there is nothing to overlap
     there - and it is still better than the host path when it does not. The host path copies every
     range, so what a single slot costs is the overlap, not the device ring. A caller that asks for a
     depth of 1 is taken at its word.
     """
-    shape = device_ring_sizing(min_free_bytes, file_stream_requests, ring_buffers)
-    if shape is None:
-        return None
-
-    buffer_size, num_buffers = shape
-    budget = device_ring_budget(min_free_bytes, file_stream_requests)
-    streamed = sum(size for file_chunks in file_stream_requests for size in file_chunks.sizes)
-
     # TWO TO RECEIVE INTO, so a transfer lands while the clones out of the one before it still run.
-    # Depth pays for both, down to the two slots that let reading and sending overlap at all - that
-    # overlap hides the storage path, which is worth more than overlapping a peer's transfer.
-    receive_buffers = 2
-    while (num_buffers + receive_buffers) * buffer_size > budget and num_buffers > 2:
-        num_buffers -= 1
-
-    # Depth could not pay. One buffer then, rather than a slot too small to send or no ring at all.
-    if (num_buffers + receive_buffers) * buffer_size > budget:
-        receive_buffers = 1
-        while (num_buffers + receive_buffers) * buffer_size > budget and num_buffers > 1:
-            num_buffers -= 1
-
-    # AFTER the reservation, never before it. The reservation is what can leave a single slot, so a
-    # ring that spanned the stream at the sizing's depth may no longer span it at this one.
-    if num_buffers >= 2 or (num_buffers == 1 and buffer_size >= streamed):
-        return AgreedRing(buffer_size, num_buffers, receive_buffers)
-
-    # ONE SLOT, and the stream does not fit in it, so reading and sending cannot run together. Two
-    # smaller slots are worth more than one large one here, as long as a slot still holds the
-    # largest range. The reservation above can leave this state, and so can the sizing on its own.
-    if ring_buffers != 1:
-        two_slots = budget // (2 + receive_buffers)
-        # The floor is two of the largest range, so two slots below it cannot hold one.
-        if 2 * two_slots >= device_ring_floor(file_stream_requests):
-            return AgreedRing(two_slots, 2, receive_buffers)
-
-    # No room for two. The one slot ring is still better than the host path, which copies every
-    # range - overlap is what is lost here, not the device ring itself.
-    if num_buffers == 1 and (1 + receive_buffers) * buffer_size <= budget:
-        return AgreedRing(buffer_size, 1, receive_buffers)
+    # Asked for as part of the shape, not reserved out of it afterwards: a reservation that shrank
+    # a shape already chosen is a second solver, and the two disagree.
+    for receive_buffers in (2, 1):
+        shape = device_ring_sizing(min_free_bytes, file_stream_requests, bounds,
+                                   extra_slots=receive_buffers)
+        if shape is not None:
+            return AgreedRing(shape[0], shape[1], receive_buffers)
 
     # Not even one slot and somewhere to receive into. Every rank reaches that from the same
     # numbers, so the whole group takes the host path together.
@@ -442,7 +442,7 @@ class DistributedStreamer:
             # KEPT, not only compared. It is the one free-memory figure the group agrees on, and a
             # ring they all send from has to be sized from it rather than from each rank's own.
             self.params.min_device_free_memory = free_memory
-            required = dist_device_bytes_required(self.params.max_chunk)
+            required = dist_device_bytes_required(self.params.max_chunk, self.params.metadata_rows)
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")
                 self.is_distributed = False
@@ -543,6 +543,9 @@ class _distributedStreamerParams:
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.max_chunk = 0
+        # One row per range of the request, set by set_params. One row until then, which is the
+        # smallest a metadata tensor can be - a request with nothing in it.
+        self.metadata_rows = 1
         # The smallest free memory in the group, once it has been agreed; None where no agreement
         # was needed. A ring every rank sends from is sized from THIS, not from what this rank
         # happens to have free.
@@ -612,6 +615,9 @@ class _distributedStreamerParams:
         # find the size of the maximal chunk for the reusable buffer
         max_chunks_per_file = (fc.max_chunk_size() for fc in file_stream_requests if fc.sizes)
         self.max_chunk = max(max_chunks_per_file, default=0)
+
+        # Held beside max_chunk, because the two together are what the staging allocation costs.
+        self.metadata_rows = metadata_rows(file_stream_requests)
 
         if discover_ranks:
             self.discover_local_ranks()
@@ -766,6 +772,7 @@ class _distributedStreamer:
         self.device = torch.empty(0, device=device).device
         self.owned = owned
         self.max_chunk = params.max_chunk
+        self.metadata_rows = params.metadata_rows
         # the ranks sharing this host: the divisor for the node-total memory limit (see rank_memory_limit)
         self.num_processes_on_node = params.num_processes_on_node
 
@@ -869,7 +876,8 @@ class _distributedStreamer:
             # the one before it, so it has to know how many turns there are before it starts.
             self.predicted = [
                 list(predicted_slots(file_stream_requests, self.group_size, rank,
-                                     self.slot_shape[0], MAX_CHUNKS_PER_BATCH, shares[rank]))
+                                     self.slot_shape[0], SENT_RING_BOUNDS.max_ranges,
+                                     shares[rank]))
                 for rank in range(self.group_size)
             ]
 
@@ -896,7 +904,7 @@ class _distributedStreamer:
                 self.file_streamer.stream_files(
                     self.rank_file_chunks_list, credentials, str(self.device),
                     owned=False, slot_shape=self.slot_shape, sent_from=True,
-                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
+                    max_ranges_per_slot=SENT_RING_BOUNDS.max_ranges,
                 )
             except RunaiStreamerMemoryLimitException as error:
                 # SHALLOWER, never smaller, and never a host ring. The slot size is what the group
@@ -935,7 +943,7 @@ class _distributedStreamer:
                 self.file_streamer.stream_files(
                     self.rank_file_chunks_list, credentials, str(self.device),
                     owned=False, slot_shape=self.slot_shape, sent_from=True,
-                    max_ranges_per_slot=MAX_CHUNKS_PER_BATCH,
+                    max_ranges_per_slot=SENT_RING_BOUNDS.max_ranges,
                 )
         else:
             self.file_streamer.stream_files(
@@ -969,7 +977,8 @@ class _distributedStreamer:
                 f"the ranks of this group did not agree on the slot size - {smallest} to {largest} "
                 f"bytes - so they would lay their ranges out differently. It is part of the "
                 f"contract between ranks, not a local choice: check that every rank was given the "
-                f"same {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME}, device memory limit and fraction"
+                f"same {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} and "
+                f"{RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME}"
             )
 
     def rank_memory_limit(self) -> int:
@@ -1026,7 +1035,7 @@ class _distributedStreamer:
         # allocations this loop makes.
         (data_buffer, received_buffer,
          batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(
-            self.max_chunk, self.device,
+            self.max_chunk, self.device, self.metadata_rows,
             receive_bytesize=self.slot_shape[0] if self.sends_directly else None,
             # Only a rank that STAGES something needs one. A rank sending its ring slots has no use
             # for it, and a rank with an empty share sends nothing at all.
@@ -1044,7 +1053,9 @@ class _distributedStreamer:
                 self.file_streamer.get_chunks(),
                 data_buffer[:BUFFER_BYTESIZE],
                 self.rank_dicts_map,
-                MAX_CHUNKS_PER_BATCH,
+                # THE METADATA'S OWN HEIGHT, so a slot ends on its bytes and never on its rows.
+                # These were two numbers, and the smaller one silently shaped every slot.
+                self.metadata_rows,
             )
 
         # The stream the clones and the collective run on. Held so slot_is_free can see it move,

@@ -60,16 +60,17 @@ class TestAgreedSlotShape(unittest.TestCase):
         self.assertNotEqual(agreed_slot_shape(1 << 28, whole),
                             agreed_slot_shape(1 << 26, whole))
 
-    def test_order_changes_the_shape(self):
-        """RECORDED, not desired. The sizing packs ranges in list order to score a depth, so the
-        same files in another order can answer differently - which makes "the same list" a
-        requirement on ORDER, not only on contents."""
+    def test_order_does_not_change_the_shape(self):
+        """IT ONCE DID, and that was a requirement nobody could enforce. The sizing used to pack
+        ranges in list order to score a depth, so the same files in another order answered
+        differently and "the same list" meant the same ORDER too. The size now comes from the
+        largest range and the total, and neither moves when the list is shuffled."""
         big, small = [1 << 20] * 8, [8] * 24
         grouped = files([big + small])
         interleaved = files([[size for pair in zip(big, small[:8]) for size in pair] + small[8:]])
 
-        self.assertNotEqual(agreed_slot_shape(128 << 20, grouped),
-                            agreed_slot_shape(128 << 20, interleaved))
+        self.assertEqual(agreed_slot_shape(128 << 20, grouped),
+                         agreed_slot_shape(128 << 20, interleaved))
 
     def test_a_group_that_agreed_nothing_has_no_shape(self):
         """None reaches here from a group whose device torch cannot measure, or one not on a device
@@ -101,12 +102,15 @@ class TestAgreedSlotShape(unittest.TestCase):
     def test_no_room_answers_none(self):
         self.assertIsNone(agreed_slot_shape(1, files([[1 << 20]])))
 
-    def test_the_depth_is_the_one_asked_for(self):
-        """Passed as an ARGUMENT, with the environment set to something else: the sizing underneath
-        reads that variable itself, so a test that only set it would pass whether or not this
-        function handed the value on."""
-        with patch.dict(os.environ, {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: "9"}):
-            self.assertEqual(agreed_slot_shape(FREE, files([[1000] * 16]), ring_buffers=4)[1], 4)
+    def test_no_setting_can_change_the_depth(self):
+        """The device ring's depth is derived and nothing outside can name it. The variable still
+        governs the HOST ring, so setting it must land nowhere here - a rank given a different one
+        would otherwise agree a different shape and read its peers at the wrong offsets."""
+        plain = agreed_slot_shape(FREE, files([[1000] * 16]))
+        for value in ("1", "4", "9", "99"):
+            with self.subTest(setting=value):
+                with patch.dict(os.environ, {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: value}):
+                    self.assertEqual(agreed_slot_shape(FREE, files([[1000] * 16])), plain)
 
     def test_free_memory_changes_the_shape(self):
         """It is sized from the agreed figure, so a different one must land somewhere - otherwise
@@ -153,20 +157,32 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
         self.assertLessEqual(
             (agreed.num_buffers + agreed.receive_buffers) * agreed.buffer_size, budget)
 
-    def test_a_ring_too_shallow_to_pay_receives_into_one(self):
-        """This fixture starts at depth 2, which is the floor, so there is nothing to sell. One
-        buffer then - losing the overlap beats losing the second ring slot that hides storage."""
-        self.assertEqual(agreed_slot_shape(FREE, self.whole()).receive_buffers, 1)
+    def test_two_to_receive_into_are_kept_when_the_slot_can_pay(self):
+        """The slot gives way before anything else does, so both receive buffers survive here."""
+        agreed = agreed_slot_shape(FREE, self.whole())
+        self.assertEqual(agreed.receive_buffers, 2)
+        self.assertEqual(agreed.num_buffers, 2, "and the overlap with it")
 
-    def test_depth_pays_for_it_while_two_slots_are_left(self):
-        """A depth of 4 can lose two and still overlap, so the slot size is untouched."""
-        unreserved = device_ring_sizing(FREE, self.whole(), 4)
-        reserved = agreed_slot_shape(FREE, self.whole(), 4)
+    def test_one_to_receive_into_when_two_cannot_fit_at_any_slot_size(self):
+        """The slot can only shrink to the largest range. Below four of those, two receive buffers
+        are unaffordable however small the slot gets."""
+        largest = 1 << 20
+        tight = files([[largest] * 4096])
+        agreed = agreed_slot_shape(5 << 20, tight)      # allows 2.5 MiB, under 4 x largest
 
-        self.assertEqual(unreserved[1], 4, "the fixture must start deep enough to lose two")
-        self.assertEqual(reserved.buffer_size, unreserved[0], "the slot size is untouched")
-        self.assertEqual(reserved.num_buffers, 2, "two buffers pay for it")
+        self.assertIsNotNone(agreed, "the ring itself still fits")
+        self.assertEqual(agreed.receive_buffers, 1)
+
+    def test_the_slot_pays_for_the_receive_buffers_not_the_depth(self):
+        """THE ORDER IS THE OTHER WAY ROUND NOW. Depth used to be sold off to pay for the receive
+        buffers; a slot somewhat smaller than the data asked for is flat over a wide range, while
+        losing a ring slot is the one cliff both models measure."""
+        alone = device_ring_sizing(FREE, self.whole())
+        reserved = agreed_slot_shape(FREE, self.whole())
+
+        self.assertEqual(reserved.num_buffers, alone[1], "the overlap survives")
         self.assertEqual(reserved.receive_buffers, 2)
+        self.assertLess(reserved.buffer_size, alone[0], "and the slot paid for them")
 
     def test_the_slot_shrinks_rather_than_leave_a_ring_that_cannot_overlap(self):
         """A depth of 2 cannot lose one: the library refills a slot only once the collective has
@@ -234,16 +250,21 @@ class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
 
         self.assertEqual(sizing[1], 2, "the sizing offers two slots")
         self.assertGreater(3 * sizing[0], budget, "which do not fit with a receive buffer")
-        self.assertLessEqual(2 * sizing[0], budget, "while one slot and a receive buffer do")
 
-        self.assertEqual(agreed_slot_shape(FREE, two_big).shape, (sizing[0], 1))
+        agreed = agreed_slot_shape(FREE, two_big)
+        largest = max(max(fc.sizes) for fc in two_big)
+        self.assertEqual(agreed.num_buffers, 1, "one slot rather than no ring at all")
+        self.assertGreaterEqual(agreed.buffer_size, largest, "and it still holds the largest range")
+        self.assertLessEqual((1 + agreed.receive_buffers) * agreed.buffer_size, budget)
 
-    def test_the_group_falls_back_only_when_not_even_one_slot_fits(self):
-        """A depth the caller asked for, spending the whole budget on one slot.
+    def test_the_group_falls_back_when_two_of_the_largest_range_do_not_fit(self):
+        """Below that nothing can overlap and a slot could not even hold one range, so the whole
+        group takes the host path - from numbers every rank shares.
 
-        There is then nowhere to receive a peer's slot of the same size, and no smaller ring to
-        retreat to, so the whole group takes the host path - from numbers every rank shares."""
-        self.assertIsNone(agreed_slot_shape(FREE, self.whole(), 1))
+        The host path copies every range, which is why this is the only case that refuses."""
+        huge = files([[300 << 20] * 4])
+        self.assertIsNone(agreed_slot_shape(FREE, huge),
+                          "1 GiB free allows 512 MiB, and two of 300 MiB do not fit")
 
     def test_a_stream_that_fits_one_slot_keeps_it(self):
         """Nothing to overlap, so one slot is not a loss - and refusing would send the group to the

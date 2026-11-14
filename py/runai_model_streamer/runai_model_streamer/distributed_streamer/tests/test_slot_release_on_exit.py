@@ -79,6 +79,7 @@ class SlotReleaseOnExit(unittest.TestCase):
         streamer.file_streamer = MagicMock()
         streamer.device = torch.device("cpu")
         streamer.max_chunk = 64
+        streamer.metadata_rows = 2
         streamer.rank_dicts_map = {}
         streamer.owned = False
         streamer.group_size = 1

@@ -70,11 +70,18 @@ class TheGroupMustAgreeOnTheSlotSize(unittest.TestCase):
         self.assertIn(str(4 * MINE), str(caught.exception))
 
     def test_it_names_the_settings_that_move_the_size(self):
-        """The ones read per rank. Without them the message says what is wrong and not where."""
+        """The ones read per rank. Without them the message says what is wrong and not where.
+
+        RUNAI_STREAMER_RING_BUFFERS used to be one of them and is NOT any more: the slot size comes
+        from the data now, and depth is local. Naming a variable that cannot cause the failure
+        sends whoever reads this to the wrong place."""
         with patch.object(module.dist, "all_reduce", side_effect=peers(4 * MINE)):
             with self.assertRaises(RuntimeError) as caught:
                 streamer().check_the_group_agreed()
-        self.assertIn("RUNAI_STREAMER_RING_BUFFERS", str(caught.exception))
+        message = str(caught.exception)
+        self.assertIn("RUNAI_STREAMER_DEVICE_MEMORY_LIMIT", message)
+        self.assertIn("RUNAI_STREAMER_DEVICE_MEMORY_FRACTION", message)
+        self.assertNotIn("RUNAI_STREAMER_RING_BUFFERS", message)
 
 
 class AGroupThatSplitBetweenThePathsIsCaughtToo(unittest.TestCase):

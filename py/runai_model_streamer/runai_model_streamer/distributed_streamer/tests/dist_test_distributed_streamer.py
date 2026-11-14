@@ -503,15 +503,11 @@ class TestDistributedStreamer(unittest.TestCase):
                 self.assertTrue(inner.sends_directly,
                                 "the switch must choose the direct source here")
                 # The shape itself is patched in, so asserting it is not None would say nothing.
-                # What the production code decides is the CAP it dictates with that shape: the ring
-                # packs by bytes, and a slot may hold no more ranges than the metadata has rows.
-                from runai_model_streamer.distributed_streamer.distributed_streamer import (
-                    MAX_CHUNKS_PER_BATCH,
-                )
-                self.assertEqual(
+                # What the production code decides is that a sent ring takes NO range cap: nothing
+                # describes a predicted slot, so only its bytes may end it.
+                self.assertIsNone(
                     inner.file_streamer.requests_iterator.max_ranges_per_slot,
-                    MAX_CHUNKS_PER_BATCH,
-                    "a sent ring must be capped at the rows a peer will read",
+                    "a sent ring fills by bytes; a cap would end its slots part empty",
                 )
 
                 # WHAT THE PRODUCTION CODE PASSES, which patching a return value leaves unexamined.

@@ -54,6 +54,8 @@ def streamer(turns, owned=True, raise_on=None):
     s.file_streamer = MagicMock()
     s.device = "cpu"
     s.max_chunk = 1 << 20
+    # One metadata row per range of the request - two here, as ROWS has two.
+    s.metadata_rows = len(ROWS)
     s.slot_shape = (TOTAL, 2)
     s.receive_buffers = 2
     s.sends_directly = True
