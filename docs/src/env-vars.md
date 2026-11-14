@@ -93,6 +93,32 @@ Positive integer, at most 1024. A larger value is capped, with a warning.
 
 1
 
+### RUNAI_STREAMER_FS_WORKERS_PER_MOUNT
+
+Controls how many asynchronous readers serve each mount. A reader is a thread with its own queue.
+
+One mount, one reader, is the default. Storage that answers many requests at once - a scale-out
+filer, or a striped local array - can be read faster by several readers than by one, because a
+single reader can only have its own queue's worth of requests outstanding.
+
+The mount's queue depth from `RUNAI_STREAMER_FS_QUEUE_DEPTH` is SHARED between its readers, not
+given to each: four readers on a depth of 64 run at 16 each. The reads in flight for the mount are
+then about what they were; they are issued from more threads. Each reader costs a thread and its
+own staging memory, so raising this is not free.
+
+A reader never runs below a depth of 3, so asking for more readers than a third of the depth raises
+the reads in flight above what the depth asks for. The streamer warns when that happens.
+
+Not used by `sync_buffered`, which serves all mounts from a single shared pool.
+
+#### Values accepted
+
+Positive integer, at most 1024. A larger value is capped, with a warning. Zero is read as one.
+
+#### Default value
+
+1
+
 ### RUNAI_STREAMER_CHUNK_BYTESIZE
 
 Controls the maximum size of memory each OS thread reads from the file at once.
