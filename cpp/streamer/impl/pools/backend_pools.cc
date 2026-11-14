@@ -32,6 +32,11 @@ BackendPools::BackendPools(WorkerFactory filesystem_factory,
     // Per queue depth and per PROCESS, not per node. Each engine has its own queue depth, so N
     // engines mean N times the depth of reads running at the device - and a thread and a ring each,
     // which is why to_concurrency caps it like the two concurrencies, and warns the same way.
+    //
+    // DELIBERATELY UNLIKE RUNAI_STREAMER_FS_WORKERS_PER_MOUNT, which SHARES a mount's depth between
+    // its readers rather than replicating it. The two knobs answer different questions: this one
+    // caps how many mounts may be served at once when they outnumber the engines, and each of those
+    // mounts brought its own depth; that one decides how a SINGLE mount's one budget is carried.
     _max_async_engines(Config::to_concurrency(
         utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_MAX_ENGINES", 1U),
         "RUNAI_STREAMER_FS_MAX_ENGINES"))
@@ -58,26 +63,6 @@ void BackendPools::push(Pool pool, Workload && workload)
     });
     _filesystem_pool->push(std::move(workload));
 }
-
-namespace
-{
-
-unsigned workers_per_mount()
-{
-    // One worker per mount is the default, and it is one thread with one ring. On storage fast
-    // enough to outrun a single thread, several independent workers on the same mount read it the
-    // way several processes do - each owns its own engine, and they share the queue.
-    //
-    // Costs pinned memory per worker, so it is opt in.
-    //
-    // Read per ENGINE, not once per process. An engine is built once per mount, under the lock this
-    // is called behind, so the lookup is rare - and a static would hand a second streamer in the
-    // same process the first one's answer, which is the same first-wins trap that binding values
-    // into a shared engine already carries.
-    return utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1u, 1u);
-}
-
-} // namespace
 
 void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool register_buffers, Workload && workload)
 {
@@ -108,14 +93,23 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                 // storage's plugin lock - the strategy was settled before dispatch, and a mount needs
                 // no agreement at all. (The mutex above guards the map, not a decision.)
                 // The block is bound HERE and never changes for this engine.
+                // THE DEPTH IS SHARED BETWEEN THE READERS, NOT GIVEN TO EACH. It is a budget for
+                // the whole node per file system type, so handing every reader the full number
+                // would multiply the node's in-flight requests by the reader count - the one thing
+                // the setting promises not to do. At least one each, so a reader always has a
+                // request it may issue.
+                const unsigned readers = Config::fs_workers_per_mount();
+                const unsigned share = std::max(1u, depth / readers);
+
                 auto created = std::make_unique<utils::ThreadPool<Workload>>(
-                    [factory = _filesystem_async_factory, device, block, depth, register_buffers]()
-                    { return factory(device, block, depth, register_buffers); }, workers_per_mount());
+                    [factory = _filesystem_async_factory, device, block, share, register_buffers]()
+                    { return factory(device, block, share, register_buffers); }, readers);
                 pool = created.get();
                 engines.push_back(std::move(created));
 
-                LOG(DEBUG) << "Engine " << engines.size() << " at queue depth " << depth << " serves mount "
-                           << major(device) << ":" << minor(device);
+                LOG(DEBUG) << "Engine " << engines.size() << " serves mount " << major(device) << ":"
+                           << minor(device) << " with " << readers << " reader(s) at queue depth "
+                           << share << " each, from a budget of " << depth;
             }
             else
             {

@@ -134,9 +134,10 @@ size_t Assigner::coalesce(const std::vector<FileRanges> & request)
 // target is split, with offset and destination advancing together so every slice stays contiguous.
 //
 // Done per GROUP. A submission's filesystem files can be served by two different pools, and a group
-// must be divided for the pool that will serve it: the async pool has one worker, so one workload, while
-// the synchronous pool has `concurrency` of them. Dividing the async group 16 ways would not be wrong -
-// the window spans workloads - but each slice would leave a partial chunk at its edges.
+// must be divided for the pool that will serve it: an async mount gets one workload per READER on it,
+// while the synchronous pool gets `concurrency` of them. Each slice leaves a partial chunk at its
+// edges, which the async worker bounces through its scratch pool - the readers cannot be fed without
+// paying that, and on a filer the parallelism is worth far more than the ragged ends.
 void Assigner::assign(size_t total_bytes_to_read)
 {
     // Split the transfers by the group that will serve them, preserving order within each group so the
@@ -168,9 +169,10 @@ void Assigner::assign(size_t total_bytes_to_read)
     _num_async_groups = static_cast<unsigned>(async_indices.size());
 
     // Sized for the ceiling, then shrunk to what was used: the synchronous group can take up to
-    // _num_workers workloads and each async group exactly one, so this is the most any submission can
-    // need. Workload indices index into these.
-    const unsigned ceiling = _num_workers + _num_async_groups + 1;
+    // _num_workers workloads and each async group up to one per reader on that mount, so this is
+    // the most any submission can need. Workload indices index into these.
+    const unsigned per_mount = Config::fs_workers_per_mount();
+    const unsigned ceiling = _num_workers + _num_async_groups * per_mount + 1;
     _worker_assignments.clear();
     _worker_assignments.resize(ceiling);
     _group_by_workload.assign(ceiling, -1);
@@ -181,11 +183,13 @@ void Assigner::assign(size_t total_bytes_to_read)
     // what it was before grouping existed - which is what keeps every existing test meaningful.
     used += assign_group(sync_indices, _num_workers, used, sync_bytes, -1);
 
-    // One worker per mount, so one workload each, however many bytes they hold. Walked in group order
-    // (std::map) so numbering is deterministic.
+    // ONE WORKLOAD PER READER ON THAT MOUNT. The pools build fs_workers_per_mount() threads for a
+    // mount; cutting its work into fewer pieces than that leaves the extra threads with nothing to
+    // pull, so the setting would do nothing. Walked in group order (std::map) so numbering is
+    // deterministic.
     for (const auto & [group, indices] : async_indices)
     {
-        used += assign_group(indices, 1, used, async_bytes[group], group);
+        used += assign_group(indices, per_mount, used, async_bytes[group], group);
     }
 
     _num_workloads = std::max(used, 1u);

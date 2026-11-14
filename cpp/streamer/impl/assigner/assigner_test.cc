@@ -17,6 +17,7 @@
 #include "common/response_code/response_code.h"
 #include "utils/random/random.h"
 #include "utils/logging/logging.h"
+#include "utils/temp/env/env.h"
 
 namespace runai::llm::streamer::impl {
 
@@ -142,6 +143,76 @@ TEST_F(AssignerTest, Async_Files_Get_One_Workload)
 
     EXPECT_EQ(assigner.num_workloads(), 1u) << "one worker cannot use more than one workload";
     EXPECT_EQ(assigner.group_of_workload(0), 0);
+}
+
+// SEVERAL READERS ON ONE MOUNT NEED SEVERAL WORKLOADS. The pools build this many threads for the
+// mount; cutting its work into one piece leaves the rest with nothing to pull, which is how the
+// setting came to do nothing at all.
+TEST_F(AssignerTest, Async_Files_Split_Across_The_Mounts_Readers)
+{
+    config->concurrency = 16;
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/a", 0, std::vector<size_t>(64, 4 << 20), base));   // 256 MiB
+
+    const Assigner assigner(request, config, { 0 });
+
+    EXPECT_EQ(assigner.num_workloads(), 4u) << "four readers, four workloads";
+    for (unsigned i = 0; i < assigner.num_workloads(); ++i)
+    {
+        EXPECT_EQ(assigner.group_of_workload(i), 0) << "every workload belongs to the one mount";
+    }
+}
+
+// Pins that the test above is the SETTING and not the byte count: the same request with one reader
+// is still one workload, so a split that ignored the setting would fail here.
+TEST_F(AssignerTest, One_Reader_Still_Gets_One_Workload)
+{
+    config->concurrency = 16;
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 1UL);
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/a", 0, std::vector<size_t>(64, 4 << 20), base));
+
+    const Assigner assigner(request, config, { 0 });
+
+    EXPECT_EQ(assigner.num_workloads(), 1u);
+}
+
+// THE CEILING TERM, which nothing else pins. _worker_assignments is sized for the most workloads
+// a submission can need and then shrunk; with readers per mount that ceiling has to count them.
+//
+// A FULL SYNCHRONOUS GROUP AND TWO ASYNC ONES, deliberately: the tests above leave the synchronous
+// group empty, so its _num_workers term alone covers the async workloads however the ceiling is
+// written, and a ceiling that forgot the readers would still pass. Here 16 + 4 + 4 = 24 workloads
+// need a ceiling that counts 4 per mount; one that counts 1 sizes for 19 and writes past the end.
+TEST_F(AssignerTest, The_Ceiling_Counts_Every_Mounts_Readers)
+{
+    config->concurrency = 16;
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/sync", 0, std::vector<size_t>(64, 4 << 20), base));
+    request.push_back(contiguous_file("/a", 1, std::vector<size_t>(64, 4 << 20), base + (1 << 30)));
+    request.push_back(contiguous_file("/b", 2, std::vector<size_t>(64, 4 << 20), base + (2UL << 30)));
+
+    // File 0 synchronous, files 1 and 2 on two different async mounts.
+    const Assigner assigner(request, config, { -1, 0, 1 });
+
+    unsigned async_workloads = 0;
+    for (unsigned i = 0; i < assigner.num_workloads(); ++i)
+    {
+        if (assigner.group_of_workload(i) >= 0)
+        {
+            ++async_workloads;
+        }
+    }
+    EXPECT_EQ(async_workloads, 8u) << "two mounts with four readers each";
+    EXPECT_GT(assigner.num_workloads(), 19u) << "the synchronous group must also be spread";
 }
 
 // The two groups are divided separately, and their workload indices must not collide - the dispatcher
