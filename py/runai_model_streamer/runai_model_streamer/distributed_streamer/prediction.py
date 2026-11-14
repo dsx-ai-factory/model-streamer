@@ -56,15 +56,18 @@ def predicted_slots(
 
         cursor = 0
         slot: List[SlotRange] = []
+        append = slot.append
         for file_index, file_chunks in enumerate(request.files):
+            # HOISTED PER FILE, not per range: both are constant across a file, and this loop runs
+            # once per rank of the group over every range of the model.
+            mapping = originals[file_chunks.id]
+            base = request.range_base[file_index]
             for range_index, size in enumerate(file_chunks.sizes):
-                original_file, original_range, _ = originals[file_chunks.id][
-                    request.global_range_index(file_index, range_index)
-                ]
+                original_file, original_range, _ = mapping[base + range_index]
 
                 # The layout rule, shared with the source that will send these slots. A second copy
                 # of it here would disagree in silence, and a receiver would read the wrong bytes.
                 at, cursor = advance(cursor, size)
-                slot.append(SlotRange(original_file, original_range, at, size))
+                append(SlotRange(original_file, original_range, at, size))
 
         yield slot
