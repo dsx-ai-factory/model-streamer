@@ -54,7 +54,7 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=None,
         ):
-            self.assertIsNone(self.streamer("cpu").slot_is_free())
+            self.assertIsNone(self.streamer("cpu").slot_is_free("stream of cpu"))
 
     def test_the_event_is_recorded_on_this_streamer_s_device(self):
         """NOT on whichever device is current.
@@ -67,7 +67,7 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=support,
         ):
-            done = self.streamer("cuda:3").slot_is_free()
+            done = self.streamer("cuda:3").slot_is_free("stream of cuda:3")
 
         self.assertIs(done, support.events[0])
         self.assertEqual(support.asked_for, ["cuda:3"])
@@ -87,7 +87,7 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=support,
         ):
-            streamer.slot_is_free()
+            streamer.slot_is_free(f"stream of {torch.device('cuda')}")
 
         self.assertIsNone(support.asked_for[0].index,
                           "an unresolved device reaches the stream lookup unchanged")
@@ -106,7 +106,7 @@ class SlotIsFree(unittest.TestCase):
             return_value=support,
         ):
             with self.assertRaises(ValueError) as caught:
-                streamer.slot_is_free(started_on="stream of cuda:7")
+                streamer.slot_is_free("stream of cuda:7")
 
         self.assertIn("moved to another stream", str(caught.exception))
         self.assertEqual(support.events, [], "and no event is recorded for a slot it cannot mark")
@@ -119,12 +119,13 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=support,
         ):
-            done = streamer.slot_is_free(started_on="stream of cuda:0")
+            done = streamer.slot_is_free("stream of cuda:0")
 
         self.assertIs(done, support.events[0])
 
-    def test_no_stream_given_means_no_check(self):
-        """A staged source ignores the event, so there is nothing for a moved stream to break."""
+    def test_no_stream_given_records_on_the_current_one(self):
+        """The staged path. It has no broadcast of its own to follow and ignores the event, so
+        there is nothing for a moved stream to break and nothing else to record on."""
         support = FakeSupport()
         streamer = self.streamer("cuda:0")
 
@@ -132,7 +133,27 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=support,
         ):
-            self.assertIsNotNone(streamer.slot_is_free())
+            done = streamer.slot_is_free()
+
+        self.assertEqual(done.recorded_on, "stream of cuda:0")
+
+    def test_the_check_can_be_turned_off_without_moving_the_event(self):
+        """What the cleanup path asks for.
+
+        After a caller has moved, asking the check again would raise and strand the ring. Dropping
+        it must not move the event: the broadcast is already enqueued on the stream below and still
+        reads the slot, so that is what a refill has to wait for."""
+        support = FakeSupport()
+        streamer = self.streamer("cuda:0")
+
+        with patch(
+            "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
+            return_value=support,
+        ):
+            done = streamer.slot_is_free("stream of cuda:0", guard=False)
+
+        self.assertEqual(done.recorded_on, "stream of cuda:0")
+        self.assertEqual(support.asked_for, [], "the check is what reads the current stream")
 
     def test_each_round_gets_its_own_event(self):
         """One event marks one slot. Re-recording a shared event would move the mark of a slot that
@@ -144,8 +165,8 @@ class SlotIsFree(unittest.TestCase):
             "runai_model_streamer.distributed_streamer.distributed_streamer.device_support",
             return_value=support,
         ):
-            first = streamer.slot_is_free()
-            second = streamer.slot_is_free()
+            first = streamer.slot_is_free("stream of cuda:0")
+            second = streamer.slot_is_free("stream of cuda:0")
 
         self.assertIsNot(first, second)
         self.assertEqual(len(support.events), 2)

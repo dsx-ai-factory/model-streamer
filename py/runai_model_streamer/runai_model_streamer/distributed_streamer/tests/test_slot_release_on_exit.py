@@ -178,7 +178,11 @@ class SlotReleaseOnExit(unittest.TestCase):
                 list(chunks)
 
         self.assertEqual(len(source.released), 1, "the slot is given back anyway")
-        self.assertIsNotNone(source.released[0][1], "and with an event, which this source demands")
+
+        # NOT just "an event". An event on the stream the caller moved to would let the next fill
+        # overwrite the slot while the broadcast, enqueued on the stream below, still sends it.
+        self.assertEqual(source.released[0][1].stream, "the stream it started on",
+                         "the event must cover the stream the broadcast was enqueued on")
 
     def test_a_slot_already_given_back_is_not_released_twice(self):
         """Releasing a slot the source has taken back would hand it an event for the slot that

@@ -1156,10 +1156,11 @@ class _distributedStreamer:
                     # leaves the slot held, and would fail it a second time here, so the slot is
                     # never given back and the ring is stranded by the very code meant to save it.
                     #
-                    # The event then marks the stream that is current now. After a move no event
-                    # can cover every clone, and this path is already an error: a stranded ring is
-                    # the worse of the two.
-                    source.release(outstanding[0], self.slot_is_free())
+                    # STILL ON send_stream. Dropping the check does not change which stream the
+                    # event belongs on: the broadcast is already enqueued there and still reads the
+                    # slot. A caller that moved has lost its own clones either way, and it has the
+                    # ValueError; the peers have no such warning.
+                    source.release(outstanding[0], self.slot_is_free(send_stream, guard=False))
                 except Exception:
                     # NEVER RAISES OUT OF HERE. This runs while another exception is on its way up,
                     # or while the generator is being closed, and replacing either with a failure to
@@ -1169,25 +1170,34 @@ class _distributedStreamer:
                         f"release the slot that was in flight"
                     )
 
-    def slot_is_free(self, started_on: Any = None) -> Optional[Any]:
+    def slot_is_free(self, send_stream: Any = None, guard: bool = True) -> Optional[Any]:
         """An event marking the end of this round, or None where the device has no events.
 
-        started_on is the stream this stream began on, or None to ask for no check.
+        RECORDED ON send_stream, the stream the broadcast was enqueued on. That broadcast
+        reads the slot as this rank's send buffer, so it is the work a refill must wait for. An
+        event on any other stream lets the next fill overwrite bytes NCCL is still sending, which
+        reaches the peers as wrong data and raises nothing.
 
         Recorded after both the collective and the clones are enqueued, so it follows both. It does
         NOT cover what a caller does later with a borrowed view: under owned=False the yields are
         views into the slot, and the caller may still hold them. Releasing after the yields is what
         bounds that, not this event.
 
-        The stream is the one of THIS streamer's device, which stream_files resolved to an ordinal.
-        An event given no stream records on whichever device happens to be current, which is the
-        right one only while a process serves a single GPU.
+        send_stream is None on the staged path, which has no broadcast to follow and ignores the
+        event. guard=False asks for the event without the check below, which the cleanup path
+        needs: see the finally in get_chunks.
         """
         support = device_support(self.device)
         if support is None:
             return None
 
-        stream = support.current_stream(self.device)
+        # NO SEND STREAM is the staged path, which has no broadcast of its own to follow and
+        # ignores the event it is given: the slot is next written by its own copy_ on this stream.
+        # There is nothing for a move to break and nothing but the current stream to record on.
+        if send_stream is None:
+            done = support.new_event()
+            done.record(support.current_stream(self.device))
+            return done
 
         # One event marks the work on ONE stream. A caller that moves leaves clones on a stream
         # this event never covers, and the library refills the slot while they still read it -
@@ -1195,15 +1205,16 @@ class _distributedStreamer:
         #
         # SAMPLED AT RELEASE, so it catches a caller that moved and stayed, not one that moved and
         # came back before releasing. The other site checks no more than this.
-        if started_on is not None and stream != started_on:
+        if guard and support.current_stream(self.device) != send_stream:
             raise ValueError(
                 "get_chunks moved to another stream part way through - every range of one stream "
                 "must be read on the stream it started on, because one event per slot can only "
                 "mark the work on one"
             )
 
+        # AFTER the check, so a move that is refused leaves no event behind.
         done = support.new_event()
-        done.record(stream)
+        done.record(send_stream)
         return done
 
     @staticmethod
