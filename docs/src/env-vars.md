@@ -172,6 +172,10 @@ can only lower the result.
 When even two of the largest tensor do not fit, the streamer reads into host memory and copies to
 the device instead.
 
+Under distributed streaming a rank that sends its buffers to its peers does not do that. It tries
+once more with a single buffer of the same size. If that does not fit either, the load fails with an
+error naming the device, the size it asked for and the free memory.
+
 Unlike `RUNAI_STREAMER_MEMORY_LIMIT`, this setting has no unlimited or minimum mode.
 
 #### Values accepted
