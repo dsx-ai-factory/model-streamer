@@ -106,11 +106,32 @@ unsigned Config::fs_workers_per_mount()
     // CAPPED like the two concurrencies and the engine count, and warned about the same way. Each
     // reader costs a thread, a ring and a staging slab - and the assigner sizes an array from this
     // number, so an unbounded one overflows that arithmetic before any allocation can refuse.
-    // AT LEAST ONE, because to_concurrency caps but does not floor: a mount with no readers is a
-    // pool with no threads, which reads nothing at all.
-    return std::max(1u, Config::to_concurrency(
+    const unsigned configured = Config::to_concurrency(
         utils::getenv<unsigned long>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1UL),
-        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT");
+
+    // NODE WIDE, AND DIVIDED, exactly as the queue depth is. The readers of one mount all queue
+    // against the same device, so what the storage sees is this number times the processes on the
+    // node. Left per process it would multiply with the tensor parallelism, asking one mount for
+    // eight times as many readers at TP=8 as the same setting asks for at TP=1.
+    //
+    // ASYNC ONLY. The synchronous pool and object storage never read this: a mount gets more than
+    // one reader only where an engine serves it.
+    const unsigned processes = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
+    const unsigned each = configured / processes;
+
+    // Logged rather than applied silently, as the depth does: a configured number that never
+    // materialises is worse than one that is rejected.
+    if (each < 1 && processes > 1)
+    {
+        LOG(WARNING) << "Readers per mount resolves to " << each << " per process (" << configured
+                     << " over " << processes << " on this node); raised to 1, so the mount is read"
+                     << " by " << processes << " rather than the " << configured << " asked for";
+    }
+
+    // AT LEAST ONE: to_concurrency caps but does not floor, and the division can reach zero on its
+    // own. A mount with no readers is a pool with no threads, which reads nothing at all.
+    return std::max(1u, each);
 }
 
 unsigned Config::to_concurrency(unsigned long value, const char * source)
