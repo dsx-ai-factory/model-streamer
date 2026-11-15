@@ -748,50 +748,91 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success random files test verified on all {self.world_size} ranks.")
 
-    def test_1_success_alignment(self):
-        # Chunk sizes are random in [1, alignment*10].
-        # BUFFER_MIN_BYTESIZE = alignment*20 guarantees at least two max-size chunks fit in
-        # one batch: worst case is chunk1=alignment*10 at offset 0 and chunk2=alignment*10
-        # at offset=alignment*10, totalling alignment*20 = BUFFER_BYTESIZE exactly.
-        # With 1-20 files of 4 chunks each there are enough chunks to guarantee at least
-        # one batch where two tensors are packed together.
-            
-        if self.world_size < 2:
-            self.skipTest("Alignment packing test requires at least 2 processes.")
+    def test_1_success_several_ranges_share_one_broadcast(self):
+        """Ranges packed into one slot start where the one before them ended.
 
-        # A size scale, not an alignment: ranges are packed one after another now.
-        scale = 512
+        THE ONLY DIST TEST THAT FILLS A SLOT WITH MORE THAN ONE RANGE. Every other one sets
+        RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE to 0, which sizes the staging buffer to a single
+        chunk, so nothing there ever packs. Chunks are random in [1, max_chunk] and the buffer holds
+        two of the largest, so slots carry several ranges and their boundaries move run to run.
+
+        READ OFF THE SENDER'S OWN LAYOUT, through the rows it is about to broadcast. Comparing the
+        BYTES instead would prove nothing about the layout: the receiver slices at the offsets the
+        sender broadcast to it, so a packer that started padding again would shift both sides
+        together and every byte would still match. The content check below is kept as a backstop
+        against a copy going astray, not as the layout test.
+
+        This used to assert that every yielded tensor began on a 512 byte boundary. A sent ring
+        refuses a range alignment now, and forcing one onto the tensors it yields - by slicing an
+        over-allocated buffer - made vLLM fault in its first forward pass."""
+        if self.world_size < 2:
+            self.skipTest("packing into a shared slot needs at least two processes")
+
+        max_chunk = 5120
         num_files = random.randint(1, 20)
+
         def random_chunks(n):
-            return [random.randint(1, scale * 10) for _ in range(n)]
+            return [random.randint(1, max_chunk) for _ in range(n)]
 
         chunks_per_file = [random_chunks(4) for _ in range(num_files)]
-        file_specs = [
-            {"size": sum(c), "chunks": c} for c in chunks_per_file
-        ]
+        file_specs = [{"size": sum(c), "chunks": c} for c in chunks_per_file]
         requests = self._prepare_file_requests(file_specs)
+
+        original = {}
+        for req in requests:
+            with open(req.path, "rb") as handle:
+                original[req.id] = handle.read()
+        rebuilt = {req.id: [None] * len(req.sizes) for req in requests}
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        real_write = __import__(module, fromlist=["write_metadata_rows"]).write_metadata_rows
+        slots = []
+
+        def record(metadata, ranges):
+            # The list that is about to go on the wire, before the receivers see any of it.
+            slots.append(list(ranges))
+            return real_write(metadata, ranges)
 
         env_vars = {
             "RUNAI_STREAMER_DIST": "1",
-            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(alignment * 20),
+            # TWO OF THE LARGEST CHUNKS IN ONE SLOT. The row cap never bites here - the staged path
+            # passes metadata_rows, which counts every range in the request - so the byte size is
+            # the only thing deciding how many ranges share a slot.
+            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(2 * max_chunk),
         }
-        # owned=False ON PURPOSE. This alignment describes where tensors sit INSIDE the staging
-        # buffers, so that the offsets one rank broadcasts are usable on every other. An owned tensor
-        # is a clone with a storage of its own, where that layout does not apply - and forcing the
-        # alignment onto it, by slicing an over-allocated buffer, made vLLM fault on a real GPU.
-        with patch.dict(os.environ, env_vars):
+        # owned=False ON PURPOSE: a borrowed tensor is a view into the slot at its own offset, which
+        # is what makes the layout observable at all. An owned one is a plain clone and shows
+        # nothing. Read inside the loop, because the next round overwrites the buffer.
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.write_metadata_rows", record):
             with DistributedStreamer() as streamer:
                 streamer.stream_files(requests, None, "cpu", True, owned=False)
+                for req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                    rebuilt[req_id][chunk_idx] = data_tensor.cpu().numpy().tobytes()
 
-                for _req_id, _chunk_idx, data_tensor in streamer.get_chunks():
-                    ptr = data_tensor.data_ptr()
-                    self.assertEqual(
-                        ptr % alignment, 0,
-                        f"Rank {self.rank}: tensor data_ptr 0x{ptr:x} is not aligned to {alignment} bytes"
-                    )
+        for req in requests:
+            self.assertEqual(original[req.id], b"".join(rebuilt[req.id]))
+
+        # A SKIP, NOT AN ASSERT. The partition hands out spans, so with one file of four chunks and
+        # several ranks this rank can be given a single chunk, or none - the fixture makes a packed
+        # slot likely, not certain. Asserting here would fail on the shape of the partition rather
+        # than on anything about packing.
+        if not any(len(ranges) > 1 for ranges in slots):
+            self.skipTest("this rank's share never filled a slot with two ranges")
+
+        for ranges in slots:
+            cursor = 0
+            for one in ranges:
+                self.assertEqual(
+                    one.offset, cursor,
+                    f"Rank {self.rank}: a range starts at {one.offset} where the one before it "
+                    f"ended at {cursor} - ranges are packed end to end, with nothing between them"
+                )
+                # A zero sized range moves the cursor nowhere, which this pins too.
+                cursor += one.size
 
         if self.rank == 0:
-            print(f"\n✅ Alignment test verified on all {self.world_size} ranks.")
+            print(f"\n✅ Shared-slot packing verified on all {self.world_size} ranks.")
 
     def test_1_owned_tensors_survive_later_rounds(self):
         # THE GUARANTEE ITSELF. BUFFER_MIN_BYTESIZE=0 sizes the staging buffer to a single chunk, so
