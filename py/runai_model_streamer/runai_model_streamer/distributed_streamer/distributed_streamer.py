@@ -945,9 +945,13 @@ class _distributedStreamer:
                     max_ranges_per_slot=SENT_RING_BOUNDS.max_ranges,
                 )
         else:
+            # The caller's depth reaches the host ring and only the host ring. The device path
+            # ignores it on purpose - its shape is agreed across the group - so this is the one
+            # call that forwards it.
             self.file_streamer.stream_files(
                 self.rank_file_chunks_list, credentials, "cpu",
-                memory_limit=self.rank_memory_limit(), owned=False
+                memory_limit=self.rank_memory_limit(), owned=False,
+                ring_buffers=ring_buffers,
             )
         self.reading_from_storage = True
 
