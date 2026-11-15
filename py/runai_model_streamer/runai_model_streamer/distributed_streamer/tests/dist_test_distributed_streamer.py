@@ -17,10 +17,8 @@ import time
 import random
 from unittest.mock import patch
 
-from runai_model_streamer.distributed_streamer.distribution_source import (
-)
-
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
+    AgreedRing,
     DistributedStreamer,
 )
 from runai_model_streamer.file_streamer import FileChunks
@@ -232,7 +230,7 @@ class TestDistributedStreamer(unittest.TestCase):
                 originals[req.id] = handle.read()
 
         module = "runai_model_streamer.distributed_streamer.distributed_streamer"
-        agreed = (2048, 3)
+        agreed = AgreedRing(2048, 3, 2)
         asked = []
         real_stream_files = fs_module.FileStreamer.stream_files
 
@@ -277,9 +275,10 @@ class TestDistributedStreamer(unittest.TestCase):
         if not asked:
             self.skipTest("this rank read nothing, so it never built a ring")
 
-        self.assertEqual(asked[0], agreed, "it asks for the agreed shape first")
-        self.assertEqual(asked[1], (agreed[0], 1), "then one slot of the SAME size")
-        self.assertEqual(inner.slot_shape, (agreed[0], 1), "and says so, for the receive buffer")
+        self.assertEqual(asked[0], agreed.shape, "it asks for the agreed shape first")
+        self.assertEqual(asked[1], (agreed.buffer_size, 1), "then one slot of the SAME size")
+        self.assertEqual(inner.slot_shape, (agreed.buffer_size, 1),
+                         "and says so, for the receive buffer")
         self.assertIsNone(handling[1],
                           "the retry runs after the failed attempt let go of its memory")
 
@@ -321,7 +320,7 @@ class TestDistributedStreamer(unittest.TestCase):
         with patch.dict(os.environ, env_vars), \
              patch.object(fs_module, "device_support", return_value=support), \
              patch(f"{module}.device_support", return_value=support), \
-             patch(f"{module}.agreed_slot_shape", return_value=(2048, 3)), \
+             patch(f"{module}.agreed_slot_shape", return_value=AgreedRing(2048, 3, 2)), \
              patch.object(fs_module.FileStreamer, "stream_files",
                           refuse_without_an_allocator_error):
             with DistributedStreamer() as streamer:
@@ -364,7 +363,7 @@ class TestDistributedStreamer(unittest.TestCase):
         with patch.dict(os.environ, env_vars), \
              patch.object(fs_module, "device_support", return_value=support), \
              patch(f"{module}.device_support", return_value=support), \
-             patch(f"{module}.agreed_slot_shape", return_value=(2048, 1)), \
+             patch(f"{module}.agreed_slot_shape", return_value=AgreedRing(2048, 1, 2)), \
              patch.object(fs_module.FileStreamer, "stream_files", always_refuse):
             with DistributedStreamer() as streamer:
                 with self.assertRaises(RunaiStreamerMemoryLimitException):
@@ -480,7 +479,7 @@ class TestDistributedStreamer(unittest.TestCase):
 
         def record_shape(*a, **k):
             shape_calls.append(a)
-            return (2048, 2)
+            return AgreedRing(2048, 2, 2)
 
         def record_source(*a, **k):
             source = real_direct(*a, **k)
@@ -511,13 +510,12 @@ class TestDistributedStreamer(unittest.TestCase):
                 )
 
                 # WHAT THE PRODUCTION CODE PASSES, which patching a return value leaves unexamined.
-                # The whole list and not this rank's share - a share is floored by the largest range
-                # IN IT, so two ranks would size differently - and the caller's depth, which used to
-                # be dropped on this path while the environment variable was still honoured.
+                # The whole list and not this rank's share: a share is floored by the largest range
+                # IN IT, so two ranks would size differently. The caller's ring_buffers=5 above is
+                # not among these arguments, and test_depth_is_not_per_rank pins that.
                 self.assertEqual(len(shape_calls), 1)
-                _, whole, depth = shape_calls[0]
+                _, whole = shape_calls[0]
                 self.assertIs(whole, requests, "the WHOLE file list, never this rank's share")
-                self.assertEqual(depth, 5, "the caller's ring_buffers reaches the agreed shape")
 
                 # The ring really is reused, which is what drives the release and its event. A ring
                 # that spans the stream never recycles, and then the hardest part of the direct
@@ -668,27 +666,33 @@ class TestDistributedStreamer(unittest.TestCase):
                 inner = streamer.distributed_streamer
                 streamer.stream_files(requests, None, "cpu", True)
 
-                group = inner.distribution_group
                 share_is_empty = len(inner.rank_file_chunks_list) == 0
                 self.assertEqual(inner.reading_from_storage, not share_is_empty)
 
                 for req_id, chunk_idx, data_tensor in streamer.get_chunks():
                     received.append((req_id, chunk_idx, data_tensor.cpu().numpy().tobytes()))
 
+                # The point of the fixture: this really was the empty-share case on all but one
+                # rank, not a share that happened to be small.
+                #
+                # Over the DISTRIBUTION group, which is per node unless RUNAI_STREAMER_DIST_GLOBAL
+                # is set. Each group partitions the file on its own, so the world would count one
+                # reader per group.
+                #
+                # INSIDE the context. Leaving it ends the streamer, and the streamer destroys the
+                # group it made - so a collective after that point is posted on a communicator that
+                # has been shut down. gloo still answers one; NCCL is not obliged to.
+                group = inner.distribution_group
+                group_size = dist.get_world_size(group=group)
+                empties = [torch.zeros(1, dtype=torch.long) for _ in range(group_size)]
+                dist.all_gather(empties,
+                                torch.tensor([1 if share_is_empty else 0], dtype=torch.long),
+                                group=group)
+
         self.assertEqual(len(received), 1, "every rank sees the one chunk, whoever read it")
         self.assertEqual(received[0][0], 0)
         self.assertEqual(received[0][1], 0)
         self.assertEqual(received[0][2], original)
-
-        # The point of the fixture: this really was the empty-share case on all but one rank, not a
-        # share that happened to be small.
-        #
-        # Over the DISTRIBUTION group, which is per node unless RUNAI_STREAMER_DIST_GLOBAL is set.
-        # Each group partitions the file on its own, so the world would count one reader per group.
-        group_size = dist.get_world_size(group=group)
-        empties = [torch.zeros(1, dtype=torch.long) for _ in range(group_size)]
-        dist.all_gather(empties, torch.tensor([1 if share_is_empty else 0], dtype=torch.long),
-                        group=group)
         self.assertEqual(sum(e.item() for e in empties), group_size - 1,
                          "one rank in this group read the chunk and every other rank had nothing")
 
