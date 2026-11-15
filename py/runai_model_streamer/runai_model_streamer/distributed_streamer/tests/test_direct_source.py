@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from runai_model_streamer.distributed_streamer.direct_source import (
     DirectDistributionSource,
 )
@@ -173,32 +175,32 @@ class TestTheRingStreamFilesBuilds(DirectSourceFixture, unittest.TestCase):
     SUPPORT = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
                             current_stream=lambda device: FakeStream())
 
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a CUDA device")
     def test_a_sent_from_ring_is_one_this_source_accepts(self):
+        """A REAL device, not a reported one. A sent-from ring only exists on a device, and the
+        library is handed the slot it was told about - so faking the support while the ring is
+        allocated on the host describes a state no caller can reach."""
         chunks = self.chunks()
 
-        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
-                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
-                patch.object(file_streamer_module, "runai_probe_direct_block_size",
-                             return_value=4096):
-            with FileStreamer() as fs:
-                # The shape the group agreed. Two of these ranges a slot.
-                fs.stream_files(chunks, device="cpu", sent_from=True,
-                                slot_shape=(SLOT, 2))
+        with FileStreamer() as fs:
+            # The shape the group agreed. Two of these ranges a slot.
+            fs.stream_files(chunks, device="cuda:0", sent_from=True,
+                            slot_shape=(SLOT, 2))
 
-                source = DirectDistributionSource(fs, ORIGINALS)
+            source = DirectDistributionSource(fs, ORIGINALS)
 
-                got, seen = b"", []
-                while True:
-                    filled = source.next_slot()
-                    if filled is None:
-                        break
-                    # A TORCH tensor, where the rings built by hand above are numpy: what a slot is
-                    # made of belongs to the path that built it, and a real device ring is torch.
-                    memory = filled.memory.numpy().tobytes()
-                    for r in filled.ranges:
-                        seen.append((r.file_id, r.range_index))
-                        got += memory[r.offset:r.offset + r.size]
-                    source.release(filled, FakeEvent())
+            got, seen = b"", []
+            while True:
+                filled = source.next_slot()
+                if filled is None:
+                    break
+                # A TORCH tensor, where the rings built by hand above are numpy: what a slot is
+                # made of belongs to the path that built it, and a real device ring is torch.
+                memory = filled.memory.cpu().numpy().tobytes()
+                for r in filled.ranges:
+                    seen.append((r.file_id, r.range_index))
+                    got += memory[r.offset:r.offset + r.size]
+                source.release(filled, torch.cuda.Event())
 
         expected = b""
         for name in ("model0.bin", "model1.bin"):
