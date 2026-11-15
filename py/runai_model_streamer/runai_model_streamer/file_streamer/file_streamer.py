@@ -126,6 +126,16 @@ def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
         raise RunaiStreamerInvalidInputException(f"Unusable device {device!r}: {error}") from error
     return "cpu" if resolved.type == "cpu" else str(device)
 
+def resolve_device(device: Union[str, torch.device]) -> torch.device:
+    """The device with its ordinal filled in.
+
+    RESOLVED, not just parsed. "cuda" with no ordinal means whichever device is current, and that
+    can answer differently later, so two reads of the same spelling can name different devices.
+    Asking torch for a tensor on it and taking that tensor's device pins the ordinal once.
+    torch.device("cuda") only parses, and leaves index None."""
+    return torch.empty(0, device=device).device
+
+
 def homogeneous_paths(paths: List[str]) -> bool:
     if not paths:
         return True  # Empty list is homogeneous by default
@@ -455,11 +465,10 @@ class FileStreamer:
             #
             # owned=False always, and memory_limit unread - see this method's docstring. A device
             # slot is reused, and the pool refuses an owned slot that is released with an event.
-            # Resolved ONCE, before anything uses it. "cuda" with no ordinal means the CURRENT
-            # device, which is not always 0 and can be asked again later with a different answer -
-            # so the slots, the stream their event is recorded on, and the index the library is told
-            # all take this one value rather than re-resolving the caller's spelling.
-            resolved = torch.empty(0, device=self.device_str).device
+            #
+            # Resolved ONCE, here, so the slots, the stream their event is recorded on, and the
+            # index the library is told all take one value instead of re-resolving the spelling.
+            resolved = resolve_device(self.device_str)
 
             try:
                 self.requests_iterator = FilesRequestsIteratorWithBuffer(

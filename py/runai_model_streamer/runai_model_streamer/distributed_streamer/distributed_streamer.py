@@ -14,7 +14,7 @@ from runai_model_streamer.file_streamer import (
     FileChunks,
 )
 
-from runai_model_streamer.file_streamer.file_streamer import host_or_device
+from runai_model_streamer.file_streamer.file_streamer import host_or_device, resolve_device
 
 from runai_model_streamer.file_streamer.device_support import device_support
 
@@ -766,10 +766,9 @@ class _distributedStreamer:
         allows a refill is recorded when the caller asks again, so a tensor kept past that point can
         change under it."""
 
-        # RESOLVED, not just parsed. "cuda" with no ordinal means whichever device is current,
-        # and that can answer differently later - so the staging buffers and the stream an event is
-        # recorded on would drift apart. Asking torch once pins both to one device.
-        self.device = torch.empty(0, device=device).device
+        # Resolved once, so the staging buffers and the stream an event is recorded on cannot
+        # drift onto different devices.
+        self.device = resolve_device(device)
         self.owned = owned
         self.max_chunk = params.max_chunk
         self.metadata_rows = params.metadata_rows
