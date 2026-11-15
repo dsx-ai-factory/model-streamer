@@ -106,8 +106,13 @@ DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
 
 
 def dist_buffer_bytesize(max_chunk: int) -> int:
-    """One staging buffer: the minimum, or the largest chunk if that is bigger."""
-    minimum = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE)))  # environment variable used for testing
+    """One staging buffer: the minimum, or the largest chunk if that is bigger.
+
+    TESTS ONLY may lower the minimum. It is what gives the gate in set_is_distributed its slack:
+    the free memory that gate compares against is read before the first collective, so it does not
+    yet show the NCCL communicator. A gibibyte per buffer leaves room for that and more. Lowered,
+    the threshold falls to about max_chunk and the communicator stops being small beside it."""
+    minimum = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE)))
     return max(minimum, max_chunk)
 
 
@@ -357,9 +362,15 @@ class DistributedStreamer:
                 device, error)
             mine = -1
 
-        # This is the first collective on the group, so it creates the NCCL communicator. The
-        # reading above does not yet show that memory. We use half of what we read, which leaves
-        # room for it.
+        # This is the first collective on the group, so it creates the NCCL communicator, and the
+        # reading above does not yet show that memory - about 634 MiB on a B200.
+        #
+        # LEFT UNCORRECTED, and the headroom is in the two readers of this figure, not here. A rank
+        # that sends its ring slots is bounded by device_ring_budget, which takes half of what this
+        # returns. A rank that stages is bounded by the gate in set_is_distributed, whose threshold
+        # starts at two staging buffers - see dist_device_bytes_required - so it carries gibibytes
+        # of slack against those megabytes. A warmup collective here would make the reading exact
+        # and buy nothing either reader needs, while adding one more place for a group to stall.
         free_memory = torch.tensor([mine], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
         smallest = int(free_memory.item())
