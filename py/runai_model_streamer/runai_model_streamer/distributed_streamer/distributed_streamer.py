@@ -1393,9 +1393,19 @@ class _distributedStreamer:
             # wait() enqueues a stream wait rather than blocking the host, and it does not yield,
             # so it is safe while the generator is being closed. Its own failure is swallowed: this
             # is cleanup, and replacing the exception that brought us here would hide it.
+            #
+            # CARRIED TO send_stream, because wait() orders the stream that is CURRENT and the
+            # release event is recorded on send_stream. The two are the same stream until a caller
+            # moves, and this path is reached after exactly that - so without the bridge the join
+            # would land on the stream the caller moved to and the release event would cover
+            # nothing. An event and a wait_event, which order streams without blocking the host.
             if posted is not None and posted[3]:
                 try:
                     posted[0].wait()
+                    if support is not None and send_stream is not None:
+                        joined = support.new_event()
+                        joined.record(support.current_stream(self.device))
+                        send_stream.wait_event(joined)
                 except Exception:
                     logger.debug(f"[RunAI Streamer][Distributed] Rank "
                                  f"{self.original_group_rank}: could not join the outstanding send "

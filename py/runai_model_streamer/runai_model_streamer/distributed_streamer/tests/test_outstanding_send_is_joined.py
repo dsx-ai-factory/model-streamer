@@ -47,12 +47,29 @@ class FakeEvent:
         self.stream = stream
 
 
+class FakeStream:
+    """The stream the sends were posted on. Records what it was told to wait for."""
+
+    def __init__(self, log):
+        self.log = log
+        self.waited_for = []
+
+    def wait_event(self, event):
+        self.waited_for.append(event)
+        self.log.append(("send stream waits", event))
+
+
 class FakeSupport:
+    """A caller that has MOVED: the current stream is not the one the sends went out on."""
+
+    def __init__(self, moved_to="the stream the caller moved to"):
+        self.moved_to = moved_to
+
     def new_event(self):
         return FakeEvent()
 
     def current_stream(self, device):
-        return "the stream"
+        return self.moved_to
 
 
 class TwoSlots:
@@ -109,6 +126,7 @@ class OutstandingSendIsJoined(unittest.TestCase):
             return work
 
         outstanding = [None]
+        send_stream = FakeStream(log)
         with patch(f"{MODULE}.device_support", return_value=FakeSupport()), \
              patch(f"{MODULE}.dist.broadcast", side_effect=broadcast), \
              patch(f"{MODULE}.aligned_device_buffer",
@@ -116,15 +134,15 @@ class OutstandingSendIsJoined(unittest.TestCase):
              patch.object(_distributedStreamer, "check_fill_matches_prediction",
                           lambda *a, **k: None):
             chunks = streamer.stream_predicted(source, torch.zeros(SIZE, dtype=torch.uint8),
-                                               "the stream", outstanding)
+                                               send_stream, outstanding)
             next(chunks)                      # the peer's rows, yielded after our send is posted
             with self.assertRaises(RuntimeError):
                 chunks.throw(RuntimeError("the caller's clone failed"))
 
-        return log, works
+        return log, works, send_stream
 
     def test_the_outstanding_send_is_waited_for(self):
-        log, works = self.run_until_the_caller_raises()
+        log, works, _ = self.run_until_the_caller_raises()
 
         self.assertEqual(len(works), 2, "the peer's transfer and our own send were posted")
         self.assertTrue(works[0].waited, "the peer's transfer is joined by consume()")
@@ -134,7 +152,7 @@ class OutstandingSendIsJoined(unittest.TestCase):
     def test_it_is_joined_before_the_slot_goes_back(self):
         """Order, not just the fact. A wait after the release is no use: the ring may already
         have refilled the slot by then."""
-        log, _ = self.run_until_the_caller_raises()
+        log, _, _ = self.run_until_the_caller_raises()
 
         waits = [i for i, (what, _) in enumerate(log) if what == "wait"]
         releases = [i for i, (what, _) in enumerate(log) if what == "release"]
@@ -142,6 +160,25 @@ class OutstandingSendIsJoined(unittest.TestCase):
         if releases:
             self.assertLess(max(waits), min(releases),
                             "every join must come before the slot goes back")
+
+
+    def test_the_join_is_carried_to_the_stream_the_sends_went_out_on(self):
+        """wait() orders whatever stream is CURRENT, and the release event is recorded on the send
+        stream. A caller that moved makes those two different, and this path is reached after
+        exactly that - so the join has to be carried across, or the event covers nothing."""
+        _, _, send_stream = self.run_until_the_caller_raises()
+
+        self.assertEqual(len(send_stream.waited_for), 1,
+                         "the send stream must be made to wait for the join")
+
+    def test_it_is_carried_before_the_slot_goes_back(self):
+        log, _, _ = self.run_until_the_caller_raises()
+
+        carried = [i for i, (what, _) in enumerate(log) if what == "send stream waits"]
+        releases = [i for i, (what, _) in enumerate(log) if what == "release"]
+        self.assertTrue(carried)
+        if releases:
+            self.assertLess(max(carried), min(releases))
 
 
 if __name__ == "__main__":
