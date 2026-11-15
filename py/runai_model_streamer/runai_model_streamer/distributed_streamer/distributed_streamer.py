@@ -1139,10 +1139,11 @@ class _distributedStreamer:
             # generator nobody kept is closed by the collector - so that read would happen at an
             # arbitrary moment, possibly during interpreter shutdown.
             #
-            # Nothing is lost by skipping it. The streamer's teardown waits on the stream this slot
-            # was read on when the slot is still taken, and the clones and the collective both run
-            # on that same stream, so the broadcast is covered. It waits for more than it has to,
-            # on a load that is being abandoned anyway.
+            # Nothing is lost by skipping it, and the bytes are safe for a reason worth stating,
+            # because it is NOT that the collective runs on this stream - an async_op send runs on
+            # NCCL's own. A slot nobody releases is never refilled, stream_predicted joins the send
+            # it posted on the way out, and the slot is a torch allocation that NCCL recordStreams,
+            # so the allocator will not hand that block to anyone else while the send reads it.
             outstanding[0] = None
             raise
         finally:
@@ -1288,80 +1289,106 @@ class _distributedStreamer:
             reusable[index] = event
             return None
 
-        for turn in range(turns):
-            for broadcasting_rank in range(self.group_size):
-                plan = self.predicted[broadcasting_rank]
-                rows = plan[turn] if turn < len(plan) else []
-                if not rows:
-                    continue
+        try:
+            for turn in range(turns):
+                for broadcasting_rank in range(self.group_size):
+                    plan = self.predicted[broadcasting_rank]
+                    rows = plan[turn] if turn < len(plan) else []
+                    if not rows:
+                        continue
 
-                total = rows[-1].offset + rows[-1].size
-                global_broadcasting_rank = self.local_group_global_ranks[broadcasting_rank]
-                mine = global_broadcasting_rank == self.original_group_rank
+                    total = rows[-1].offset + rows[-1].size
+                    global_broadcasting_rank = self.local_group_global_ranks[broadcasting_rank]
+                    mine = global_broadcasting_rank == self.original_group_rank
 
-                # A SEND NEEDS ITS SLOT FIRST, and asking for one gives the previous one back. If
-                # the posted turn is also a send, consuming it here is what keeps this to one live
-                # slot.
-                #
-                # With ONE receive buffer the posted transfer is still in it, so it has to be
-                # consumed before anything posts into it again.
-                if posted is not None and (single or (mine and posted[3])):
-                    done = yield from consume(posted)
-                    if posted[3]:
-                        pending_event = done
-                    posted = None
+                    # A SEND NEEDS ITS SLOT FIRST, and asking for one gives the previous one back. If
+                    # the posted turn is also a send, consuming it here is what keeps this to one live
+                    # slot.
+                    #
+                    # With ONE receive buffer the posted transfer is still in it, so it has to be
+                    # consumed before anything posts into it again.
+                    if posted is not None and (single or (mine and posted[3])):
+                        done = yield from consume(posted)
+                        if posted[3]:
+                            pending_event = done
+                        posted = None
 
-                if mine:
-                    if started:
-                        source.release(outstanding[0], pending_event)
-                        # CLEARED AS IT GOES BACK. next_slot below can raise, and the finally in
-                        # get_chunks would otherwise hand the same slot back a second time.
-                        outstanding[0] = None
-                    filled = source.next_slot()
-                    outstanding[0] = filled
-                    started = True
-                    self.check_fill_matches_prediction(rows, filled.ranges if filled else [],
-                                                       filled.memory if filled else None)
-                    buffer = filled.memory
-                    # NOT an index: a send has no receive buffer. -1 would be a valid one.
-                    index = None
-                else:
-                    index = receives % len(receiving)
-                    receives += 1
-                    if reusable[index] is not None:
-                        support.current_stream(self.device).wait_event(reusable[index])
-                        reusable[index] = None
-                    buffer = receiving[index][:total]
+                    if mine:
+                        if started:
+                            source.release(outstanding[0], pending_event)
+                            # CLEARED AS IT GOES BACK. next_slot below can raise, and the finally in
+                            # get_chunks would otherwise hand the same slot back a second time.
+                            outstanding[0] = None
+                        filled = source.next_slot()
+                        outstanding[0] = filled
+                        started = True
+                        self.check_fill_matches_prediction(rows, filled.ranges if filled else [],
+                                                           filled.memory if filled else None)
+                        buffer = filled.memory
+                        # NOT an index: a send has no receive buffer. -1 would be a valid one.
+                        index = None
+                    else:
+                        index = receives % len(receiving)
+                        receives += 1
+                        if reusable[index] is not None:
+                            support.current_stream(self.device).wait_event(reusable[index])
+                            reusable[index] = None
+                        buffer = receiving[index][:total]
 
-                work = dist.broadcast(buffer, global_broadcasting_rank,
-                                      group=self.distribution_group, async_op=True)
+                    work = dist.broadcast(buffer, global_broadcasting_rank,
+                                          group=self.distribution_group, async_op=True)
 
-                if posted is not None:
-                    done = yield from consume(posted)
-                    if posted[3]:
-                        pending_event = done
-                posted = (work, buffer, rows, mine, index)
+                    # RECORDED BEFORE THE CONSUME BELOW, which yields to the caller and can raise
+                    # there. Until this assignment our own send exists only as a local, and the
+                    # cleanup on the way out would have nothing to join.
+                    previous, posted = posted, (work, buffer, rows, mine, index)
 
-        if posted is not None:
-            done = yield from consume(posted)
-            if posted[3]:
-                pending_event = done
+                    if previous is not None:
+                        done = yield from consume(previous)
+                        if previous[3]:
+                            pending_event = done
 
-        if started:
-            source.release(outstanding[0], pending_event)
-            outstanding[0] = None
+            if posted is not None:
+                done = yield from consume(posted)
+                if posted[3]:
+                    pending_event = done
+                # JOINED, so the cleanup below has nothing left to do on the way out.
+                posted = None
 
-        # THE NET UNDER THE WHOLE SCHEME. A peer reads these bytes at offsets it computed instead of
-        # received, so a slot the ring filled and no rank expected is never sent, and the weights in
-        # it go missing with nothing raised.
-        leftover = source.next_slot()
-        if leftover is not None:
-            # Held, so the finally in get_chunks hands it back instead of stranding the ring.
-            outstanding[0] = leftover
-            raise RuntimeError(
-                "the ring had a slot left that no rank predicted - the prediction and the stream "
-                "disagree about how much this rank reads"
-            )
+            if started:
+                source.release(outstanding[0], pending_event)
+                outstanding[0] = None
+
+            # THE NET UNDER THE WHOLE SCHEME. A peer reads these bytes at offsets it computed instead of
+            # received, so a slot the ring filled and no rank expected is never sent, and the weights in
+            # it go missing with nothing raised.
+            leftover = source.next_slot()
+            if leftover is not None:
+                # Held, so the finally in get_chunks hands it back instead of stranding the ring.
+                outstanding[0] = leftover
+                raise RuntimeError(
+                    "the ring had a slot left that no rank predicted - the prediction and the stream "
+                    "disagree about how much this rank reads"
+                )
+        finally:
+            # OUR OWN SEND MAY STILL BE READING THE SLOT. A send is posted with async_op=True, so
+            # NCCL runs it on its own stream: posting makes NCCL wait on this stream, never the
+            # other way round. Only wait() puts the dependency back, and on the way out of a
+            # failed round nothing else has.
+            #
+            # HERE, not in get_chunks. Closing this generator runs this finally FIRST, so the
+            # release event recorded there lands after the collective.
+            #
+            # wait() enqueues a stream wait rather than blocking the host, and it does not yield,
+            # so it is safe while the generator is being closed. Its own failure is swallowed: this
+            # is cleanup, and replacing the exception that brought us here would hide it.
+            if posted is not None and posted[3]:
+                try:
+                    posted[0].wait()
+                except Exception:
+                    logger.debug(f"[RunAI Streamer][Distributed] Rank "
+                                 f"{self.original_group_rank}: could not join the outstanding send "
+                                 f"while cleaning up")
 
     def check_fill_matches_prediction(self, rows: List[SlotRange],
                                       ranges: List[SlotRange],
