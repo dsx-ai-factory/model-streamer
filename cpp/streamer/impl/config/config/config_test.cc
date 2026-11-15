@@ -111,6 +111,46 @@ TEST_F(Creation, WorkersPerMountIsAtLeastOne)
     }
 }
 
+// NODE WIDE. The readers of one mount queue against the same device, so the setting is what the
+// node asks for and each process takes its share - the same arithmetic the queue depth uses. Left
+// per process, the real count would multiply with the tensor parallelism.
+TEST_F(Creation, WorkersPerMountAreSharedBetweenTheProcessesOnTheNode)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    for (const unsigned processes : { 1u, 2u, 4u, 8u })
+    {
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"),
+                               static_cast<unsigned long>(processes));
+
+        EXPECT_EQ(Config::fs_workers_per_mount(), 8u / processes);
+        EXPECT_EQ(Config::fs_workers_per_mount() * processes, 8u)
+            << "the node reads with the same number of readers however it is split";
+    }
+}
+
+// The floor still wins, and the node then reads with MORE than was asked for - which is logged.
+TEST_F(Creation, MoreProcessesThanReadersStillLeavesOneEach)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 2UL);
+    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+    EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+}
+
+// The default is untouched by the division: one per process, whatever the parallelism.
+TEST_F(Creation, TheDefaultIsOnePerProcessAtEveryGroupSize)
+{
+    utils::temp::UnsetEnv readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+
+    for (const unsigned processes : { 1u, 8u })
+    {
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"),
+                               static_cast<unsigned long>(processes));
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+}
+
 TEST_F(Creation, Concurrency)
 {
     const auto expected = utils::random::number<int>(1, 1000);

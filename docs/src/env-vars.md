@@ -101,6 +101,13 @@ One mount, one reader, is the default. Storage that answers many requests at onc
 filer, or a striped local array - can be read faster by several readers than by one, because a
 single reader can only have its own queue's worth of requests outstanding.
 
+The value is for the NODE, not for one process, and is divided between the streamer processes on
+it the same way `RUNAI_STREAMER_FS_QUEUE_DEPTH` is. Eight readers over eight processes is one each;
+over two processes it is four each. A mount is read by the number asked for however the work is
+split across ranks. A process never gets fewer than one reader, so asking for fewer readers than
+there are processes gives one each, and the streamer warns that the mount is read by more than the
+number asked for.
+
 The mount's queue depth from `RUNAI_STREAMER_FS_QUEUE_DEPTH` is SHARED between its readers, not
 given to each: four readers on a depth of 64 run at 16 each. The reads in flight for the mount are
 then about what they were; they are issued from more threads. Each reader costs a thread and its
