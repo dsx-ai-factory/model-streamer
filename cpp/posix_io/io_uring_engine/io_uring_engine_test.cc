@@ -240,6 +240,10 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, RegionBytes);
 
+    // Asked BEFORE the engine exists: once it holds its region, a probe registering a second one can
+    // be refused by a RLIMIT_MEMLOCK that allowed the first, and would then expect the wrong answer.
+    const bool kernel_registers = raw_can_register_buffer();
+
     // After the buffers, so the ring goes first - see the note on declaration order above.
     IoUringEngine engine(config_with(8));
 
@@ -263,7 +267,7 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
 
     // THE PATH UNDER TEST ACTUALLY RAN. A fixed read and an ordinary one return identical bytes, so
     // without this the test would pass on a host that registered nothing.
-    EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer() ? 1u : 0u)
+    EXPECT_EQ(engine.registered_regions(), kernel_registers ? 1u : 0u)
         << "the engine disagreed with the kernel about whether this region could be registered";
 
     EXPECT_EQ(engine.over_table_reads(), 0u)
@@ -961,6 +965,10 @@ TEST(IoUringEngine, Direct_Read_Through_A_Registered_Buffer)
     AlignedBuffer region(Block * 2);
     ASSERT_NE(region.get(), nullptr);
 
+    // Asked BEFORE any engine exists: once one holds its region, a probe registering a second can be
+    // refused by a RLIMIT_MEMLOCK that allowed the first, and would then expect the wrong answer.
+    const bool kernel_registers = raw_can_register_buffer(Block * 2);
+
     for (const bool async_direct : BothPaths)
     {
         SCOPED_TRACE(path_name(async_direct));
@@ -982,7 +990,7 @@ TEST(IoUringEngine, Direct_Read_Through_A_Registered_Buffer)
         ASSERT_EQ(issued, 1u);
 
         // The fixed path really ran, where the kernel allows it.
-        EXPECT_EQ(engine.registered_regions(), raw_can_register_buffer(Block * 2) ? 1u : 0u);
+        EXPECT_EQ(engine.registered_regions(), kernel_registers ? 1u : 0u);
 
         const auto completions = reap(engine, 1);
         ASSERT_EQ(completions.size(), 1u);
