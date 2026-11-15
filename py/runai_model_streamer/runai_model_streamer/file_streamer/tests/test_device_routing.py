@@ -12,6 +12,9 @@ import torch
 from runai_model_streamer.file_streamer import file_streamer as file_streamer_module
 from runai_model_streamer.file_streamer.device_support import DeviceSupport
 from runai_model_streamer.file_streamer.file_streamer import FileStreamer
+from runai_model_streamer.file_streamer.file_streamer import (
+    RunaiStreamerInvalidInputException,
+)
 from runai_model_streamer.file_streamer.requests_iterator import (
     FileChunks,
     FilesRequestsIteratorWithBuffer,
@@ -90,6 +93,51 @@ class TestDictatedSlotShape(unittest.TestCase):
         # A device the C++ layer does not serve still takes the shape, on the host ring.
         self.assertEqual(self.ring_shape(supported=False, slot_shape=(RANGE_SIZE * 2, 7)),
                          (RANGE_SIZE * 2, 7, False))
+
+
+class TestTheRangeCap(unittest.TestCase):
+    """max_ranges_per_slot reaches the HOST ring too, and is refused where it cannot be honoured.
+
+    The host branch used to drop it. A caller that set it got slots packed by bytes alone, which
+    is the opposite of what it asked for, and nothing said so."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("x" * (RANGE_SIZE * RANGES))
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def chunks(self):
+        return [FileChunks.contiguous(0, self.path, 0, [RANGE_SIZE] * RANGES)]
+
+    def stream(self, **kwargs):
+        """The ring stream_files built, on the host branch."""
+        with patch.object(file_streamer_module, "device_support", return_value=None), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size",
+                             return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(self.chunks(), None, "cpu", **kwargs)
+                cap = fs.requests_iterator.max_ranges_per_slot
+                fs.drain_live_submissions()
+        return cap
+
+    def test_a_dictated_host_ring_takes_the_cap(self):
+        # A slot sized for every range, so only the cap can end it early. Without the forwarding
+        # the ring reports None here and packs all twelve into one slot.
+        self.assertEqual(self.stream(slot_shape=(RANGE_SIZE * RANGES, 2),
+                                     max_ranges_per_slot=3), 3)
+
+    def test_a_cap_without_a_dictated_shape_is_refused(self):
+        """Not ignored. A ring sized from a byte budget would be sized without the cap and then
+        packed under it, so the slot it chose could never be filled."""
+        with self.assertRaises(RunaiStreamerInvalidInputException) as caught:
+            self.stream(max_ranges_per_slot=3)
+
+        self.assertIn("needs a dictated slot_shape", str(caught.exception))
+
+    def test_no_cap_is_still_no_cap(self):
+        self.assertIsNone(self.stream(slot_shape=(RANGE_SIZE * RANGES, 2)))
 
 
 class TestADictatedShapeIsValidated(unittest.TestCase):

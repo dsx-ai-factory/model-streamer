@@ -318,6 +318,10 @@ class FileStreamer:
         the count - a four byte range takes a whole row. Without it the ring packs by bytes alone
         and a slot of small tensors overflows whatever the peers agreed to read.
 
+        It needs a dictated slot_shape and is REFUSED without one, on either ring. A ring sized
+        here from a byte budget would be sized without the cap and then packed under it, which is
+        a slot the ring can never fill.
+
         It asks two things of the caller, and refuses rather than give back a ring that cannot be
         sent. A DEVICE the library can write into, because a host ring places its ranges congruent
         with their file offsets - a layout that depends on the mount and on this rank's address. And
@@ -447,6 +451,16 @@ class FileStreamer:
                 "stream dictated none"
             )
 
+        if max_ranges_per_slot is not None and slot_shape is None:
+            # REFUSED, not ignored. A ring sized here from a byte budget would pack under the cap
+            # but be SIZED without it, so the chosen slot is one the ring can never fill - the
+            # split SlotBounds exists to prevent. The cap also only means anything to a caller
+            # describing its slots to peers, and such a caller always dictates the shape.
+            raise RunaiStreamerInvalidInputException(
+                f"max_ranges_per_slot={max_ranges_per_slot} needs a dictated slot_shape: a ring "
+                f"sized from a byte budget would be sized without the cap and packed under it"
+            )
+
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
         sizing = None
@@ -572,6 +586,7 @@ class FileStreamer:
                 buffer_size, num_buffers = slot_shape
                 self.requests_iterator = FilesRequestsIteratorWithBuffer(
                     buffer_size, num_buffers, file_stream_requests, direct_block, owned=hands_over,
+                    max_ranges_per_slot=max_ranges_per_slot,
                 )
             else:
                 self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
