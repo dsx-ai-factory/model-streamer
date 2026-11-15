@@ -196,6 +196,11 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    # A REAL DEVICE, not only a patched DeviceSupport. These drive the library into a device write,
+    # and the C++ layer cannot be patched: without a driver it answers "No usable device is
+    # present". The distributed tests run against the REAL library, so on a CPU-only host they
+    # would fail rather than skip.
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
     def test_1_a_rank_short_of_device_memory_keeps_the_slot_size(self):
         """The ring the group agreed will not fit on this rank any more.
 
@@ -421,6 +426,11 @@ class TestDistributedStreamer(unittest.TestCase):
         else:
             self.assertEqual(said, [], "and by no other rank")
 
+    # A REAL DEVICE, not only a patched DeviceSupport. These drive the library into a device write,
+    # and the C++ layer cannot be patched: without a driver it answers "No usable device is
+    # present". The distributed tests run against the REAL library, so on a CPU-only host they
+    # would fail rather than skip.
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
     def test_1_the_direct_source_is_used_where_the_library_can_fill_the_ring(self):
         for owned in (True, False):
             with self.subTest(owned=owned):
