@@ -60,16 +60,24 @@ class FakeStream:
 
 
 class FakeSupport:
-    """A caller that has MOVED: the current stream is not the one the sends went out on."""
+    """A caller that MOVES once streaming has started.
 
-    def __init__(self, moved_to="the stream the caller moved to"):
+    get_chunks captures send_stream from the FIRST current_stream call, so answering with the real
+    send stream once and a different one afterwards is what a caller moving mid-stream looks like
+    from in here - and it is the only case where the join and the release event can land on
+    different streams."""
+
+    def __init__(self, send_stream, moved_to="the stream the caller moved to"):
+        self.send_stream = send_stream
         self.moved_to = moved_to
+        self.asked = 0
 
     def new_event(self):
         return FakeEvent()
 
     def current_stream(self, device):
-        return self.moved_to
+        self.asked += 1
+        return self.send_stream if self.asked == 1 else self.moved_to
 
 
 class TwoSlots:
@@ -106,6 +114,15 @@ class OutstandingSendIsJoined(unittest.TestCase):
         # TWO, because with one the loop consumes the turn before it BEFORE posting the next, and
         # the window this test is about never opens.
         streamer.receive_buffers = 2
+        # What get_chunks reads on the way into the predicted loop.
+        streamer.max_chunk = SIZE
+        streamer.metadata_rows = 2
+        streamer.rank_dicts_map = {}
+        streamer.reading_from_storage = True
+        streamer.sends_directly = True
+        streamer.slot_shape = (SIZE, 2)
+        streamer.total_chunks_to_read = 2
+        streamer.file_streamer = MagicMock()
         streamer.is_error = False
         # A RECEIVE FROM THE PEER, THEN OUR OWN SEND, which is the only order that leaves a send
         # of ours posted while the loop yields. Two sends in a row are consumed early instead.
@@ -114,7 +131,11 @@ class OutstandingSendIsJoined(unittest.TestCase):
         return streamer
 
     def run_until_the_caller_raises(self):
-        """Drive the loop to the yield inside the second turn's consume, then raise there."""
+        """Drive the loop to the yield inside the second turn's consume, then raise there.
+
+        THROUGH get_chunks, not stream_predicted directly. The slot goes back in get_chunks's
+        finally, so a test that drove the inner generator alone would record no release at all -
+        and the ordering assertions below would compare the joins against an empty list."""
         log = []
         source = TwoSlots(log)
         streamer = self.streamer()
@@ -127,14 +148,14 @@ class OutstandingSendIsJoined(unittest.TestCase):
 
         outstanding = [None]
         send_stream = FakeStream(log)
-        with patch(f"{MODULE}.device_support", return_value=FakeSupport()), \
+        with patch(f"{MODULE}.DirectDistributionSource", return_value=source), \
+             patch(f"{MODULE}.device_support", return_value=FakeSupport(send_stream)), \
              patch(f"{MODULE}.dist.broadcast", side_effect=broadcast), \
              patch(f"{MODULE}.aligned_device_buffer",
                    side_effect=lambda n, device: torch.zeros(n, dtype=torch.uint8)), \
              patch.object(_distributedStreamer, "check_fill_matches_prediction",
                           lambda *a, **k: None):
-            chunks = streamer.stream_predicted(source, torch.zeros(SIZE, dtype=torch.uint8),
-                                               send_stream, outstanding)
+            chunks = streamer.get_chunks()
             next(chunks)                      # the peer's rows, yielded after our send is posted
             with self.assertRaises(RuntimeError):
                 chunks.throw(RuntimeError("the caller's clone failed"))
@@ -157,9 +178,9 @@ class OutstandingSendIsJoined(unittest.TestCase):
         waits = [i for i, (what, _) in enumerate(log) if what == "wait"]
         releases = [i for i, (what, _) in enumerate(log) if what == "release"]
         self.assertTrue(waits, "nothing was ever joined")
-        if releases:
-            self.assertLess(max(waits), min(releases),
-                            "every join must come before the slot goes back")
+        self.assertTrue(releases, "the slot never went back, so there is no order to check")
+        self.assertLess(max(waits), min(releases),
+                        "every join must come before the slot goes back")
 
 
     def test_the_join_is_carried_to_the_stream_the_sends_went_out_on(self):
@@ -176,9 +197,9 @@ class OutstandingSendIsJoined(unittest.TestCase):
 
         carried = [i for i, (what, _) in enumerate(log) if what == "send stream waits"]
         releases = [i for i, (what, _) in enumerate(log) if what == "release"]
-        self.assertTrue(carried)
-        if releases:
-            self.assertLess(max(carried), min(releases))
+        self.assertTrue(carried, "the join was never carried to the send stream")
+        self.assertTrue(releases, "the slot never went back, so there is no order to check")
+        self.assertLess(max(carried), min(releases))
 
 
 if __name__ == "__main__":
