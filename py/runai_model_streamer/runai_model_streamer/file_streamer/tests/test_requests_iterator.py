@@ -1046,6 +1046,34 @@ class TestDeviceRingShape(unittest.TestCase):
         self.assertLessEqual((slots + 2) * size, 300 * MiB, "within the allowance")
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_a_cap_that_splits_the_stream_keeps_the_second_slot(self):
+        """Bytes are not the only thing that ends a slot.
+
+        A slot can hold every byte of the stream and still not hold every RANGE, because the cap
+        ends it on its row count. The second request then waits for the first slot to come back,
+        which is the overlap this depth exists for. The shortcut used to compare byte totals by
+        hand and would pin the depth at one here."""
+        MiB = 1 << 20
+        stream = self.files([MiB] * 4)                       # 4 MiB, which one slot holds
+        bounds = SlotBounds(max_ranges=2)                    # but only two ranges at a time
+
+        size, slots = device_ring_sizing(64 * MiB, stream, bounds)
+
+        self.assertGreaterEqual(size, 4 * MiB, "the bytes do fit in one slot")
+        self.assertEqual(slots, 2, "the cap still needs a second request, so keep the overlap")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_alignment_that_splits_the_stream_keeps_the_second_slot(self):
+        """The same for padding: each range is rounded up, so the packed stream outgrows a slot
+        that its raw bytes fit inside."""
+        stream = self.files([8] * 4)                         # 32 bytes raw
+        bounds = SlotBounds(range_alignment=1 << 20)         # a mebibyte each once padded
+
+        size, slots = device_ring_sizing(64 << 20, stream, bounds)
+
+        self.assertEqual(slots, 2, "padded, this stream does not fit in one slot")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_one_slot_is_still_right_when_it_does_span(self):
         """Pins that the test above is about SPANNING and not about always answering two: a stream
         a slot holds whole recycles nothing, so a second slot could never be filled."""

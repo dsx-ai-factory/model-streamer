@@ -1073,11 +1073,20 @@ def device_ring_sizing(free_bytes: Optional[int],
 
     # A STREAM THAT FITS IN ONE SLOT RECYCLES NOTHING, so a second slot could never be filled.
     #
+    # THE BYTES FIRST, THEN THE PACKER. A slot can hold every byte and still not hold every range:
+    # the cap ends a slot on its row count, and the alignment pads each range. Either way a second
+    # request follows, waits for the first slot to come back, and a depth of one costs the overlap.
+    #
+    # The byte test comes first because it is NECESSARY - padding and a cap only ever need more room
+    # - and because it is cheap. Packing walks every range, where the sum only adds them, and a
+    # model with hundreds of thousands of ranges feels the difference. Gated this way, a model large
+    # enough for that to matter fails the byte test and never reaches the packer.
+    #
     # AFTER THE SHRINK, NEVER BEFORE IT. Asking first uses a size the allowance may not pay for:
     # the depth is then pinned at one, the slot shrinks below the stream, and the ring can neither
     # span it nor overlap - where two smaller slots would have fitted the same allowance.
     streamed = sum(size_ for file_chunks in files_chunks for size_ in file_chunks.sizes)
-    if slots > 1 and size >= streamed:
+    if slots > 1 and size >= streamed and pack(files_chunks, size, bounds).slots <= 1:
         slots = 1
 
     if bounds.max_ranges is not None and rows_ended_a_slot(files_chunks, size, bounds):
