@@ -58,7 +58,14 @@ test-unit-real test-unit-real-installed:
 test-dist: mock install_dev_dep
 	torchrun --nproc_per_node 2 run_dist_tests.py
 
-test: test-unit test-dist
+# Every Python file must at least PARSE. The distributed tests need torchrun and two GPUs, so
+# they do not run in the usual loop - an unparseable one sat on a branch for several commits
+# while `make test` stayed green, because the discovery that would have loaded it never ran.
+# Needs no dependencies and takes a second.
+lint-parse:
+	python3 -m compileall -q -f runai_model_streamer run_dist_tests.py
+
+test: lint-parse test-unit test-dist
 
 clean:
 	rm -rf build/ dist/ runai_model_streamer.egg-info/
