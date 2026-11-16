@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from typing import List, Iterator, Optional, Tuple
+from typing import Any, List, Iterator, NamedTuple, Optional, Tuple
 import torch
 import torch.distributed as dist
 import os
@@ -14,7 +14,9 @@ from runai_model_streamer.file_streamer import (
     FileChunks,
 )
 
-from runai_model_streamer.file_streamer.file_streamer import host_or_device
+from runai_model_streamer.file_streamer.file_streamer import host_or_device, resolve_device
+
+from runai_model_streamer.file_streamer.device_support import device_support
 
 from runai_model_streamer.torch_device.torch_device import (
     can_measure_device_memory,
@@ -22,8 +24,32 @@ from runai_model_streamer.torch_device.torch_device import (
 )
 
 from runai_model_streamer.file_streamer.requests_iterator import (
+    RunaiStreamerMemoryLimitException,
+    device_ring_budget,
+    device_ring_floor,
+    device_ring_sizing,
+    SlotBounds,
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
+)
+
+from runai_model_streamer.distributed_streamer.distribution_source import (
+    EmptyDistributionSource,
+    SlotRange,
+)
+
+from runai_model_streamer.distributed_streamer.prediction import (
+    predicted_slots,
+)
+
+from runai_model_streamer.distributed_streamer.staged_source import (
+    StagedDistributionSource,
+)
+
+from runai_model_streamer.distributed_streamer.direct_source import (
+    DirectDistributionSource,
 )
 
 from runai_model_streamer.distributed_streamer.partition import (
@@ -46,28 +72,47 @@ import humanize
 
 logger = logging.getLogger(__name__)
 
-RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR = "RUNAI_STREAMER_CUDA_ALIGNMENT"
-DEFAULT_DIST_BUFFER_ALIGNMENT = 512
-MAX_DIST_BUFFER_ALIGNMENT = 1024 * 1024
+def metadata_rows(file_stream_requests: List[FileChunks]) -> int:
+    """How many ranges one metadata tensor must be able to describe.
+
+    EVERY RANGE IN THE REQUEST. A slot cannot hold more than the share it is filled from, and a
+    share cannot hold more than the whole list - so this bounds any slot without modelling how the
+    ranges pack. A height derived from the packing would be a second copy of a rule that has
+    already drifted once, and it would fail mid-load, with the collective already posted.
+
+    Every rank computes it from the same list, which is what makes the broadcast shapes match. At
+    32 bytes a row it costs about 2.4 MiB for a model of 76 thousand ranges, against a staging
+    buffer of at least a gibibyte."""
+    return max(1, sum(len(file_chunks.sizes) for file_chunks in file_stream_requests))
 
 
-def get_dist_buffer_alignment() -> int:
-    """
-    Get the alignment for the distributed buffer.
-    """
-    value = int(os.environ.get(RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR, str(DEFAULT_DIST_BUFFER_ALIGNMENT)))
-    if value < 0 or value > MAX_DIST_BUFFER_ALIGNMENT:
-        raise ValueError(f"Invalid value for RUNAI_STREAMER_CUDA_ALIGNMENT: {value}, must be between 0 and {MAX_DIST_BUFFER_ALIGNMENT} bytes")
-    return value
+SENT_RING_BOUNDS = SlotBounds()
+"""The bounds a sent ring is built with, and so the bounds its size must be chosen under.
 
+NO RANGE CAP. A cap belongs to a metadata tensor's height, and nothing describes a predicted slot -
+every rank works the layout out instead. Capping here would end a slot before its bytes ran out, so
+the group would broadcast more slots, each one part empty.
 
-MAX_CHUNKS_PER_BATCH = 256
+ONE VALUE for the sizing, the prediction and the ring. They were separate parameters, and the
+sizing read only the byte budget - so it chose a slot the row cap could never fill."""
+
+DIST_BUFFER_ALIGNMENT = 512
+"""What a staging buffer's START is aligned to, not its contents.
+
+The ranges inside are packed one after another, so whether one can be read as its dtype follows
+from its own offset. A buffer starting at an odd address would make that follow from wherever torch
+allocated instead, and every range would be copied."""
 DEFAULT_BUFFER_MIN_BYTESIZE = 1024 * 1024 * 1024
 
 
 def dist_buffer_bytesize(max_chunk: int) -> int:
-    """One staging buffer: the minimum, or the largest chunk if that is bigger."""
-    minimum = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE)))  # environment variable used for testing
+    """One staging buffer: the minimum, or the largest chunk if that is bigger.
+
+    TESTS ONLY may lower the minimum. It is what gives the gate in set_is_distributed its slack:
+    the free memory that gate compares against is read before the first collective, so it does not
+    yet show the NCCL communicator. A gibibyte per buffer leaves room for that and more. Lowered,
+    the threshold falls to about max_chunk and the communicator stops being small beside it."""
+    minimum = int(os.environ.get("RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE", str(DEFAULT_BUFFER_MIN_BYTESIZE)))
     return max(minimum, max_chunk)
 
 
@@ -76,45 +121,170 @@ def is_global_distribution() -> bool:
     return int(os.environ.get("RUNAI_STREAMER_DIST_GLOBAL", "0")) == 1
 
 
-def allocate_dist_staging(max_chunk: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Every device allocation the broadcast loop makes: two staging buffers and two metadata tensors.
+def aligned_device_buffer(bytesize: int, device: torch.device) -> torch.Tensor:
+    """One device buffer whose START is aligned, over-allocated so the slice still has room.
 
-    Each staging buffer is over-allocated by the alignment and sliced to the first aligned address, so
-    an offset that is a multiple of the alignment lands aligned in BOTH buffers - which is what a
+    EVERY buffer a rank receives into comes from here. An offset means the same thing in a sender's
+    buffer and in a receiver's copy only while both begin on the same remainder, and torch's
+    allocator is not asked to promise that."""
+    raw = torch.empty(bytesize + DIST_BUFFER_ALIGNMENT, dtype=torch.uint8, device=device)
+    return raw[(-raw.data_ptr()) % DIST_BUFFER_ALIGNMENT:]
+
+
+def allocate_dist_staging(max_chunk: int, device: torch.device, rows: int,
+                          receive_bytesize: Optional[int] = None,
+                          send_buffer: bool = True) -> Tuple[Optional[torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Every device allocation the broadcast loop makes: the staging buffers and two metadata tensors.
+
+    Each staging buffer is over-allocated by DIST_BUFFER_ALIGNMENT and sliced to the first aligned
+    address, so the same offset lands on the same remainder in BOTH buffers - which is what a
     receiving rank relies on to read a sender's layout.
+
+    receive_bytesize is what the LARGEST sender will broadcast, which is the slot size where the
+    ranks send their ring slots. It defaults to this rank's own staging size, which is right only
+    while every rank stages.
+
+    send_buffer is False for a rank that sends its ring slots: it has nothing to stage through, and
+    the buffer would be a device allocation nothing ever writes to.
 
     dist_device_bytes_required() measures THIS function, and a test allocates from it and compares, so
     the free-memory check cannot disagree with the allocation about how many buffers there are."""
     buffer_bytesize = dist_buffer_bytesize(max_chunk)
-    alignment = get_dist_buffer_alignment()
+    receive_bytesize = buffer_bytesize if receive_bytesize is None else receive_bytesize
 
-    def staging() -> torch.Tensor:
-        raw = torch.empty(buffer_bytesize + alignment, dtype=torch.uint8, device=device)
-        return raw if alignment <= 1 else raw[(-raw.data_ptr()) % alignment:]
+    def staging(bytesize: int) -> torch.Tensor:
+        return aligned_device_buffer(bytesize, device)
 
     def metadata() -> torch.Tensor:
-        return torch.zeros(MAX_CHUNKS_PER_BATCH + 1, 4, dtype=torch.int64, device=device)
+        # One row per range, plus row 0 for the count.
+        return torch.zeros(rows + 1, 4, dtype=torch.int64, device=device)
 
-    return staging(), staging(), metadata(), metadata()
+    send = staging(buffer_bytesize) if send_buffer else None
+    return send, staging(receive_bytesize), metadata(), metadata()
 
 
-def dist_device_bytes_required(max_chunk: int) -> int:
-    """What allocate_dist_staging() takes on the device."""
-    staging = dist_buffer_bytesize(max_chunk) + get_dist_buffer_alignment()
-    metadata = (MAX_CHUNKS_PER_BATCH + 1) * 4 * 8      # int64
+def dist_device_bytes_required(max_chunk: int, rows: int) -> int:
+    """What allocate_dist_staging() takes on the device WHEN THE RANKS STAGE.
+
+    It is the gate in set_is_distributed, which runs before the group has a slot shape, so it cannot
+    describe a rank that sends its ring slots: that rank allocates no send buffer, sizes its receive
+    buffer from the agreed slot, and takes a device ring on top that this never counted. What bounds
+    THAT rank is device_ring_budget, out of which agreed_slot_shape reserves the buffers it receives
+    into - two where depth can pay for them, one where it cannot.
+
+    So this stays the STAGED figure. On the direct path it is not even conservative: that rank
+    receives into a buffer the size of the agreed slot, which is at least the largest range, while
+    this counts dist_buffer_bytesize(max_chunk). The gate runs before the group has a slot shape,
+    so it cannot know the real figure; what bounds that rank is device_ring_budget instead."""
+    staging = dist_buffer_bytesize(max_chunk) + DIST_BUFFER_ALIGNMENT
+    metadata = (rows + 1) * 4 * 8      # int64
     return 2 * staging + 2 * metadata
 
 
-def aligned_offset(base_ptr: int, current_offset: int, alignment: int) -> int:
-    """Return the smallest offset >= current_offset such that (base_ptr + offset) % alignment == 0."""
-    if alignment <= 1:
-        return current_offset
-    total_addr = base_ptr + current_offset
-    padding = (-total_addr) % alignment
-    return current_offset + padding
-
-
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
+
+
+def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None:
+    """Describe a filled slot for the ranks that will receive it.
+
+    The row is [file, index, SIZE, OFFSET], which is not SlotRange's field order: broadcast() reads
+    the size from column 2 and the offset from column 3. Row 0 carries the count.
+    """
+    if len(ranges) + 1 > metadata.shape[0]:
+        # Raised before anything is written. Half a row set is worse than none: the collective is
+        # posted either way, and the receivers decode whatever got there.
+        raise ValueError(
+            f"{len(ranges)} ranges need {len(ranges) + 1} metadata rows, and this tensor has "
+            f"{metadata.shape[0]}"
+        )
+
+    metadata[0, 0] = len(ranges)
+    if ranges:
+        # ONE TENSOR FOR THE WHOLE BLOCK. A tensor built per row is a construction and a copy each
+        # time, and a slot can carry tens of thousands of rows - and on a device metadata tensor
+        # each of those copies is its own transfer.
+        rows = torch.tensor([(r.file_id, r.range_index, r.size, r.offset) for r in ranges],
+                            dtype=metadata.dtype)
+        metadata[1:len(ranges) + 1].copy_(rows)
+
+
+class AgreedRing(NamedTuple):
+    """What the group agreed to build on every rank.
+
+    buffer_size is the only part every rank must match: it is the broadcast unit and an input to the
+    layout each rank computes for its peers. Depth and the receive count are local, and a rank that
+    cannot afford what was agreed may lower either on its own."""
+
+    buffer_size: int
+    num_buffers: int
+    receive_buffers: int
+
+    @property
+    def shape(self) -> Tuple[int, int]:
+        """What stream_files takes: the ring, without the buffers received into."""
+        return (self.buffer_size, self.num_buffers)
+
+
+def agreed_slot_shape(min_free_bytes: Optional[int],
+                      file_stream_requests: List[FileChunks],
+                      bounds: SlotBounds = SENT_RING_BOUNDS) -> Optional[AgreedRing]:
+    """The ring every rank of the group will send from, with what it receives into, or None when no
+    ring fits.
+
+    NO COLLECTIVE OF ITS OWN. It is a pure function of values that are already equal on every rank:
+    the smallest free memory in the group, which get_min_device_free_memory has agreed, and the
+    whole file list, which is the caller's request. Agreement comes from identical inputs, not from
+    another reduction - and a second reduction would be a second place for the ranks to disagree.
+
+    THE WHOLE LIST, never this rank's share. A share is floored by the largest range IN IT, so two
+    ranks would answer differently. And the size is what a RECEIVER allocates too, so it has to hold
+    the largest range any sender will broadcast - which only the whole list knows.
+
+    THE SAME LIST. Not in the same order, any more: the size comes from the largest range and the
+    total, and neither moves when the list is shuffled. It used to be packed in list order to score
+    a candidate depth, which made ORDER part of the contract between ranks.
+
+    NO CALLER-NAMED DEPTH anywhere on this path. A rank that chose its own would wait on
+    collectives its peers never post, and the device ring no longer takes one from anybody: its
+    depth is the two slots that let reading and sending overlap.
+
+    EVERY INPUT IS READ PER RANK, and two of them still move the answer: the device memory limit
+    and its fraction, which only ever LOWER what the data asked for. A rank given different ones
+    sizes differently, which is what check_the_group_agreed is for.
+
+    min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
+    measure, or one not using a device backend at all. There is then no ring to agree on, and the
+    answer is None.
+
+    ONE SLOT OF THE BUDGET IS NOT THE RING'S. A rank that sends its slots also receives its peers',
+    into a buffer of the same size, and get_chunks allocates that AFTER stream_files has already
+    taken the ring. Sizing the ring to the whole budget would leave nothing for it, and the failure
+    would be a raw allocation error on some ranks while the others wait in the collective.
+
+    THE SLOT PAYS FOR IT, down to the largest range, and the depth only when the slot cannot. Two
+    slots is the least that can overlap - the library refills a slot only once the collective has
+    handed it back - and losing that is the one cliff both models measure, while a slot somewhat
+    below what the data asked for is flat over a wide range. Shrinking is safe because every rank
+    computes this from the same numbers and so shrinks together; what would break a peer is one
+    rank alone choosing a different size.
+
+    A one slot ring is still right when the stream fits inside it - there is nothing to overlap
+    there - and it is still better than the host path when it does not. The host path copies every
+    range, so what a single slot costs is the overlap, not the device ring. A caller that asks for a
+    depth of 1 is taken at its word.
+    """
+    # TWO TO RECEIVE INTO, so a transfer lands while the clones out of the one before it still run.
+    # Asked for as part of the shape, not reserved out of it afterwards: a reservation that shrank
+    # a shape already chosen is a second solver, and the two disagree.
+    for receive_buffers in (2, 1):
+        shape = device_ring_sizing(min_free_bytes, file_stream_requests, bounds,
+                                   extra_slots=receive_buffers)
+        if shape is not None:
+            return AgreedRing(shape[0], shape[1], receive_buffers)
+
+    # Not even one slot and somewhere to receive into. Every rank reaches that from the same
+    # numbers, so the whole group takes the host path together.
+    return None
 
 
 def get_backends() -> dict:
@@ -181,12 +351,6 @@ class DistributedStreamer:
         its own free memory is."""
         group = self.distributed_streamer.create_group(self.params)
 
-        # The first collective on a group creates its NCCL communicator, which takes device memory.
-        # Done first, with the operation the stream uses, so the free memory read below is what is
-        # left for the staging buffers.
-        warmup = torch.zeros(1, dtype=torch.uint8, device=device)
-        dist.broadcast(warmup, src=dist.get_global_rank(group, 0), group=group)
-
         # A RANK THAT CANNOT MEASURE STILL REDUCES, with -1. Raising here instead would leave its
         # peers in the all_reduce below until the group timeout, and they would wait for a reading
         # that is never coming. Free memory is never negative, so nothing else produces this value.
@@ -198,6 +362,15 @@ class DistributedStreamer:
                 device, error)
             mine = -1
 
+        # This is the first collective on the group, so it creates the NCCL communicator, and the
+        # reading above does not yet show that memory - about 634 MiB on a B200.
+        #
+        # LEFT UNCORRECTED, and the headroom is in the two readers of this figure, not here. A rank
+        # that sends its ring slots is bounded by device_ring_budget, which takes half of what this
+        # returns. A rank that stages is bounded by the gate in set_is_distributed, whose threshold
+        # starts at two staging buffers - see dist_device_bytes_required - so it carries gibibytes
+        # of slack against those megabytes. A warmup collective here would make the reading exact
+        # and buy nothing either reader needs, while adding one more place for a group to stall.
         free_memory = torch.tensor([mine], dtype=torch.int64, device=device)
         dist.all_reduce(free_memory, op=dist.ReduceOp.MIN, group=group)
         smallest = int(free_memory.item())
@@ -215,6 +388,11 @@ class DistributedStreamer:
 
     def set_is_distributed(self, is_distributed: bool, device: str) -> None:
         # check if distributed streaming should be used
+
+        # CLEARED FIRST, because this object is reused across loads. A figure measured before the
+        # last model occupied the device would size a ring far too large, and nothing downstream
+        # can tell a stale reading from a fresh one.
+        self.params.min_device_free_memory = None
 
         if not is_distributed:
             self.is_distributed = False
@@ -272,7 +450,10 @@ class DistributedStreamer:
         # the JOB - there is nothing here for the ranks to agree at runtime.
         if self.is_distributed and can_measure_device_memory(device) and backend_name in ("nccl", "xccl"):
             free_memory = self.get_min_device_free_memory(device)
-            required = dist_device_bytes_required(self.params.max_chunk)
+            # KEPT, not only compared. It is the one free-memory figure the group agrees on, and a
+            # ring they all send from has to be sized from it rather than from each rank's own.
+            self.params.min_device_free_memory = free_memory
+            required = dist_device_bytes_required(self.params.max_chunk, self.params.metadata_rows)
             if free_memory < required:
                 logger.warning(f"[RunAI Streamer][Distributed] Warning: Not enough memory on the device for distributed streaming - fallback to non distributed streaming, free memory: {free_memory} bytes, required minimun: {required} bytes")
                 self.is_distributed = False
@@ -316,7 +497,9 @@ class DistributedStreamer:
             )
             built_ring = True
         else:
-            self.distributed_streamer.stream_files(file_stream_requests, credentials, device, self.params, owned=owned)
+            self.distributed_streamer.stream_files(file_stream_requests, credentials, device,
+                                                   self.params, owned=owned,
+                                                   ring_buffers=ring_buffers)
             # A rank whose share of the partition is empty returns before building anything, leaving the
             # iterator from the safetensors metadata read in place. Reporting THAT as the model ring is
             # worse than reporting nothing: `1 x 8 Bytes` against the model's byte total reads exactly
@@ -371,6 +554,13 @@ class _distributedStreamerParams:
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
         self.max_chunk = 0
+        # One row per range of the request, set by set_params. One row until then, which is the
+        # smallest a metadata tensor can be - a request with nothing in it.
+        self.metadata_rows = 1
+        # The smallest free memory in the group, once it has been agreed; None where no agreement
+        # was needed. A ring every rank sends from is sized from THIS, not from what this rank
+        # happens to have free.
+        self.min_device_free_memory = None
  
     def get_group_size(self) -> int:
         if not dist.is_initialized():
@@ -437,6 +627,9 @@ class _distributedStreamerParams:
         max_chunks_per_file = (fc.max_chunk_size() for fc in file_stream_requests if fc.sizes)
         self.max_chunk = max(max_chunks_per_file, default=0)
 
+        # Held beside max_chunk, because the two together are what the staging allocation costs.
+        self.metadata_rows = metadata_rows(file_stream_requests)
+
         if discover_ranks:
             self.discover_local_ranks()
         else:
@@ -456,9 +649,17 @@ class _distributedStreamerParams:
             self.my_global_rank = dist.get_rank()
 
 class _distributedStreamer:
+    # What every rank will send, per rank and per turn. None means the metadata still travels,
+    # which is the safe answer: it is what a stream falls back to, and what any path that never
+    # sized a ring to send from gets.
+    predicted: Optional[List[List[List[SlotRange]]]] = None
+
     def __init__(self, file_streamer : FileStreamer) -> None:
         self.file_streamer = file_streamer
         self.device = None
+        self.sends_directly = False
+        self.slot_shape = None
+        self.receive_buffers = 0
         self.rank_file_chunks_list = {} # post Partitioning FileChunks to be streamed by this rank
         self.rank_dicts_map = {} # maps post partitioning FileChunks.id and chunk index to the original FileChunks.id and chunk index and chunk size
         self.total_chunks_to_read = 0
@@ -563,11 +764,25 @@ class _distributedStreamer:
             device: str,
             params : _distributedStreamerParams,
             owned: bool,
+            ring_buffers: Optional[int] = None,
     ) -> None:
+        """ring_buffers is the caller's depth. It reaches the HOST ring only.
 
-        self.device = torch.device(device)
+        The agreed shape ignores it. That shape decides whether the group sends ring slots or stages
+        through host memory, and the two post a different number of collectives per round, so a rank
+        that answered differently would wait for messages its peers never send.
+
+        owned=False hands the caller a view into a buffer the ring refills. It holds only while the
+        caller uses each tensor before asking for the next, and keeps to one stream: the event that
+        allows a refill is recorded when the caller asks again, so a tensor kept past that point can
+        change under it."""
+
+        # Resolved once, so the staging buffers and the stream an event is recorded on cannot
+        # drift onto different devices.
+        self.device = resolve_device(device)
         self.owned = owned
         self.max_chunk = params.max_chunk
+        self.metadata_rows = params.metadata_rows
         # the ranks sharing this host: the divisor for the node-total memory limit (see rank_memory_limit)
         self.num_processes_on_node = params.num_processes_on_node
 
@@ -614,6 +829,68 @@ class _distributedStreamer:
 
         log_rank_span_info(self.original_group_rank, my_span.partition)
 
+        # Send the ring's own slots where the library can fill them, and stage through a host ring
+        # where it cannot. agreed_slot_shape is a pure function of the free memory the group already
+        # reduced and of the WHOLE file list, so every rank should answer the same - and the check
+        # below is there because "should" is not "does".
+        #
+        # THE CALLER'S DEPTH IS NOT HONOURED HERE, and that is the point. The shape decides which
+        # path the whole group takes, so a rank that answered differently would wait for collectives
+        # its peers never post. Depth is the one input a caller can set per rank, and it buys little
+        # past a few slots, so the group agrees without asking.
+        agreed = agreed_slot_shape(params.min_device_free_memory, file_stream_requests)
+        self.slot_shape = agreed.shape if agreed else None
+        self.receive_buffers = agreed.receive_buffers if agreed else 0
+        self.sends_directly = (
+            device_support(self.device) is not None and self.slot_shape is not None
+        )
+        self.check_the_group_agreed()
+
+        # A device that COULD be filled, with no shape the group can send from. Said once, by one
+        # rank, because every rank reaches it from the same numbers - and said at all because the
+        # stream otherwise stages through host memory with nothing to show why.
+        if (self.original_group_rank == 0
+                and not self.sends_directly
+                and device_support(self.device) is not None):
+            if params.min_device_free_memory is None:
+                why = "the group agreed no free memory figure to size one from"
+            else:
+                budget = device_ring_budget(params.min_device_free_memory, file_stream_requests)
+                largest = device_ring_floor(file_stream_requests) // 2
+                why = (f"{humanize.naturalsize(budget, binary=True)} does not hold a slot to send, "
+                       f"one to receive and the largest range "
+                       f"({humanize.naturalsize(largest, binary=True)})")
+            logger.info(
+                f"[RunAI Streamer][Distributed] no ring fits on {self.device} that a slot can be "
+                f"broadcast from: {why} - staging through host memory instead"
+            )
+
+        # WHAT EVERY RANK WILL SEND, worked out instead of received. A receiver knows the ranges and
+        # where they sit before anything arrives, so the batch metadata never has to travel.
+        #
+        # NO COLLECTIVE, and this is a REQUIREMENT, not a convenience: every rank must be given the
+        # same file list, in the same order, and the same streamer settings. That is what makes the
+        # answer here already equal everywhere. Agreeing it over the wire would add a wait to a loop
+        # whose whole point is to remove one, and a second place for the ranks to disagree.
+        #
+        # BEFORE the empty-share return below. A rank with nothing to read still receives from its
+        # peers, so it needs the prediction as much as a rank that reads.
+        self.predicted = None
+        if self.sends_directly:
+            # ONE PASS over the file list, not one per rank. Working a share out reads every
+            # tensor of the model, and the cut points are the same for everyone, so asking rank by
+            # rank would repeat the whole pass for an answer already in hand.
+            shares = partition(file_stream_requests, self.group_size)
+
+            # WHOLE PLANS, not streams. The loop that sends them posts one collective and consumes
+            # the one before it, so it has to know how many turns there are before it starts.
+            self.predicted = [
+                list(predicted_slots(file_stream_requests, self.group_size, rank,
+                                     self.slot_shape[0], SENT_RING_BOUNDS.max_ranges,
+                                     shares[rank]))
+                for rank in range(self.group_size)
+            ]
+
         if len(self.rank_file_chunks_list) == 0:
             self.reading_from_storage = False
             logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: No chunks to read from storage")
@@ -621,15 +898,102 @@ class _distributedStreamer:
 
         # read files
         #
-        # owned=False whatever the caller asked for: this ring is internal. prefill() copies each chunk
-        # into the staging buffer and keeps no view, so nobody outside holds host memory and giving a
-        # slot away would only buy a fresh allocation per submission. Ownership on this path is the
-        # per tensor clone out of the staging buffer.
-        self.file_streamer.stream_files(
-            self.rank_file_chunks_list, credentials, "cpu",
-            memory_limit=self.rank_memory_limit(), owned=False
-        )
+        # owned=False whatever the caller asked for: this ring is internal. Nobody outside holds a
+        # slot - a staged source copies each range out of it, and a sent slot is broadcast and then
+        # cloned - so giving one away would only buy a fresh allocation per submission. Ownership on
+        # both paths is the per tensor clone the loop makes.
+        if self.sends_directly:
+            # memory_limit is not passed: it caps HOST memory, and this ring is on the device. The
+            # shape is what bounds it, and sent_from refuses a ring the library cannot write into.
+            #
+            # The same max_ranges_per_slot the metadata tensor has rows for. The ring packs by
+            # bytes, so without it a slot of small tensors holds more ranges than a peer can be told
+            # about, and write_metadata_rows refuses the batch.
+            shallower = None
+            try:
+                self.file_streamer.stream_files(
+                    self.rank_file_chunks_list, credentials, str(self.device),
+                    owned=False, slot_shape=self.slot_shape, sent_from=True,
+                    max_ranges_per_slot=SENT_RING_BOUNDS.max_ranges,
+                )
+            except RunaiStreamerMemoryLimitException as error:
+                # SHALLOWER, never smaller, and never a host ring. The slot size is what the group
+                # broadcasts, so a rank that changed it would send something its peers cannot
+                # receive, and a host ring cannot be broadcast from at all - NCCL does not send host
+                # memory. Depth is the only part of the shape this rank may decide alone.
+                #
+                # The shape was sized from the group's MINIMUM free memory, so reaching here means
+                # something took device memory on this rank after the group agreed. The broadcasts
+                # are synchronous, so the overlap this gives up slows every peer, not just this one.
+                # ONLY THE RING'S OWN OOM. That exception also carries a dictated shape this
+                # layer refused outright, and a packing failure raised after the submissions are
+                # already live - retrying either asks for the same refusal again, and the second
+                # trips the streamer's "a stream is still live" guard, which would replace the real
+                # diagnosis. The allocator's error is what a shallower ring can answer.
+                if not isinstance(error.__cause__, torch.cuda.OutOfMemoryError):
+                    raise
+
+                if self.slot_shape[1] <= 1:
+                    raise
+
+                shallower = (self.slot_shape[0], 1)
+
+            # OUTSIDE the handler, so the attempt that failed has let go of its memory. The pool
+            # allocates every slot up front, and while an exception is being handled its traceback
+            # keeps the slots it did manage to take - retrying in there asks for one more on top of
+            # them, and can fail where this succeeds.
+            if shallower is not None:
+                self.slot_shape = shallower
+                logger.warning(
+                    f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: not enough "
+                    f"device memory for the ring the group agreed - retrying with one slot of "
+                    f"{humanize.naturalsize(self.slot_shape[0], binary=True)}, which reads and "
+                    f"sends in turn instead of together"
+                )
+                self.file_streamer.stream_files(
+                    self.rank_file_chunks_list, credentials, str(self.device),
+                    owned=False, slot_shape=self.slot_shape, sent_from=True,
+                    max_ranges_per_slot=SENT_RING_BOUNDS.max_ranges,
+                )
+        else:
+            # The caller's depth reaches the host ring and only the host ring. The device path
+            # ignores it on purpose - its shape is agreed across the group - so this is the one
+            # call that forwards it.
+            self.file_streamer.stream_files(
+                self.rank_file_chunks_list, credentials, "cpu",
+                memory_limit=self.rank_memory_limit(), owned=False,
+                ring_buffers=ring_buffers,
+            )
         self.reading_from_storage = True
+
+    def check_the_group_agreed(self) -> None:
+        """Every rank packs to the same slot size, or they read each other at the wrong offsets.
+
+        The inputs are meant to be equal everywhere, but some are read per rank - the ring depth
+        setting, the device memory limit and its fraction - and any of them moves the slot size. A
+        rank that packed differently is not an error anyone would see: the load finishes and the
+        weights are wrong.
+
+        Zero where this rank stages through host memory, so a group that split between the two
+        paths is caught here rather than in a collective its peers never post.
+
+        ONE COLLECTIVE PER STREAM, carrying the value and its negation so a single MAX answers both
+        ends."""
+        if self.distribution_group is None:
+            return
+
+        size = self.slot_shape[0] if self.sends_directly else 0
+        both = torch.tensor([size, -size], dtype=torch.int64, device=self.device)
+        dist.all_reduce(both, op=dist.ReduceOp.MAX, group=self.distribution_group)
+        largest, smallest = int(both[0].item()), -int(both[1].item())
+        if largest != smallest:
+            raise RuntimeError(
+                f"the ranks of this group did not agree on the slot size - {smallest} to {largest} "
+                f"bytes - so they would lay their ranges out differently. It is part of the "
+                f"contract between ranks, not a local choice: check that every rank was given the "
+                f"same {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} and "
+                f"{RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME}"
+            )
 
     def rank_memory_limit(self) -> int:
         """This rank's share of RUNAI_STREAMER_MEMORY_LIMIT, which is a NODE total.
@@ -675,37 +1039,71 @@ class _distributedStreamer:
             raise ValueError("Streamer not initialized")
         
         BUFFER_BYTESIZE = dist_buffer_bytesize(self.max_chunk)
-        alignment = get_dist_buffer_alignment()
 
+        # The receive buffer must hold the LARGEST slot any peer will broadcast. Where the ranks send
+        # their ring slots that is the agreed slot size, not this rank's staging size - and a receive
+        # buffer that is too small does not raise, because slicing it CLAMPS, so the mismatch would
+        # reach the collective as a size disagreement.
+        #
         # Allocated THERE, not here, so the free-memory check in set_is_distributed measures the same
-        # four allocations this loop makes.
+        # allocations this loop makes.
         (data_buffer, received_buffer,
-         batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(self.max_chunk, self.device)
+         batch_metadata_tensor, received_metadata_tensor) = allocate_dist_staging(
+            self.max_chunk, self.device, self.metadata_rows,
+            receive_bytesize=self.slot_shape[0] if self.sends_directly else None,
+            # Only a rank that STAGES something needs one. A rank sending its ring slots has no use
+            # for it, and a rank with an empty share sends nothing at all.
+            send_buffer=self.reading_from_storage and not self.sends_directly,
+        )
         
-        ready_chunks_iterator = self.file_streamer.get_chunks()
-        
-        def chunk_generator():
-            yield from ready_chunks_iterator
-            while True:
-                yield None
+        if not self.reading_from_storage:
+            source = EmptyDistributionSource()
+        elif self.sends_directly:
+            source = DirectDistributionSource(self.file_streamer, self.rank_dicts_map)
+        else:
+            # Opened HERE, not above: the direct source pulls whole slots through get_slots instead,
+            # and starting this generator as well would leave two of them live on one streamer.
+            source = StagedDistributionSource(
+                self.file_streamer.get_chunks(),
+                data_buffer[:BUFFER_BYTESIZE],
+                self.rank_dicts_map,
+                # THE METADATA'S OWN HEIGHT, so a slot ends on its bytes and never on its rows.
+                # These were two numbers, and the smaller one silently shaped every slot.
+                self.metadata_rows,
+            )
+
+        # The stream the clones and the collective run on. Held so slot_is_free can see it move,
+        # and only where a source refills its slots - a staged source ignores the event.
+        send_stream = None
+        if self.sends_directly:
+            support = device_support(self.device)
+            if support is not None:
+                send_stream = support.current_stream(self.device)
 
         chunks_to_read = [self.total_chunks_to_read]
-        chunk_gen = chunk_generator()
-        leftover_chunk = [None]
+
+        # The slot this rank is holding, in a cell so the finally below and the predicted loop -
+        # which is a generator of its own - name the same one.
+        outstanding = [None]
 
         try:
+            if self.predicted is not None:
+                # The rounds are known, so they can be pipelined. The metadata loop below cannot:
+                # a receiver there learns the size of the next transfer from the transfer before it.
+                for file_id, chunk_index, buffer in self.stream_predicted(
+                        source, received_buffer, send_stream, outstanding):
+                    yield file_id, chunk_index, self.own(buffer) if self.owned else buffer
+                return
+
             while chunks_to_read[0] > 0:
-                # --- Fill staging buffer ---
-                current_data_size, chunk_count_in_batch = self.prefill(
-                    chunk_gen,
-                    MAX_CHUNKS_PER_BATCH,
-                    BUFFER_BYTESIZE,
-                    data_buffer,
-                    received_buffer,
-                    batch_metadata_tensor,
-                    received_metadata_tensor,
-                    leftover_chunk,
-                    alignment)
+                # --- Fill the send buffer ---
+                filled = source.next_slot()
+                outstanding[0] = filled
+                ranges = filled.ranges if filled else []
+                chunk_count_in_batch = len(ranges)
+                current_data_size = len(filled.memory) if filled else 0
+
+                write_metadata_rows(batch_metadata_tensor, ranges)
 
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Prefilled buffer with {chunk_count_in_batch} chunks and total size {humanize.naturalsize(current_data_size)}")
 
@@ -714,20 +1112,26 @@ class _distributedStreamer:
                 # Owned here rather than at broadcast()'s two yields, so there is no second site to
                 # miss - a missed one is a tensor that looks right and is overwritten next round.
                 #
-                # No event is needed, and the clone adds no ordering requirement that was not already
-                # there. data_buffer is next written by prefill()'s copy_ on this same stream;
-                # received_buffer is next written by dist.broadcast on NCCL's, which torch orders
-                # against this one - a dependency master already relies on for borrowed views.
+                # The staged source needs no event and ignores the one it is given: the slot is
+                # next written by its copy_ on this same stream, and received_buffer by
+                # dist.broadcast on NCCL's, which torch orders against this one - a dependency
+                # master already relies on for borrowed views. A source the library refills has no
+                # such ordering, and that is what release() takes an event for.
                 for file_id, chunk_index, buffer in self.broadcast(
                     chunks_to_read,
                     batch_metadata_tensor,
                     received_metadata_tensor,
-                    data_buffer,
+                    filled.memory if filled else None,
                     received_buffer,
-                    chunk_count_in_batch,
-                    current_data_size):
+                    chunk_count_in_batch):
                     yield file_id, chunk_index, self.own(buffer) if self.owned else buffer
-               
+
+                # AFTER the yields. The slot is this rank's send buffer, and broadcast() hands out
+                # views into it, so releasing earlier would let the next fill overwrite them.
+                if filled:
+                    source.release(filled, self.slot_is_free(send_stream))
+                outstanding[0] = None
+
         except RuntimeError as e:
             # Check if the error is a timeout
             self.is_error = True
@@ -740,81 +1144,310 @@ class _distributedStreamer:
             self.is_error = True
             logger.exception(f"[RunAI Streamer][Distributed] rank {self.original_group_rank} error: {e}")
             raise e
+        except GeneratorExit:
+            # A caller that walked away. The slot is NOT given back here: releasing resumes the
+            # library's own generator, which reads a whole further slot before it returns, and a
+            # generator nobody kept is closed by the collector - so that read would happen at an
+            # arbitrary moment, possibly during interpreter shutdown.
+            #
+            # Nothing is lost by skipping it, and the bytes are safe for a reason worth stating,
+            # because it is NOT that the collective runs on this stream - an async_op send runs on
+            # NCCL's own. A slot nobody releases is never refilled, stream_predicted joins the send
+            # it posted on the way out, and the slot is a torch allocation that NCCL recordStreams,
+            # so the allocator will not hand that block to anyone else while the send reads it.
+            outstanding[0] = None
+            raise
+        finally:
+            # A FINALLY, because an exception from the broadcast leaves the slot held with no
+            # other path back. A source the library refills is resumed BY the release, and the
+            # event goes with it, so the pool can wait on that event instead of the whole stream.
+            if outstanding[0] is not None:
+                try:
+                    # NO GUARD HERE, deliberately. Asking it again would re-raise whatever stopped
+                    # the loop - a caller that moved streams fails the check at the release above,
+                    # leaves the slot held, and would fail it a second time here, so the slot is
+                    # never given back and the ring is stranded by the very code meant to save it.
+                    #
+                    # STILL ON send_stream. Dropping the check does not change which stream the
+                    # event belongs on: the broadcast is already enqueued there and still reads the
+                    # slot. A caller that moved has lost its own clones either way, and it has the
+                    # ValueError; the peers have no such warning.
+                    source.release(outstanding[0], self.slot_is_free(send_stream, guard=False))
+                except Exception:
+                    # NEVER RAISES OUT OF HERE. This runs while another exception is on its way up,
+                    # or while the generator is being closed, and replacing either with a failure to
+                    # tidy up would hide what actually went wrong.
+                    logger.exception(
+                        f"[RunAI Streamer][Distributed] rank {self.original_group_rank}: could not "
+                        f"release the slot that was in flight"
+                    )
+
+    def slot_is_free(self, send_stream: Any = None, guard: bool = True) -> Optional[Any]:
+        """An event marking the end of this round, or None where the device has no events.
+
+        RECORDED ON send_stream, the stream the broadcast was enqueued on. That broadcast
+        reads the slot as this rank's send buffer, so it is the work a refill must wait for. An
+        event on any other stream lets the next fill overwrite bytes NCCL is still sending, which
+        reaches the peers as wrong data and raises nothing.
+
+        Recorded after both the collective and the clones are enqueued, so it follows both. It does
+        NOT cover what a caller does later with a borrowed view: under owned=False the yields are
+        views into the slot, and the caller may still hold them. Releasing after the yields is what
+        bounds that, not this event.
+
+        send_stream is None on the staged path, which has no broadcast to follow and ignores the
+        event. guard=False asks for the event without the check below, which the cleanup path
+        needs: see the finally in get_chunks.
+        """
+        support = device_support(self.device)
+        if support is None:
+            return None
+
+        # NO SEND STREAM is the staged path, which has no broadcast of its own to follow and
+        # ignores the event it is given: the slot is next written by its own copy_ on this stream.
+        # There is nothing for a move to break and nothing but the current stream to record on.
+        if send_stream is None:
+            done = support.new_event()
+            done.record(support.current_stream(self.device))
+            return done
+
+        # One event marks the work on ONE stream. A caller that moves leaves clones on a stream
+        # this event never covers, and the library refills the slot while they still read it -
+        # wrong bytes, nothing raised. The non-distributed ring refuses the same move.
+        #
+        # SAMPLED AT RELEASE, so it catches a caller that moved and stayed, not one that moved and
+        # came back before releasing. The other site checks no more than this.
+        if guard and support.current_stream(self.device) != send_stream:
+            raise ValueError(
+                "get_chunks moved to another stream part way through - every range of one stream "
+                "must be read on the stream it started on, because one event per slot can only "
+                "mark the work on one"
+            )
+
+        # AFTER the check, so a move that is refused leaves no event behind.
+        done = support.new_event()
+        done.record(send_stream)
+        return done
 
     @staticmethod
     def own(buffer: torch.Tensor) -> torch.Tensor:
         """A private copy of buffer.
 
         A PLAIN CLONE, and the simplicity is the point. An earlier version over-allocated and sliced
-        to an aligned address, to carry RUNAI_STREAMER_CUDA_ALIGNMENT across the copy. The tensor it
-        returned starts part way into a larger storage, and vLLM died with an illegal address in its
-        first forward pass as soon as it stopped cloning our tensors for us.
+        to an aligned address, to carry the staging alignment across the copy. The tensor it returned
+        starts part way into a larger storage, and vLLM died with an illegal address in its first
+        forward pass as soon as it stopped cloning our tensors for us.
 
-        RUNAI_STREAMER_CUDA_ALIGNMENT is not lost, because it was never a promise about this tensor:
-        it describes where tensors sit INSIDE the staging buffers, so that one rank's offsets are
-        usable on every other, and that layout is unchanged. What a caller needs is alignment for the
-        dtype, which SafetensorsStreamer checks on every tensor whatever path produced it.
+        The slot layout is not lost, because it was never a promise about this tensor: it says
+        where ranges sit INSIDE the staging buffers, so that one rank's offsets are usable on every
+        other, and that layout is unchanged. What a caller needs is alignment for the dtype, which
+        SafetensorsStreamer checks on every tensor whatever path produced it.
         """
         return buffer.clone()
 
-    def prefill(self,
-                chunk_gen: Iterator,
-                max_chunks_per_batch: int,
-                buffer_bytesize: int,
-                data_buffer: torch.Tensor,
-                received_buffer: torch.Tensor,
-                batch_metadata_tensor: torch.Tensor,
-                received_metadata_tensor: torch.Tensor,
-                leftover_chunk: List[Tuple[int, int, torch.Tensor]],
-                alignment: int) -> Tuple[int, int]:
+    def stream_predicted(self, source, received_buffer: torch.Tensor, send_stream,
+                         outstanding: List) -> Iterator:
+        """Post one broadcast, then consume the one before it.
 
-        current_data_size = 0
-        chunk_count_in_batch = 0
-        base_ptr = data_buffer.data_ptr()
+        A transfer runs while the caller is still working through the tensors of the slot before it.
+        ONE turn of lookahead, not two: a second live post would need a second ring slot, and the
+        source hands out one at a time.
 
-        while chunk_count_in_batch < max_chunks_per_batch and self.reading_from_storage:
+        A rank with fewer slots than its peers is skipped on the turns it has nothing for. Every
+        rank holds the same prediction, so they skip the same turns and no collective is half
+        posted."""
+        support = device_support(self.device)
+        turns = max((len(plan) for plan in self.predicted), default=0)
 
-            # Prioritize the leftover chunk from the previous batch.
-            if leftover_chunk[0]:
-                chunk_item = leftover_chunk[0]
-                leftover_chunk[0] = None
-            else:
-                chunk_item = next(chunk_gen)
+        # AS MANY AS THE GROUP AGREED ROOM FOR. Two are used in turn, so a transfer lands while the
+        # clones out of the one before it still run. One means no overlap, which is what a budget
+        # with no room for a second buffer buys.
+        receiving = [received_buffer]
+        if turns and self.receive_buffers > 1:
+            try:
+                receiving.append(aligned_device_buffer(received_buffer.numel(), self.device))
+            except torch.cuda.OutOfMemoryError:
+                # THIS RANK ALONE, and nothing has to agree. The count changes no collective - every
+                # rank still posts the same transfers in the same order - so a rank short of memory
+                # gives up the overlap and keeps loading instead of failing the whole group.
+                logger.warning(
+                    f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: not enough "
+                    f"device memory for a second receive buffer - receiving into one, which reads "
+                    f"and sends in turn instead of together"
+                )
+        single = len(receiving) == 1
+        # The clones out of that buffer. Posting into it again waits for them.
+        reusable = [None] * len(receiving)
 
-            if chunk_item is None:
-                break
+        posted = None
+        pending_event = None
+        started = False
+        receives = 0
 
-            ready_request_id, ready_chunk_index, cpu_buffer = chunk_item
-            chunk_size = cpu_buffer.numel()
+        def consume(entry):
+            """Wait for a posted transfer, hand its ranges over, and return the slot's event."""
+            work, buffer, rows, mine, index = entry
+            # Does not block the host: it makes this stream wait on the collective, so the clones
+            # the caller makes below are ordered after it.
+            work.wait()
+            for row in rows:
+                yield row.file_id, row.range_index, buffer[row.offset: row.offset + row.size]
+            if mine:
+                return self.slot_is_free(send_stream)
+            # The clones out of this receive buffer. Posting into it again waits here.
+            event = support.new_event()
+            event.record(support.current_stream(self.device))
+            reusable[index] = event
+            return None
 
-            chunk_offset = aligned_offset(base_ptr, current_data_size, alignment)
-            if chunk_offset + chunk_size > buffer_bytesize:
-                # This chunk doesn't fit, so we save it for the next batch.
-                leftover_chunk[0] = chunk_item
-                break
+        try:
+            for turn in range(turns):
+                for broadcasting_rank in range(self.group_size):
+                    plan = self.predicted[broadcasting_rank]
+                    rows = plan[turn] if turn < len(plan) else []
+                    if not rows:
+                        continue
 
-            data_buffer[chunk_offset : chunk_offset + chunk_size].copy_(cpu_buffer.squeeze())
+                    total = rows[-1].offset + rows[-1].size
+                    global_broadcasting_rank = self.local_group_global_ranks[broadcasting_rank]
+                    mine = global_broadcasting_rank == self.original_group_rank
 
-            orig_req_idx, orig_chunk_idx, _ = self.rank_dicts_map[ready_request_id][ready_chunk_index]
-            batch_metadata_tensor[chunk_count_in_batch + 1].copy_(
-                torch.tensor([orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset])
+                    # A SEND NEEDS ITS SLOT FIRST, and asking for one gives the previous one back. If
+                    # the posted turn is also a send, consuming it here is what keeps this to one live
+                    # slot.
+                    #
+                    # With ONE receive buffer the posted transfer is still in it, so it has to be
+                    # consumed before anything posts into it again.
+                    if posted is not None and (single or (mine and posted[3])):
+                        done = yield from consume(posted)
+                        if posted[3]:
+                            pending_event = done
+                        posted = None
+
+                    if mine:
+                        if started:
+                            source.release(outstanding[0], pending_event)
+                            # CLEARED AS IT GOES BACK. next_slot below can raise, and the finally in
+                            # get_chunks would otherwise hand the same slot back a second time.
+                            outstanding[0] = None
+                        filled = source.next_slot()
+                        outstanding[0] = filled
+                        started = True
+                        self.check_fill_matches_prediction(rows, filled.ranges if filled else [],
+                                                           filled.memory if filled else None)
+                        buffer = filled.memory
+                        # NOT an index: a send has no receive buffer. -1 would be a valid one.
+                        index = None
+                    else:
+                        index = receives % len(receiving)
+                        receives += 1
+                        if reusable[index] is not None:
+                            support.current_stream(self.device).wait_event(reusable[index])
+                            reusable[index] = None
+                        buffer = receiving[index][:total]
+
+                    work = dist.broadcast(buffer, global_broadcasting_rank,
+                                          group=self.distribution_group, async_op=True)
+
+                    # RECORDED BEFORE THE CONSUME BELOW, which yields to the caller and can raise
+                    # there. Until this assignment our own send exists only as a local, and the
+                    # cleanup on the way out would have nothing to join.
+                    previous, posted = posted, (work, buffer, rows, mine, index)
+
+                    if previous is not None:
+                        done = yield from consume(previous)
+                        if previous[3]:
+                            pending_event = done
+
+            if posted is not None:
+                done = yield from consume(posted)
+                if posted[3]:
+                    pending_event = done
+                # JOINED, so the cleanup below has nothing left to do on the way out.
+                posted = None
+
+            if started:
+                source.release(outstanding[0], pending_event)
+                outstanding[0] = None
+
+            # THE NET UNDER THE WHOLE SCHEME. A peer reads these bytes at offsets it computed instead of
+            # received, so a slot the ring filled and no rank expected is never sent, and the weights in
+            # it go missing with nothing raised.
+            leftover = source.next_slot()
+            if leftover is not None:
+                # Held, so the finally in get_chunks hands it back instead of stranding the ring.
+                outstanding[0] = leftover
+                raise RuntimeError(
+                    "the ring had a slot left that no rank predicted - the prediction and the stream "
+                    "disagree about how much this rank reads"
+                )
+        finally:
+            # OUR OWN SEND MAY STILL BE READING THE SLOT. A send is posted with async_op=True, so
+            # NCCL runs it on its own stream: posting makes NCCL wait on this stream, never the
+            # other way round. Only wait() puts the dependency back, and on the way out of a
+            # failed round nothing else has.
+            #
+            # HERE, not in get_chunks. Closing this generator runs this finally FIRST, so the
+            # release event recorded there lands after the collective.
+            #
+            # wait() enqueues a stream wait rather than blocking the host, and it does not yield,
+            # so it is safe while the generator is being closed. Its own failure is swallowed: this
+            # is cleanup, and replacing the exception that brought us here would hide it.
+            #
+            # CARRIED TO send_stream, because wait() orders the stream that is CURRENT and the
+            # release event is recorded on send_stream. The two are the same stream until a caller
+            # moves, and this path is reached after exactly that - so without the bridge the join
+            # would land on the stream the caller moved to and the release event would cover
+            # nothing. An event and a wait_event, which order streams without blocking the host.
+            if posted is not None and posted[3]:
+                try:
+                    posted[0].wait()
+                    if support is not None and send_stream is not None:
+                        joined = support.new_event()
+                        joined.record(support.current_stream(self.device))
+                        send_stream.wait_event(joined)
+                except Exception:
+                    logger.debug(f"[RunAI Streamer][Distributed] Rank "
+                                 f"{self.original_group_rank}: could not join the outstanding send "
+                                 f"while cleaning up")
+
+    def check_fill_matches_prediction(self, rows: List[SlotRange],
+                                      ranges: List[SlotRange],
+                                      sent: Optional[torch.Tensor]) -> None:
+        """The ring filled exactly what this rank's peers predicted it would.
+
+        RANGE BY RANGE, not a byte count. The peers read these bytes at the offsets they predicted
+        and name them by the ids they predicted, so an id or an offset that differs sends the right
+        bytes under the wrong names - and every peer agrees, so nothing downstream can notice. The
+        real layout is in hand here, which makes the exact comparison the cheap one."""
+        if list(rows) != list(ranges):
+            raise RuntimeError(
+                f"rank {self.original_group_rank}: the ring laid out {list(ranges)} and the "
+                f"prediction said {list(rows)}. The packer and the prediction disagree, so the "
+                f"peers would read these bytes under the wrong names"
             )
 
-            current_data_size = chunk_offset + chunk_size
-            chunk_count_in_batch += 1
-
-        batch_metadata_tensor[0, 0] = chunk_count_in_batch
-
-        return current_data_size, chunk_count_in_batch
+        # The peers size their receive from the prediction, so this one is a hang if it is wrong.
+        expected = rows[-1].offset + rows[-1].size if rows else 0
+        actual = len(sent) if sent is not None else 0
+        if actual != expected:
+            raise RuntimeError(
+                f"rank {self.original_group_rank}: the ring filled {actual} bytes and the "
+                f"prediction said {expected}"
+            )
 
     def broadcast(self,
                   chunks_to_read: List[int],
                   batch_metadata_tensor: torch.Tensor,
                   received_metadata_tensor: torch.Tensor,
-                  data_buffer: torch.Tensor,
+                  sent: Optional[torch.Tensor],
                   received_buffer: torch.Tensor,
-                  chunk_count_in_batch: int,
-                  current_data_size: int) -> Iterator:        
+                  chunk_count_in_batch: int) -> Iterator:
+        """sent is this rank's outgoing slot, or None when it has nothing to send this round.
+
+        It comes from the distribution source, so it is already the used prefix and already on the
+        device the collective sends from. A direct source is read into its slot, so there is no
+        buffer of ours to take a view of."""
 
         total_broadcast_chunks = 0
 
@@ -832,12 +1465,12 @@ class _distributedStreamer:
 
                 # broadcast data
                 if chunk_count_in_batch > 0:
-                    logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Broadcasting data of size {humanize.naturalsize(current_data_size)}")
-                    dist.broadcast(data_buffer[:current_data_size], global_broadcasting_rank, group=self.distribution_group)
+                    logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Broadcasting data of size {humanize.naturalsize(len(sent))}")
+                    dist.broadcast(sent, global_broadcasting_rank, group=self.distribution_group)
 
                 # yield
                     for orig_req_idx, orig_chunk_idx, chunk_size, chunk_offset in batch_metadata_tensor[1 : chunk_count_in_batch + 1].tolist():
-                        yield orig_req_idx, orig_chunk_idx, data_buffer[chunk_offset : chunk_offset + chunk_size]
+                        yield orig_req_idx, orig_chunk_idx, sent[chunk_offset : chunk_offset + chunk_size]
             else:
                 # receive metadata
                 logger.debug(f"[RunAI Streamer][Distributed] Rank {self.original_group_rank}: Receiving metadata from rank {global_broadcasting_rank}")
@@ -857,6 +1490,16 @@ class _distributedStreamer:
                 total_data_size = last_meta[3].item() + last_meta[2].item() # offset plus size of last chunk in batch
 
                 chunks_to_read[0] -= received_chunk_count_in_batch
+
+                # CHECKED, because the slice would otherwise clamp: a receive buffer smaller than
+                # what the sender broadcasts becomes a size mismatch inside the collective, which is
+                # an abort under gloo and a hang under NCCL.
+                if total_data_size > len(received_buffer):
+                    raise RuntimeError(
+                        f"rank {global_broadcasting_rank} is broadcasting {total_data_size} bytes "
+                        f"and this rank's receive buffer holds {len(received_buffer)}; the ranks "
+                        f"did not agree on a slot size"
+                    )
 
                 received_data_buf_view = received_buffer[:total_data_size]
 

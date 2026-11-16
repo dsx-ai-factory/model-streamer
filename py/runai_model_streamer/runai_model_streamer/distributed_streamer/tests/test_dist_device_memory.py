@@ -10,12 +10,12 @@ import torch
 
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DEFAULT_BUFFER_MIN_BYTESIZE,
+    DIST_BUFFER_ALIGNMENT,
     DistributedStreamer,
     _distributedStreamer,
     allocate_dist_staging,
     dist_buffer_bytesize,
     dist_device_bytes_required,
-    get_dist_buffer_alignment,
 )
 
 MIN_BYTESIZE_ENV = "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE"
@@ -47,22 +47,30 @@ class TestDistDeviceBytesRequired(unittest.TestCase):
         A staging buffer is handed out as a slice of its over-allocated base, and a slice shares that
         base's storage - so each tensor's own storage is what the device gave up, counted once."""
         chunk = 4096
-        tensors = allocate_dist_staging(chunk, torch.device("cpu"))
-        allocated = sum(t.untyped_storage().nbytes() for t in tensors)
-        self.assertEqual(dist_device_bytes_required(chunk), allocated)
+        for rows in (1, 256, 75944):
+            with self.subTest(rows=rows):
+                tensors = allocate_dist_staging(chunk, torch.device("cpu"), rows=rows)
+                allocated = sum(t.untyped_storage().nbytes() for t in tensors)
+                self.assertEqual(dist_device_bytes_required(chunk, rows), allocated)
 
     @patch.dict(os.environ, {MIN_BYTESIZE_ENV: "4096"}, clear=True)
     def test_both_staging_buffers_start_aligned(self):
-        data, received, _, _ = allocate_dist_staging(4096, torch.device("cpu"))
-        alignment = get_dist_buffer_alignment()
+        data, received, _, _ = allocate_dist_staging(4096, torch.device("cpu"), rows=256)
+        alignment = DIST_BUFFER_ALIGNMENT
         for name, buffer in (("data", data), ("received", received)):
             self.assertEqual(buffer.data_ptr() % alignment, 0, f"{name} buffer is not aligned")
             self.assertGreaterEqual(buffer.numel(), 4096, f"{name} buffer lost room to its own padding")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_a_small_chunk_still_needs_two_minimum_buffers(self):
-        required = dist_device_bytes_required(2 * 1024 * 1024)
+        required = dist_device_bytes_required(2 * 1024 * 1024, rows=256)
         self.assertGreaterEqual(required, 2 * DEFAULT_BUFFER_MIN_BYTESIZE)
+
+
+# set_is_distributed is called here without a request, so the streamer's params carry the height an
+# empty one gives. The check and this figure have to come from the same number or the test guards
+# nothing.
+EMPTY_REQUEST_ROWS = 1
 
 
 class DistributedJob:
@@ -154,16 +162,15 @@ class TestMinFreeMemory(unittest.TestCase):
         with job.patched():
             self.assertEqual(job.streamer().get_min_device_free_memory("cuda:0"), 70)
 
-    def test_the_communicator_is_created_before_free_memory_is_read(self):
-        """The first collective takes the communicator's device memory, so it must come before the
-        reading, or a rank just above the requirement passes and then cannot allocate its buffers."""
+    def test_the_group_carries_one_collective_and_it_is_the_reduction(self):
+        """The reduction is the only collective here, so it is the one that creates the communicator.
+        The reading therefore does not include that memory, which is why we use half of it."""
         job = DistributedJob([50, 40])
         streamer = job.streamer()
         with job.patched():
             streamer.get_min_device_free_memory("cuda:0")
         self.assertEqual(job.events.mock_calls,
                          [call.create_group(streamer.params),
-                          call.broadcast(0, job.group),
                           call.read_free_memory("cuda:0"),
                           call.all_reduce(torch.distributed.ReduceOp.MIN, job.group)])
 
@@ -182,7 +189,7 @@ class TestDistributedMemoryCheck(unittest.TestCase):
         patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.required = dist_device_bytes_required(4096)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
 
     def decide(self, free_by_rank, my_rank=0, group_ranks=None):
         job = DistributedJob(free_by_rank, my_rank=my_rank, group_ranks=group_ranks)
@@ -230,6 +237,56 @@ class TestDistributedMemoryCheck(unittest.TestCase):
         job.events.release_group.assert_not_called()
 
 
+class TestTheAgreedFreeMemoryIsKept(unittest.TestCase):
+    """set_is_distributed reduces a free-memory figure; a ring every rank sends from is sized from
+    THAT, not from what this rank happens to have free. So it has to survive the decision."""
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
+
+    def decide(self, free_by_rank, is_distributed=True, device="cuda:1"):
+        job = DistributedJob(free_by_rank, my_rank=0)
+        streamer = job.streamer()
+        with job.patched():
+            streamer.set_is_distributed(is_distributed, device)
+        return streamer
+
+    def test_the_group_minimum_is_kept(self):
+        streamer = self.decide([10 ** 12, self.required + 7])
+
+        self.assertEqual(streamer.params.min_device_free_memory, self.required + 7,
+                         "not this rank's own figure, the group's smallest")
+
+    def test_it_is_kept_even_when_the_check_turns_distribution_off(self):
+        """The figure is the group's whatever the decision was. A rank that fell back still agreed
+        it, and reading it afterwards must not get this rank's own."""
+        streamer = self.decide([10 ** 12, self.required - 1])
+
+        self.assertFalse(streamer.is_distributed)
+        self.assertEqual(streamer.params.min_device_free_memory, self.required - 1)
+
+    def test_a_stream_that_never_asked_has_no_figure(self):
+        self.assertIsNone(self.decide([10 ** 12, 10 ** 12],
+                                      is_distributed=False).params.min_device_free_memory)
+
+    def test_a_stale_figure_is_cleared_before_the_next_decision(self):
+        """This object is reused across loads. A figure measured before the last model occupied the
+        device would size the next ring far too large, and nothing downstream can tell."""
+        job = DistributedJob([10 ** 12, 10 ** 12], my_rank=0)
+        streamer = job.streamer()
+        with job.patched():
+            streamer.set_is_distributed(True, "cuda:1")
+        self.assertIsNotNone(streamer.params.min_device_free_memory)
+
+        with job.patched():
+            streamer.set_is_distributed(False, "cuda:1")
+        self.assertIsNone(streamer.params.min_device_free_memory,
+                          "the figure from the previous load is still here")
+
+
 class TestASecondReadOnTheSameStreamer(unittest.TestCase):
     """What the fallback must not cost the NEXT read.
 
@@ -244,7 +301,7 @@ class TestASecondReadOnTheSameStreamer(unittest.TestCase):
         patcher = patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1", MIN_BYTESIZE_ENV: "0"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.required = dist_device_bytes_required(4096)
+        self.required = dist_device_bytes_required(4096, EMPTY_REQUEST_ROWS)
 
     def two_reads(self, free_by_rank, my_rank, group_ranks, groups_by_ranks):
         """Two reads on one streamer. Returns the decision and the new_group calls each read made."""

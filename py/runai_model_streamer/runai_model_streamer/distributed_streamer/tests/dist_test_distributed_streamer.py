@@ -1,9 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import logging
 import unittest
 import hashlib
 import os
+import sys
 import torch
 import torch.distributed as dist
 from typing import List
@@ -15,14 +18,34 @@ import random
 from unittest.mock import patch
 
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
+    AgreedRing,
     DistributedStreamer,
-    RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR,
 )
 from runai_model_streamer.file_streamer import FileChunks
 from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
 )
+
+class FakeStream:
+    """A stand-in for a device stream, compared by VALUE.
+
+    torch hands out a fresh Stream object per call and defines __eq__, so a fake that is only ever
+    one object would let a production comparison written with `is not` pass here and fail on a GPU
+    every round."""
+
+    def __init__(self, ident=0):
+        self.ident = ident
+
+    def __eq__(self, other):
+        return isinstance(other, FakeStream) and other.ident == self.ident
+
+    def __hash__(self):
+        return hash(self.ident)
+
+    def synchronize(self):
+        pass
+
 
 class TestDistributedStreamer(unittest.TestCase):
     
@@ -48,6 +71,26 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0 and os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
             
+    @contextlib.contextmanager
+    def collected_logs(self, name):
+        """Every message a logger emits, including none.
+
+        assertLogs FAILS when nothing was logged, and "nothing" is what most ranks must do for a
+        line that is said once by the first of them."""
+        records = []
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        log = logging.getLogger(name)
+        handler = Collect()
+        log.addHandler(handler)
+        try:
+            yield records
+        finally:
+            log.removeHandler(handler)
+
     def _prepare_file_requests(self, file_specs: List[dict]) -> List[FileChunks]:
         # rank 0 creates the file requests and broadcasts them to all ranks
         if self.rank == 0:
@@ -153,6 +196,519 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success empty file list test verified on all {self.world_size} ranks.")
 
+    # A REAL DEVICE, not only a patched DeviceSupport. These drive the library into a device write,
+    # and the C++ layer cannot be patched: without a driver it answers "No usable device is
+    # present". The distributed tests run against the REAL library, so on a CPU-only host they
+    # would fail rather than skip.
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
+    def test_1_a_rank_short_of_device_memory_keeps_the_slot_size(self):
+        """The ring the group agreed will not fit on this rank any more.
+
+        What it may change alone is DEPTH. Changing the slot size would send its peers something
+        they cannot receive, and a host ring cannot be broadcast from at all - so the retry is one
+        slot of the SAME size, and the stream still has to come out whole."""
+        from runai_model_streamer.file_streamer import file_streamer as fs_module
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.file_streamer.requests_iterator import (
+            RunaiStreamerMemoryLimitException,
+        )
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        class FakeEvent:
+            def record(self, stream=None):
+                pass
+
+            def query(self):
+                return True
+
+            def synchronize(self):
+                pass
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                                current_stream=lambda device=None: FakeStream())
+
+        file_specs = [{"size": 6144, "chunks": [2048] * 3}, {"size": 4096, "chunks": [2048] * 2}]
+        requests = self._prepare_file_requests(file_specs)
+        originals = {}
+        for req in requests:
+            with open(req.path, "rb") as handle:
+                originals[req.id] = handle.read()
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        agreed = AgreedRing(2048, 3, 2)
+        asked = []
+        real_stream_files = fs_module.FileStreamer.stream_files
+
+        handling = []
+
+        def one_device_ring_too_many(self, *args, **kwargs):
+            """Refuse the agreed depth once, the way the ring layer refuses a shape it cannot
+            allocate, then behave normally."""
+            shape = kwargs.get("slot_shape")
+            if shape is not None:
+                asked.append(shape)
+                # Whether an exception is still being handled while this attempt runs. The pool
+                # takes every slot up front, and a traceback holds the ones it got, so a retry
+                # inside the handler asks for memory on top of the attempt that just failed.
+                handling.append(sys.exc_info()[0])
+                if len(asked) == 1:
+                    # FROM an allocator error, as file_streamer raises it. Only that cause is
+                    # retried: the same exception type also carries refusals a shallower ring
+                    # cannot answer.
+                    try:
+                        raise torch.cuda.OutOfMemoryError("out of memory")
+                    except torch.cuda.OutOfMemoryError as oom:
+                        raise RunaiStreamerMemoryLimitException(
+                            "cannot build the ring this stream asks for") from oom
+            return real_stream_files(self, *args, **kwargs)
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch.object(fs_module, "device_support", return_value=support), \
+             patch.object(fs_module, "device_free_memory", return_value=1 << 30), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", return_value=agreed), \
+             patch.object(fs_module.FileStreamer, "stream_files", one_device_ring_too_many):
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True, owned=True)
+
+                got = {}
+                for req_id, chunk_idx, tensor in streamer.get_chunks():
+                    got.setdefault(req_id, {})[chunk_idx] = tensor.cpu().numpy().tobytes()
+
+        if not asked:
+            self.skipTest("this rank read nothing, so it never built a ring")
+
+        self.assertEqual(asked[0], agreed.shape, "it asks for the agreed shape first")
+        self.assertEqual(asked[1], (agreed.buffer_size, 1), "then one slot of the SAME size")
+        self.assertEqual(inner.slot_shape, (agreed.buffer_size, 1),
+                         "and says so, for the receive buffer")
+        self.assertIsNone(handling[1],
+                          "the retry runs after the failed attempt let go of its memory")
+
+        for req in requests:
+            rebuilt = b"".join(got[req.id][i] for i in sorted(got[req.id]))
+            self.assertEqual(rebuilt, originals[req.id],
+                             f"request {req.id} did not reassemble after the retry")
+
+        if self.rank == 0:
+            print(f"\n✅ Shallow retry verified on all {self.world_size} ranks.")
+
+    def test_1_a_refusal_that_is_not_an_allocation_failure_is_not_retried(self):
+        """The same exception type covers a shape this layer refused outright, and a packing
+        failure raised after the submissions are live. A shallower ring answers neither, and
+        re-entering stream_files there would replace the real diagnosis with its own guard."""
+        from runai_model_streamer.file_streamer import file_streamer as fs_module
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.file_streamer.requests_iterator import (
+            RunaiStreamerMemoryLimitException,
+        )
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=object,
+                                current_stream=lambda device=None: None)
+
+        requests = self._prepare_file_requests([{"size": 4096, "chunks": [2048, 2048]}])
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        asked = []
+
+        def refuse_without_an_allocator_error(self, *args, **kwargs):
+            shape = kwargs.get("slot_shape")
+            if shape is None:
+                raise AssertionError("the direct branch must dictate a shape")
+            asked.append(shape)
+            # No __cause__: this is the shape pre-check, not the allocator.
+            raise RunaiStreamerMemoryLimitException("a slot cannot hold the largest range")
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch.object(fs_module, "device_support", return_value=support), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", return_value=AgreedRing(2048, 3, 2)), \
+             patch.object(fs_module.FileStreamer, "stream_files",
+                          refuse_without_an_allocator_error):
+            with DistributedStreamer() as streamer:
+                with self.assertRaises(RunaiStreamerMemoryLimitException):
+                    streamer.stream_files(requests, None, "cpu", True, owned=True)
+
+        if not asked:
+            self.skipTest("this rank read nothing, so it never built a ring")
+
+        self.assertEqual(asked, [(2048, 3)], "asked once, at the agreed depth, and not again")
+
+    def test_1_a_ring_already_one_slot_deep_is_not_retried(self):
+        """There is nowhere shallower to go.
+
+        Retrying the same shape would ask the allocator for what it has just refused, and the second
+        refusal is the one the caller would see. Every rank reaches this together, so no peer is
+        left waiting."""
+        from runai_model_streamer.file_streamer import file_streamer as fs_module
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.file_streamer.requests_iterator import (
+            RunaiStreamerMemoryLimitException,
+        )
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=object,
+                                current_stream=lambda device=None: None)
+
+        requests = self._prepare_file_requests([{"size": 4096, "chunks": [2048, 2048]}])
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        asked = []
+
+        def always_refuse(self, *args, **kwargs):
+            shape = kwargs.get("slot_shape")
+            if shape is None:
+                raise AssertionError("the direct branch must dictate a shape")
+            asked.append(shape)
+            raise RunaiStreamerMemoryLimitException("cannot build the ring this stream asks for")
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch.object(fs_module, "device_support", return_value=support), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", return_value=AgreedRing(2048, 1, 2)), \
+             patch.object(fs_module.FileStreamer, "stream_files", always_refuse):
+            with DistributedStreamer() as streamer:
+                with self.assertRaises(RunaiStreamerMemoryLimitException):
+                    streamer.stream_files(requests, None, "cpu", True, owned=True)
+
+        if not asked:
+            self.skipTest("this rank read nothing, so it never built a ring")
+
+        self.assertEqual(asked, [(2048, 1)], "asked once, and not asked again")
+
+        if self.rank == 0:
+            print(f"\n✅ No pointless retry verified on all {self.world_size} ranks.")
+
+    def test_1_losing_the_device_ring_is_logged_once(self):
+        """A device the library could fill, with no shape the group can send from.
+
+        That combination stages through host memory and used to leave no trace. It is said by ONE
+        rank, because every rank reaches it from the same numbers."""
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        class FakeEvent:
+            def record(self, stream=None):
+                pass
+
+            def query(self):
+                return True
+
+            def synchronize(self):
+                pass
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                                current_stream=lambda device=None: None)
+
+        requests = self._prepare_file_requests([{"size": 2048, "chunks": [1024, 1024]}])
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", return_value=None), \
+             patch(f"{module}.device_ring_budget", return_value=1 << 20):
+            with self.collected_logs(module) as logs:
+                with DistributedStreamer() as streamer:
+                    inner = streamer.distributed_streamer
+                    streamer.stream_files(requests, None, "cpu", True)
+                    list(streamer.get_chunks())
+
+        self.assertFalse(inner.sends_directly, "the fixture must take the staged path")
+
+        said = [line for line in logs if "no ring fits" in line]
+        if inner.original_group_rank == 0:
+            self.assertEqual(len(said), 1, "said once, by the first rank")
+            self.assertIn("staging through host memory instead", said[0])
+        else:
+            self.assertEqual(said, [], "and by no other rank")
+
+    # A REAL DEVICE, not only a patched DeviceSupport. These drive the library into a device write,
+    # and the C++ layer cannot be patched: without a driver it answers "No usable device is
+    # present". The distributed tests run against the REAL library, so on a CPU-only host they
+    # would fail rather than skip.
+    @unittest.skipUnless(torch.cuda.is_available(), "needs a GPU")
+    def test_1_the_direct_source_is_used_where_the_library_can_fill_the_ring(self):
+        for owned in (True, False):
+            with self.subTest(owned=owned):
+                self._direct_source_round_trip(owned)
+
+    def _direct_source_round_trip(self, owned):
+        """The whole 5d switch, end to end, on a host-only runner.
+
+        Two device facts a host-only runner cannot produce are stood in: the vendor row, and the
+        slot shape the group agrees from its reduced free memory - that reduction runs only under a
+        device backend, so under gloo there is no shape and the switch would always say staged.
+        With both in place the library builds a ring it treats as device memory, stream_files is
+        asked for a sent-from ring, and the loop broadcasts its slots instead of staging through a
+        host ring. The bytes must still come back whole."""
+        from runai_model_streamer.file_streamer import file_streamer as fs_module
+        from runai_model_streamer.file_streamer.device_support import DeviceSupport
+        from runai_model_streamer.libstreamer import RUNAI_FILE_STREAMER_DEVICE_CUDA
+
+        class FakeEvent:
+            def record(self, stream=None):
+                pass
+
+            def query(self):
+                return True
+
+            def synchronize(self):
+                pass
+
+        support = DeviceSupport(api_type=RUNAI_FILE_STREAMER_DEVICE_CUDA, new_event=FakeEvent,
+                                current_stream=lambda device=None: FakeStream())
+
+        # MORE THAN THE RING HOLDS: 10 ranges of 2048 into 2 slots that take one each, so the
+        # slowest rank still gets more ranges than slots and has to recycle. The release and its
+        # event run between rounds - with a ring that spans the stream they never would.
+        file_specs = [{"size": 12288, "chunks": [2048] * 6},
+                      {"size": 8192, "chunks": [2048] * 4}]
+        requests = self._prepare_file_requests(file_specs)
+        originals = {}
+        for req in requests:
+            with open(req.path, "rb") as handle:
+                originals[req.id] = handle.read()
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        sources = []
+        real_direct = __import__(module, fromlist=["DirectDistributionSource"]).DirectDistributionSource
+
+        inner_cls = __import__(module, fromlist=["_distributedStreamer"])._distributedStreamer
+        real_slot_is_free = inner_cls.slot_is_free
+        started = []
+
+        def spy_slot_is_free(self, started_on=None):
+            started.append(started_on)
+            return real_slot_is_free(self, started_on)
+
+        shape_calls = []
+
+        def record_shape(*a, **k):
+            shape_calls.append(a)
+            return AgreedRing(2048, 2, 2)
+
+        def record_source(*a, **k):
+            source = real_direct(*a, **k)
+            sources.append(source)
+            return source
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch.object(fs_module, "device_support", return_value=support), \
+             patch.object(fs_module, "device_free_memory", return_value=1 << 30), \
+             patch(f"{module}.device_support", return_value=support), \
+             patch(f"{module}.agreed_slot_shape", side_effect=record_shape), \
+             patch.object(inner_cls, "slot_is_free", spy_slot_is_free), \
+             patch(f"{module}.DirectDistributionSource", side_effect=record_source), \
+             self.collected_logs(module) as logs:
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True, owned=owned, ring_buffers=5)
+
+                self.assertTrue(inner.sends_directly,
+                                "the switch must choose the direct source here")
+                # The shape itself is patched in, so asserting it is not None would say nothing.
+                # What the production code decides is that a sent ring takes NO range cap: nothing
+                # describes a predicted slot, so only its bytes may end it.
+                self.assertIsNone(
+                    inner.file_streamer.requests_iterator.max_ranges_per_slot,
+                    "a sent ring fills by bytes; a cap would end its slots part empty",
+                )
+
+                # WHAT THE PRODUCTION CODE PASSES, which patching a return value leaves unexamined.
+                # The whole list and not this rank's share: a share is floored by the largest range
+                # IN IT, so two ranks would size differently. The caller's ring_buffers=5 above is
+                # not among these arguments, and test_depth_is_not_per_rank pins that.
+                self.assertEqual(len(shape_calls), 1)
+                _, whole = shape_calls[0]
+                self.assertIs(whole, requests, "the WHOLE file list, never this rank's share")
+
+                # The ring really is reused, which is what drives the release and its event. A ring
+                # that spans the stream never recycles, and then the hardest part of the direct
+                # source - handing a slot back and having it refilled - is never exercised. Read
+                # HERE: __exit__ frees the ring and leaves requests_iterator None.
+                ring = inner.file_streamer.requests_iterator
+                mine = sum(len(fc.sizes) for fc in inner.rank_file_chunks_list)
+                self.assertGreater(mine, ring.num_buffers,
+                                   "this rank needs more ranges than slots, or nothing recycles")
+
+                got = {}
+                for req_id, chunk_idx, tensor in streamer.get_chunks():
+                    got.setdefault(req_id, {})[chunk_idx] = tensor.cpu().numpy().tobytes()
+
+        # The bytes, not just the count: a wrong slot or a wrong offset still yields the right
+        # number of chunks.
+        for req in requests:
+            rebuilt = b"".join(got[req.id][i] for i in sorted(got[req.id]))
+            self.assertEqual(rebuilt, originals[req.id],
+                             f"request {req.id} did not reassemble")
+
+        # UNCONDITIONAL. Behind an `if reading_from_storage` this assertion quietly disappears the
+        # day the partition gives a rank nothing, and the test still passes.
+        self.assertEqual([line for line in logs if "no ring fits" in line], [],
+                         "nothing fell back, so nothing should say it did")
+
+        # The guard is only armed if the loop hands it the stream it started on. Passing None would
+        # leave slot_is_free unable to see a caller move, and every test of it would still pass.
+        if inner.sends_directly and inner.reading_from_storage:
+            self.assertTrue(started, "a sending rank releases at least one slot")
+            self.assertTrue(all(s is not None for s in started),
+                            "the loop must tell slot_is_free which stream it started on")
+        self.assertEqual(len(sources), 1 if inner.reading_from_storage else 0,
+                         "a rank that reads sends from the ring itself, and one that does not sends"
+                         " nothing")
+
+        if self.rank == 0:
+            print(f"\n✅ Direct source (owned={owned}) verified on all {self.world_size} ranks.")
+
+    def test_1_the_slot_is_released_with_an_event_where_the_device_has_them(self):
+        """The loop marks the end of a round, and a source that refills waits for that mark.
+
+        Gloo on the host has no events, so the path is only reachable here by standing a vendor row
+        in. What is being checked is the LOOP: that it records after the broadcast and the clones,
+        and hands the mark over with the slot."""
+        releases = []
+
+        built = []
+
+        class Watched:
+            """The staged source, with every release recorded."""
+
+            def __init__(self, inner):
+                built.append(self)
+                self._inner = inner
+
+            def next_slot(self):
+                return self._inner.next_slot()
+
+            def release(self, filled, done=None):
+                releases.append(done)
+                self._inner.release(filled, done)
+
+        clones = []
+
+        class FakeEvent:
+            def __init__(self):
+                self.stream = None
+                self.clones_at_record = None
+
+            def record(self, stream=None):
+                self.stream = stream
+                # WHEN it was recorded, which is the whole point. An event built before the yields
+                # would be handed over looking exactly the same.
+                self.clones_at_record = len(clones)
+
+        class FakeSupport:
+            new_event = FakeEvent
+
+            @staticmethod
+            def current_stream(device):
+                return f"stream of {device}"
+
+        file_specs = [{"size": 2048, "chunks": [1024, 1024]}]
+        requests = self._prepare_file_requests(file_specs)
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        real_source = __import__(module, fromlist=["StagedDistributionSource"]).StagedDistributionSource
+
+        inner_cls = __import__(module, fromlist=["_distributedStreamer"])._distributedStreamer
+        real_own = inner_cls.own
+
+        def counting_own(buffer):
+            clones.append(buffer)
+            return real_own(buffer)
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.device_support", return_value=FakeSupport), \
+             patch.object(inner_cls, "own", staticmethod(counting_own)), \
+             patch(f"{module}.StagedDistributionSource",
+                   side_effect=lambda *a, **k: Watched(real_source(*a, **k))):
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True, owned=True)
+                chunks = list(streamer.get_chunks())
+
+        self.assertEqual(len(chunks), 2, "both chunks reach every rank")
+
+        # Every rank on the distributed path builds a source, even one with an empty share. Without
+        # this, a run that never distributed at all would skip below and read as a pass.
+        self.assertEqual(len(built), 1, "the distributed path ran on this rank")
+        # It is about the STAGED release. device_support is patched above, so the only reason this
+        # rank still stages is that gloo never agreed a slot shape - which is worth saying, or the
+        # next person reads a confusing failure in a test about events.
+        self.assertFalse(inner.sends_directly, "this test is about the staged release path")
+        self.assertEqual(len(clones), 2, "both chunks were cloned out of a slot")
+
+        if not releases:
+            self.skipTest("this rank read nothing, so it never released a slot")
+
+        for done in releases:
+            self.assertIsInstance(done, FakeEvent,
+                                  "the loop must hand an event over with the slot")
+            self.assertEqual(done.stream, "stream of cpu",
+                             "recorded on the stream of THIS streamer's device")
+            self.assertEqual(done.clones_at_record, 2,
+                             "recorded AFTER the round's clones, not before the loop")
+
+    def test_1_success_one_rank_has_nothing_to_read(self):
+        """A rank whose share is empty still receives from its peers.
+
+        Different from an empty FILE LIST, where no rank reads and the broadcast loop never runs.
+        One file of one chunk goes to one rank, and total_chunks_to_read is 1 on every rank, so the
+        loop does run on the rank that has nothing - as a receiver only."""
+        if self.world_size < 2:
+            self.skipTest("needs at least two ranks")
+
+        file_specs = [{"size": 100, "chunks": [100]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        received = []
+        with patch.dict(os.environ, env_vars):
+            with DistributedStreamer() as streamer:
+                inner = streamer.distributed_streamer
+                streamer.stream_files(requests, None, "cpu", True)
+
+                share_is_empty = len(inner.rank_file_chunks_list) == 0
+                self.assertEqual(inner.reading_from_storage, not share_is_empty)
+
+                for req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                    received.append((req_id, chunk_idx, data_tensor.cpu().numpy().tobytes()))
+
+                # The point of the fixture: this really was the empty-share case on all but one
+                # rank, not a share that happened to be small.
+                #
+                # Over the DISTRIBUTION group, which is per node unless RUNAI_STREAMER_DIST_GLOBAL
+                # is set. Each group partitions the file on its own, so the world would count one
+                # reader per group.
+                #
+                # INSIDE the context. Leaving it ends the streamer, and the streamer destroys the
+                # group it made - so a collective after that point is posted on a communicator that
+                # has been shut down. gloo still answers one; NCCL is not obliged to.
+                group = inner.distribution_group
+                group_size = dist.get_world_size(group=group)
+                empties = [torch.zeros(1, dtype=torch.long) for _ in range(group_size)]
+                dist.all_gather(empties,
+                                torch.tensor([1 if share_is_empty else 0], dtype=torch.long),
+                                group=group)
+
+        self.assertEqual(len(received), 1, "every rank sees the one chunk, whoever read it")
+        self.assertEqual(received[0][0], 0)
+        self.assertEqual(received[0][1], 0)
+        self.assertEqual(received[0][2], original)
+        self.assertEqual(sum(e.item() for e in empties), group_size - 1,
+                         "one rank in this group read the chunk and every other rank had nothing")
+
+        if self.rank == 0:
+            print(f"\n✅ Empty-share rank test verified on all {self.world_size} ranks.")
+
     def test_1_success_random_files(self):
         file_specs = []
         # Use a random number of files (1 to 10)
@@ -202,50 +758,91 @@ class TestDistributedStreamer(unittest.TestCase):
         if self.rank == 0:
             print(f"\n✅ Success random files test verified on all {self.world_size} ranks.")
 
-    def test_1_success_alignment(self):
-        # Chunk sizes are random in [1, alignment*10].
-        # BUFFER_MIN_BYTESIZE = alignment*20 guarantees at least two max-size chunks fit in
-        # one batch: worst case is chunk1=alignment*10 at offset 0 and chunk2=alignment*10
-        # at offset=alignment*10, totalling alignment*20 = BUFFER_BYTESIZE exactly.
-        # With 1-20 files of 4 chunks each there are enough chunks to guarantee at least
-        # one batch where two tensors are packed together.
-            
-        if self.world_size < 2:
-            self.skipTest("Alignment packing test requires at least 2 processes.")
+    def test_1_success_several_ranges_share_one_broadcast(self):
+        """Ranges packed into one slot start where the one before them ended.
 
-        alignment = 512
+        THE ONLY DIST TEST THAT FILLS A SLOT WITH MORE THAN ONE RANGE. Every other one sets
+        RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE to 0, which sizes the staging buffer to a single
+        chunk, so nothing there ever packs. Chunks are random in [1, max_chunk] and the buffer holds
+        two of the largest, so slots carry several ranges and their boundaries move run to run.
+
+        READ OFF THE SENDER'S OWN LAYOUT, through the rows it is about to broadcast. Comparing the
+        BYTES instead would prove nothing about the layout: the receiver slices at the offsets the
+        sender broadcast to it, so a packer that started padding again would shift both sides
+        together and every byte would still match. The content check below is kept as a backstop
+        against a copy going astray, not as the layout test.
+
+        This used to assert that every yielded tensor began on a 512 byte boundary. A sent ring
+        refuses a range alignment now, and forcing one onto the tensors it yields - by slicing an
+        over-allocated buffer - made vLLM fault in its first forward pass."""
+        if self.world_size < 2:
+            self.skipTest("packing into a shared slot needs at least two processes")
+
+        max_chunk = 5120
         num_files = random.randint(1, 20)
+
         def random_chunks(n):
-            return [random.randint(1, alignment * 10) for _ in range(n)]
+            return [random.randint(1, max_chunk) for _ in range(n)]
 
         chunks_per_file = [random_chunks(4) for _ in range(num_files)]
-        file_specs = [
-            {"size": sum(c), "chunks": c} for c in chunks_per_file
-        ]
+        file_specs = [{"size": sum(c), "chunks": c} for c in chunks_per_file]
         requests = self._prepare_file_requests(file_specs)
+
+        original = {}
+        for req in requests:
+            with open(req.path, "rb") as handle:
+                original[req.id] = handle.read()
+        rebuilt = {req.id: [None] * len(req.sizes) for req in requests}
+
+        module = "runai_model_streamer.distributed_streamer.distributed_streamer"
+        real_write = __import__(module, fromlist=["write_metadata_rows"]).write_metadata_rows
+        slots = []
+
+        def record(metadata, ranges):
+            # The list that is about to go on the wire, before the receivers see any of it.
+            slots.append(list(ranges))
+            return real_write(metadata, ranges)
 
         env_vars = {
             "RUNAI_STREAMER_DIST": "1",
-            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(alignment * 20),
-            RUNAI_STREAMER_CUDA_ALIGNMENT_ENV_VAR: str(alignment),
+            # TWO OF THE LARGEST CHUNKS IN ONE SLOT. The row cap never bites here - the staged path
+            # passes metadata_rows, which counts every range in the request - so the byte size is
+            # the only thing deciding how many ranges share a slot.
+            "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": str(2 * max_chunk),
         }
-        # owned=False ON PURPOSE. This alignment describes where tensors sit INSIDE the staging
-        # buffers, so that the offsets one rank broadcasts are usable on every other. An owned tensor
-        # is a clone with a storage of its own, where that layout does not apply - and forcing the
-        # alignment onto it, by slicing an over-allocated buffer, made vLLM fault on a real GPU.
-        with patch.dict(os.environ, env_vars):
+        # owned=False ON PURPOSE: a borrowed tensor is a view into the slot at its own offset, which
+        # is what makes the layout observable at all. An owned one is a plain clone and shows
+        # nothing. Read inside the loop, because the next round overwrites the buffer.
+        with patch.dict(os.environ, env_vars), \
+             patch(f"{module}.write_metadata_rows", record):
             with DistributedStreamer() as streamer:
                 streamer.stream_files(requests, None, "cpu", True, owned=False)
+                for req_id, chunk_idx, data_tensor in streamer.get_chunks():
+                    rebuilt[req_id][chunk_idx] = data_tensor.cpu().numpy().tobytes()
 
-                for _req_id, _chunk_idx, data_tensor in streamer.get_chunks():
-                    ptr = data_tensor.data_ptr()
-                    self.assertEqual(
-                        ptr % alignment, 0,
-                        f"Rank {self.rank}: tensor data_ptr 0x{ptr:x} is not aligned to {alignment} bytes"
-                    )
+        for req in requests:
+            self.assertEqual(original[req.id], b"".join(rebuilt[req.id]))
+
+        # A SKIP, NOT AN ASSERT. The partition hands out spans, so with one file of four chunks and
+        # several ranks this rank can be given a single chunk, or none - the fixture makes a packed
+        # slot likely, not certain. Asserting here would fail on the shape of the partition rather
+        # than on anything about packing.
+        if not any(len(ranges) > 1 for ranges in slots):
+            self.skipTest("this rank's share never filled a slot with two ranges")
+
+        for ranges in slots:
+            cursor = 0
+            for one in ranges:
+                self.assertEqual(
+                    one.offset, cursor,
+                    f"Rank {self.rank}: a range starts at {one.offset} where the one before it "
+                    f"ended at {cursor} - ranges are packed end to end, with nothing between them"
+                )
+                # A zero sized range moves the cursor nowhere, which this pins too.
+                cursor += one.size
 
         if self.rank == 0:
-            print(f"\n✅ Alignment test verified on all {self.world_size} ranks.")
+            print(f"\n✅ Shared-slot packing verified on all {self.world_size} ranks.")
 
     def test_1_owned_tensors_survive_later_rounds(self):
         # THE GUARANTEE ITSELF. BUFFER_MIN_BYTESIZE=0 sizes the staging buffer to a single chunk, so

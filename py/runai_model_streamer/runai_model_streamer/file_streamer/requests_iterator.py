@@ -28,8 +28,24 @@ RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME = "RUNAI_STREAMER_RING_BUFFERS"
 # shallow and large for that, and costs no throughput.
 DEFAULT_RING_BUFFERS = 18
 
+# A HARD CAP, and only when it is set. It used to default to 8 GiB and act as a TARGET the data
+# could raise, which made a configured number decide the slot size while the model decided nothing.
 RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_MEMORY_LIMIT"
-DEFAULT_DEVICE_MEMORY_LIMIT = 8 * (1 << 30)   # 8 GiB
+
+# Two slots is where reading and sending overlap at all: a slot is refilled only once it has been
+# handed over, so one slot never overlaps anything. Measured as a cliff on both models to hand -
+# one slot costs 11% on an 80B and 19.6% on a 235B - and flat above it.
+DEVICE_RING_SLOTS = 2
+
+# The least a slot may be, whatever the ranges are. A slot smaller than this holds too little for
+# the reader to keep its queue busy, and a model of small tensors would otherwise get a slot of
+# kilobytes and one collective per slot.
+#
+# NOT MEASURED. Every model benchmarked has a largest range far above it (593.5 MiB, 1187 MiB), so
+# this floor has never bound and no arm has tested it. It is a deliberate guess, kept as its own
+# number so it can be measured and moved; it is NOT a restatement of the C++ read settings, which
+# are per mount type and not visible from here.
+DEVICE_RING_MIN_SLOT = 256 * (1 << 20)
 
 # Of what the device has FREE, not of what it has. The ring is transient and the caller is about to
 # fill the rest with the model it is loading.
@@ -162,6 +178,25 @@ def _alloc_slot(slot_size: int) -> Slot:
 
 
 
+
+
+def next_offset(cursor: int, alignment: int) -> int:
+    """Where the next range starts. An alignment of 1 packs them one after another."""
+    return cursor + -cursor % alignment
+
+
+def advance(cursor: int, size: int, alignment: int) -> Tuple[int, int]:
+    """Where this range starts, and where the cursor ends after it.
+
+    A ZERO-SIZED RANGE TAKES NO PAD. It has no bytes to align, and a pad for it would spend slot
+    room a real range could use. An empty tensor in a shard is a real case, and the C++ layer
+    answers a zero-sized range like any other, so it still gets a destination."""
+    if size == 0:
+        return cursor, cursor
+    at = next_offset(cursor, alignment)
+    return at, at + size
+
+
 class SlotMemory(NamedTuple):
     """What a ring's slots are made of, and what that implies.
 
@@ -210,12 +245,51 @@ HOST_SLOTS = SlotMemory(_alloc_slot, direct_io=True, label="CPU", new_event=None
 class FilesRequestsIteratorWithBuffer:
     def __init__(self, buffer_size: int, num_buffers: int, files_chunks: List[FileChunks],
                  direct_block: int = DIRECT_IO_BLOCK, owned: bool = True,
-                 slots: SlotMemory = HOST_SLOTS) -> None:
+                 slots: SlotMemory = HOST_SLOTS, range_alignment: int = 1,
+                 sent_from: bool = False,
+                 max_ranges_per_slot: Optional[int] = None) -> None:
         # This request's block, measured by the library from the mounts these paths live on. Held per
         # instance, not per module: two requests can touch different mounts, and a value fixed at
         # import could only ever be a guess about the first one.
         self.direct_block = direct_block
-        self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks)
+
+        # 0 divides by zero inside the rule, and a negative one moves the cursor BACKWARDS - Python's
+        # % follows the sign of the divisor - which overlaps two ranges in one slot. Both would show
+        # up far from here, as wrong bytes rather than as a bad argument.
+        if range_alignment < 1:
+            raise ValueError(f"range_alignment must be at least 1, got {range_alignment}")
+
+        # A ring that is SENT FROM lays its ranges out by a rule, so a peer can work out where each
+        # one is without being told. A ring that is READ INTO directly places each range congruent
+        # with its file offset instead. The two cannot both hold, and silently preferring one would
+        # give a peer the wrong offsets.
+        if range_alignment > 1 and slots.direct_io:
+            raise ValueError(
+                f"a {slots.label} ring is read into directly, so its ranges are placed congruent "
+                f"with their file offsets and cannot also be aligned to {range_alignment}"
+            )
+        self._range_alignment = range_alignment
+
+        # A RING WHOSE SLOTS GO ON THE WIRE. Its ranges are packed one after another, so a peer
+        # works out where each one is from the sizes alone. Both of these would move a range
+        # somewhere that peer will not look, and neither shows up as anything but wrong weights.
+        if sent_from:
+            if slots.direct_io:
+                raise ValueError(
+                    f"a {slots.label} ring is read into directly, so its ranges sit congruent with "
+                    f"their file offsets and cannot be sent from"
+                )
+            if range_alignment != 1:
+                raise ValueError(
+                    f"a ring that is sent from packs its ranges one after another, not by "
+                    f"{range_alignment}"
+                )
+        self._sent_from = sent_from
+
+        self.files_requests_iterator = FilesRequestsIterator(buffer_size, files_chunks,
+                                                             range_alignment,
+                                                             max_ranges_per_slot)
+        self.max_ranges_per_slot = max_ranges_per_slot
         self.buffer_size = buffer_size
         self.num_buffers = num_buffers
         # DEBUG, not INFO: this class cannot know which rank it is on, and every rank builds its own
@@ -246,7 +320,8 @@ class FilesRequestsIteratorWithBuffer:
         """Addresses for this request's ranges, or None if an aligned layout does not fit.
 
         With aligned=True a range may be pushed forward a few bytes so that its address and its file
-        offset leave the same remainder. With aligned=False the ranges are packed one after another.
+        offset leave the same remainder. With aligned=False the ranges follow range_alignment, which
+        is 1 - one after another.
         """
         dsts = []
         cursor = base
@@ -258,14 +333,92 @@ class FilesRequestsIteratorWithBuffer:
                     # 0 when they already line up, which is the usual case after the first range of a
                     # file.
                     cursor += (offset - cursor) % self.direct_block
+                    if cursor + size > limit:
+                        return None
 
-                if cursor + size > limit:
+                    dsts.append(cursor)
+                    cursor += size
+                    continue
+
+                # FROM THE BASE, not the address: the rule reads sizes only, so two ranks whose
+                # slots sit at different addresses still lay the same ranges out the same way.
+                at, after = advance(cursor - base, size, self._range_alignment)
+
+                # The packer walks the same way against the same limit, so this cannot trip while
+                # the two agree. It is the net if they ever stop agreeing.
+                if base + at + size > limit:
                     return None
 
-                dsts.append(cursor)
-                cursor += size
+                dsts.append(base + at)
+                cursor = base + after
 
         return dsts
+
+    @property
+    def range_alignment(self) -> int:
+        """The rule this ring's ranges are placed by. 1 means one after another.
+
+        A sender reads `sent_from` rather than this: both rings pack one after another now, so the
+        number no longer tells them apart. Kept because the placement still follows it."""
+        return self._range_alignment
+
+    @property
+    def sent_from(self) -> bool:
+        """Whether this ring was built for its slots to be broadcast.
+
+        The mark a sender checks. The constructor refuses the layouts that would break it, so this
+        is a true statement about the ranges and not only about what the caller asked for."""
+        return self._sent_from
+
+    def range_offsets_of(self, request: FilesRequest) -> List[int]:
+        """Each range's offset INSIDE its slot.
+
+        What a receiver can use: it reads its own copy at its own address, so only the offset inside
+        the slot means the same thing on both sides.
+
+        ASKED OF THE RING, not derived from range_dsts[0]. That is the layout's own first element,
+        so a layout shifted down the slot would still read as starting at 0."""
+        if request.buffer_index is None:
+            raise RuntimeError("range_offsets_of on a request whose slot has already been released")
+
+        base = self._pool.slot(request.buffer_index).address
+        return [dst - base for dst in request.range_dsts]
+
+    def slot_memory_of(self, request: FilesRequest):
+        """The USED prefix of this request's slot, as the slot is made of.
+
+        What a caller broadcasts or copies out. The whole slot would also be correct and is simpler,
+        but it sends the unused tail - and the last slot of a stream is usually part full, so that
+        tail is most of it.
+
+        MEASURED FROM THE PLACEMENT, not summed from the sizes. An aligned layout pushes ranges
+        forward to stay congruent with their file offsets, so it leaves gaps: the sum of the sizes
+        is then SHORTER than the extent, and a caller sending that many bytes would truncate the
+        last range. Reading the end of the furthest range cannot make that mistake, and is right for
+        a tight layout too.
+
+        AGREEING A SLOT SIZE IS NOT ENOUGH to make this the same on two ranks. On a host ring the
+        extent also depends on RUNAI_STREAMER_MAX_PADS_PER_BUFFER, which distributed streaming
+        assumes is equal across ranks, and on the probed direct_block, which is NOT an assumption -
+        it is measured per mount, so ranks reading different mounts can differ. Either one changes
+        the pad width, which can make _place(aligned=True) refuse on one rank and fall back to tight
+        packing while its peers stay aligned: same ranges, same dictated shape, different layout and
+        a different length here.
+
+        A DEVICE ring is immune - direct_io=False, so there are no pads and the extent is just the
+        data."""
+        if request.buffer_index is None:
+            raise RuntimeError("slot_memory_of on a request whose slot has already been released")
+
+        slot = self._pool.slot(request.buffer_index)
+
+        # THE LAST RANGE ENDS FURTHEST, so this is O(1) rather than a walk over every range - which
+        # matters, because a model brings a few hundred thousand of them. _place only ever ADVANCES
+        # its cursor, aligned or not, so range_dsts is non-decreasing and nothing placed earlier can
+        # reach past the last one. A placement that reordered ranges would break this, and would
+        # break the file-order yield as well.
+        used = request.range_dsts[-1] + request.files[-1].sizes[-1] - slot.address
+        return slot.memory[:used]
 
     def has_free_buffer(self) -> bool:
         return self._pool.has_free()
@@ -403,8 +556,15 @@ class FilesRequestsIteratorWithBuffer:
         )
 
 class FilesRequestsIterator:
-    def __init__(self, memory_limit: int, files_chunks: List[FileChunks]) -> None:
+    def __init__(self, memory_limit: int, files_chunks: List[FileChunks],
+                 range_alignment: int = 1, max_ranges_per_request: Optional[int] = None) -> None:
+        if max_ranges_per_request is not None and max_ranges_per_request < 1:
+            raise ValueError(
+                f"max_ranges_per_request must be at least 1, got {max_ranges_per_request}"
+            )
         self.memory_limit = memory_limit
+        self.range_alignment = range_alignment
+        self.max_ranges_per_request = max_ranges_per_request
         self.q = deque(FileChunksIterator(file_chunks)
             for file_chunks in files_chunks)
         
@@ -434,9 +594,19 @@ class FilesRequestsIterator:
         files_request = FilesRequest()
         current_request_memory_size = 0
         while self.q:
+            # Spent across the files of ONE request, not per file: the cap describes the request,
+            # which is what a peer receives.
+            remaining_ranges = (None if self.max_ranges_per_request is None
+                                else self.max_ranges_per_request - files_request.num_ranges)
+            if remaining_ranges is not None and remaining_ranges <= 0:
+                break
+
             file_chunks_iterator = self.q[0]
             file_chunks = file_chunks_iterator.next_chunks(
-                self.memory_limit - current_request_memory_size
+                self.memory_limit - current_request_memory_size,
+                current_request_memory_size,
+                self.range_alignment,
+                remaining_ranges,
             )
             finished = file_chunks_iterator.is_finished()
             if finished:
@@ -460,7 +630,9 @@ class FilesRequestsIterator:
             # one response per range.
             files_request.append(file_chunks, self.file_to_assigned_ranges[file_chunks.id])
             self.file_to_assigned_ranges[file_chunks.id] += len(file_chunks.sizes)
-            current_request_memory_size += file_chunks.total_size()
+            # WHAT THE PACKER ALREADY DECIDED, not a second walk of the same ranges. The two are
+            # one layout, and recomputing it here made them two things that had to agree.
+            current_request_memory_size = file_chunks_iterator.cursor_after
 
         if len(files_request.files) == 0:
             files_request = None
@@ -478,18 +650,40 @@ class FileChunksIterator:
         self.offsets = file_chunks.offsets
         self.sizes = file_chunks.sizes
         self.next_index = 0
+        # Nothing has been handed out yet, so no request has a cursor from this file.
+        self.cursor_after = 0
 
     def is_finished(self) -> bool:
         return self.next_index >= len(self.sizes)
 
-    def next_chunks(self, size: int) -> FileChunks:
+    def next_chunks(self, size: int, cursor: int = 0, alignment: int = 1,
+                    max_ranges: Optional[int] = None) -> FileChunks:
+        """The next ranges that fit in `size` bytes, laid out from `cursor` by `alignment`.
+
+        cursor is where this file's first range would land inside the request, which the rule needs:
+        the pad before a range depends on where the ranges before it ended, including those from an
+        earlier file in the same request.
+
+        max_ranges stops the packing by COUNT as well as by bytes. A caller that describes a slot to
+        someone else has a fixed number of rows to describe it in, and bytes alone do not bound the
+        count: a range of any size takes one row, and small ranges pack by the thousand.
+
+        Leaves `cursor_after` holding where the request's cursor ends. The caller used to walk these
+        same ranges a second time to work that out, which made two computations of one layout that
+        had to agree - and doubled the cost of every packing pass."""
         start = self.next_index
         end = start
-        remaining = size
-        while end < len(self.sizes) and self.sizes[end] <= remaining:
-            remaining -= self.sizes[end]
+        limit = cursor + size
+        stop_at = len(self.sizes) if max_ranges is None else min(len(self.sizes), start + max_ranges)
+        while end < stop_at:
+            at, after = advance(cursor, self.sizes[end], alignment)
+            if at + self.sizes[end] > limit:
+                break
+            cursor = after
             end += 1
         self.next_index = end
+        # VALID UNTIL THE NEXT CALL, like next_index: both describe the hand-out just made.
+        self.cursor_after = cursor
         return FileChunks(self.id, self.path, self.offsets[start:end], self.sizes[start:end])
 
 def _largest_range(files_chunks: List[FileChunks]) -> int:
@@ -714,8 +908,15 @@ def _numeric_env(name: str, default, parse):
         raise ValueError(f"{name} must be a number, got {raw!r}") from None
 
 
-def _device_memory_limit() -> int:
-    value = _numeric_env(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, DEFAULT_DEVICE_MEMORY_LIMIT, int)
+def _device_memory_limit() -> Optional[int]:
+    """The hard cap, or None when nobody set one.
+
+    None rather than a default: a number nobody chose cannot be a cap. The ring takes what the data
+    needs, and this only ever lowers it."""
+    raw = os.getenv(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME)
+    if raw is None:
+        return None
+    value = _numeric_env(RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME, None, int)
     if value <= 0:
         raise ValueError(
             f"{RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} must be a positive number of bytes, "
@@ -734,140 +935,227 @@ def _device_memory_fraction() -> float:
     return value
 
 
+class SlotBounds(NamedTuple):
+    """Every rule that can end a slot early, in one value.
+
+    These were separate parameters once, and the sizing read only the byte budget. It scored a
+    packing the caller's range cap forbade and chose a slot the ring could never fill. One value
+    passed to the packer and to the sizing cannot be honoured by one and forgotten by the other."""
+
+    # The most ranges one slot may hold, or None for as many as its bytes allow.
+    max_ranges: Optional[int] = None
+
+    # What each range's start is rounded up to. 1 packs them one after another.
+    range_alignment: int = 1
+
+
+class Packing(NamedTuple):
+    """What a slot size really achieves on a file list."""
+
+    buffer_size: int
+    slots: int
+    # Bytes the ranges occupy, pads excluded.
+    used: int
+    # The most ranges that landed in any one slot.
+    widest: int
+
+    @property
+    def fill(self) -> float:
+        if not self.slots:
+            return 0.0
+        return self.used / (self.slots * self.buffer_size)
+
+
+
+def pack(files_chunks: List[FileChunks], buffer_size: int, bounds: SlotBounds) -> Packing:
+    """Run THE RING'S OWN PACKER over these files and report what it did.
+
+    Not a model of the packing rule - the rule itself, the same object a ring and a prediction
+    build. A hand-written copy here read only the byte budget, so it ignored both the range cap the
+    caller was passing and the alignment, and scored slots the ring could not produce.
+
+    A range carries ONE destination address, so it cannot span two slots: a slot takes consecutive
+    ranges until the next does not fit, and the rest is read-ahead nobody uses."""
+    if buffer_size <= 0:
+        return Packing(buffer_size, 0, 0, 0)
+
+    packer = FilesRequestsIterator(buffer_size, files_chunks, bounds.range_alignment,
+                                   bounds.max_ranges)
+    slots = used = widest = 0
+    while True:
+        request = packer.next_request()
+        if request is None:
+            break
+        slots += 1
+        widest = max(widest, request.num_ranges)
+        used += sum(size for file_chunks in request.files for size in file_chunks.sizes)
+    return Packing(buffer_size, slots, used, widest)
+
+
+def rows_ended_a_slot(files_chunks: List[FileChunks], buffer_size: int,
+                      bounds: SlotBounds) -> bool:
+    """Whether the range cap, rather than the bytes, is what ends a slot at this size.
+
+    Packed twice and compared, because holding exactly max_ranges proves nothing on its own - the
+    bytes may have run out at the same range. A cap that bites always splits a slot, so it always
+    costs a slot. Run once, for the size already chosen."""
+    if bounds.max_ranges is None:
+        return False
+    return (pack(files_chunks, buffer_size, bounds).slots
+            > pack(files_chunks, buffer_size, bounds._replace(max_ranges=None)).slots)
+
+
 def device_ring_sizing(free_bytes: Optional[int],
                        files_chunks: List[FileChunks],
-                       ring_buffers: Optional[int] = None) -> Optional[Tuple[int, int]]:
+                       bounds: SlotBounds = SlotBounds(),
+                       extra_slots: int = 0) -> Optional[Tuple[int, int]]:
     """(buffer_size, num_buffers) for a ring in DEVICE memory, or None to use the host ring instead.
 
-    The budget is the configured limit, capped at a fraction of what the device has free. The limit
-    keeps the ring from growing just because a device is empty; the fraction keeps it from taking
-    memory the caller needs for the model it is loading.
+    THE DATA DECIDES THE SIZE AND THE MEMORY FOLLOWS. device_slot_size answers from the ranges, the
+    depth is the two slots that let reading and sending overlap, and the two together are what the
+    ring asks for. The fraction of free memory and the limit only ever LOWER that. It used to run
+    the other way - a configured 8 GiB became a budget, and the slot size was budget // depth - so
+    a number nobody chose for this model decided the layout.
 
-    None rather than an exception: a device with no room for a ring is not an error, it is the host
-    path. The budget must cover two of the largest range, below which nothing can overlap - a single
-    buffer is only refilled once it has been handed over. That is a floor on the BUDGET, not on the
-    depth: a stream smaller than the budget is still spanned entirely, so one whose ranges all fit at
-    once gets fewer buffers, and a single-range stream gets one. Nothing is lost there - with one
-    range there is nothing to overlap, and the device ring still avoids the copy the host path makes.
+    NO CALLER-NAMED DEPTH. The host ring takes one, because a caller there may know something the
+    setting cannot - the header sweeps ask for 1, since each is one small range per file. A DEVICE
+    ring has no such case: its depth is the two slots that overlap, and a depth from outside could
+    only ask for memory the data does not need. Asking for 100 once claimed 50 GiB.
+
+    extra_slots is what the CALLER will allocate beside the ring, in buffers of the same size: the
+    distributed path receives its peers' slots into one or two of them. Counted here rather than
+    reserved afterwards, because a reservation that shrinks a shape this function already chose is
+    a second solver, and the two disagree - asking for B x 2 plus 2 would land on 1.33B x 2 plus 1.
+
+    None rather than an exception: a device with no room is not an error, it is the host path. The
+    least that can work is one slot holding the largest range, since a range carries one destination
+    address and cannot span two slots.
+
+    bounds are the rules the RING will be built with. The size no longer comes from a packing
+    search, so a cap can no longer silently steer it; what a cap still does is end a slot before its
+    bytes run out, which is reported rather than solved around.
 
     free_bytes is a parameter rather than a query, so the arithmetic is testable without a device.
-    None is what device_free_memory() reports for a device torch cannot measure, and answers the same
-    way as too little room: no device ring. Taken here rather than at the call site, so every caller
-    of this pair cannot each decide what unknown means."""
+    None is what device_free_memory() reports for a device torch cannot measure, and answers the
+    same way as too little room: no device ring."""
     if free_bytes is None:
         return None
-    budget = device_ring_budget(free_bytes, files_chunks)
-    if budget <= 0 or budget < device_ring_floor(files_chunks):
-        return None
-    return _device_ring_shape(files_chunks, budget, ring_buffers)
 
+    size = device_slot_size(files_chunks)
+    if size <= 0:
+        # Nothing to read. One empty buffer, as the host ring answers for the same case.
+        return 0, 1
 
-def _packing_fill(sizes: List[int], buffer_size: int) -> float:
-    """How full the buffers get, packing these ranges in order at this buffer size.
-
-    A range carries ONE destination address, so it cannot span two buffers: a request fills a buffer
-    with consecutive ranges until the next does not fit, and the rest of that buffer is read-ahead
-    nobody uses. Measured 89.9% to 97.3% across the models to hand, so the waste is real but modest.
-
-    Not monotonic in the buffer size, which is why this is searched rather than derived: fill
-    oscillates with how the sizes happen to tile, and the best size was 1.50x the largest range on one
-    model and 4.75x on another."""
-    if buffer_size <= 0:
-        return 0.0
-    buffers, used, current = 0, 0, 0
-    for size in sizes:
-        if current + size > buffer_size:
-            buffers += 1
-            used += current
-            current = 0
-        current += size
-    if current:
-        buffers += 1
-        used += current
-    return used / (buffers * buffer_size) if buffers else 0.0
-
-
-# Enough to find the peak without making sizing itself expensive: the search costs candidates x
-# ranges, and a model can carry a few hundred thousand ranges. The peaks measured are far apart, so a
-# handful of points finds them.
-MAX_PACKING_CANDIDATES = 8
-
-
-def _device_ring_shape(files_chunks: List[FileChunks], budget: int,
-                       ring_buffers: Optional[int] = None) -> Tuple[int, int]:
-    """(buffer_size, num_buffers) for a device ring, chosen by how well the ranges pack.
-
-    The host ring derives its buffer from the depth target (_ring_sizing). Here the achievable sizes
-    are known - budget // N for each depth N the budget can pay for - so the one that wastes least is
-    picked instead. Depth itself was measured flat on a device ring from 2 to 10 buffers at a fixed
-    budget, so there is nothing to trade away by choosing on packing alone.
-
-    Falls back to _ring_sizing when there is nothing to choose between: no ranges, or a budget that
-    affords a single buffer."""
     largest = _largest_range(files_chunks)
-    sizes = [size for file_chunks in files_chunks for size in file_chunks.sizes if size > 0]
-    if largest <= 0 or not sizes:
-        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
+    allowance = device_ring_budget(free_bytes, files_chunks)
 
-    # A stream the budget already spans recycles nothing, so packing waste is not lost read-ahead -
-    # it is only memory never used. _ring_sizing spends the headroom on slightly larger buffers
-    # instead, and gives a single range a single buffer rather than a ring it cannot overlap with.
-    if sum(sizes) < budget:
-        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget, ring_buffers)
+    # KEPT FROM THE OLD RULE. Below two of the largest range nothing can overlap, and the host path
+    # - which copies every range - is the better answer. The gate is on what is ALLOWED, so a
+    # device that is simply too full falls back rather than building a ring that cannot work.
+    if allowance < device_ring_floor(files_chunks):
+        return None
 
-    # The CALLER's depth first, then the environment. A caller that names a depth has a reason the
-    # setting cannot know - the header sweeps ask for 1 because each is one small range per file -
-    # and the host path already honours it, so the two must not disagree.
-    requested = ring_buffers if ring_buffers is not None else _ring_buffers_setting()
-    target = requested if requested is not None else DEFAULT_RING_BUFFERS
-    deepest = min(target, budget // largest)
-    if deepest < 2:
-        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget, ring_buffers)
+    slots = DEVICE_RING_SLOTS
 
-    # A depth somebody set is used as given. The search below is free to settle on fewer buffers than
-    # the target, which on the default is the point - but it turned an explicit setting into an upper
-    # bound, so asking for 4 could still give 2 and nothing said so. The budget may still shrink it,
-    # since a buffer cannot be smaller than the largest range.
-    if requested is not None:
-        return max(largest, budget // deepest), deepest
+    # THE SLOT GIVES WAY BEFORE THE DEPTH DOES, down to the largest range. Dropping to one slot
+    # loses the overlap entirely, which is the one cliff both models measure; a slot somewhat
+    # smaller than the data asked for is flat over a wide range.
+    if (slots + extra_slots) * size > allowance:
+        size = max(largest, allowance // (slots + extra_slots))
 
-    # The achievable buffer sizes are one per depth; sampled when there are more than the cap.
-    depths = list(range(2, deepest + 1))
-    if len(depths) > MAX_PACKING_CANDIDATES:
-        step = (len(depths) - 1) / (MAX_PACKING_CANDIDATES - 1)
-        depths = sorted({depths[round(i * step)] for i in range(MAX_PACKING_CANDIDATES)})
+    # Still short at the floor, so the depth has to give after all.
+    while (slots + extra_slots) * size > allowance and slots > 1:
+        slots -= 1
+        size = max(largest, min(size, allowance // (slots + extra_slots)))
 
-    best = None
-    for depth in depths:
-        buffer_size = max(largest, budget // depth)
-        buffers = min(target, budget // buffer_size)
-        if buffers < 2:
-            continue
-        fill = _packing_fill(sizes, buffer_size)
-        # Ties go to the smaller ring: equal packing for less device memory.
-        rank = (fill, -(buffer_size * buffers))
-        if best is None or rank > best[0]:
-            best = (rank, buffer_size, buffers)
+    if (slots + extra_slots) * size > allowance:
+        return None
 
-    if best is None:
-        return _ring_sizing(MemoryCapMode.limited, files_chunks, budget)
-    return best[1], best[2]
+    # A STREAM THAT FITS IN ONE SLOT RECYCLES NOTHING, so a second slot could never be filled.
+    #
+    # THE BYTES FIRST, THEN THE PACKER. A slot can hold every byte and still not hold every range:
+    # the cap ends a slot on its row count, and the alignment pads each range. Either way a second
+    # request follows, waits for the first slot to come back, and a depth of one costs the overlap.
+    #
+    # The byte test comes first because it is NECESSARY - padding and a cap only ever need more room
+    # - and because it is cheap. Packing walks every range, where the sum only adds them, and a
+    # model with hundreds of thousands of ranges feels the difference. Gated this way, a model large
+    # enough for that to matter fails the byte test and never reaches the packer.
+    #
+    # AFTER THE SHRINK, NEVER BEFORE IT. Asking first uses a size the allowance may not pay for:
+    # the depth is then pinned at one, the slot shrinks below the stream, and the ring can neither
+    # span it nor overlap - where two smaller slots would have fitted the same allowance.
+    streamed = sum(size_ for file_chunks in files_chunks for size_ in file_chunks.sizes)
+    if slots > 1 and size >= streamed and pack(files_chunks, size, bounds).slots <= 1:
+        slots = 1
+
+    if bounds.max_ranges is not None and rows_ended_a_slot(files_chunks, size, bounds):
+        # NOT corrected here: the cap is the caller's. Said out loud because this is the pairing
+        # that once disagreed in silence, with the sizing optimising for a packing the cap forbade.
+        logger.debug(
+            f"[RunAI Streamer] ring slots end on their range cap of {bounds.max_ranges} rather "
+            f"than on their {humanize.naturalsize(size, binary=True)} of room"
+        )
+    return size, slots
+
+
+def host_ring_sizing(files_chunks: List[FileChunks],
+                     memory_limit: int,
+                     ring_buffers: Optional[int] = None) -> Tuple[int, int]:
+    """(buffer_size, num_buffers) the HOST ring would choose for this list, WITHOUT building it.
+
+    The host-shaped sibling of device_ring_sizing. Peers that must agree a ring shape have to know
+    it before any of them allocates, which means asking the question without the answer being a
+    ring.
+
+    DELEGATES to _ring_sizing rather than repeating its arithmetic. with_memory_mode() reaches the
+    same numbers on its way to building an iterator; this is that arithmetic alone. Reimplementing
+    it would let the agreed shape and the built ring drift apart, which is the one thing a caller
+    using this cannot survive.
+
+    memory_limit is REQUIRED, and deliberately not defaulted to the environment. The variable is a
+    NODE total; a caller agreeing a shape across ranks has to divide it by the ranks sharing the
+    host first. Reading it here would hand every rank the whole node's limit, and the group would
+    agree a shape it discovers it cannot afford only at allocation time.
+
+    The extent a slot ends up holding also depends on the probed direct_block, which this does not
+    answer and which no environment can make equal - see slot_memory_of."""
+    return _ring_sizing(_get_memory_mode(memory_limit), files_chunks, memory_limit, ring_buffers)
 
 
 def device_ring_budget(free_bytes: int, files_chunks: List[FileChunks]) -> int:
-    """Bytes a device ring may take: the configured target, raised when the data needs more, and
-    capped by the fraction of free memory in every case.
+    """The MOST a device ring may take. Not what it will take - that comes from the data.
 
-    The limit is a TARGET, not a veto. A range carries one destination address and so cannot span two
-    buffers, so a model whose largest range needs more than the target would otherwise lose the
-    device ring entirely - on a device with the room to spare, because a setting said 4 GiB. Only the
-    fraction refuses, and then the device really is too full.
+    A fraction of what the device has free, lowered further by the limit where one is set. Both are
+    backstops: the fraction keeps the ring out of memory the caller needs for the model it is
+    loading, and the limit is there for an operator who wants a ceiling of their own.
+
+    files_chunks is unused and kept so the two backstops have one public entry point; the figure no
+    longer depends on the data, which is the whole point of the change.
 
     Public so a caller that falls back can report the number that bound it. Free memory alone does
-    not: printing it against the floor reads as nonsense, gigabytes being 'not enough' for
+    not: printing it against what was needed reads as nonsense, gigabytes being 'not enough' for
     kilobytes."""
-    return min(max(_device_memory_limit(), device_ring_floor(files_chunks)),
-               int(free_bytes * _device_memory_fraction()))
+    allowance = int(free_bytes * _device_memory_fraction())
+    limit = _device_memory_limit()
+    return allowance if limit is None else min(allowance, limit)
+
+
+def device_slot_size(files_chunks: List[FileChunks]) -> int:
+    """How big one slot wants to be, from the DATA alone.
+
+    A range carries one destination address and cannot span two slots, so the largest range is a
+    hard floor. DEVICE_RING_MIN_SLOT is the soft one, for a model whose ranges are all small.
+
+    Never more than the whole stream: a ring cannot read ahead past the end, and reserving for
+    bytes that do not exist is the waste this change exists to stop.
+
+    0 where there is nothing to read, which is not an error - an empty shard is a real case."""
+    largest = _largest_range(files_chunks)
+    if largest <= 0:
+        return 0
+    streamed = sum(size for file_chunks in files_chunks for size in file_chunks.sizes)
+    return min(max(largest, DEVICE_RING_MIN_SLOT), max(largest, streamed))
 
 
 def device_ring_floor(files_chunks: List[FileChunks]) -> int:

@@ -11,6 +11,7 @@ import humanize
 from runai_model_streamer.file_streamer import FileChunks
 
 import logging
+from itertools import accumulate
 
 logger = logging.getLogger(__name__)
 
@@ -219,9 +220,10 @@ def _span_ends(sizes: List[int], n: int) -> Tuple[List[int], List[int]]:
     """
     total = len(sizes)
 
-    prefix = [0] * (total + 1)
-    for index, size in enumerate(sizes):
-        prefix[index + 1] = prefix[index] + size
+    # accumulate() rather than a Python loop: same numbers, and the walk happens in C. This runs
+    # once per rank on the load path over every range of the model.
+    prefix = [0]
+    prefix.extend(accumulate(sizes))
 
     def cuts(ceiling: int) -> Optional[List[int]]:
         ends: List[int] = []
@@ -270,12 +272,24 @@ def _flatten(file_stream_requests: List[FileChunks]):
     origins: List[Tuple[int, int]] = []
 
     for request in file_stream_requests:
-        order = sorted(range(len(request.sizes)),
-                       key=lambda i: (request.offsets[i], request.sizes[i]))
-        for index in order:
+        pairs = list(zip(request.offsets, request.sizes))
+
+        # ALREADY IN ORDER is the normal case: a safetensors shard lists its tensors back to back.
+        # Checking costs one pass and skips a key callback and a tuple build per range, which is
+        # the whole of this function's cost on a model with a hundred thousand of them.
+        if all(pairs[i] <= pairs[i + 1] for i in range(len(pairs) - 1)):
+            paths.extend([request.path] * len(pairs))
+            offsets.extend(request.offsets)
+            sizes.extend(request.sizes)
+            origins.extend((request.id, index) for index in range(len(pairs)))
+            continue
+
+        # Sorting the values themselves still beats sorting indices through a key callback.
+        for offset, size, index in sorted(
+                (offset, size, index) for index, (offset, size) in enumerate(pairs)):
             paths.append(request.path)
-            offsets.append(request.offsets[index])
-            sizes.append(request.sizes[index])
+            offsets.append(offset)
+            sizes.append(size)
             origins.append((request.id, index))
 
     return paths, offsets, sizes, origins
