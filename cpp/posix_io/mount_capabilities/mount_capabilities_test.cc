@@ -33,6 +33,7 @@
 #include "common/exception/exception.h"
 #include "utils/fd/fd.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::posix_io
@@ -180,9 +181,18 @@ TEST(MountCapabilities, Is_Block_Device_Asks_Sysfs)
     ASSERT_NE(root, nullptr) << std::strerror(errno);
 
     const std::string sysfs(root);
+    const std::string listed = sysfs + "/dev/block/9:1";
+    // Removes whatever was made, also when an ASSERT below returns early.
+    utils::ScopeGuard remove_tree([&]()
+    {
+        ::unlink(listed.c_str());
+        ::rmdir((sysfs + "/dev/block").c_str());
+        ::rmdir((sysfs + "/dev").c_str());
+        ::rmdir(sysfs.c_str());
+    });
+
     ASSERT_EQ(::mkdir((sysfs + "/dev").c_str(), 0700), 0);
     ASSERT_EQ(::mkdir((sysfs + "/dev/block").c_str(), 0700), 0);
-    const std::string listed = sysfs + "/dev/block/9:1";
     {
         const utils::Fd created(::open(listed.c_str(), O_CREAT | O_RDWR, 0600));
         ASSERT_GE(created.fd(), 0);
@@ -192,11 +202,6 @@ TEST(MountCapabilities, Is_Block_Device_Asks_Sysfs)
     EXPECT_FALSE(is_block_device(makedev(3965, 7), sysfs)) << "Lustre's made-up number is not listed";
     EXPECT_FALSE(is_block_device(makedev(0, 42), sysfs)) << "an anonymous device (NFS, tmpfs) is not listed";
     EXPECT_FALSE(is_block_device(makedev(9, 1), sysfs + "/missing")) << "no sysfs reads as file storage";
-
-    ::unlink(listed.c_str());
-    ::rmdir((sysfs + "/dev/block").c_str());
-    ::rmdir((sysfs + "/dev").c_str());
-    ::rmdir(root);
 }
 
 // The real answer for wherever the test runs, checked against sysfs directly rather than assumed:

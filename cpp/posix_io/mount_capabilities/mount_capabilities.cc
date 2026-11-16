@@ -274,7 +274,7 @@ std::ostream & operator<<(std::ostream & os, const MountCapability & capability)
         os << " (" << capability.fs_type << ")";
     }
 
-    os << (capability.block_backed ? " block device" : " no block device");
+    os << (capability.block_backed ? " block-backed" : "");
     return os << (capability.memory_backed ? " memory-backed" : "");
 }
 

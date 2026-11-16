@@ -24,6 +24,7 @@ runai_cc_test(
         "//posix_io/alignment",
         "//utils/fd",
         "//utils/random",
+        "//utils/scope_guard",
         "//utils/temp/file",
     ],
 )

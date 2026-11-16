@@ -52,6 +52,10 @@ struct MountCapability
     // device (EBS, iSCSI, virtio). False for file systems with no device beneath them - NFS, Lustre,
     // CIFS, FUSE, virtiofs, tmpfs - which the kernel gives an anonymous number, or (Lustre) one it
     // makes up. See is_block_device() for why the number alone cannot decide it.
+    //
+    // Also false for btrfs, ZFS and overlayfs even when they sit on NVMe: they too give files an
+    // anonymous number. Those mounts keep direct reads inline, as before this field existed - safe,
+    // but without the io-wq gain (issue #323). Overlayfs is the one a container image puts models on.
     bool block_backed = false;
 };
 

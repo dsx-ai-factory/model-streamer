@@ -78,9 +78,9 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
         {
             // Routed by what is BOUND into an engine and cannot change afterwards: the depth the
             // mount resolved, whether it registers buffers, and whether its direct reads go to io-wq.
-            // So a mount never lands on an engine
-            // built for another answer, and the cap applies within each - which is why discovery
-            // order cannot cost a mount any of its configured values.
+            // So a mount never lands on an engine built for another answer, and the cap applies
+            // within each - which is why discovery order cannot cost a mount any of its configured
+            // values.
             auto & engines = _async_pools[{ depth, register_buffers, async_direct }];
 
             if (engines.size() < _max_async_engines)

@@ -55,6 +55,17 @@ size_t device_slab_bytesize()
     return configured;
 }
 
+// Where this worker's direct reads are issued, for the startup log. libaio has no io-wq hand-off and
+// ignores async_direct, so only io_uring can report it.
+const char * direct_read_path(bool async_direct, posix_io::Strategy strategy)
+{
+    if (!async_direct)
+    {
+        return "inline (no block device)";
+    }
+    return strategy == posix_io::Strategy::LibaioDirect ? "inline (libaio)" : "via io-wq (block device)";
+}
+
 } // namespace
 
 size_t staging_bytesize(size_t chunk_bytesize, size_t block, bool direct)
@@ -215,12 +226,8 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
 
     _device_out = std::make_unique<DeviceWriterClient>(_writer, buffers, _engine->depth() + _copy_depth);
 
-    // libaio has no io-wq hand-off and ignores async_direct, so only io_uring can report it.
-    const bool via_io_wq = _async_direct && _strategy != posix_io::Strategy::LibaioDirect;
-
     LOG(INFO) << "Async io worker ready: " << _strategy << ", " << *_settings << ", direct reads "
-              << (via_io_wq ? "via io-wq (block device)"
-                            : (_async_direct ? "inline (libaio)" : "inline (no block device)"));
+              << direct_read_path(_async_direct, _strategy);
 
     // Harvest into a buffer sized once - nothing is allocated while completing.
     _completions.resize(_engine->depth());

@@ -172,10 +172,9 @@ struct AsyncIoConfig
     //
     //   block device   An inline O_DIRECT submit pins the destination on the worker, and on fresh
     //                  host memory that is a first-touch fault and a zeroed page per 4 KiB (issue
-    //                  #323). io-wq spreads it: Qwen3-32B to host memory on a B200 NVMe RAID went
-    //                  from 10.9 s to 0.74 s.
+    //                  #323). io-wq spreads those faults over its workers.
     //   NFS            The inline submit only sends an RPC, which is cheap. io-wq made the same load
-    //                  1.4-2x slower at 5-10x the CPU (same-node NFS, 5-8 GiB/s).
+    //                  slower at several times the CPU.
     //
     // Ignored by libaio, which has no such knob. Defaults to false: the behaviour before it existed.
     bool async_direct = false;
