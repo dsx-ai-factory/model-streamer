@@ -118,6 +118,13 @@ struct ThreadPool
         return _deque.size();
     }
 
+    // The threads this pool runs. In per-worker mode each one owns a Worker, so it is also the
+    // number of workers and of whatever they hold.
+    unsigned threads() const
+    {
+        return static_cast<unsigned>(_threads.size());
+    }
+
     static void routine(ThreadPool & pool)
     {
         while (true)

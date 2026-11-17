@@ -230,6 +230,12 @@ unsigned BackendPools::async_engines() const
     return count_async_engines();
 }
 
+unsigned BackendPools::async_readers() const
+{
+    const auto guard = std::unique_lock<std::mutex>(_async_mutex);
+    return count_async_readers();
+}
+
 unsigned BackendPools::pools_created() const
 {
     const auto guard = std::unique_lock<std::mutex>(_async_mutex);
@@ -246,6 +252,20 @@ unsigned BackendPools::count_async_engines() const
     {
         (void)key;
         total += static_cast<unsigned>(engines.size());
+    }
+    return total;
+}
+
+unsigned BackendPools::count_async_readers() const
+{
+    unsigned total = 0;
+    for (const auto & [key, engines] : _async_pools)
+    {
+        (void)key;
+        for (const auto & pool : engines)
+        {
+            total += pool->threads();
+        }
     }
     return total;
 }
