@@ -522,6 +522,75 @@ class TestTheCacheIsVoted(unittest.TestCase):
         self.assertIs(got, fresh)
         self.assertIs(worker.group_job, new_job)
 
+    def test_the_full_retry_after_an_asymmetric_vote_failure(self):
+        """The retained-state rank's whole retry, with the real discovery and vote code.
+
+        A vote can fail on one rank after succeeding on a peer, so this rank keeps its discovery
+        group and distribution entry while the peer retires everything. Walked here: the failing
+        vote retires discovery, the retry REDISCOVERS through the real find_local_ranks - a reused
+        params instance included - and the next vote, answered 0 by the recovered peer, retires the
+        retained distribution entry and recreates. No step reuses stale state silently."""
+        key = ("local", ((0, 1),), "timeout")
+        job = MagicMock(name="job")
+        old_discovery = MagicMock(name="old_discovery")
+        old_distribution = [MagicMock(name="old_distribution")]
+        new_discovery = MagicMock(name="new_discovery")
+
+        fake_dist = MagicMock(name="dist")
+        fake_dist.is_initialized.return_value = True
+        fake_dist.get_world_size.return_value = 2
+        fake_dist.get_rank.return_value = 1
+        fake_dist.group.WORLD = job
+        fake_dist.new_group.return_value = new_discovery
+
+        def gather(out, obj, group=None):
+            out[:] = ["one-host", "one-host"]
+        fake_dist.all_gather_object.side_effect = gather
+
+        # The failing vote first, then the retry's vote answering 0: the peer evicted.
+        def all_reduce_calls():
+            yield RuntimeError("vote timed out")
+            yield lambda tensor: tensor.fill_(0)
+        calls = all_reduce_calls()
+
+        def all_reduce(tensor, op=None, group=None):
+            step = next(calls)
+            if isinstance(step, Exception):
+                raise step
+            step(tensor)
+        fake_dist.all_reduce.side_effect = all_reduce
+
+        params = _distributedStreamerParams()
+        params.num_processes_on_node = 2      # a reused instance, layout from before the failure
+        params.discovered_job = job
+        params.my_global_rank = 1
+        params.groups_by_ranks = [[0, 1]]
+
+        cache = {("discovery",): old_discovery, key: old_distribution}
+        fresh = MagicMock(name="fresh_distribution")
+        with patch.object(distributed_streamer, "dist", fake_dist), \
+                patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 1, [[0, 1]])), \
+                patch.object(distributed_streamer, "_cache_job", job), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}):
+            # The vote fails on this rank (its peer's may have succeeded).
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, lambda: fresh)
+            self.assertNotIn(("discovery",), cache, "the failed vote kept the discovery group")
+            self.assertIsNone(distributed_streamer._topology_cache)
+            self.assertIn(key, cache, "a vote failure is not a stream failure; the entry stays")
+
+            # The retry: the reused instance rediscovers through the REAL find_local_ranks.
+            params.discover_local_ranks()
+            self.assertIs(cache[("discovery",)], new_discovery)
+            self.assertEqual(distributed_streamer._topology_cache, (2, 1, [[0, 1]]))
+
+            # The retry's vote: the peer evicted, so MIN is 0 - retire the entry, recreate.
+            returned = _distributedStreamer.cached_or_created(key, lambda: fresh)
+        self.assertIs(returned, fresh)
+        self.assertIn(old_distribution, cache[("retired",)])
+        self.assertIn(old_discovery, cache[("retired",)])
+
     def test_a_failed_vote_retires_the_discovery_group_and_the_topology(self):
         # A vote that fails may have closed the discovery group's pairs; keeping it would fail
         # every later vote too. The next load must rediscover, on every rank together.
