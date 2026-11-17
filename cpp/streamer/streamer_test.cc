@@ -155,6 +155,34 @@ TEST_F(StreamerTest, Creation)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+// A MALFORMED READER COUNT IS REJECTED AT START, like every other malformed variable. It used to be
+// read first on the request path, where a parse failure is not a common::Exception and so becomes
+// UnknownError - the code that tells a caller to abandon the streamer rather than fix its input.
+TEST_F(StreamerTest, MalformedWorkersPerMountIsRejectedAtStart)
+{
+    for (const auto & written : { std::string("-1"), std::string("abc"), std::string("4 ") })
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), written);
+
+        void * streamer = nullptr;
+        EXPECT_EQ(runai_file_streamer_start(&streamer),
+                  static_cast<int>(common::ResponseCode::InvalidParameterError))
+            << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << written;
+        EXPECT_EQ(streamer, nullptr);
+    }
+}
+
+// The streamer still starts for a value it can use, so the check above rejects the malformed ones
+// rather than the variable.
+TEST_F(StreamerTest, AValidWorkersPerMountStartsNormally)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
 // Replaces AssignerTest.Mismatched_Input_Sizes, which asserted the old per-file vector length check.
 // Lengths cannot disagree now - num_ranges describes the flat arrays - so what remains checkable at the C
 // boundary is null-ness, validated in submit_request before anything is dereferenced.
