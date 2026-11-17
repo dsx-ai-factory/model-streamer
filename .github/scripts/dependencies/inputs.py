@@ -16,6 +16,7 @@ from util import HERE, read_json
 DOCKERFILE = dockerfile.DOCKERFILE
 SCRIPTS = ".devcontainer/scripts"
 DEVCONTAINER = ".devcontainer/devcontainer.json"
+REQUIREMENTS = "requirements.txt"  # the runtime requirements of a wheel; setup.py reads them as install_requires
 
 
 def config():
@@ -64,14 +65,24 @@ def devcontainer_features(repo):
     return json.loads(text).get("features", {})
 
 
+def requirement_lines(text):
+    """The requirements in a requirements file: one per line, without comments and blank lines."""
+    lines = (line.split("#")[0].strip() for line in text.splitlines())
+    return [line for line in lines if line]
+
+
 def setup_requirements(path):
-    """The install_requires list of a setup.py, read without running it."""
+    """The install_requires list of a setup.py, read without running it. A setup.py that reads it from
+    the requirements.txt next to it (`install_requires=read_requirements()`) gives that file's lines."""
     with open(path) as f:
         tree = ast.parse(f.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "setup":
             for keyword in node.keywords:
                 if keyword.arg == "install_requires":
+                    if isinstance(keyword.value, ast.Call):
+                        with open(os.path.join(os.path.dirname(path), REQUIREMENTS)) as f:
+                            return requirement_lines(f.read())
                     return list(ast.literal_eval(keyword.value))
     return []
 
@@ -96,8 +107,11 @@ def pip_groups(repo):
             files.append(declared_by)
 
     for setup in sorted(glob.glob(os.path.join(repo, "py", "*", "setup.py"))):
+        declaring = os.path.join(os.path.dirname(setup), REQUIREMENTS)
+        if not os.path.exists(declaring):
+            declaring = setup  # install_requires written in the setup.py itself
         for spec in setup_requirements(setup):
-            add("run", spec, os.path.relpath(setup, repo))
+            add("run", spec, os.path.relpath(declaring, repo))
     for path in build_files(repo):
         for line, requirements in dockerfile.pip_packages(read(repo, path), path):
             for spec in requirements:
@@ -105,9 +119,8 @@ def pip_groups(repo):
                 for category in categories_for("pip", name):
                     add(category, spec, "%s:%d" % (path, line))
     for requirements in sorted(glob.glob(os.path.join(repo, "py", "*", "requirements*"))):
-        for line in read(repo, requirements).splitlines():
-            spec = line.split("#")[0].strip()
-            if spec:
+        if os.path.basename(requirements) != REQUIREMENTS:  # requirements.txt is `run`, read above
+            for spec in requirement_lines(read(repo, requirements)):
                 add("test", spec, os.path.relpath(requirements, repo))
     for makefile in sorted(glob.glob(os.path.join(repo, "py", "*", "Makefile"))):
         for name, index in re.findall(r"pip download (\S+) --index-url (\S+)", read(repo, makefile)):
@@ -115,10 +128,14 @@ def pip_groups(repo):
             if index not in groups["test"]["extra_index_urls"]:
                 groups["test"]["extra_index_urls"].append(index)
         for command in re.findall(r"pip3? install\s+([^&\\\n]*)", read(repo, makefile)):
-            skip = False
-            for token in command.split():
-                if skip or token.startswith("-r"):
-                    skip = token == "-r"  # the name after -r is a requirements file, listed elsewhere
+            tokens = command.split()
+            for i, token in enumerate(tokens):
+                if token == "-r" and i + 1 < len(tokens):  # a requirements file, next to the Makefile
+                    requirements = os.path.join(os.path.dirname(makefile), tokens[i + 1])
+                    for spec in requirement_lines(read(repo, requirements)):
+                        add("test", spec, os.path.relpath(requirements, repo))
+                elif i and tokens[i - 1] == "-r":
+                    continue
                 elif not token.startswith(("-", ".", "$")) and "/" not in token:  # a package name, not a path or a wheel of ours
                     add("test", token, os.path.relpath(makefile, repo))
     for pyproject in sorted(glob.glob(os.path.join(repo, "py", "*", "pyproject.toml"))):
