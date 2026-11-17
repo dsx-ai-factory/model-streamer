@@ -289,7 +289,7 @@ Model Streamer is licensed under the [Apache License 2.0](LICENSE).
   - [`COPYRIGHT`](COPYRIGHT): all of them merged.
 
   They are generated, not edited by hand: the
-  [run-ai/runai-actions Renovate pipeline](https://github.com/run-ai/runai-actions/tree/main/renovate)
+  [run-ai/repo-housekeeper Renovate pipeline](https://github.com/run-ai/repo-housekeeper/tree/main/renovate)
   regenerates them in every dependency update PR, from the `# renovate:` and
   `# attribution:` comments in `.devcontainer/Dockerfile` and `.devcontainer/gcs/config/sources.bzl`
   (which modules ship each library, its git submodules, its Bazel dependencies, code it vendors).

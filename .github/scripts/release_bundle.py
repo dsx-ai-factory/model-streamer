@@ -19,7 +19,7 @@ COMPONENTS = {"streamer": "libstreamer.so", "s3": "libstreamers3.so",
 ARCHITECTURES = {"x86_64": 62, "aarch64": 183}  # ELF e_machine values
 HEADERS = {"streamer.h", "device.h", "response_code.h", "submission_id.h"}
 # The third-party notice of the four libraries in the SDK: cpp/NOTICE, kept current by the
-# run-ai/runai-actions Renovate pipeline, packed into each SDK archive under this name.
+# run-ai/repo-housekeeper Renovate pipeline, packed into each SDK archive under this name.
 NOTICE_NAME = "THIRD_PARTY_NOTICES.txt"
 
 
