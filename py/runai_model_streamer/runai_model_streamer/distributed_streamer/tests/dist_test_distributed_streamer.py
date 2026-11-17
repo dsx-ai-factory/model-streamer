@@ -827,15 +827,17 @@ class TestDistributedStreamer(unittest.TestCase):
                         self.assertEqual(stream_all(streamer), original)
                 dist.barrier()
 
-                # Both ranks are now lost; no discovery group exists or gets created; every load
-                # on every rank succeeds plainly.
+                # Both ranks are now lost; every load on every rank succeeds plainly, and NO
+                # process group of any kind is asked for - asserted on the call itself, not
+                # inferred from the cache.
                 self.assertTrue(module._distribution_is_lost())
                 self.assertNotIn(("discovery",), module._group_cache)
-                with DistributedStreamer() as streamer:
-                    self.assertEqual(stream_all(streamer), original)
-                    self.assertFalse(streamer.is_distributed)
-                self.assertNotIn(("discovery",), module._group_cache,
-                                 "a lost job asked for a group")
+                with patch.object(dist, "new_group",
+                                  side_effect=AssertionError("a lost job asked for a group")) as forbidden:
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                    forbidden.assert_not_called()
 
                 if self.rank == 0:
                     print(f"\n✅ Post-failure fallback verified on all {self.world_size} ranks.")
