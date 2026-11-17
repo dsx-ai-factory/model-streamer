@@ -208,8 +208,11 @@ def npm_dependencies(repo):
 
 # --- Bazel -----------------------------------------------------------------------------------------
 
-RULE = re.compile(r"^(\w+)\(\n((?:  .*\n)*?)\)$", re.M)  # a rule as `bazel query --output=build` prints it
+RULE = re.compile(r"^(\w+)\(\n((?:  .*\n)*?)\)$", re.M)  # a rule as `bazel mod show_repo` prints it
 REPOSITORY_RULES = ("http_archive", "http_file", "http_jar", "git_repository", "new_git_repository", "go_repository")
+MODULE_SECTION = re.compile(r"^## ([\w.+-]+)@[^:\n]*:$", re.M)  # one per module in `bazel mod show_repo`
+MODULE_DECLARATION = re.compile(r"\b(?:bazel_dep|single_version_override|archive_override|git_override)\("
+                                r"[^)\n]*?\b(?:name|module_name) = \"([\w.+-]+)\"")
 
 
 def _bazel(workspace, *args):
@@ -217,71 +220,117 @@ def _bazel(workspace, *args):
 
 
 def bazel_dependencies(repo, workspace):
-    """The repositories Bazel fetches to build and test everything, with the URL and hash of each.
+    """The repositories Bazel downloads to build and test everything, with the URL and hash of each.
 
-    `workspace` is a writable copy of the repository: Bazel writes into it. The set is what
-    `bazel fetch //...` leaves in the output base, so it is what the build and the tests need."""
+    `workspace` is a writable copy of the repository: Bazel writes into it. Both Bazel modules are
+    covered: the application (cpp/) and the devcontainer's SDK builder (.devcontainer/gcs/), whose
+    graph is the code of the prebuilt GCS SDK. Dependencies are Bzlmod modules (MODULE.bazel): the
+    set is the module repositories `bazel fetch //...` leaves in the output base, so it is what the
+    builds and the tests need, and `bazel mod show_repo` says where each one was downloaded from."""
     cpp = os.path.join(workspace, "cpp")
-    for config in ("x86_64", "aarch64"):  # some dependencies are selected per target architecture
-        log("bazel: fetching every repository for %s (this takes a while)" % config)
-        _bazel(cpp, "fetch", "--config=" + config, "//...:all")
-    output_base = run(["bazel", "info", "output_base"], cwd=cpp).strip()
+    # Module resolution does not depend on the architecture, so the native configuration fetches
+    # the whole set. The other architecture's configuration cannot even load: the toolchain
+    # repository declares only the native platform (cross-compilation is not supported).
+    log("bazel: fetching every application repository (this takes a while)")
+    _bazel(cpp, "fetch", "--config=" + architecture(), "//...:all")
+    found = _module_dependencies(cpp, "cpp/MODULE.bazel")
+    sdk = os.path.join(workspace, ".devcontainer", "gcs")
+    log("bazel: fetching every repository of the GCS SDK builder (this takes a while)")
+    _bazel(sdk, "fetch", "//...:all")
+    found += _module_dependencies(sdk, ".devcontainer/gcs/MODULE.bazel")
+    return found  # collect.py merges the modules both builds share
+
+
+def _module_dependencies(directory, module_file):
+    """The fetched module repositories of the Bazel module at `directory`, named by `module_file`."""
+    output_base = _bazel(directory, "info", "output_base").strip()
     fetched = {name for name in os.listdir(os.path.join(output_base, "external")) if not name.endswith(".marker")}
-    definitions = _bazel(cpp, "query", "--output=build", "//external:*")
+    modules = _module_graph(directory)
+    definitions = _bazel(directory, "mod", "show_repo", *sorted(modules))
+    declarations = _module_declarations(os.path.join(directory, "MODULE.bazel"))
     found = []
-    for match in RULE.finditer(definitions):
-        rule, attrs = match.group(1), _attributes(match.group(2))
-        name = attrs.get("name")
-        if rule not in REPOSITORY_RULES or name not in fetched:
+    for module, text in _module_sections(definitions):
+        match = RULE.search(text)
+        if not match or module not in modules:
             continue
-        note = "Bazel repository %s." % name
-        declared = [defined_at(definitions, match, workspace)]
+        rule, attrs = match.group(1), _attributes(match.group(2))
+        if rule not in REPOSITORY_RULES or attrs.get("name") not in fetched:
+            continue
+        version, parent = modules[module]
+        if module in declarations:
+            declared = ["%s:%d" % (module_file, declarations[module])]
+        elif parent:
+            declared = ["MODULE.bazel of Bazel module %s (Bazel Central Registry)" % parent]
+        else:
+            declared = [module_file]
+        note = "Bazel module %s." % module
         if rule == "go_repository":
-            module, version = attrs.get("importpath", name), attrs.get("version") or attrs.get("commit", "unversioned")
             found.append(entry(module, version, "go", ["build"],
-                               [file_record("https://proxy.golang.org/%s/@v/%s.zip" % (module, version),
+                               [file_record("https://proxy.golang.org/%s/@v/%s.zip" % (attrs.get("importpath", module), version),
                                             digest=("h1", attrs["sum"], "go.sum hash in the repository rule") if attrs.get("sum") else None)],
                                declared, note))
         elif rule in ("git_repository", "new_git_repository"):
-            found.append(entry(name, attrs.get("tag") or attrs.get("commit", "unversioned")[:12], "bazel", ["build"],
+            found.append(entry(module, version or attrs.get("tag") or attrs.get("commit", "unversioned")[:12], "bazel", ["build"],
                                [file_record(attrs.get("remote", ""), commit=attrs.get("commit"))], declared, note))
         else:
             urls = attrs.get("urls") or ([attrs["url"]] if attrs.get("url") else [])
             if urls:
                 primary = next((url for url in urls if "mirror" not in url), urls[0])  # upstream first, mirrors after
-                found.append(entry(name, _version_from(primary, attrs.get("strip_prefix", "")), "bazel", ["build"],
+                found.append(entry(module, version or _version_from(primary, attrs.get("strip_prefix", "")), "bazel", ["build"],
                                    [file_record(primary, mirrors=[url for url in urls if url != primary],
-                                                digest=("sha256", attrs["sha256"], "WORKSPACE rule") if attrs.get("sha256") else None)],
+                                                digest=_module_digest(attrs))],
                                    declared, note))
     return found
 
 
-FRAME = re.compile(r"#\s+(/\S+?):(\d+)(?::\d+)?(?:\s|$)")
+def _module_graph(directory):
+    """{module: (version, first requiring module or None for the root)} for the selected modules of
+    the resolved graph (`bazel mod graph`). The root and modules a local_path_override supplies have
+    no version and are not dependencies to report, but their children remember them as the parent."""
+    graph = json.loads(_bazel(directory, "mod", "graph", "--output", "json"))
+    modules = {}
+
+    def walk(node, parent):
+        for dependency in node.get("dependencies", []) + node.get("indirectDependencies", []):
+            name, version = dependency["name"], dependency.get("version", "")
+            if version and name not in modules:
+                modules[name] = (version, parent)
+            # A module's subtree appears expanded at one of its occurrences, not necessarily the
+            # first; the other occurrences carry no dependencies, so walking every one terminates.
+            walk(dependency, name if version else parent)
+
+    walk(graph, None)
+    return modules
 
 
-def defined_at(definitions, rule, workspace):
-    """The file and line of the workspace that declares a repository rule, as `cpp/toolchain/deps.bzl:11`.
+def _module_declarations(module_file):
+    """{module: line number} for the modules the file itself asks for (bazel_dep and overrides)."""
+    declarations = {}
+    with open(module_file) as f:
+        for number, line in enumerate(f, 1):
+            match = MODULE_DECLARATION.search(line)
+            if match:
+                declarations.setdefault(match.group(1), number)
+    return declarations
 
-    `bazel query --output=build` prints, for each rule, a `# <file>:<line>:<column>` comment above it (the line of
-    the WORKSPACE that started it) and, below it, the call chain: `# Rule x instantiated at (most recent call
-    last):` and one `#   <file>:<line>:<column> in <function>` per frame, outermost first. The last frame inside
-    the workspace is the line that wrote the rule, in a `.bzl` file when a macro did. A macro of a fetched
-    repository (boringssl, from google-cloud-cpp) has no frame in the workspace after the WORKSPACE call, so the
-    WORKSPACE line that called it is the answer. `rule` is the match of the rule in `definitions`."""
-    root = workspace.rstrip("/") + "/"
-    found = None
-    for line in definitions[rule.end():].splitlines()[1:]:  # the rest of the line of the closing parenthesis is empty
-        if not line.startswith("#") or "defined at" in line:
-            break  # the frames after `defined at` belong to the rule kind (http_archive), not to this use
-        frame = FRAME.match(line)
-        if frame and frame.group(1).startswith(root):
-            found = "%s:%s" % (os.path.relpath(frame.group(1), workspace), frame.group(2))
-    if not found:
-        above = definitions[:rule.start()].rstrip("\n").splitlines()
-        frame = FRAME.match(above[-1]) if above else None
-        if frame and frame.group(1).startswith(root):
-            found = "%s:%s" % (os.path.relpath(frame.group(1), workspace), frame.group(2))
-    return found or "cpp/WORKSPACE"
+
+def _module_sections(definitions):
+    """(module name, text) per `## <module>@<version>:` section of `bazel mod show_repo`."""
+    matches = list(MODULE_SECTION.finditer(definitions))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(definitions)
+        yield match.group(1), definitions[match.start():end]
+
+
+def _module_digest(attrs):
+    """The archive hash of a module repository rule: `sha256`, or the SRI `integrity` the Bazel
+    Central Registry serves."""
+    if attrs.get("sha256"):
+        return ("sha256", attrs["sha256"], "Bazel module registry")
+    integrity = attrs.get("integrity", "")
+    if integrity.startswith("sha256-"):
+        return ("sha256", base64.b64decode(integrity[len("sha256-"):]).hex(), "Bazel module registry (integrity)")
+    return None
 
 
 def _attributes(block):
