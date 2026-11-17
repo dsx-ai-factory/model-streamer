@@ -206,21 +206,25 @@ _group_cache: Dict[Tuple, Any] = {}
 _cache_job: Any = None
 
 
-def _caches_for_this_job() -> None:
-    """Reset the caches when the default process group has changed since they were filled.
+def _caches_for_this_job() -> Any:
+    """Reset the caches when the default process group has changed since they were filled, and
+    return the current job's token.
 
     Called before every cache read. Comparison is by identity: init_process_group builds a new
     default group object, so a cache filled under another one belongs to a dead job. The dead job's
-    groups are retired, not dropped, for the reason _retire gives."""
+    groups are retired, not dropped, for the reason _retire gives. The returned token lets
+    INSTANCE state - a discovered layout, a held distribution group - make the same staleness
+    check, since an instance can outlive the job it was filled under just as the module can."""
     global _cache_job, _topology_cache
     current = dist.group.WORLD if dist.is_initialized() else None
     if current is _cache_job:
-        return
+        return current
     for key in list(_group_cache):
         if key != ("retired",):
             _retire(_group_cache.pop(key))
     _topology_cache = None
     _cache_job = current
+    return current
 
 
 def _retire_discovery() -> None:
@@ -612,6 +616,10 @@ class DistributedStreamer:
 class _distributedStreamerParams:
     def __init__(self) -> None:
         self.num_processes_on_node = None
+        # The job the layout below was discovered under. An instance can be reused across
+        # init_process_group cycles, and the new job's layout may differ, so the layout is
+        # rediscovered when the token no longer matches (see discover_local_ranks).
+        self.discovered_job = None
         self.my_global_rank = 0
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
@@ -714,8 +722,14 @@ class _distributedStreamerParams:
     def discover_local_ranks(self) -> None:
         # set the value of RUNAI_STREAMER_PROCESS_GROUP_SIZE to be the number of processes in the distribution group (or 1 if process group is not initialized)
         # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
+        current_job = _caches_for_this_job()
+        if self.discovered_job is not current_job:
+            # The instance outlived the job its layout was discovered under; the new job's layout
+            # may differ, so the old one must not be served.
+            self.num_processes_on_node = None
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()
+            self.discovered_job = current_job
         if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") is None:
             os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = str(self.num_processes_on_node)
 
@@ -743,6 +757,9 @@ class _distributedStreamer:
         self.rank = 0
         self.original_group_rank = 0
         self.distribution_group = None
+        # The job the held group belongs to; a handle held across init_process_group cycles is the
+        # dead job's and must not be returned for the new one (see create_distribution_group).
+        self.group_job = None
         self.reading_from_storage = False
         self.local_group_global_ranks = []
         self.is_error = False
@@ -774,8 +791,14 @@ class _distributedStreamer:
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
-        if self.distribution_group:
+        current_job = _caches_for_this_job()
+        if self.distribution_group and self.group_job is current_job:
             return self.distribution_group
+        # Either there is no group, or the held one belongs to a job that is gone - a reused
+        # instance can outlive init_process_group. The dead job's handle is dropped, not retired:
+        # the module cache held the reference, and _caches_for_this_job already retired it.
+        self.distribution_group = None
+        self.group_job = current_job
 
         if is_global_distribution():
             # create global group

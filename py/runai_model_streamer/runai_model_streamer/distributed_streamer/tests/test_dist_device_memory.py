@@ -14,6 +14,7 @@ from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DIST_BUFFER_ALIGNMENT,
     DistributedStreamer,
     _distributedStreamer,
+    _distributedStreamerParams,
     allocate_dist_staging,
     dist_buffer_bytesize,
     dist_device_bytes_required,
@@ -450,6 +451,48 @@ class TestTheCacheIsVoted(unittest.TestCase):
         returned, old, created, cache = self.vote(have_mine=False, group_min=0)
         self.assertIs(returned, created)
         self.assertNotIn(("retired",), cache)
+
+    def test_an_instance_reused_across_jobs_rediscovers_the_layout(self):
+        # A params object can outlive init_process_group; the layout it discovered belongs to the
+        # dead job and must not be served to the new one.
+        params = _distributedStreamerParams()
+        old_job, new_job = MagicMock(name="old_job"), MagicMock(name="new_job")
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          side_effect=[(2, 0, [[0, 1]]), (4, 0, [[0, 1, 2, 3]])]) as find, \
+                patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", None), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module:
+            group_module.WORLD = old_job
+            params.discover_local_ranks()
+            self.assertEqual(params.num_processes_on_node, 2)
+            group_module.WORLD = new_job
+            params.discover_local_ranks()
+        self.assertEqual(find.call_count, 2, "the dead job's layout was served to the new job")
+        self.assertEqual(params.num_processes_on_node, 4)
+
+    def test_a_group_held_across_jobs_is_not_returned(self):
+        # A worker can hold the dead job's distribution group; the new job must get a fresh one.
+        worker = _distributedStreamer(None)
+        worker.distribution_group = MagicMock(name="old_group")
+        old_job, new_job = MagicMock(name="old_job"), MagicMock(name="new_job")
+        worker.group_job = old_job
+        worker.groups_by_ranks = [[0, 1]]
+        worker.my_global_rank = 0
+        fresh = MagicMock(name="fresh_group")
+        with patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", old_job), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module, \
+                patch("torch.distributed.new_group", return_value=fresh), \
+                patch("torch.distributed.get_world_size", return_value=2):
+            group_module.WORLD = new_job
+            got = worker.create_distribution_group()
+        self.assertIs(got, fresh)
+        self.assertIs(worker.group_job, new_job)
 
     def test_a_failed_vote_retires_the_discovery_group_and_the_topology(self):
         # A vote that fails may have closed the discovery group's pairs; keeping it would fail
