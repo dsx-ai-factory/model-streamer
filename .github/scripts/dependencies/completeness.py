@@ -22,6 +22,7 @@ from util import run
 # The files the collector reads, as globs from the repository root (`*` also matches `/`).
 READ_BY_THE_COLLECTOR = [
     ".devcontainer/Dockerfile",
+    ".devcontainer/requirements.txt",
     ".devcontainer/scripts/*.sh",
     ".devcontainer/devcontainer.json",
     ".github/workflows/*",

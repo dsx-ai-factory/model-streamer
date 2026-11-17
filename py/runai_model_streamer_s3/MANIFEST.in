@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# setup.py reads the runtime requirements from this file, so a source distribution needs it.
+include requirements.txt
