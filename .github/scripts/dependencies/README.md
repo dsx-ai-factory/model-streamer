@@ -44,7 +44,7 @@ The collector reads these files, so a new dependency is picked up when it is add
 
 | File | Gives |
 |---|---|
-| `.devcontainer/Dockerfile` | base images, `apt-get install`, `pip install`, `npm install`, `curl` downloads (with the hash the file pins), `git clone` |
+| `.devcontainer/Dockerfile` | base images, `apt-get install`, `pip install` (a `pip install -r` reads the requirements file the Dockerfile copies, `.devcontainer/requirements.txt`), `npm install`, `curl` downloads (with the hash the file pins), `git clone` |
 | `.devcontainer/scripts/*.sh` | the same commands, in the shell scripts the Dockerfile runs. A script is not run: the architecture argument (`amd64`, `arm64`), `NAME=value` lines and `case amd64)` branches are expanded to give one URL and hash per architecture, and the hash is the `echo "<hash>  <file>" \| sha256sum -c -` line for the file. A URL with a variable that cannot be expanded stops the collector with the script and line. |
 | `.devcontainer/devcontainer.json` | devcontainer features and the packages of the apt-packages feature |
 | `py/*/setup.py` and `py/*/requirements.txt` | `install_requires` of the four wheels (`run`). Each `setup.py` reads it from the `requirements.txt` next to it, which is where a runtime dependency is declared |

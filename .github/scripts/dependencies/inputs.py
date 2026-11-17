@@ -11,7 +11,7 @@ import os
 import re
 
 import dockerfile
-from util import HERE, read_json
+from util import HERE, read_json, requirement_lines
 
 DOCKERFILE = dockerfile.DOCKERFILE
 SCRIPTS = ".devcontainer/scripts"
@@ -63,12 +63,6 @@ def devcontainer_features(repo):
     """{feature reference: options} from devcontainer.json (which allows // comments)."""
     text = "\n".join(l for l in read(repo, DEVCONTAINER).splitlines() if not l.strip().startswith("//"))
     return json.loads(text).get("features", {})
-
-
-def requirement_lines(text):
-    """The requirements in a requirements file: one per line, without comments and blank lines."""
-    lines = (line.split("#")[0].strip() for line in text.splitlines())
-    return [line for line in lines if line]
 
 
 def setup_requirements(path):
