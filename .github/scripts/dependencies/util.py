@@ -19,6 +19,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))  # HERE is <repo>
 CATEGORIES = ("ship", "run", "build", "test", "base-image", "ci")
 
 
+def requirement_lines(text):
+    """The requirements in a requirements file: one per line, without comments and blank lines."""
+    lines = (line.split("#")[0].strip() for line in text.splitlines())
+    return [line for line in lines if line]
+
+
 def log(message):
     print(message, file=sys.stderr, flush=True)
 

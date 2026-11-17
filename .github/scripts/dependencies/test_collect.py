@@ -73,6 +73,16 @@ class DockerfileTest(unittest.TestCase):
         self.assertEqual([i[1:] for i in images], [("localhost:5000/team/app", "1", None, "x"),
                                                    ("localhost:5000/team/app", None, None, None)])
 
+    def test_pip_install_of_a_copied_requirements_file(self):
+        text = ("COPY .devcontainer/requirements.txt /tmp/r.txt\n"
+                "RUN pip install -r /tmp/r.txt \\\n    && rm /tmp/r.txt\n")
+        packages = [p for _, p in dockerfile.pip_packages(text)]
+        self.assertEqual(len(packages), 1)
+        self.assertTrue(all(r[0].isalpha() and "==" in r for r in packages[0]), packages)
+        self.assertIn("cpplint==1.5.4", packages[0])
+        with self.assertRaises(ValueError):
+            dockerfile.pip_packages("RUN pip install -r /tmp/missing.txt\n")
+
     def test_pip_and_npm_packages(self):
         self.assertEqual([p for _, p in dockerfile.pip_packages(SAMPLE)], [["pip==25.0.1"], ["boto3", "cpplint==1.5.4"]])
         self.assertEqual([p for _, p in dockerfile.npm_packages(SAMPLE)], [["azurite"]])

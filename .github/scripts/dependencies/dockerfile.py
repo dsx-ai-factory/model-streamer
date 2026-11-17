@@ -8,7 +8,10 @@ also runs in the image).
 Every reader takes the text of the file and its path. A path that ends in `.sh` is read as a script
 (every line is a command); any other path is read as a Dockerfile (the `RUN` instructions)."""
 
+import os
 import re
+
+from util import REPO, requirement_lines
 
 DOCKERFILE = ".devcontainer/Dockerfile"
 ARCHES = ("x86_64", "aarch64")
@@ -141,6 +144,16 @@ def apt_packages(text, path=DOCKERFILE):
     return found
 
 
+def _copied_requirements(text, destination):
+    """The requirements of the file that `pip install -r <destination>` reads: the Dockerfile copies it
+    from the repository (`COPY <source> <destination>`)."""
+    copy = re.search(r"^COPY\s+(?:--\S+\s+)*(\S+)\s+%s\s*$" % re.escape(destination), text, re.M)
+    if not copy:
+        raise ValueError("pip install -r %s: no COPY of that file in the Dockerfile" % destination)
+    with open(os.path.join(REPO, copy.group(1))) as f:
+        return requirement_lines(f.read())
+
+
 def pip_packages(text, path=DOCKERFILE):
     """Requirements named on `pip install` lines, as (line, [requirement])."""
     found = []
@@ -148,7 +161,12 @@ def pip_packages(text, path=DOCKERFILE):
         for segment in _segments(rest):
             match = re.search(r"pip3? install\s+(.*)", segment)
             if match:
-                requirements = [t for t in _tokens(match.group(1)) if not t.startswith("-")]
+                requirements, tokens = [], _tokens(match.group(1))
+                for index, token in enumerate(tokens):
+                    if token == "-r" and index + 1 < len(tokens):
+                        requirements += _copied_requirements(text, tokens[index + 1])
+                    elif not token.startswith("-") and not (index and tokens[index - 1] == "-r"):
+                        requirements.append(token)
                 if requirements:
                     found.append((number, requirements))
     return found
