@@ -186,8 +186,8 @@ jobs:
         include:
           - name: newest-torch
             newest: true
-            torch_spec: torch
-            numpy_spec: numpy
+            torch_spec: torch>=2.0.0
+            numpy_spec: numpy>=1.24.4
             # Python 3.12: the newest torch needs Python 3.11 or later, which Ubuntu 22.04 does not have
             image: nvidia/cuda:12.6.3-base-ubuntu24.04
             rows: full
