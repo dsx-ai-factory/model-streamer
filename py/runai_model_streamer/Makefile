@@ -55,8 +55,11 @@ test-unit-real test-unit-real-installed:
 	STREAMER_LIBRARY=$(STREAMER_REAL_LIB) RUNAI_STREAMER_FS_STRATEGY=$(FS_STRATEGY) \
 		python3 -m unittest discover -b runai_model_streamer
 
+# RUNAI_STREAMER_DIST_TIMEOUT bounds the streamer's own collectives (default 600s): these tests
+# move only kilobytes to a few megabytes, so a broadcast still waiting after two minutes is a rank
+# that never posted it. Tests that exercise the timeout itself override the value with patch.dict.
 test-dist: mock install_dev_dep
-	torchrun --nproc_per_node 2 run_dist_tests.py
+	RUNAI_STREAMER_DIST_TIMEOUT=120 torchrun --nproc_per_node 2 run_dist_tests.py
 
 # Every Python file must at least PARSE. The distributed tests need torchrun and two GPUs, so
 # they do not run in the usual loop - an unparseable one sat on a branch for several commits
