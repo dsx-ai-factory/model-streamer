@@ -232,7 +232,17 @@ def _retire_discovery() -> None:
 
     Its pairs may be closed, so keeping it would fail every later vote too. Dropping the topology
     makes the next load rerun find_local_ranks, which recreates the discovery group - a global
-    collective, so every rank of the job repeats it together."""
+    collective, so every rank of the job repeats it together.
+
+    A vote CAN fail on one rank and succeed on another - gloo lets a peer complete once this rank's
+    contribution is in, while this rank times out on the return leg - so a retry may find some
+    ranks rediscovering and others voting on the retained group. That round fails too, loudly, by
+    timeout on both sides: the rediscovering ranks wait in new_group for peers that never come, and
+    the voting ranks wait for contributions that never come. What makes this terminate is that
+    every rank whose collective fails retires HERE, so each failed round strictly shrinks the set
+    of ranks holding the old state, and within a round or two every rank rediscovers together.
+    Stale state is never reused silently; the cost of disagreement is bounded retries, not wrong
+    data."""
     global _topology_cache
     discovery = _group_cache.pop(("discovery",), None)
     if discovery is not None:
@@ -676,6 +686,11 @@ class _distributedStreamerParams:
         # every later load's cache vote, so its patience must not be whatever the FIRST load's
         # environment happened to say - a first load configured for seconds would make every later
         # vote give up on a peer the later load's own timeout still allows for.
+        # A leftover entry - a partial failure filled the group but not the topology - is retired,
+        # not overwritten: overwriting would drop its last reference and run the destructor.
+        stale = _group_cache.pop(("discovery",), None)
+        if stale is not None:
+            _retire(stale)
         discovery_group = dist.new_group(ranks=list(range(world_size)),
                                          timeout=DEFAULT_BROADCAST_TIMEOUT, backend="gloo")
         _group_cache[("discovery",)] = discovery_group
