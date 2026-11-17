@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call, patch
 
 import torch
 
+from runai_model_streamer.distributed_streamer import distributed_streamer
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DEFAULT_BUFFER_MIN_BYTESIZE,
     DIST_BUFFER_ALIGNMENT,
@@ -310,7 +311,10 @@ class TestASecondReadOnTheSameStreamer(unittest.TestCase):
         streamer.params.max_chunk = 4096
         streamer.params.my_global_rank = my_rank
         streamer.params.groups_by_ranks = groups_by_ranks
+        # A fresh module-level group cache per simulated rank: in a real job each rank is its own
+        # process, so two ranks simulated in one process must not see each other's cache.
         with job.patched(), \
+                patch.object(distributed_streamer, "_group_cache", {}), \
                 patch("torch.distributed.new_group",
                       side_effect=lambda **kwargs: MagicMock(name="group")) as new_group, \
                 patch("torch.distributed.destroy_process_group"):
@@ -345,13 +349,30 @@ class TestReleaseGroup(unittest.TestCase):
         worker.distribution_group = group
         return worker
 
-    def test_it_destroys_the_group_and_forgets_it(self):
+    def test_it_forgets_the_group_and_keeps_it_for_the_next_stream(self):
+        # The group is NOT destroyed on the healthy path: gloo teardown can block in the destructor
+        # and corrupt the rank's store client, which is why groups are cached for reuse instead.
         group = MagicMock(name="group")
         worker = self.worker(group)
         with patch("torch.distributed.destroy_process_group") as destroy:
             worker.release_group()
-        destroy.assert_called_once_with(group=group)
+        destroy.assert_not_called()
         self.assertIsNone(worker.distribution_group)
+
+    def test_a_poisoned_group_is_destroyed_and_evicted(self):
+        # The error path: a failed stream may have closed the group's pairs, so the next stream
+        # must not inherit it from the cache.
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        distributed_streamer._group_cache[("local", ((0, 1),), "test")] = [group]
+        try:
+            with patch("torch.distributed.destroy_process_group") as destroy:
+                worker.release_group(poisoned=True)
+            destroy.assert_called_once_with(group=group)
+            self.assertIsNone(worker.distribution_group)
+            self.assertNotIn(("local", ((0, 1),), "test"), distributed_streamer._group_cache)
+        finally:
+            distributed_streamer._group_cache.pop(("local", ((0, 1),), "test"), None)
 
     def test_with_no_group_it_does_nothing(self):
         worker = self.worker(None)
@@ -368,12 +389,21 @@ class TestReleaseGroup(unittest.TestCase):
         barrier.assert_not_called()
         destroy.assert_not_called()
 
-    def test_exit_still_runs_the_barrier_and_destroys_a_live_group(self):
+    def test_exit_still_runs_the_barrier_and_keeps_a_live_group(self):
         group = MagicMock(name="group")
         worker = self.worker(group)
         with patch("torch.distributed.barrier") as barrier, patch("torch.distributed.destroy_process_group") as destroy:
             worker.__exit__(None, None, None)
         barrier.assert_called_once_with(group=group)
+        destroy.assert_not_called()
+        self.assertIsNone(worker.distribution_group)
+
+    def test_exit_with_an_exception_destroys_the_group_without_a_barrier(self):
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        with patch("torch.distributed.barrier") as barrier, patch("torch.distributed.destroy_process_group") as destroy:
+            worker.__exit__(RuntimeError, RuntimeError("stream failed"), None)
+        barrier.assert_not_called()
         destroy.assert_called_once_with(group=group)
         self.assertIsNone(worker.distribution_group)
 

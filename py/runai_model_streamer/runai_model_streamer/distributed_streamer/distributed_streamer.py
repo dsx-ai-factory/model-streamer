@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from typing import Any, List, Iterator, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Iterator, NamedTuple, Optional, Tuple
 import torch
 import torch.distributed as dist
 import os
@@ -182,6 +182,22 @@ def dist_device_bytes_required(max_chunk: int, rows: int) -> int:
 
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
+
+# PROCESS GROUPS ARE CACHED FOR THE LIFE OF THE PROCESS, and that is a fix, not an optimization.
+# gloo's group teardown can block inside the DESTRUCTOR waiting on the peer's sockets - after a
+# matched barrier, and silently, since a destructor cannot raise - and a teardown that races a peer
+# has been seen to corrupt the rank's TCPStore client, after which every group the rank tries to
+# create fails with "Socket Timeout" no matter how long the timeout. Creating and destroying groups
+# per stream rolled those dice on every load (and on every distributed test); reusing one group per
+# topology and timeout takes teardown off the healthy path entirely. The topology cannot change
+# within a torch job, so a cached group never goes stale - only a POISONED one, whose stream failed,
+# is evicted and destroyed (see release_group), because its pairs may already be closed.
+#
+# The cache key must decide HIT or MISS identically on every rank, because creating a group is a
+# collective: a rank that misses while its peers hit waits for them until the timeout. Every key
+# component below is job-global (the rank layout, the timeout env var), never rank-local state.
+_topology_cache: Optional[Tuple[int, int, List[List[int]]]] = None
+_group_cache: Dict[Tuple, Any] = {}
 
 
 def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None:
@@ -578,9 +594,14 @@ class _distributedStreamerParams:
         """
         Returns the number of processes on the node, global rank and the list of ranks on each node
 
-        This function performs all_gather_object on the global group which cause nccl to allocate  device memory which otherwise may never be allocated by the user application
-        To avoid this issue, we create a another global subgroup just for discovering the local ranks and then destroy that subgroup after the ranks are discovered.
+        The answer cannot change within a torch job, so it is computed once per process and cached.
+
+        The gather runs on a dedicated gloo subgroup rather than the global group: hostnames travel
+        through host memory there, so no backend allocates device memory that the user application
+        may never have allocated itself. The subgroup is KEPT, not destroyed - it costs a few
+        sockets, and tearing a gloo group down is what _group_cache's comment warns about.
         """
+        global _topology_cache
         if not dist.is_initialized():
             return 1, 0, [[0]]
 
@@ -589,16 +610,18 @@ class _distributedStreamerParams:
         if world_size == 1:
             return 1, 0, [[0]]
 
+        if _topology_cache is not None:
+            return _topology_cache
+
         my_global_rank = dist.get_rank()
 
         # 1. Discover all peers on all nodes (this is a global collective)
-        # create global group just for discovering the local ranks
-        sandbox_global_group = dist.new_group(ranks=list(range(world_size)), timeout=self.broadcast_timeout)
+        discovery_group = dist.new_group(ranks=list(range(world_size)),
+                                         timeout=self.broadcast_timeout, backend="gloo")
+        _group_cache[("discovery",)] = discovery_group
         all_hostnames = [None] * world_size
-        dist.all_gather_object(all_hostnames, socket.gethostname(), group=sandbox_global_group)
-        dist.destroy_process_group(group=sandbox_global_group)
-        del sandbox_global_group
- 
+        dist.all_gather_object(all_hostnames, socket.gethostname(), group=discovery_group)
+
         # 2. Create a list of rank lists, one for each unique host.
         # e.g., [[0,1,2,3,4,5,6,7], [8,9,10,11,12,13,14,15]]
         unique_hostnames = sorted(list(set(all_hostnames)))
@@ -613,7 +636,8 @@ class _distributedStreamerParams:
                 my_group_size = len(ranks_list)
                 break
 
-        return my_group_size, my_global_rank, groups_by_ranks
+        _topology_cache = (my_group_size, my_global_rank, groups_by_ranks)
+        return _topology_cache
 
     def set_params(
             self,
@@ -682,13 +706,19 @@ class _distributedStreamer:
 
     def __exit__(self, exc_type: any, exc_value: any, traceback: any) -> None:
         if self.distribution_group:
+            # A failed stream poisons the group: a timed-out collective closes gloo pairs, so the
+            # next stream must not inherit it from the cache. The barrier's own failure counts.
+            poisoned = exc_type is not None
             try:
                 # Only attempt a barrier if there was no exception.
-                if exc_type is None:
+                if not poisoned:
                     torch.distributed.barrier(group=self.distribution_group)
+            except BaseException:
+                poisoned = True
+                raise
             finally:
-                # ALWAYS destroy the group.
-                self.release_group()
+                # ALWAYS let go of the group; destroy it only when it is poisoned.
+                self.release_group(poisoned=poisoned)
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
@@ -701,7 +731,11 @@ class _distributedStreamer:
 
             all_ranks = list(range(world_size))
             self.local_group_global_ranks = all_ranks
-            group = dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout)
+            key = ("global", world_size, self.broadcast_timeout)
+            group = _group_cache.get(key)
+            if group is None:
+                group = dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout)
+                _group_cache[key] = group
 
         else:
             group = self.create_local_distribution_group()
@@ -725,9 +759,12 @@ class _distributedStreamer:
 
         # All processes must create ALL subgroups in the same order.
         # This is a global collective operation, done once for each subgroup.
-         
-        created_groups = [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout) for ranks in self.groups_by_ranks]
-        
+        key = ("local", tuple(tuple(ranks) for ranks in self.groups_by_ranks), self.broadcast_timeout)
+        created_groups = _group_cache.get(key)
+        if created_groups is None:
+            created_groups = [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout) for ranks in self.groups_by_ranks]
+            _group_cache[key] = created_groups
+
         # Each process finds which of the newly created groups it belongs to.
         my_local_group = None
         for i, ranks_list in enumerate(self.groups_by_ranks):
@@ -747,11 +784,23 @@ class _distributedStreamer:
         self.distribution_group = self.create_distribution_group()
         return self.distribution_group
 
-    def release_group(self) -> None:
-        """Destroy the distribution group, if there is one. Local to this rank: no barrier."""
-        if self.distribution_group:
-            torch.distributed.destroy_process_group(group=self.distribution_group)
-            self.distribution_group = None
+    def release_group(self, poisoned: bool = False) -> None:
+        """Let go of the distribution group, if there is one. Local to this rank: no barrier.
+
+        The group itself is NOT destroyed on the healthy path: it stays in _group_cache for the next
+        stream, because tearing a gloo group down is the hazard that cache exists to avoid (see its
+        comment). poisoned=True is the error path - the group's pairs may already be closed, so it
+        is evicted and destroyed rather than handed to the next stream. Every rank of a failed
+        stream ends up here, by its own exception or by the timeout of a collective its peer never
+        finished, so the eviction stays symmetric."""
+        group = self.distribution_group
+        self.distribution_group = None
+        if group is None or not poisoned:
+            return
+        for key, cached in list(_group_cache.items()):
+            if cached is group or (isinstance(cached, list) and group in cached):
+                del _group_cache[key]
+        torch.distributed.destroy_process_group(group=group)
 
     def set_rank(self) -> None:
         self.rank = dist.get_rank(group=self.distribution_group)
