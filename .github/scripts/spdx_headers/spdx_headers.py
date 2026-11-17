@@ -35,7 +35,7 @@ EXEMPT_NAMES = ("LICENSE", "NOTICE", "DCO", "CODEOWNERS")
 # Write each path relative to the repo root, such as "cpp/s3/s3.cc".
 # The upstream license texts below are third-party files that must stay verbatim.
 SKIP = [
-    "third_party_notices/licenses/curl-7.69.1/COPYING",
+    "third_party_notices/licenses/curl-8.8.0/COPYING",
     "third_party_notices/licenses/curl/COPYING",
     "third_party_notices/licenses/gcc-runtime/COPYING.RUNTIME",
     "third_party_notices/licenses/gcc-runtime/COPYING3",
