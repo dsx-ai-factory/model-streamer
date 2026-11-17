@@ -4,6 +4,7 @@
 import contextlib
 import logging
 import unittest
+from datetime import timedelta
 import hashlib
 import os
 import sys
@@ -755,6 +756,87 @@ class TestDistributedStreamer(unittest.TestCase):
 
         if self.rank == 0:
             print(f"\n✅ Asymmetric-eviction recovery verified on all {self.world_size} ranks.")
+
+    def test_1_the_job_falls_back_everywhere_after_an_asymmetric_vote_failure(self):
+        """Every rank, for real, to the plain-streaming fallback after an asymmetric vote failure.
+
+        Rank 1 loses distribution the way a failed vote does it; rank 0 saw nothing. Rank 0's next
+        vote then times out against the missing peer and must lose distribution too - WITHOUT
+        creating any group, because torch's group-creation ordinal cannot be re-agreed after an
+        asymmetric failure. From then on every load on every rank succeeds plainly, reuse of a
+        streamer within one context included."""
+        if self.world_size != 2:
+            self.skipTest("the staged vote failure choreographs exactly two ranks")
+
+        file_specs = [{"size": 1000, "chunks": [500, 500]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        module = distributed_streamer_module
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+
+        def stream_all(streamer):
+            chunks = [None] * len(requests[0].sizes)
+            streamer.stream_files(requests, None, "cpu", True)
+            for _, chunk_idx, tensor in streamer.get_chunks():
+                chunks[chunk_idx] = tensor.cpu().numpy().tobytes()
+            return b"".join(chunks)
+
+        def drop_discovery():
+            stale = module._group_cache.pop(("discovery",), None)
+            if stale is not None:
+                module._retire(stale)
+            module._topology_cache = None
+
+        # The kept discovery group carries the constant default timeout; the staged failure below
+        # must cost seconds, not minutes, so both ranks drop it and recreate one together under a
+        # short default.
+        with patch.dict(os.environ, env_vars), \
+                patch.object(module, "DEFAULT_BROADCAST_TIMEOUT", timedelta(seconds=5)):
+            try:
+                drop_discovery()
+                dist.barrier()
+                with DistributedStreamer() as streamer:
+                    self.assertEqual(stream_all(streamer), original)
+
+                # The asymmetry: rank 1 observed its vote fail, rank 0 observed nothing.
+                if self.rank == 1:
+                    module._lose_distribution()
+                dist.barrier()
+
+                if self.rank == 1:
+                    # The lost rank falls back at once, and STAYS fallen back when the same
+                    # context is reused: the decision is re-made per stream call.
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                        self.assertEqual(stream_all(streamer), original)
+                else:
+                    # The peer's vote times out against the missing rank and loses distribution
+                    # without asking for any group.
+                    with self.assertRaises(Exception):
+                        with DistributedStreamer() as streamer:
+                            stream_all(streamer)
+                dist.barrier()
+
+                # Both ranks are now lost; no discovery group exists or gets created; every load
+                # succeeds plainly.
+                self.assertTrue(module._distribution_is_lost())
+                self.assertNotIn(("discovery",), module._group_cache)
+                with DistributedStreamer() as streamer:
+                    self.assertEqual(stream_all(streamer), original)
+                    self.assertFalse(streamer.is_distributed)
+                self.assertNotIn(("discovery",), module._group_cache,
+                                 "a lost job asked for a group")
+
+                if self.rank == 0:
+                    print(f"\n✅ Post-failure fallback verified on all {self.world_size} ranks.")
+            finally:
+                # Hand the suite back a distributing job: the staged loss was this test's own.
+                module._distribution_lost_for_job = object()
+                drop_discovery()
+                dist.barrier()
 
     def test_1_success_random_files(self):
         file_specs = []
