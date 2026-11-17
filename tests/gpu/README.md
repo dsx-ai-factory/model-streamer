@@ -293,7 +293,7 @@ so that the suites, the caps, the budget, the results and the verdict are the sa
 |---|---|
 | `GPU_SUITES` | the suites to run, comma-separated (default `streaming`) |
 | `GPU_WORLD` | `2` (default) or `1`: the GPUs of the run |
-| `GPU_TORCH_SPEC`, `GPU_NUMPY_SPEC` | what to install (default the newest torch, any numpy) |
+| `GPU_TORCH_SPEC`, `GPU_NUMPY_SPEC` | what to install (default the newest torch, at least 2.0.0, and the newest numpy, at least 1.24.4) |
 | `GPU_STREAMER_SPEC` | install the streamer from a requirement specifier instead of the wheel in `/wheel` |
 | `GPU_S3_SPEC` | the S3 plugin to install when there is no wheel of it (the object_storage suite) |
 | `GPU_DEVICE` | where the object_storage suite streams to: `cuda:0` (default, and a missing GPU is a failure), or `cpu` when the suite's test is run by hand outside the environment, on a machine without a GPU |

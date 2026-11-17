@@ -24,6 +24,13 @@ class bdist_wheel(_bdist_wheel):
         return "py3", "none", plat
 
 
+def read_requirements(name="requirements.txt"):
+    """The requirements of this package, one per line (comments and blank lines are ignored)."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+        lines = (line.split("#")[0].strip() for line in f)
+        return [line for line in lines if line]
+
+
 def assert_lib_exists():
     lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LIB)
     if os.path.islink(lib_path):
@@ -43,7 +50,7 @@ setup(
     version=VERSION,
     license_files=("LICENSE", "THIRD_PARTY_NOTICES.txt"),
     packages=find_packages(),
-    install_requires=["azure-storage-blob", "azure-identity"],
+    install_requires=read_requirements(),
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],
     cmdclass={"bdist_wheel": bdist_wheel},
 )

@@ -49,10 +49,9 @@ RUN if [ "$TARGETARCH" = amd64 ]; then \
     && rm /tmp/tsan_preinit.c; \
     fi
 
-RUN pip install \
-    boto3 \
-    cpplint==1.5.4 \
-    pytest
+COPY .devcontainer/requirements.txt /tmp/devcontainer-requirements.txt
+RUN pip install -r /tmp/devcontainer-requirements.txt \
+    && rm /tmp/devcontainer-requirements.txt
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     cmake \

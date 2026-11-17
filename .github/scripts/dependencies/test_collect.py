@@ -73,6 +73,16 @@ class DockerfileTest(unittest.TestCase):
         self.assertEqual([i[1:] for i in images], [("localhost:5000/team/app", "1", None, "x"),
                                                    ("localhost:5000/team/app", None, None, None)])
 
+    def test_pip_install_of_a_copied_requirements_file(self):
+        text = ("COPY .devcontainer/requirements.txt /tmp/r.txt\n"
+                "RUN pip install -r /tmp/r.txt \\\n    && rm /tmp/r.txt\n")
+        packages = [p for _, p in dockerfile.pip_packages(text)]
+        self.assertEqual(len(packages), 1)
+        self.assertTrue(all(r[0].isalpha() and "==" in r for r in packages[0]), packages)
+        self.assertIn("cpplint==1.5.4", packages[0])
+        with self.assertRaises(ValueError):
+            dockerfile.pip_packages("RUN pip install -r /tmp/missing.txt\n")
+
     def test_pip_and_npm_packages(self):
         self.assertEqual([p for _, p in dockerfile.pip_packages(SAMPLE)], [["pip==25.0.1"], ["boto3", "cpplint==1.5.4"]])
         self.assertEqual([p for _, p in dockerfile.npm_packages(SAMPLE)], [["azurite"]])
@@ -275,8 +285,8 @@ class InputsTest(unittest.TestCase):
 
     def test_makefile_installs_are_test_packages(self):
         test = inputs.pip_groups(util.REPO)["test"]
-        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/Makefile"])
-        self.assertIn("azure-storage-blob", test["specs"])
+        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])  # `pip install -r requirements.txt`
+        self.assertIn("azure-storage-blob", [inputs.spec_name(s) for s in test["specs"]])
         self.assertFalse([s for s in test["specs"] if "/" in s or s.startswith(("-", "."))])  # no paths or wheels of ours
 
     def test_pip_groups(self):
@@ -284,7 +294,7 @@ class InputsTest(unittest.TestCase):
         self.assertIn("boto3", groups["run"]["specs"])
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
         self.assertTrue(groups["test"]["extra_index_urls"])
-        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/setup.py"])
+        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])
         self.assertTrue(any(spec.startswith("setuptools") for spec in groups["build"]["specs"]))
 
     def test_every_workflow_action_has_a_reference(self):

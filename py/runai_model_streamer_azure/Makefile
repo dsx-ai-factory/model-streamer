@@ -8,7 +8,7 @@ PACKAGE_VERSION ?= 0.0.0
 .PHONY: build test install_dev_dep clean
 
 install_dev_dep:
-	pip3 install azure-storage-blob azure-identity
+	pip3 install -r requirements.txt
 
 build:
 	python3 setup.py bdist_wheel --plat-name ${PLATFORM}
