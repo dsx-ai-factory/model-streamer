@@ -359,20 +359,20 @@ class TestReleaseGroup(unittest.TestCase):
         destroy.assert_not_called()
         self.assertIsNone(worker.distribution_group)
 
-    def test_a_poisoned_group_is_destroyed_and_evicted(self):
+    def test_a_poisoned_group_is_evicted_and_retired(self):
         # The error path: a failed stream may have closed the group's pairs, so the next stream
-        # must not inherit it from the cache.
+        # must not inherit it from the cache - and it is retired, never destroyed, because gloo
+        # teardown is the blocking hazard the cache exists to avoid.
         group = MagicMock(name="group")
         worker = self.worker(group)
-        distributed_streamer._group_cache[("local", ((0, 1),), "test")] = [group]
-        try:
-            with patch("torch.distributed.destroy_process_group") as destroy:
-                worker.release_group(poisoned=True)
-            destroy.assert_called_once_with(group=group)
+        with patch.object(distributed_streamer, "_group_cache",
+                          {("local", ((0, 1),), "test"): [group]}) as cache, \
+                patch("torch.distributed.destroy_process_group") as destroy:
+            worker.release_group(poisoned=True)
+            destroy.assert_not_called()
             self.assertIsNone(worker.distribution_group)
-            self.assertNotIn(("local", ((0, 1),), "test"), distributed_streamer._group_cache)
-        finally:
-            distributed_streamer._group_cache.pop(("local", ((0, 1),), "test"), None)
+            self.assertNotIn(("local", ((0, 1),), "test"), cache)
+            self.assertIn([group], cache[("retired",)])
 
     def test_with_no_group_it_does_nothing(self):
         worker = self.worker(None)
@@ -398,14 +398,58 @@ class TestReleaseGroup(unittest.TestCase):
         destroy.assert_not_called()
         self.assertIsNone(worker.distribution_group)
 
-    def test_exit_with_an_exception_destroys_the_group_without_a_barrier(self):
+    def test_exit_with_an_exception_evicts_the_group_without_a_barrier(self):
         group = MagicMock(name="group")
         worker = self.worker(group)
-        with patch("torch.distributed.barrier") as barrier, patch("torch.distributed.destroy_process_group") as destroy:
+        with patch.object(distributed_streamer, "_group_cache", {("global", 2, "test"): group}) as cache, \
+                patch("torch.distributed.barrier") as barrier, \
+                patch("torch.distributed.destroy_process_group") as destroy:
             worker.__exit__(RuntimeError, RuntimeError("stream failed"), None)
-        barrier.assert_not_called()
-        destroy.assert_called_once_with(group=group)
-        self.assertIsNone(worker.distribution_group)
+            barrier.assert_not_called()
+            destroy.assert_not_called()
+            self.assertIsNone(worker.distribution_group)
+            self.assertNotIn(("global", 2, "test"), cache)
+            self.assertIn(group, cache[("retired",)])
+
+
+class TestTheCacheIsVoted(unittest.TestCase):
+    """cached_or_created reuses an entry only when EVERY rank still holds one.
+
+    Eviction is rank-local knowledge - in per-node mode a failure on one node never reaches the
+    others - and creating a group is a collective, so a rank that recreates alone waits for peers
+    that never come. The vote over the kept discovery group is what keeps hit and miss identical."""
+
+    def vote(self, have_mine, group_min):
+        """One rank's trip through cached_or_created, with the group's MIN coming back as group_min."""
+        key = ("global", 2, "test")
+        cache = {("discovery",): MagicMock(name="discovery")}
+        old = MagicMock(name="old_group")
+        if have_mine:
+            cache[key] = old
+
+        def all_reduce(tensor, op=None, group=None):
+            tensor.fill_(group_min)
+
+        created = MagicMock(name="created_group")
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch("torch.distributed.all_reduce", side_effect=all_reduce):
+            returned = _distributedStreamer.cached_or_created(key, lambda: created)
+        return returned, old, created, cache
+
+    def test_everyone_has_it_so_it_is_reused(self):
+        returned, old, created, cache = self.vote(have_mine=True, group_min=1)
+        self.assertIs(returned, old)
+        self.assertNotIn(("retired",), cache)
+
+    def test_a_peer_evicted_so_everyone_recreates_and_this_ranks_entry_is_retired(self):
+        returned, old, created, cache = self.vote(have_mine=True, group_min=0)
+        self.assertIs(returned, created)
+        self.assertIn(old, cache[("retired",)])
+
+    def test_this_rank_evicted_so_everyone_recreates(self):
+        returned, old, created, cache = self.vote(have_mine=False, group_min=0)
+        self.assertIs(returned, created)
+        self.assertNotIn(("retired",), cache)
 
 
 class TestARankThatCannotMeasure(unittest.TestCase):

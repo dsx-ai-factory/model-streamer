@@ -191,13 +191,46 @@ DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
 # per stream rolled those dice on every load (and on every distributed test); reusing one group per
 # topology and timeout takes teardown off the healthy path entirely. The topology cannot change
 # within a torch job, so a cached group never goes stale - only a POISONED one, whose stream failed,
-# is evicted and destroyed (see release_group), because its pairs may already be closed.
+# is evicted and retired (see release_group), because its pairs may already be closed.
 #
-# The cache key must decide HIT or MISS identically on every rank, because creating a group is a
-# collective: a rank that misses while its peers hit waits for them until the timeout. Every key
-# component below is job-global (the rank layout, the timeout env var), never rank-local state.
+# HIT OR MISS must be decided identically on every rank, because creating a group is a collective: a
+# rank that misses while its peers hit waits for them until the timeout. The key components are
+# job-global (the rank layout, the timeout env var) - and eviction, which is rank-local knowledge,
+# is reconciled by the vote in cached_or_created before any entry is reused.
 _topology_cache: Optional[Tuple[int, int, List[List[int]]]] = None
 _group_cache: Dict[Tuple, Any] = {}
+
+# The default process group the caches belong to. "The life of the process" above really means the
+# life of the JOB: a process that destroys the default group and initializes a new one may come back
+# with a different layout, and groups of the dead job must not serve the new one.
+_cache_job: Any = None
+
+
+def _caches_for_this_job() -> None:
+    """Reset the caches when the default process group has changed since they were filled.
+
+    Called before every cache read. Comparison is by identity: init_process_group builds a new
+    default group object, so a cache filled under another one belongs to a dead job. The dead job's
+    groups are retired, not dropped, for the reason _retire gives."""
+    global _cache_job, _topology_cache
+    current = dist.group.WORLD if dist.is_initialized() else None
+    if current is _cache_job:
+        return
+    for key in list(_group_cache):
+        if key != ("retired",):
+            _retire(_group_cache.pop(key))
+    _topology_cache = None
+    _cache_job = current
+
+
+def _retire(entry: Any) -> None:
+    """Keep a reference to a group (or list of them) that must never be used again.
+
+    Deliberately a leak: dropping the last reference runs gloo's destructor, which is the blocking,
+    store-corrupting teardown this module exists to avoid (see _group_cache). A retired group costs
+    its sockets until the process ends, and retirement only happens after a failed stream, so the
+    cost is bounded by failures."""
+    _group_cache.setdefault(("retired",), []).append(entry)
 
 
 def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None:
@@ -610,6 +643,7 @@ class _distributedStreamerParams:
         if world_size == 1:
             return 1, 0, [[0]]
 
+        _caches_for_this_job()
         if _topology_cache is not None:
             return _topology_cache
 
@@ -717,7 +751,7 @@ class _distributedStreamer:
                 poisoned = True
                 raise
             finally:
-                # ALWAYS let go of the group; destroy it only when it is poisoned.
+                # ALWAYS let go of the group; evict and retire it only when it is poisoned.
                 self.release_group(poisoned=poisoned)
         return
 
@@ -732,16 +766,41 @@ class _distributedStreamer:
             all_ranks = list(range(world_size))
             self.local_group_global_ranks = all_ranks
             key = ("global", world_size, self.broadcast_timeout)
-            group = _group_cache.get(key)
-            if group is None:
-                group = dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout)
-                _group_cache[key] = group
+            group = self.cached_or_created(
+                key, lambda: dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout))
 
         else:
             group = self.create_local_distribution_group()
 
         logger.debug(f"[RunAI Streamer][Distributed] Created distribution group with size {dist.get_world_size(group=group)}")
         return group
+
+    @staticmethod
+    def cached_or_created(key: Tuple, create) -> Any:
+        """The cached entry for key, or a fresh one from create() - AGREED ACROSS THE JOB.
+
+        Hit or miss is voted, not read locally. A rank whose stream failed evicted its entry
+        (release_group), while the ranks whose streams succeeded kept theirs - in per-node mode a
+        failure on one node never reaches the others - and creating a group needs every rank of the
+        job, so a rank that recreates alone waits for peers that never come. One MIN over the kept
+        discovery group settles it: everyone reuses, or everyone retires its entry and recreates.
+        The vote travels through host memory on gloo, so it allocates nothing on any device.
+        """
+        _caches_for_this_job()
+        discovery = _group_cache.get(("discovery",))
+        have = key in _group_cache
+        if discovery is not None:
+            vote = torch.tensor([1 if have else 0], dtype=torch.int64)
+            dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=discovery)
+            have = bool(vote.item())
+        if have:
+            return _group_cache[key]
+        stale = _group_cache.pop(key, None)
+        if stale is not None:
+            _retire(stale)
+        created = create()
+        _group_cache[key] = created
+        return created
 
     def create_local_distribution_group(self) -> Optional[dist.ProcessGroup]:
         """
@@ -760,10 +819,10 @@ class _distributedStreamer:
         # All processes must create ALL subgroups in the same order.
         # This is a global collective operation, done once for each subgroup.
         key = ("local", tuple(tuple(ranks) for ranks in self.groups_by_ranks), self.broadcast_timeout)
-        created_groups = _group_cache.get(key)
-        if created_groups is None:
-            created_groups = [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout) for ranks in self.groups_by_ranks]
-            _group_cache[key] = created_groups
+        created_groups = self.cached_or_created(
+            key,
+            lambda: [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout)
+                     for ranks in self.groups_by_ranks])
 
         # Each process finds which of the newly created groups it belongs to.
         my_local_group = None
@@ -787,20 +846,23 @@ class _distributedStreamer:
     def release_group(self, poisoned: bool = False) -> None:
         """Let go of the distribution group, if there is one. Local to this rank: no barrier.
 
-        The group itself is NOT destroyed on the healthy path: it stays in _group_cache for the next
-        stream, because tearing a gloo group down is the hazard that cache exists to avoid (see its
+        The group is NOT destroyed in either case: it stays in _group_cache for the next stream,
+        because tearing a gloo group down is the hazard that cache exists to avoid (see its
         comment). poisoned=True is the error path - the group's pairs may already be closed, so it
-        is evicted and destroyed rather than handed to the next stream. Every rank of a failed
-        stream ends up here, by its own exception or by the timeout of a collective its peer never
-        finished, so the eviction stays symmetric."""
+        is evicted and retired rather than handed to the next stream. The eviction is LOCAL
+        knowledge: in per-node mode the other nodes' streams may have succeeded and kept their
+        entries, which is why the next stream VOTES before reusing the cache (cached_or_created) -
+        this rank's missing entry makes every rank recreate together."""
         group = self.distribution_group
         self.distribution_group = None
         if group is None or not poisoned:
             return
         for key, cached in list(_group_cache.items()):
+            if key == ("retired",):
+                continue
             if cached is group or (isinstance(cached, list) and group in cached):
                 del _group_cache[key]
-        torch.distributed.destroy_process_group(group=group)
+                _retire(cached)
 
     def set_rank(self) -> None:
         self.rank = dist.get_rank(group=self.distribution_group)
