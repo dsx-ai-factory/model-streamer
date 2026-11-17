@@ -104,6 +104,10 @@ TEST_F(Creation, WorkersPerMountIsAtLeastOne)
     {
         utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 0UL);
         EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+
+        const Config config;
+        EXPECT_EQ(config.fs_workers_per_mount_node, 1u)
+            << "zero reads as one at both ends, so the configuration reports what is used";
     }
     {
         utils::temp::UnsetEnv readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
@@ -157,6 +161,26 @@ TEST_F(Creation, WorkersPerMountDropsARemainder)
         EXPECT_EQ(Config::fs_workers_per_mount(), 2u);
         EXPECT_EQ(Config::fs_workers_per_mount() * 4u, 8u) << "the node reads with 8, not the 9 asked for";
     }
+}
+
+// THE DIVISION HAPPENS LATE, after a Config exists. Python writes the process group size while it
+// streams, so a number resolved when the streamer was built would skip the division and hand every
+// process the whole node's readers. What a Config holds is the node-wide figure, undivided.
+TEST_F(Creation, WorkersPerMountDividesByAGroupSizeWrittenAfterTheConfig)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    unsigned node_wide = 0;
+    {
+        utils::temp::UnsetEnv group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+        const Config config;
+        node_wide = config.fs_workers_per_mount_node;
+    }
+    EXPECT_EQ(node_wide, 8u) << "a Config holds what the node was asked for";
+
+    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+    EXPECT_EQ(Config::fs_workers_per_mount(), 1u)
+        << "8 readers over 8 processes is one each, divided after the Config was built";
 }
 
 // The default is untouched by the division: one per process, whatever the parallelism.

@@ -171,7 +171,9 @@ void Assigner::assign(size_t total_bytes_to_read)
     // Sized for the ceiling, then shrunk to what was used: the synchronous group can take up to
     // _num_workers workloads and each async group up to one per reader on that mount, so this is
     // the most any submission can need. Workload indices index into these.
-    const unsigned per_mount = Config::fs_workers_per_mount();
+    // Only an async group has readers. Object storage and the synchronous pool never ask, so they
+    // do not resolve the setting either.
+    const unsigned per_mount = _num_async_groups > 0 ? Config::fs_workers_per_mount() : 1;
     const unsigned ceiling = _num_workers + _num_async_groups * per_mount + 1;
     _worker_assignments.clear();
     _worker_assignments.resize(ceiling);

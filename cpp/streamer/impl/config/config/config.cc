@@ -156,7 +156,10 @@ unsigned Config::to_concurrency(unsigned long value, const char * source)
 Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_bytesize, size_t fs_sync_read_block_bytesize,
                bool enforce_minimum, size_t fs_async_chunk_bytesize, FsQueueDepth fs_async_queue_depth,
                std::string fs_strategy_candidates, unsigned long object_storage_retry_timeout_seconds,
-               std::string fs_no_register_buffers, bool fs_register_buffers, bool fs_direct_async) :
+               std::string fs_no_register_buffers, bool fs_register_buffers, bool fs_direct_async,
+               unsigned long fs_workers_per_mount_node) :
+    fs_workers_per_mount_node(to_concurrency(fs_workers_per_mount_node,
+                                             "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT")),
     concurrency(concurrency),
     s3_concurrency(s3_concurrency),
     s3_block_bytesize(s3_block_bytesize),
@@ -262,12 +265,13 @@ Config::Config(FsSettings fs, bool enforce_minimum) :
            utils::getenv<std::string>("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS",
                                       default_fs_no_register_buffers),
            utils::getenv<bool>("RUNAI_STREAMER_FS_REGISTER_BUFFERS", default_fs_register_buffers),
-           utils::getenv<bool>("RUNAI_STREAMER_FS_DIRECT_ASYNC", default_fs_direct_async))
+           utils::getenv<bool>("RUNAI_STREAMER_FS_DIRECT_ASYNC", default_fs_direct_async),
+           utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1U))
 {}
 
 std::ostream & operator<<(std::ostream & os, const Config & config)
 {
-    return os << "Streamer concurrency " << config.concurrency << " ; s3 concurrency " << config.s3_concurrency << " ; s3 block size " << config.s3_block_bytesize << " bytes; " << " ; file system block size " << config.fs_sync_read_block_bytesize << " bytes; " << " ; file system chunk size " << config.fs_async_chunk_bytesize << " bytes; " << " ; file system queue depth " << config.fs_async_queue_depth << " (node-wide); " << " ; file system strategy " << config.fs_strategy_candidates << "; object storage retry timeout " << config.object_storage_retry_timeout.count() << " seconds; ";
+    return os << "Streamer concurrency " << config.concurrency << " ; s3 concurrency " << config.s3_concurrency << " ; s3 block size " << config.s3_block_bytesize << " bytes; " << " ; file system block size " << config.fs_sync_read_block_bytesize << " bytes; " << " ; file system chunk size " << config.fs_async_chunk_bytesize << " bytes; " << " ; file system queue depth " << config.fs_async_queue_depth << " (node-wide); " << " ; file system readers per mount " << config.fs_workers_per_mount_node << " (node-wide); " << " ; file system strategy " << config.fs_strategy_candidates << "; object storage retry timeout " << config.object_storage_retry_timeout.count() << " seconds; ";
 }
 
 }; // namespace runai::llm::streamer::impl

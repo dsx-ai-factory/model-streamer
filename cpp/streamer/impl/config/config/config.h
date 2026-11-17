@@ -48,12 +48,23 @@ struct Config
            unsigned long object_storage_retry_timeout_seconds = 0,
            std::string fs_no_register_buffers = default_fs_no_register_buffers,
            bool fs_register_buffers = default_fs_register_buffers,
-           bool fs_direct_async = default_fs_direct_async);
+           bool fs_direct_async = default_fs_direct_async,
+           unsigned long fs_workers_per_mount_node = 1);
     Config(bool enforce_minimum = true);
 
  private:
     // The deny list as written, into lowercased entries with empties dropped.
     static std::vector<std::string> split_types(const std::string & value);
+
+ public:
+    // What RUNAI_STREAMER_FS_WORKERS_PER_MOUNT asks of the NODE, floored at one and capped. Held so
+    // a malformed value is rejected while a Config is being built, where runai_file_streamer_start
+    // turns it into InvalidParameterError naming the variable - the request path would report
+    // UnknownError, which tells a caller to abandon the streamer. NOT the number a process uses:
+    // that is fs_workers_per_mount(), which divides this late.
+    unsigned fs_workers_per_mount_node;
+
+ private:
 
     // Both file system settings come from the same variable, so they are resolved together: reading it
     // twice would parse it twice and state the precedence rule twice.
@@ -128,6 +139,11 @@ struct Config
     // READ IN TWO PLACES and so defined in one: the pools build this many threads per mount, and
     // the assigner must cut that mount's work into this many workloads or the extra threads have
     // nothing to pull. The two must agree.
+    //
+    // STATIC, and the environment is read again on every call, because the value is divided by
+    // RUNAI_STREAMER_PROCESS_GROUP_SIZE - which the Python layer does not write until it streams,
+    // long after a Config exists. Resolving it here would read the unset default and skip the
+    // division. The same reason AsyncIoSettings is built on the first workload.
     //
     // Costs pinned memory and queue depth per worker, so it is opt in.
     static unsigned fs_workers_per_mount();
