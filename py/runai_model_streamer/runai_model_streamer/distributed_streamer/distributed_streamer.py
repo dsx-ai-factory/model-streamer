@@ -227,27 +227,38 @@ def _caches_for_this_job() -> Any:
     return current
 
 
-def _retire_discovery() -> None:
-    """Retire the discovery group and forget the topology, after a vote failed on it.
+# The job whose discovery machinery failed; a sentinel no job token ever is, until then. See
+# _lose_distribution for why this is a one-way door for the job rather than a retry.
+_distribution_lost_for_job: Any = object()
 
-    Its pairs may be closed, so keeping it would fail every later vote too. Dropping the topology
-    makes the next load rerun find_local_ranks, which recreates the discovery group - a global
-    collective, so every rank of the job repeats it together.
 
-    A vote CAN fail on one rank and succeed on another - gloo lets a peer complete once this rank's
-    contribution is in, while this rank times out on the return leg - so a retry may find some
-    ranks rediscovering and others voting on the retained group. That round fails too, loudly, by
-    timeout on both sides: the rediscovering ranks wait in new_group for peers that never come, and
-    the voting ranks wait for contributions that never come. What makes this terminate is that
-    every rank whose collective fails retires HERE, so each failed round strictly shrinks the set
-    of ranks holding the old state, and within a round or two every rank rediscovers together.
-    Stale state is never reused silently; the cost of disagreement is bounded retries, not wrong
-    data."""
-    global _topology_cache
+def _distribution_is_lost() -> bool:
+    """Whether a discovery-machinery collective failed earlier in THIS job."""
+    return dist.is_initialized() and dist.group.WORLD is _distribution_lost_for_job
+
+
+def _lose_distribution() -> None:
+    """A discovery-machinery collective failed - a cache vote, or discovery itself. Distribution
+    stays OFF for the remainder of this job: set_is_distributed falls back to plain streaming,
+    which posts no collectives and cannot hang.
+
+    Deliberately NOT a retry path. A vote can fail on one rank after succeeding on a peer - gloo
+    lets the peer complete once this rank's contribution is in, while this rank times out on the
+    return leg - and recovery cannot be re-synchronized afterwards: torch consumes its
+    group-creation ordinal BEFORE constructing a group and a failure does not restore it, so ranks
+    that failed DIFFERENTLY hold mismatched ordinals and can never meet in a later new_group. Any
+    rediscovery promise would be false.
+
+    Ranks that did not observe the failure time out ONCE against the missing peer - in their vote,
+    or in the stream's collectives - and land here too; every load after that succeeds, plainly. A
+    new init_process_group is a new job: the token no longer matches, and streaming distributes
+    again."""
+    global _topology_cache, _distribution_lost_for_job
     discovery = _group_cache.pop(("discovery",), None)
     if discovery is not None:
         _retire(discovery)
     _topology_cache = None
+    _distribution_lost_for_job = _cache_job
 
 
 def _retire(entry: Any) -> None:
@@ -493,6 +504,18 @@ class DistributedStreamer:
                 logger.info("[RunAI Streamer][Distributed] Torch distributed is not initialized - fallback to non distributed streaming")
             self.is_distributed = self.is_distributed and self.get_group_size() > 1
 
+        # A discovery-machinery collective failed earlier in this job, and group recovery cannot be
+        # re-synchronized across the ranks (see _lose_distribution) - so this load, and every later
+        # one in the job, streams plainly. EVERY RANK CONVERGES HERE: a rank that did not observe
+        # the failure times out once against the missing peer and loses distribution too.
+        if self.is_distributed and _distribution_is_lost():
+            logger.warning(
+                "[RunAI Streamer][Distributed] Warning: a distributed streaming collective failed "
+                "earlier in this job and the ranks can no longer agree on group creation - "
+                "fallback to non distributed streaming until the process group is reinitialized"
+            )
+            self.is_distributed = False
+
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
         backend_name = None
@@ -680,6 +703,13 @@ class _distributedStreamerParams:
 
         my_global_rank = dist.get_rank()
 
+        if _distribution_is_lost():
+            # Discovery would create a group, and after a possibly-asymmetric failure the ranks can
+            # no longer meet in one (see _lose_distribution). One process alone on its node is the
+            # conservative layout: the CPP layer sizes safely from it, and nothing distributed runs
+            # in this job anyway - set_is_distributed falls back.
+            return 1, my_global_rank, [[my_global_rank]]
+
         # 1. Discover all peers on all nodes (this is a global collective)
         #
         # THE CONSTANT TIMEOUT, not this load's broadcast_timeout: the group is kept and serves
@@ -691,11 +721,17 @@ class _distributedStreamerParams:
         stale = _group_cache.pop(("discovery",), None)
         if stale is not None:
             _retire(stale)
-        discovery_group = dist.new_group(ranks=list(range(world_size)),
-                                         timeout=DEFAULT_BROADCAST_TIMEOUT, backend="gloo")
-        _group_cache[("discovery",)] = discovery_group
-        all_hostnames = [None] * world_size
-        dist.all_gather_object(all_hostnames, socket.gethostname(), group=discovery_group)
+        try:
+            discovery_group = dist.new_group(ranks=list(range(world_size)),
+                                             timeout=DEFAULT_BROADCAST_TIMEOUT, backend="gloo")
+            _group_cache[("discovery",)] = discovery_group
+            all_hostnames = [None] * world_size
+            dist.all_gather_object(all_hostnames, socket.gethostname(), group=discovery_group)
+        except BaseException:
+            # Discovery itself failed, possibly on this rank alone - the same asymmetry the vote
+            # can suffer, with the same consequence: no later group creation can be agreed.
+            _lose_distribution()
+            raise
 
         # 2. Create a list of rank lists, one for each unique host.
         # e.g., [[0,1,2,3,4,5,6,7], [8,9,10,11,12,13,14,15]]
@@ -857,11 +893,11 @@ class _distributedStreamer:
             try:
                 dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=discovery)
             except BaseException:
-                # The vote itself failed, so the discovery group's pairs may be closed, and every
-                # later vote would fail against it. Retire it and drop the topology: the next load
-                # rediscovers through find_local_ranks, a global collective every rank repeats
-                # together - the same symmetry argument as release_group's.
-                _retire_discovery()
+                # The vote itself failed, and it may have succeeded on a peer, so recovery cannot
+                # be re-synchronized - distribution is lost for the job (see _lose_distribution),
+                # and later loads fall back to plain streaming instead of retrying a group
+                # creation the ranks can no longer agree on.
+                _lose_distribution()
                 raise
             have = bool(vote.item())
         if have:
