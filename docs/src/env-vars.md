@@ -120,10 +120,13 @@ single reader can only have its own queue's worth of requests outstanding.
 
 The value is for the NODE, not for one process, and is divided between the streamer processes on
 it the same way `RUNAI_STREAMER_FS_QUEUE_DEPTH` is. Eight readers over eight processes is one each;
-over two processes it is four each. A mount is read by the number asked for however the work is
-split across ranks. A process never gets fewer than one reader, so asking for fewer readers than
-there are processes gives one each, and the streamer warns that the mount is read by more than the
-number asked for.
+over two processes it is four each.
+
+The division drops a remainder. Each process gets the whole part of the share, so the mount is read
+by that number times the processes on the node: twelve readers over eight processes is one each, and
+the mount is read by eight, not twelve. A process never gets fewer than one reader, so asking for
+fewer readers than there are processes also gives one each. The streamer warns whenever the mount
+ends up with a number other than the one asked for.
 
 The mount's queue depth from `RUNAI_STREAMER_FS_QUEUE_DEPTH` is SHARED between its readers, not
 given to each: four readers on a depth of 64 run at 16 each. The reads in flight for the mount are

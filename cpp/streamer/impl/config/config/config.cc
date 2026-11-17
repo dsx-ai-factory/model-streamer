@@ -118,20 +118,23 @@ unsigned Config::fs_workers_per_mount()
     // ASYNC ONLY. The synchronous pool and object storage never read this: a mount gets more than
     // one reader only where an engine serves it.
     const unsigned processes = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
-    const unsigned each = configured / processes;
-
-    // Logged rather than applied silently, as the depth does: a configured number that never
-    // materialises is worse than one that is rejected.
-    if (each < 1 && processes > 1)
-    {
-        LOG(WARNING) << "Readers per mount resolves to " << each << " per process (" << configured
-                     << " over " << processes << " on this node); raised to 1, so the mount is read"
-                     << " by " << processes << " rather than the " << configured << " asked for";
-    }
 
     // AT LEAST ONE: to_concurrency caps but does not floor, and the division can reach zero on its
     // own. A mount with no readers is a pool with no threads, which reads nothing at all.
-    return std::max(1u, each);
+    const unsigned each = std::max(1u, configured / processes);
+    const unsigned node_total = each * processes;
+
+    // Logged rather than applied silently, as the depth does: a number that never materialises is
+    // worse than one that is rejected. Covers both directions - the floor above raises a share of
+    // zero, and the division drops any remainder. Zero is read as one, so it is not reported.
+    if (configured > 0 && node_total != configured)
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << configured << " over " << processes
+                     << " processes on this node is " << each << " each, so a mount is read by "
+                     << node_total << " readers rather than the " << configured << " asked for";
+    }
+
+    return each;
 }
 
 unsigned Config::to_concurrency(unsigned long value, const char * source)

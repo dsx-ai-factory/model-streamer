@@ -138,6 +138,27 @@ TEST_F(Creation, MoreProcessesThanReadersStillLeavesOneEach)
     EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
 }
 
+// A REMAINDER IS DROPPED, which the tests above cannot show because every pair in them divides. Each
+// process takes the whole part, so the node reads the mount with less than was asked for. Rounding
+// the division up instead would give twelve over eight two each, and the node twenty-four.
+TEST_F(Creation, WorkersPerMountDropsARemainder)
+{
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 12UL);
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+        EXPECT_EQ(Config::fs_workers_per_mount() * 8u, 8u) << "the node reads with 8, not the 12 asked for";
+    }
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 9UL);
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 4UL);
+
+        EXPECT_EQ(Config::fs_workers_per_mount(), 2u);
+        EXPECT_EQ(Config::fs_workers_per_mount() * 4u, 8u) << "the node reads with 8, not the 9 asked for";
+    }
+}
+
 // The default is untouched by the division: one per process, whatever the parallelism.
 TEST_F(Creation, TheDefaultIsOnePerProcessAtEveryGroupSize)
 {
