@@ -276,7 +276,7 @@ class InputsTest(unittest.TestCase):
     def test_makefile_installs_are_test_packages(self):
         test = inputs.pip_groups(util.REPO)["test"]
         self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])  # `pip install -r requirements.txt`
-        self.assertIn("azure-storage-blob", test["specs"])
+        self.assertIn("azure-storage-blob", [inputs.spec_name(s) for s in test["specs"]])
         self.assertFalse([s for s in test["specs"] if "/" in s or s.startswith(("-", "."))])  # no paths or wheels of ours
 
     def test_pip_groups(self):

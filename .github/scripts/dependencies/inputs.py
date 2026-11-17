@@ -124,7 +124,7 @@ def pip_groups(repo):
                 add("test", spec, os.path.relpath(requirements, repo))
     for makefile in sorted(glob.glob(os.path.join(repo, "py", "*", "Makefile"))):
         for name, index in re.findall(r"pip download (\S+) --index-url (\S+)", read(repo, makefile)):
-            add("test", name, os.path.relpath(makefile, repo))
+            add("test", name.strip("\"'"), os.path.relpath(makefile, repo))  # the requirement may be quoted
             if index not in groups["test"]["extra_index_urls"]:
                 groups["test"]["extra_index_urls"].append(index)
         for command in re.findall(r"pip3? install\s+([^&\\\n]*)", read(repo, makefile)):
