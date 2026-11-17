@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -96,7 +97,10 @@ class FsAsyncRouter
 
     // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
     // by value like everything else here, so a worker outlives this object whatever the order.
-    WorkerFactory worker_factory(std::shared_ptr<DeviceWriter> writer) const;
+    // `process_group_size` is read when a worker is built, which is after the streamer's caller has
+    // had the chance to set it.
+    WorkerFactory worker_factory(std::shared_ptr<DeviceWriter> writer,
+                                 std::shared_ptr<const std::atomic<unsigned>> process_group_size) const;
 
     // The largest direct-I/O block any of these mounts requires. `paths` must exclude object-storage
     // URIs, which name no mount.

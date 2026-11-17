@@ -77,6 +77,17 @@ int runai_file_streamer_set_fs_strategy(
     const char * candidates
 );
 
+// How many streamer processes share this node. RUNAI_STREAMER_FS_QUEUE_DEPTH is a node-wide figure,
+// and each process takes its share of it, so a tensor-parallel load states its rank count here.
+// Streamer-scoped, 1 until set. Call before the first submission: an engine keeps the count it was
+// built with. 0 returns InvalidParameterError.
+//
+// Optional. RUNAI_STREAMER_PROCESS_GROUP_SIZE, when set, wins over this call.
+int runai_file_streamer_set_process_group_size(
+    void * streamer,
+    unsigned process_group_size
+);
+
 // Multi-request submit: read multiple files concurrently.
 //
 // A submission is a list of files; each file carries a list of RANGES to read. A range is an

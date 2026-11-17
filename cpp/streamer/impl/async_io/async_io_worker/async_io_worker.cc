@@ -96,12 +96,14 @@ bool reads_through_staging(const common::Device & destination)
 
 AsyncIoWorker::AsyncIoWorker(posix_io::Strategy strategy, size_t block, unsigned node_wide_depth,
                              EngineFactory factory, std::function<void()> on_engine_dead,
-                             std::shared_ptr<DeviceWriter> writer, bool register_buffers) :
+                             std::shared_ptr<DeviceWriter> writer, bool register_buffers,
+                             unsigned process_group_size) :
     _writer(std::move(writer)),
     _strategy(strategy),
     _block(block != 0 ? block : posix_io::MaxProbeBlock),
     _block_measured(block != 0),
     _node_wide_depth(node_wide_depth),
+    _process_group_size(process_group_size),
     _register_buffers(register_buffers),
     _factory(std::move(factory)),
     _on_engine_dead(std::move(on_engine_dead))
@@ -141,9 +143,9 @@ std::size_t AsyncIoWorker::capacity(const Workload & first)
         throw common::Exception(common::ResponseCode::EmptyRequestError);
     }
 
-    // Resolved HERE, not at construction: depth is divided by RUNAI_STREAMER_PROCESS_GROUP_SIZE, and
-    // the window size the base wants IS the engine's depth. One moment, one place.
-    _settings.emplace(*first.batches().front().config, _node_wide_depth);
+    // Resolved HERE, not at construction: the window size the base wants IS the engine's depth. One
+    // moment, one place.
+    _settings.emplace(*first.batches().front().config, _node_wide_depth, _process_group_size);
 
     posix_io::AsyncIoConfig config;
     config.depth = _settings->depth();

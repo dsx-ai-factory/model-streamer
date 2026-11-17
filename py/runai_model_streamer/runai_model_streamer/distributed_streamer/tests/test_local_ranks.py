@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from runai_model_streamer.distributed_streamer import distributed_streamer
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
@@ -14,8 +14,6 @@ from runai_model_streamer.distributed_streamer.distributed_streamer import (
 )
 from runai_model_streamer.safetensors_streamer.safetensors_streamer import SafetensorsStreamer
 from runai_model_streamer.safetensors_streamer.tests.test_metadata_ordering import write_safetensors
-
-PROCESS_GROUP_SIZE = "RUNAI_STREAMER_PROCESS_GROUP_SIZE"
 
 
 class TestDiscoverRanks(unittest.TestCase):
@@ -43,8 +41,8 @@ class TestDiscoverRanks(unittest.TestCase):
 
         self.find_local_ranks.assert_not_called()
         self.assertEqual(streamer.params.my_global_rank, 3)
-        # the CPP layer defaults to 1, since a count larger than the readers on the node lowers their throughput
-        self.assertNotIn(PROCESS_GROUP_SIZE, os.environ)
+        # the CPP layer keeps 1, since a count larger than the readers on the node lowers their throughput
+        streamer.file_streamer.set_process_group_size.assert_not_called()
 
     def test_safetensors_streamer_discovers_only_for_a_distributed_load(self):
         # a non distributed load may run on a single rank. A distributed load discovers in its first metadata read,
@@ -70,13 +68,18 @@ class TestDiscoverRanks(unittest.TestCase):
         path = os.path.join(temp_dir, "model.safetensors")
         write_safetensors(path, [("t", {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]})], b"\x00\x01\x02\x03")
 
-        for is_distributed, count in ((False, None), (True, "8")):
-            with self.subTest(is_distributed=is_distributed), patch.dict(os.environ, {}, clear=True):
+        for is_distributed, count in ((False, None), (True, 8)):
+            with self.subTest(is_distributed=is_distributed), patch(
+                "runai_model_streamer.file_streamer.file_streamer.runai_set_process_group_size"
+            ) as set_count:
                 with SafetensorsStreamer() as streamer:
                     streamer.stream_files([path], is_distributed=is_distributed)
                     self.assertEqual(len(list(streamer.get_tensors())), 1)
 
-                self.assertEqual(os.environ.get(PROCESS_GROUP_SIZE), count)
+                if count is None:
+                    set_count.assert_not_called()
+                else:
+                    set_count.assert_called_with(ANY, count)
 
 
 if __name__ == "__main__":

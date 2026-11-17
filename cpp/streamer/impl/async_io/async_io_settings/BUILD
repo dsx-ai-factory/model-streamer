@@ -8,7 +8,6 @@ runai_cc_auto_library(
     deps = [
         "//posix_io/io_engine",
         "//streamer/impl/config/config",
-        "//utils/env",
         "//utils/logging",
     ],
 )
@@ -18,6 +17,5 @@ runai_cc_test(
     srcs = ["async_io_settings_test.cc"],
     deps = [
         ":async_io_settings",
-        "//utils/temp/env",
     ],
 )

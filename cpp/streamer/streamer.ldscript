@@ -57,3 +57,8 @@ RUNAI_FILE_STREAMER_1.0 {
         runai_file_streamer_list_files;
     local: *;
 };
+
+RUNAI_FILE_STREAMER_1.1 {
+    global:
+        runai_file_streamer_set_process_group_size;
+} RUNAI_FILE_STREAMER_1.0;

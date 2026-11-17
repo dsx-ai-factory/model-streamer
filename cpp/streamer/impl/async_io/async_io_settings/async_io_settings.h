@@ -15,22 +15,19 @@ namespace runai::llm::streamer::impl
 
 // What this process will actually use, as opposed to what the operator asked for.
 //
-// CONSTRUCT ON THE FIRST WORKLOAD, never at streamer construction. Depth is divided by
-// RUNAI_STREAMER_PROCESS_GROUP_SIZE, which the Python layer does not write until stream_files() -
-// long after runai_file_streamer_start() has returned. Building this early reads the unset default of 1, skips the
-// division, and says nothing: the device then sees eight times the intended depth at TP=8.
-//
 // Every value is clamped against its real ceiling here and logged when clamped. A configured number
 // that quietly never materialises is worse than one that is rejected.
 class AsyncIoSettings
 {
  public:
     // node_wide_depth is resolved for this worker's mount, so the config is not consulted for it.
+    // process_group_size is the number of streamer processes on this node, from the streamer.
     //
     // max_read_bytesize defaults to this host's kernel ceiling; it is a parameter so a test can check
     // the clamp without depending on the page size of the machine it runs on.
-    AsyncIoSettings(const Config & config, unsigned node_wide_depth, size_t max_read_bytesize);
-    AsyncIoSettings(const Config & config, unsigned node_wide_depth);
+    AsyncIoSettings(const Config & config, unsigned node_wide_depth, unsigned process_group_size,
+                    size_t max_read_bytesize);
+    AsyncIoSettings(const Config & config, unsigned node_wide_depth, unsigned process_group_size = 1);
 
     // In-flight requests for THIS process: the node-wide figure divided by the number of streamer
     // processes on the node, then bounded at both ends by MinDepth and MaxDepth below.
@@ -54,9 +51,7 @@ class AsyncIoSettings
     // and than the one a sweep measured.
     size_t chunk_bytesize() const;
 
-    // Streamer processes on this node, from RUNAI_STREAMER_PROCESS_GROUP_SIZE. 1 when unset, which is
-    // both the single-process case and the "Python has not written it yet" case - the second is a bug
-    // and the reason this object is built late.
+    // Streamer processes on this node. Never below 1, since it is a divisor.
     unsigned process_group_size() const;
 
  private:

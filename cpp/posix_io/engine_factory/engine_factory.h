@@ -20,9 +20,8 @@ namespace runai::llm::streamer::posix_io
 // rejected is the dispatcher's job. That way nullptr means one thing only - "not available here" -
 // rather than also meaning "no engine was wanted". is_async(strategy) must be true.
 //
-// Called on the FIRST WORKLOAD, not at streamer construction: depth depends on
-// RUNAI_STREAMER_PROCESS_GROUP_SIZE, which Python does not set until stream_files(), long after
-// runai_file_streamer_start() returned. Building earlier would read the default of 1 and skip the division.
+// Called on the FIRST WORKLOAD, not at streamer construction: depth depends on the process group
+// size, which the caller may set after runai_file_streamer_start() returned.
 //
 // A failure to build a real engine DEMOTES the strategy for the rest of the process
 // (IoUringProbe::mark_unavailable), so resolution stops offering something that has already failed.
