@@ -15,7 +15,7 @@ CONTENTS
    6. Abseil C++ 20250814.2 - Apache-2.0
    7. Protocol Buffers (includes upb) v33.6 - BSD-3-Clause
    8. utf8_range (bundled in protobuf) v33.6 - MIT
-   9. BoringSSL 0.20251124.0 - OpenSSL AND ISC AND SSLeay (see license text)
+   9. BoringSSL 0.20251124.0 - Apache-2.0
   10. fiat-crypto (bundled in BoringSSL) 0.20251124.0 - Apache-2.0
   11. curl (libcurl, Bazel-built for the GCS SDK) 8.8.0 - curl
   12. c-ares 1.34.5 - MIT
@@ -2294,8 +2294,8 @@ SOFTWARE.
 ==============================================================================
 Version:   0.20251124.0
 Project:   https://github.com/google/boringssl
-License:   OpenSSL AND ISC AND SSLeay (see license text)
-Copyright: Copyright (c) 1998-2011 The OpenSSL Project; Copyright (C) 1995-1998 Eric Young; Copyright (c) Google Inc. and contributors
+License:   Apache-2.0
+Copyright: Copyright The BoringSSL Authors
 Linkage:   static
 
 --- LICENSE ---

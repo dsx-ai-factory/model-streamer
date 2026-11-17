@@ -628,8 +628,8 @@
    "name": "BoringSSL",
    "version": "0.20251124.0",
    "url": "https://github.com/google/boringssl",
-   "spdx": "OpenSSL AND ISC AND SSLeay (see license text)",
-   "copyright": "Copyright (c) 1998-2011 The OpenSSL Project; Copyright (C) 1995-1998 Eric Young; Copyright (c) Google Inc. and contributors",
+   "spdx": "Apache-2.0",
+   "copyright": "Copyright The BoringSSL Authors",
    "linkage": "static",
    "libs": [
     "libstreamergcs"
