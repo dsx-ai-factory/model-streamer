@@ -275,7 +275,7 @@ class InputsTest(unittest.TestCase):
 
     def test_makefile_installs_are_test_packages(self):
         test = inputs.pip_groups(util.REPO)["test"]
-        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/Makefile"])
+        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])  # `pip install -r requirements.txt`
         self.assertIn("azure-storage-blob", test["specs"])
         self.assertFalse([s for s in test["specs"] if "/" in s or s.startswith(("-", "."))])  # no paths or wheels of ours
 
@@ -285,7 +285,7 @@ class InputsTest(unittest.TestCase):
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
         self.assertIn("torch>=2.6", groups["test"]["specs"])  # quoted in the Makefile; the quotes must not survive
         self.assertTrue(groups["test"]["extra_index_urls"])
-        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/setup.py"])
+        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])
         self.assertTrue(any(spec.startswith("setuptools") for spec in groups["build"]["specs"]))
 
     def test_every_workflow_action_has_a_reference(self):

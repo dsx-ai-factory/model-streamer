@@ -24,6 +24,13 @@ class bdist_wheel(_bdist_wheel):
         return "py3", "none", plat
 
 
+def read_requirements(name="requirements.txt"):
+    """The requirements of this package, one per line (comments and blank lines are ignored)."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+        lines = (line.split("#")[0].strip() for line in f)
+        return [line for line in lines if line]
+
+
 def assert_lib_exists():
     lib_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), LIB)
     if os.path.islink(lib_path):
@@ -45,7 +52,7 @@ setup(
     packages=find_packages(),
     # 1.28.0 is the first boto3 that reads AWS_ENDPOINT_URL / AWS_ENDPOINT_URL_S3 (configured endpoints).
     # The listing client (files.py) relies on that to target the same endpoint as the C++ reads.
-    install_requires=["boto3>=1.28.0"],
+    install_requires=read_requirements(),
     data_files=[("/runai_model_streamer/libstreamer/lib/", [LIB])],
     cmdclass={"bdist_wheel": bdist_wheel},
 )
