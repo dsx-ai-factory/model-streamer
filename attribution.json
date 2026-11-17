@@ -1,5 +1,5 @@
 {
-  "description": "What ships that no line in this repository says (run-ai/runai-actions Renovate pipeline, renovate/README.md#attribution). Pinned libraries are marked where they are pinned: .devcontainer/Dockerfile, .devcontainer/gcs/MODULE.bazel.",
+  "description": "What ships that no line in this repository says (run-ai/repo-housekeeper Renovate pipeline, renovate/README.md#attribution). Pinned libraries are marked where they are pinned: .devcontainer/Dockerfile, .devcontainer/gcs/MODULE.bazel.",
   "components": [
     {
       "name": "gcc-runtime",
