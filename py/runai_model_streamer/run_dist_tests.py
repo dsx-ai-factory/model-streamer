@@ -22,25 +22,32 @@ WATCHDOG_INTERVAL_SECONDS = 90
 
 def run_tests():
     faulthandler.dump_traceback_later(WATCHDOG_INTERVAL_SECONDS, repeat=True, file=sys.stderr)
+    try:
+        # 1. GLOBAL SETUP: Initialize the process group ONCE
+        dist.init_process_group("gloo", timeout=PROCESS_GROUP_TIMEOUT)
 
-    # 1. GLOBAL SETUP: Initialize the process group ONCE
-    dist.init_process_group("gloo", timeout=PROCESS_GROUP_TIMEOUT)
+        # 2. DISCOVER & RUN TESTS: This already sorts alphabetically by default
+        loader = unittest.TestLoader()
+        suite = loader.discover("runai_model_streamer", pattern="dist_test_*.py")
 
-    # 2. DISCOVER & RUN TESTS: This already sorts alphabetically by default
-    loader = unittest.TestLoader()
-    suite = loader.discover("runai_model_streamer", pattern="dist_test_*.py")
+        # failfast: once one collective desyncs, every later test errors against the same closed
+        # pair, so each further "failure" is the same incident again and costs another timeout wait.
+        runner = unittest.TextTestRunner(failfast=True)
+        result = runner.run(suite)
 
-    # failfast: once one collective desyncs, every later test errors against the same closed pair,
-    # so each further "failure" is the same incident again and costs another timeout wait.
-    runner = unittest.TextTestRunner(failfast=True)
-    result = runner.run(suite)
+        # failfast stopped only THIS rank's runner; a peer may still be inside another test's
+        # collective. Exiting nonzero here lets torchrun stop the remaining ranks at once, instead
+        # of meeting them at a barrier they will not reach until a timeout.
+        if not result.wasSuccessful():
+            return 1
 
-    faulthandler.cancel_dump_traceback_later()
-
-    # 3. GLOBAL TEARDOWN: Destroy the process group ONCE
-    dist.barrier()
-    dist.destroy_process_group()
-    return 0 if result.wasSuccessful() else 1
+        # 3. GLOBAL TEARDOWN: Destroy the process group ONCE. The watchdog stays armed through
+        # here: group destruction is the blocking operation it exists to catch.
+        dist.barrier()
+        dist.destroy_process_group()
+        return 0
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 if __name__ == '__main__':
