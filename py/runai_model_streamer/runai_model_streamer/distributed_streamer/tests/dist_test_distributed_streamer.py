@@ -789,9 +789,9 @@ class TestDistributedStreamer(unittest.TestCase):
                 module._retire(stale)
             module._topology_cache = None
 
-        # The kept discovery group carries the constant default timeout; the staged failure below
-        # must cost seconds, not minutes, so both ranks drop it and recreate one together under a
-        # short default.
+        # The kept discovery group carries the constant default timeout; the failures below must
+        # cost seconds, not minutes, so both ranks drop it and recreate one together under a short
+        # default.
         with patch.dict(os.environ, env_vars), \
                 patch.object(module, "DEFAULT_BROADCAST_TIMEOUT", timedelta(seconds=5)):
             try:
@@ -800,28 +800,35 @@ class TestDistributedStreamer(unittest.TestCase):
                 with DistributedStreamer() as streamer:
                     self.assertEqual(stream_all(streamer), original)
 
-                # The asymmetry: rank 1 observed its vote fail, rank 0 observed nothing.
-                if self.rank == 1:
-                    module._lose_distribution()
+                # THE REAL ASYMMETRIC VOTE FAILURE, not a staged flag: rank 0 votes while rank 1
+                # is simply between loads, so rank 0's vote times out and rank 0 alone loses
+                # distribution - its discovery entry is retired, and no group was asked for.
+                if self.rank == 0:
+                    with self.assertRaises(Exception):
+                        with DistributedStreamer() as streamer:
+                            stream_all(streamer)
+                    self.assertTrue(module._distribution_is_lost())
+                    self.assertNotIn(("discovery",), module._group_cache)
                 dist.barrier()
 
+                # Rank 1, whose state is intact, now votes against the lost peer: it must time out
+                # and lose too, without asking for any group. Rank 0's load meanwhile already
+                # falls back and succeeds plainly - and stays fallen back when the same context
+                # is reused, because the decision is re-made per stream call.
                 if self.rank == 1:
-                    # The lost rank falls back at once, and STAYS fallen back when the same
-                    # context is reused: the decision is re-made per stream call.
+                    with self.assertRaises(Exception):
+                        with DistributedStreamer() as streamer:
+                            stream_all(streamer)
+                    self.assertTrue(module._distribution_is_lost())
+                else:
                     with DistributedStreamer() as streamer:
                         self.assertEqual(stream_all(streamer), original)
                         self.assertFalse(streamer.is_distributed)
                         self.assertEqual(stream_all(streamer), original)
-                else:
-                    # The peer's vote times out against the missing rank and loses distribution
-                    # without asking for any group.
-                    with self.assertRaises(Exception):
-                        with DistributedStreamer() as streamer:
-                            stream_all(streamer)
                 dist.barrier()
 
                 # Both ranks are now lost; no discovery group exists or gets created; every load
-                # succeeds plainly.
+                # on every rank succeeds plainly.
                 self.assertTrue(module._distribution_is_lost())
                 self.assertNotIn(("discovery",), module._group_cache)
                 with DistributedStreamer() as streamer:

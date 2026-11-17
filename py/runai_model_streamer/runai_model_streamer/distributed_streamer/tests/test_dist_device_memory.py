@@ -522,6 +522,31 @@ class TestTheCacheIsVoted(unittest.TestCase):
         self.assertIs(got, fresh)
         self.assertIs(worker.group_job, new_job)
 
+    def test_a_failed_creation_loses_distribution_too(self):
+        # After a miss, a rank can enter group creation while a peer's vote failed or answered
+        # differently, so a creation failure is possibly asymmetric - and it consumed a
+        # group-creation ordinal the ranks can no longer re-agree on. It must flip the same switch
+        # a failed vote does; the retired discovery group is the proof _lose_distribution ran.
+        key = ("global", 2, "test")
+        discovery = MagicMock(name="discovery")
+        cache = {("discovery",): discovery}
+
+        def all_reduce(tensor, op=None, group=None):
+            tensor.fill_(0)
+
+        def explode():
+            raise RuntimeError("new_group timed out")
+
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 0, [[0, 1]])), \
+                patch.object(distributed_streamer, "_distribution_lost_for_job", object()), \
+                patch("torch.distributed.all_reduce", side_effect=all_reduce):
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, explode)
+            self.assertNotIn(("discovery",), cache)
+            self.assertIn(discovery, cache[("retired",)])
+            self.assertIsNone(distributed_streamer._topology_cache)
+
     def test_a_failed_vote_loses_distribution_for_the_rest_of_the_job(self):
         """A vote can fail on one rank after succeeding on a peer, and torch consumes its
         group-creation ordinal before constructing a group, so ranks that failed differently can

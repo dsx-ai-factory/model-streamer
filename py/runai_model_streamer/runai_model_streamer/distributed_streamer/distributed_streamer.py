@@ -905,7 +905,14 @@ class _distributedStreamer:
         stale = _group_cache.pop(key, None)
         if stale is not None:
             _retire(stale)
-        created = create()
+        try:
+            created = create()
+        except BaseException:
+            # A rank can reach creation ALONE - a peer's vote may have failed or answered
+            # differently - so a failed creation is possibly asymmetric, and it has consumed a
+            # group-creation ordinal the ranks can no longer re-agree on (see _lose_distribution).
+            _lose_distribution()
+            raise
         _group_cache[key] = created
         return created
 
