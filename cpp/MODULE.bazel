@@ -7,10 +7,28 @@ this checkout's SDK build inputs."""
 
 module(name = "runai_model_streamer")
 
-bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_cc", version = "0.2.22")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "googletest", version = "1.16.0", dev_dependency = True, repo_name = "com_google_googletest")
+
+# The I/O engines' libraries, built from source by Bazel and linked statically into libstreamer.so
+# (third_party/BUILD has the targets, and the system-library alternative for packagers).
+# attribution: shipped module=py/runai_model_streamer,cpp
+bazel_dep(name = "liburing", version = "2.14.bcr.2")
+# attribution: shipped module=py/runai_model_streamer,cpp
+bazel_dep(name = "libaio", version = "0.3.113.bcr.1")
+
+# liburing's registry build runs its configure with --use-libc, as the devcontainer build did; the
+# patch keeps the stack protector that build had (see the patch).
+single_version_override(
+    module_name = "liburing",
+    patch_strip = 1,
+    patches = ["//third_party:liburing_stack_protector.patch"],
+)
+
+# libaio's registry source URL (releases.pagure.org) is gone; bazel_downloader.cfg fetches the same
+# archive, still checked against the registry's sha256, from Debian's mirror.
 
 # The SDK's ABI compatibility header and build inputs, shared with the SDK builder.
 bazel_dep(name = "gcs_sdk_config")
@@ -44,18 +62,6 @@ new_local_repository(
 new_local_repository(
     name = "azure",
     build_file = "//third_party:azure.BUILD",
-    path = "/opt",
-)
-
-new_local_repository(
-    name = "uring",
-    build_file = "//third_party:uring.BUILD",
-    path = "/opt",
-)
-
-new_local_repository(
-    name = "aio",
-    build_file = "//third_party:aio.BUILD",
     path = "/opt",
 )
 

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Keep liburing compiled with the toolchain's stack protector, as the devcontainer build did.
+#
+# The registry's BUILD.bazel copies upstream's default CFLAGS, which include -fno-stack-protector.
+# Upstream needs that for its nolibc build, which has no __stack_chk_fail; this build is --use-libc.
+# The devcontainer build replaced those CFLAGS with "-fPIC -O2", so the liburing in libstreamer.so
+# has always had the compiler's default -fstack-protector-strong. This patch keeps it that way.
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -55,7 +55,6 @@
+         "-Wall",
+         "-Wextra",
+         "-Wno-unused-parameter",
+-        "-fno-stack-protector",
+         "-include config-host.h",
+     ],
+     includes = ["src/include"],

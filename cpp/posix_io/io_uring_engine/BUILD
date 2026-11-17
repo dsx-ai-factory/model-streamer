@@ -13,7 +13,7 @@ runai_cc_auto_library(
         "//posix_io/io_uring_probe",
         "//common/response_code",
         "//utils/logging",
-        "@uring//:uring",
+        "//third_party:uring",
     ],
 )
 
