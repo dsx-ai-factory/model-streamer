@@ -165,18 +165,10 @@ struct AsyncIoConfig
     // Defaults to false so a caller that says nothing gets the behaviour it had before.
     bool register_buffers = false;
 
-    // Whether DIRECT reads on this mount are handed to the kernel's async workers (io_uring's
-    // IOSQE_ASYNC) instead of being issued inline by our one worker. Buffered reads always are.
-    //
-    // Per mount, because it pays on block devices and costs on network file systems:
-    //
-    //   block device   An inline O_DIRECT submit pins the destination on the worker, and on fresh
-    //                  host memory that is a first-touch fault and a zeroed page per 4 KiB (issue
-    //                  #323). io-wq spreads those faults over its workers.
-    //   NFS            The inline submit only sends an RPC, which is cheap. io-wq made the same load
-    //                  slower at several times the CPU.
-    //
-    // Ignored by libaio, which has no such knob. Defaults to false: the behaviour before it existed.
+    // Whether direct reads go to io-wq (IOSQE_ASYNC) instead of inline on our one worker; buffered
+    // reads always do. On for block devices, where an inline submit takes the destination's
+    // first-touch faults on the worker (#323). Off for NFS, where it only sends an RPC and io-wq costs
+    // more CPU. Ignored by libaio. Default false: the behaviour before it existed.
     bool async_direct = false;
 };
 

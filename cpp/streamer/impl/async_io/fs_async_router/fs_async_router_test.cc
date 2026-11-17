@@ -263,10 +263,8 @@ TEST(FsAsyncRouter, Without_A_Policy_Every_Mount_Registers)
     EXPECT_TRUE(groups.registers[0]);
 }
 
-// Whether direct reads go to io-wq is decided per mount too, and from the DEVICE rather than the type
-// name: the router must carry the mount's block_backed answer, whatever the type says. Lustre reads as
-// "lustre" and reports a made-up device number, so it is the case a type-name or major-number rule
-// would get wrong.
+// io-wq is decided per mount from block_backed, not the type name. Lustre, with its made-up device
+// number, is the case a type-name or major-number rule would get wrong.
 TEST(FsAsyncRouter, Io_Wq_Is_Decided_Per_Mount_From_The_Device)
 {
     FsAsyncRouter router(async_candidates, with_mounts([](const std::string & directory)

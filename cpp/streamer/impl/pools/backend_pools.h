@@ -151,11 +151,9 @@ class BackendPools
     // containers below. Several threads can submit at the same time, so the first workload for a
     // mount can arrive on more than one thread at once.
     mutable std::mutex _async_mutex;
-    // Keyed by the DEPTH, the registration decision and the io-wq decision, because all three are
-    // bound into an engine when it is built and none can change afterwards. Depth alone would let an
-    // NFS mount and an ext4 mount share an engine at the default cap of one - and then whichever
-    // arrived first would decide registration and io-wq for both, which is wrong for one of them
-    // whichever way it went.
+    // Keyed by everything bound into an engine when it is built: depth, registration and io-wq. Depth
+    // alone would let an NFS and an ext4 mount share one engine at the default cap of one, and the
+    // first to arrive would decide for both.
     std::map<std::tuple<unsigned, bool, bool>, std::vector<std::unique_ptr<utils::ThreadPool<Workload>>>> _async_pools;
 
     // Which engine each mount uses. Separate from _async_pools because above the cap several mounts

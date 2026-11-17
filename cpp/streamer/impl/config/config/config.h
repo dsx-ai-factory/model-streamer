@@ -102,12 +102,8 @@ struct Config
     // show it.
     static constexpr bool default_fs_register_buffers = true;
 
-    // RUNAI_STREAMER_FS_DIRECT_ASYNC: whether direct reads may be handed to io_uring's io-wq workers
-    // (IOSQE_ASYNC) on the mounts where the streamer decides they should - see
-    // AsyncIoConfig::async_direct for which mounts and why. On by default.
-    //
-    // A kill switch, not a tuning knob: off issues every direct read inline, as before io-wq was used
-    // for them, on every mount. Buffered reads are always handed to io-wq and are not affected.
+    // RUNAI_STREAMER_FS_DIRECT_ASYNC: kill switch, on by default. Off issues every direct read inline,
+    // as before. Which mounts use io-wq when on: AsyncIoConfig::async_direct. Buffered reads unaffected.
     static constexpr bool default_fs_direct_async = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
@@ -157,7 +153,7 @@ struct Config
     // The master switch. False turns registered buffers off for every mount, whatever the list says.
     bool fs_register_buffers;
 
-    // False issues every direct read inline, whatever the mount. See default_fs_direct_async.
+    // See default_fs_direct_async.
     bool fs_direct_async;
 
     // Whether reads on a mount of this type may use registered buffers. Prefix matched, so `nfs`

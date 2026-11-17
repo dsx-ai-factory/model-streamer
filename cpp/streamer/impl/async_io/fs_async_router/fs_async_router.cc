@@ -175,8 +175,8 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
                         const bool may_register = registers == nullptr || registers(capability.fs_type);
                         out.registers.push_back(may_register);
 
-                        // From the device, not the type name: a list of network file system names
-                        // would miss the ones nobody wrote down, and those would get io-wq.
+                        // By device, not type name: a name list would miss unlisted network
+                        // file systems.
                         const bool to_io_wq = direct_async && capability.block_backed;
                         out.async_direct.push_back(to_io_wq);
 

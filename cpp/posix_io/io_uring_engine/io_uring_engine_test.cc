@@ -240,8 +240,7 @@ TEST(IoUringEngine, Reads_Through_A_Registered_Buffer)
     utils::ScopeGuard free_region([&region]() { ::free(region); });
     std::memset(region, 0, RegionBytes);
 
-    // Asked BEFORE the engine exists: once it holds its region, a probe registering a second one can
-    // be refused by a RLIMIT_MEMLOCK that allowed the first, and would then expect the wrong answer.
+    // Before the engine: with its region held, a tight RLIMIT_MEMLOCK could refuse the probe's.
     const bool kernel_registers = raw_can_register_buffer();
 
     // After the buffers, so the ring goes first - see the note on declaration order above.
@@ -945,8 +944,7 @@ TEST(IoUringEngine, Direct_Read_Is_Refused_When_Misaligned)
             const auto completion = read_once(engine, fixture.ref(), test_case.offset, test_case.bytesize,
                                               buffer.get() + test_case.address_shift);
 
-            // EINVAL exactly. This is the value completion_mapper reads to tell an alignment bug from a
-            // storage fault, so the test pins the number and not only "it failed".
+            // EINVAL exactly: completion_mapper reads it to tell an alignment bug from a storage fault.
             EXPECT_EQ(completion.res, -EINVAL)
                 << "the kernel accepted a direct read with a misaligned " << test_case.what
                 << " - either this mount ignores O_DIRECT, or the rule the mock enforces is wrong";
@@ -965,8 +963,7 @@ TEST(IoUringEngine, Direct_Read_Through_A_Registered_Buffer)
     AlignedBuffer region(Block * 2);
     ASSERT_NE(region.get(), nullptr);
 
-    // Asked BEFORE any engine exists: once one holds its region, a probe registering a second can be
-    // refused by a RLIMIT_MEMLOCK that allowed the first, and would then expect the wrong answer.
+    // Before the engine: with its region held, a tight RLIMIT_MEMLOCK could refuse the probe's.
     const bool kernel_registers = raw_can_register_buffer(Block * 2);
 
     for (const bool async_direct : BothPaths)

@@ -428,8 +428,7 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     // system type, and handed to the engine, which also has the host's answer.
     const bool _register_buffers;
 
-    // Whether this mount's direct reads go to the kernel's async workers. Decided by the router from
-    // whether the mount is a block device - see AsyncIoConfig::async_direct.
+    // See AsyncIoConfig::async_direct.
     const bool _async_direct;
 
     // Set once a measurement was refused for being larger than the scratch buffers. It only silences

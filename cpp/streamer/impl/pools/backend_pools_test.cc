@@ -140,10 +140,8 @@ TEST(BackendPools, MountsThatDisagreeAboutRegistrationDoNotShareAnEngine)
     EXPECT_EQ(built, (std::vector<bool>{ true, false })) << "each engine kept its own mount's answer";
 }
 
-// The same for io-wq: whether direct reads go to the kernel's async workers is bound into an engine,
-// and it is right on a block device and wrong on NFS. Two mounts that agree about depth AND
-// registration - the default for every mount but NFS's registration - must still not share, or the
-// first to arrive would decide for both.
+// The same for io-wq, which is bound into an engine: mounts that agree on depth and registration but
+// not on io-wq must not share one, or the first to arrive would decide for both.
 TEST(BackendPools, MountsThatDisagreeAboutIoWqDoNotShareAnEngine)
 {
     utils::temp::UnsetEnv max_engines(std::string("RUNAI_STREAMER_FS_MAX_ENGINES"));

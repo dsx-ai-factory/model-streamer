@@ -48,25 +48,15 @@ struct MountCapability
     // "ext4". So it separates network storage from local, and says nothing about local speed.
     std::string fs_type;
 
-    // Whether `dev` is a real block device: ext4 or xfs on NVMe, md RAID, dm, or a network block
-    // device (EBS, iSCSI, virtio). False for file systems with no device beneath them - NFS, Lustre,
-    // CIFS, FUSE, virtiofs, tmpfs - which the kernel gives an anonymous number, or (Lustre) one it
-    // makes up. See is_block_device() for why the number alone cannot decide it.
-    //
-    // Also false for btrfs, ZFS and overlayfs even when they sit on NVMe: they too give files an
-    // anonymous number. Those mounts keep direct reads inline, as before this field existed - safe,
-    // but without the io-wq gain (issue #323). Overlayfs is the one a container image puts models on.
+    // Whether `dev` is a block device (NVMe, md RAID, dm, EBS, iSCSI, virtio) - see is_block_device().
+    // False for NFS, Lustre, CIFS, FUSE, virtiofs and tmpfs, and also for btrfs, ZFS and overlayfs,
+    // which give files an anonymous device number even on NVMe. Those keep direct reads inline.
     bool block_backed = false;
 };
 
-// Whether `dev` names a block device, asked of sysfs: /sys/dev/block/<major>:<minor> exists for every
-// block device and for nothing else. `sysfs` is a test seam.
-//
-// Not "major != 0", which is the obvious test and is wrong: Lustre reports major 3965 (measured, FSx
-// for Lustre on kernel 6.12) and has no device at all.
-//
-// False when sysfs is not visible, which errs towards treating the mount as file storage. Measured
-// visible inside unprivileged Kubernetes pods.
+// Whether sysfs lists `dev` under /sys/dev/block. Not "major != 0": Lustre reports a made-up major
+// (3965 on FSx). False when sysfs is not visible, which keeps direct reads inline. `sysfs` is a test
+// seam.
 bool is_block_device(dev_t dev, const std::string & sysfs = "/sys");
 
 // Whether a mount can serve O_DIRECT.

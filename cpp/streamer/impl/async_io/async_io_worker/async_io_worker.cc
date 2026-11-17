@@ -55,8 +55,7 @@ size_t device_slab_bytesize()
     return configured;
 }
 
-// Where this worker's direct reads are issued, for the startup log. libaio has no io-wq hand-off and
-// ignores async_direct, so only io_uring can report it.
+// For the startup log. libaio ignores async_direct.
 const char * direct_read_path(bool async_direct, posix_io::Strategy strategy)
 {
     if (!async_direct)
