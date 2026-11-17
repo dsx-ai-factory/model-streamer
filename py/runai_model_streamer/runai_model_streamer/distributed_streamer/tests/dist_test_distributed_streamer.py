@@ -17,6 +17,7 @@ import time
 import random
 from unittest.mock import patch
 
+from runai_model_streamer.distributed_streamer import distributed_streamer as distributed_streamer_module
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     AgreedRing,
     DistributedStreamer,
@@ -708,6 +709,52 @@ class TestDistributedStreamer(unittest.TestCase):
 
         if self.rank == 0:
             print(f"\n✅ Empty-share rank test verified on all {self.world_size} ranks.")
+
+    def test_1_success_after_an_asymmetric_cache_eviction(self):
+        """Every rank, for real, through the cache vote after an asymmetric eviction.
+
+        A failed stream evicts the cached distribution group on ITS ranks only; in per-node mode
+        the other ranks keep theirs. The vote in cached_or_created must then bring EVERY rank to
+        recreate together - a rank that recreated alone would wait in dist.new_group for peers that
+        never call it, until the timeout. Staged here without a failure: after a healthy stream,
+        rank 1 retires its cached entries exactly as release_group(poisoned=True) would, and the
+        next stream must still deliver every byte on every rank."""
+        if self.world_size < 2:
+            self.skipTest("an asymmetric eviction needs at least two ranks")
+
+        file_specs = [{"size": 1000, "chunks": [500, 500]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+
+        def stream_all():
+            chunks = [None] * len(requests[0].sizes)
+            with DistributedStreamer() as streamer:
+                streamer.stream_files(requests, None, "cpu", True)
+                for _, chunk_idx, tensor in streamer.get_chunks():
+                    chunks[chunk_idx] = tensor.cpu().numpy().tobytes()
+            return b"".join(chunks)
+
+        with patch.dict(os.environ, env_vars):
+            self.assertEqual(stream_all(), original)
+
+            # The asymmetry: this rank's entries are retired the way a poisoned release does it,
+            # while every other rank keeps its cache. AFTER the context, so the exit barrier above
+            # ran on every rank.
+            if self.rank == 1:
+                cache = distributed_streamer_module._group_cache
+                for key in [k for k in cache if k and k[0] in ("local", "global")]:
+                    distributed_streamer_module._retire(cache.pop(key))
+            dist.barrier()
+
+            # The next stream votes before reusing: rank 1's miss must make every rank recreate
+            # together, and the data must still arrive whole.
+            self.assertEqual(stream_all(), original)
+
+        if self.rank == 0:
+            print(f"\n✅ Asymmetric-eviction recovery verified on all {self.world_size} ranks.")
 
     def test_1_success_random_files(self):
         file_specs = []
