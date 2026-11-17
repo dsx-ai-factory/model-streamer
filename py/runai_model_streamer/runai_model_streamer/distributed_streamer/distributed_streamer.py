@@ -223,6 +223,19 @@ def _caches_for_this_job() -> None:
     _cache_job = current
 
 
+def _retire_discovery() -> None:
+    """Retire the discovery group and forget the topology, after a vote failed on it.
+
+    Its pairs may be closed, so keeping it would fail every later vote too. Dropping the topology
+    makes the next load rerun find_local_ranks, which recreates the discovery group - a global
+    collective, so every rank of the job repeats it together."""
+    global _topology_cache
+    discovery = _group_cache.pop(("discovery",), None)
+    if discovery is not None:
+        _retire(discovery)
+    _topology_cache = None
+
+
 def _retire(entry: Any) -> None:
     """Keep a reference to a group (or list of them) that must never be used again.
 
@@ -650,8 +663,13 @@ class _distributedStreamerParams:
         my_global_rank = dist.get_rank()
 
         # 1. Discover all peers on all nodes (this is a global collective)
+        #
+        # THE CONSTANT TIMEOUT, not this load's broadcast_timeout: the group is kept and serves
+        # every later load's cache vote, so its patience must not be whatever the FIRST load's
+        # environment happened to say - a first load configured for seconds would make every later
+        # vote give up on a peer the later load's own timeout still allows for.
         discovery_group = dist.new_group(ranks=list(range(world_size)),
-                                         timeout=self.broadcast_timeout, backend="gloo")
+                                         timeout=DEFAULT_BROADCAST_TIMEOUT, backend="gloo")
         _group_cache[("discovery",)] = discovery_group
         all_hostnames = [None] * world_size
         dist.all_gather_object(all_hostnames, socket.gethostname(), group=discovery_group)
@@ -790,8 +808,18 @@ class _distributedStreamer:
         discovery = _group_cache.get(("discovery",))
         have = key in _group_cache
         if discovery is not None:
-            vote = torch.tensor([1 if have else 0], dtype=torch.int64)
-            dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=discovery)
+            # ON THE CPU EXPLICITLY: torch.set_default_device would otherwise put the vote on the
+            # application's device, and the gloo discovery group cannot reduce a device tensor.
+            vote = torch.tensor([1 if have else 0], dtype=torch.int64, device="cpu")
+            try:
+                dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=discovery)
+            except BaseException:
+                # The vote itself failed, so the discovery group's pairs may be closed, and every
+                # later vote would fail against it. Retire it and drop the topology: the next load
+                # rediscovers through find_local_ranks, a global collective every rank repeats
+                # together - the same symmetry argument as release_group's.
+                _retire_discovery()
+                raise
             have = bool(vote.item())
         if have:
             return _group_cache[key]

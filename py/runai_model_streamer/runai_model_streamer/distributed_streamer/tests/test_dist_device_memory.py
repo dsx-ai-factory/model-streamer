@@ -451,6 +451,21 @@ class TestTheCacheIsVoted(unittest.TestCase):
         self.assertIs(returned, created)
         self.assertNotIn(("retired",), cache)
 
+    def test_a_failed_vote_retires_the_discovery_group_and_the_topology(self):
+        # A vote that fails may have closed the discovery group's pairs; keeping it would fail
+        # every later vote too. The next load must rediscover, on every rank together.
+        key = ("global", 2, "test")
+        discovery = MagicMock(name="discovery")
+        cache = {("discovery",): discovery, key: MagicMock(name="old_group")}
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 0, [[0, 1]])), \
+                patch("torch.distributed.all_reduce", side_effect=RuntimeError("vote timed out")):
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, lambda: MagicMock())
+            self.assertNotIn(("discovery",), cache)
+            self.assertIn(discovery, cache[("retired",)])
+            self.assertIsNone(distributed_streamer._topology_cache)
+
 
 class TestARankThatCannotMeasure(unittest.TestCase):
     """What a failed memory query must NOT do: leave the reduction.
