@@ -137,6 +137,33 @@ TEST(BackendPools, TheMountsDepthIsSharedBetweenItsReaders)
     }
 }
 
+// A GROUP IS NOT A RING. The cap counts groups, and a group now runs one reader per setting - each
+// with its own ring and thread. Counting groups as engines reported one where four were built.
+TEST(BackendPools, ReadersAreCountedSeparatelyFromEngineGroups)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(pools.async_engines(), 1u) << "one mount, one group";
+    EXPECT_EQ(pools.async_readers(), 4u) << "that group runs four readers, each with a ring";
+}
+
+// Two mounts at the same depth above the cap share a group, so the groups do not grow but the
+// readers do not either - the sharers read through the same four.
+TEST(BackendPools, SharedGroupsDoNotAddReaders)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(pools.async_engines(), 1u);
+    EXPECT_EQ(pools.async_readers(), 4u) << "the second mount shares the first group's readers";
+}
+
 // A reader must always have a request it may issue, however many readers share a shallow budget.
 TEST(BackendPools, AReaderNeverGetsAZeroDepth)
 {

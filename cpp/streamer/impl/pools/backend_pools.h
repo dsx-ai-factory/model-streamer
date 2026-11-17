@@ -121,8 +121,14 @@ class BackendPools
     // For testing: number of pools created so far.
     unsigned pools_created() const;
 
-    // How many async engines exist. For tests: nothing in production reads it.
+    // How many async engine GROUPS exist - the entries of _async_pools, which is what
+    // _max_async_engines caps. A group runs several readers, so this is not the number of rings or
+    // threads; async_readers() is. For tests: nothing in production reads it.
     unsigned async_engines() const;
+
+    // The readers across every group, each of which owns a ring and a thread. The number a mount
+    // gets is a share of the node's, so this is what the process really runs. For tests.
+    unsigned async_readers() const;
 
     // The resolved limit per queue depth, after the environment is read and capped. For tests: the
     // cap is otherwise only visible by building enough engines to reach it.
@@ -162,9 +168,11 @@ class BackendPools
     // point at the same engine, and because a mount must keep the engine it was given.
     std::map<dev_t, utils::ThreadPool<Workload> *> _async_by_device;
 
-    // The largest number of engines PER QUEUE DEPTH, so the worst case is this times the number of
-    // distinct depths configured. 1 puts every mount of one depth on one engine. That is the default,
-    // and it is also how an operator turns the feature off, because we have not measured the gain.
+    // The largest number of engine GROUPS per queue depth. A group runs fs_workers_per_mount()
+    // readers, each with its own ring and thread, so the worst case is this times the distinct depths
+    // configured times that reader count. 1 puts every mount of one depth on one group. That is the
+    // default, and it is also how an operator turns the feature off, because we have not measured
+    // the gain.
     const unsigned _max_async_engines;
 
     // Mounts that were given an engine already in use. Not the same as (mounts - engines): a mount
@@ -175,8 +183,11 @@ class BackendPools
     static utils::ThreadPool<Workload> * least_loaded_async(
         const std::vector<std::unique_ptr<utils::ThreadPool<Workload>>> & engines);
 
-    // Engines across every depth. Called under _async_mutex.
+    // Engine groups across every depth. Called under _async_mutex.
     unsigned count_async_engines() const;
+
+    // Readers across every group of every depth. Called under _async_mutex.
+    unsigned count_async_readers() const;
 
     std::unique_ptr<utils::ThreadPool<Workload>> _object_storage_pool;
 
