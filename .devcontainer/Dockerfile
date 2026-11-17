@@ -49,9 +49,9 @@ RUN if [ "$TARGETARCH" = amd64 ]; then \
     fi
 
 RUN pip install \
-    boto3 \
+    boto3==1.37.38 \
     cpplint==1.5.4 \
-    pytest
+    pytest==8.3.5
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     cmake \
