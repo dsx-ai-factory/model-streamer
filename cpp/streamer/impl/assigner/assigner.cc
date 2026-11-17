@@ -179,17 +179,23 @@ void Assigner::assign(size_t total_bytes_to_read)
 
     unsigned used = 0;
 
+    // The block each group is cut by, decided here because this is where the pool is decided. An
+    // async mount is read at the async chunk, so cutting it by the synchronous block would size its
+    // readers by a setting no engine uses.
+    const size_t sync_block = _is_object_storage ? _config->s3_block_bytesize
+                                                 : _config->fs_sync_read_block_bytesize;
+
     // The synchronous group first, so that with no async files the workload numbering is identical to
     // what it was before grouping existed - which is what keeps every existing test meaningful.
-    used += assign_group(sync_indices, _num_workers, used, sync_bytes, -1);
+    used += assign_group(sync_indices, _num_workers, used, sync_bytes, -1, sync_block);
 
-    // ONE WORKLOAD PER READER ON THAT MOUNT. The pools build fs_workers_per_mount() threads for a
-    // mount; cutting its work into fewer pieces than that leaves the extra threads with nothing to
-    // pull, so the setting would do nothing. Walked in group order (std::map) so numbering is
-    // deterministic.
+    // ONE WORKLOAD PER READER ON THAT MOUNT, up to one per async chunk of work. A reader holding less
+    // than a chunk has nothing to read, so a smaller cut is right rather than a loss. Walked in group
+    // order (std::map) so numbering is deterministic.
     for (const auto & [group, indices] : async_indices)
     {
-        used += assign_group(indices, per_mount, used, async_bytes[group], group);
+        used += assign_group(indices, per_mount, used, async_bytes[group], group,
+                             _config->fs_async_chunk_bytesize);
     }
 
     _num_workloads = std::max(used, 1u);
@@ -224,7 +230,8 @@ unsigned Assigner::assign_group(const std::vector<size_t> & indices,
                                 unsigned workers,
                                 unsigned first_workload,
                                 size_t group_bytes,
-                                int group)
+                                int group,
+                                size_t block_bytesize)
 {
     if (indices.empty())
     {
@@ -233,7 +240,8 @@ unsigned Assigner::assign_group(const std::vector<size_t> & indices,
 
     size_t base_bytes_remainder = 0;
     unsigned workloads = 0;
-    const size_t base_bytes_per_worker = bytes_per_worker_for(group_bytes, workers, base_bytes_remainder, workloads);
+    const size_t base_bytes_per_worker = bytes_per_worker_for(group_bytes, workers, block_bytesize,
+                                                              base_bytes_remainder, workloads);
 
     size_t position = 0;   // which entry of `indices` is being assigned
     size_t consumed = 0;   // how many of its bytes are already assigned
@@ -356,11 +364,11 @@ unsigned Assigner::get_num_workers() const
 // How many bytes each workload of a group should aim for, and how many workloads the group needs.
 //
 // Deliberately pure: writing _num_workloads as a side effect cannot work once there is more than one
-// group, so each group computes its own count and the caller adds them up.
-size_t Assigner::bytes_per_worker_for(size_t group_bytes, unsigned max_workers,
+// group, so each group computes its own count and the caller adds them up. The block comes from the
+// caller, which knows whether this group is read by the synchronous pool, an engine or the backend.
+size_t Assigner::bytes_per_worker_for(size_t group_bytes, unsigned max_workers, size_t block_bytesize,
                                       size_t & remainder_bytesize, unsigned & workloads)
 {
-    const size_t block_bytesize = _is_object_storage ? _config->s3_block_bytesize : _config->fs_sync_read_block_bytesize;
     const size_t num_blocks = group_bytes / block_bytesize;
 
     // Zero-sized files are assigned to one worker: they may hold zero-sized tensors, and every range

@@ -88,10 +88,10 @@ struct Assigner
     // each group divided for the pool that will serve it - one workload per READER on that mount for
     // the async pool, and `concurrency` for the synchronous one.
     //
-    // A mount's readers must each get a workload or they idle: the pool builds that many threads, and
-    // a group cut into fewer pieces leaves the rest with nothing to take. The slices do not align to
-    // chunk boundaries, so each one leaves a partial chunk at its edges - the async worker bounces
-    // those through its scratch pool, and the parallelism is worth more than the ragged ends.
+    // A mount gets one workload per reader, up to one per async chunk of work: the pool builds that
+    // many threads, and a reader holding less than a chunk has nothing to read. The slices do not
+    // align to chunk boundaries, so each one leaves a partial chunk at its edges - the async worker
+    // bounces those through its scratch pool, and the parallelism is worth more than the ragged ends.
     Assigner(const std::vector<FileRanges> & request,
              std::shared_ptr<const Config> config,
              std::vector<int> group_by_file = {});
@@ -124,7 +124,9 @@ struct Assigner
  private:
     // Bytes per workload for one group, and how many workloads it needs. Deliberately pure: writing
     // _num_workloads as a side effect cannot work once there is more than one group.
-    size_t bytes_per_worker_for(size_t group_bytes, unsigned max_workers,
+    //
+    // `block_bytesize` is given, not derived here: the caller knows which pool serves the group.
+    size_t bytes_per_worker_for(size_t group_bytes, unsigned max_workers, size_t block_bytesize,
                                 size_t & remainder_bytesize, unsigned & workloads);
     bool check_object_storage(const std::vector<FileRanges> & request) const;
 
@@ -143,12 +145,14 @@ struct Assigner
 
     // One group's share of step 2. `indices` are positions in _transfers; `workers` is how many
     // workloads this group may use; `first_workload` is where its workload numbering starts; `group`
-    // is what group_of_workload() will report for them. Returns how many workloads it used.
+    // is what group_of_workload() will report for them; `block_bytesize` is the read granularity of
+    // the pool that will serve it. Returns how many workloads it used.
     unsigned assign_group(const std::vector<size_t> & indices,
                           unsigned workers,
                           unsigned first_workload,
                           size_t group_bytes,
-                          int group);
+                          int group,
+                          size_t block_bytesize);
 
     // This file's group: -1 when group_by_file is empty, which is every caller but the streamer.
     int group_of_file(unsigned file_index) const;
