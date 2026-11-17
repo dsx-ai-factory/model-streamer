@@ -182,6 +182,59 @@ TEST_F(AssignerTest, One_Reader_Still_Gets_One_Workload)
     EXPECT_EQ(assigner.num_workloads(), 1u);
 }
 
+// THE ASYNC GROUP IS CUT BY THE ASYNC CHUNK, which is what its readers read at. It used to be cut by
+// the synchronous block - the same setting that sizes an object storage chunk - so raising that for
+// object storage took readers away from a mount that never uses it.
+TEST_F(AssignerTest, Async_Workloads_Ignore_The_Synchronous_Block)
+{
+    config->concurrency = 16;
+    config->fs_async_chunk_bytesize = 8 << 20;
+    config->fs_sync_read_block_bytesize = 16 << 20;
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/a", 0, std::vector<size_t>(16, 4 << 20), base));   // 64 MiB
+
+    const Assigner assigner(request, config, { 0 });
+
+    EXPECT_EQ(assigner.num_workloads(), 8u) << "eight chunks of work, eight readers, eight workloads";
+}
+
+// A READER NEEDS A WHOLE CHUNK. Below that the group is cut into as many workloads as it holds
+// chunks, and the readers left over have nothing to read.
+TEST_F(AssignerTest, A_Group_Smaller_Than_Its_Readers_Gets_One_Workload_Per_Chunk)
+{
+    config->concurrency = 16;
+    config->fs_async_chunk_bytesize = 8 << 20;
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/a", 0, std::vector<size_t>(8, 4 << 20), base));    // 32 MiB
+
+    const Assigner assigner(request, config, { 0 });
+
+    EXPECT_EQ(assigner.num_workloads(), 4u) << "32 MiB holds four chunks, so four of the eight readers";
+}
+
+// The synchronous group keeps the synchronous block. Pins that the change above reached the async
+// branch only - cutting every group by the async chunk would give this one eight workloads.
+TEST_F(AssignerTest, The_Synchronous_Group_Is_Cut_By_Its_Own_Block)
+{
+    config->concurrency = 16;
+    config->fs_async_chunk_bytesize = 8 << 20;
+    config->fs_sync_read_block_bytesize = 16 << 20;
+
+    char * const base = fake_base();
+    std::vector<FileRanges> request;
+    request.push_back(contiguous_file("/a", 0, std::vector<size_t>(16, 4 << 20), base));   // 64 MiB
+
+    const Assigner assigner(request, config, {});
+
+    EXPECT_EQ(assigner.num_workloads(), 4u) << "64 MiB over a 16 MiB block is four workloads";
+}
+
 // THE CEILING TERM, which nothing else pins. _worker_assignments is sized for the most workloads
 // a submission can need and then shrunk; with readers per mount that ceiling has to count them.
 //
