@@ -25,8 +25,8 @@ FIXTURES=${GPU_FIXTURES:-.gpu-fixtures}   # a suite gets a directory of its own 
 SEED=${GPU_SEED:-$(date +%s)}
 WHEEL_DIR=${GPU_WHEEL_DIR:-/wheel}
 STREAMER_SPEC=${GPU_STREAMER_SPEC:-}
-TORCH_SPEC=${GPU_TORCH_SPEC:-torch}
-NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy}
+TORCH_SPEC=${GPU_TORCH_SPEC:-torch>=2.0.0}
+NUMPY_SPEC=${GPU_NUMPY_SPEC:-numpy>=1.24.4}
 WORLD=${GPU_WORLD:-2}
 case "$WORLD" in
     1|2) ;;
