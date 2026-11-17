@@ -93,6 +93,25 @@ Positive integer, at most 1024. A larger value is capped, with a warning.
 
 1
 
+### RUNAI_STREAMER_FS_DIRECT_ASYNC
+
+Controls whether `io_uring_direct` hands direct reads to the kernel's io-wq workers (`IOSQE_ASYNC`)
+on the mounts where the streamer chooses to. Today that is mounts backed by a block device (local
+NVMe, RAID, EBS and other block volumes). There the hand-off spreads the cost of preparing
+each read's destination over several kernel threads, which matters most when loading into newly
+allocated host memory.
+
+Set it to `0` to issue every direct read inline on every mount, as before. Buffered reads are always
+handed to io-wq and are not affected, nor is `libaio_direct`.
+
+#### Values accepted
+
+Boolean: `1` or `0`
+
+#### Default value
+
+`1`
+
 ### RUNAI_STREAMER_CHUNK_BYTESIZE
 
 Controls the maximum size of memory each OS thread reads from the file at once.

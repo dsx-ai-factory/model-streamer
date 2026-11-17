@@ -91,8 +91,12 @@ class FsAsyncRouter
     // `device` is where the submission's bytes are going. NO DEFAULT, for the reason Batch gives for
     // the same parameter: defaulting to the host would quietly treat a device destination as host
     // memory, and here that decides which reader serves the file.
+    //
+    // `direct_async` false keeps every group's direct reads inline, whatever its mount - the
+    // RUNAI_STREAMER_FS_DIRECT_ASYNC kill switch.
     Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
-                  common::Device destination, const RegisterPolicy & registers = nullptr);
+                  common::Device destination, const RegisterPolicy & registers = nullptr,
+                  bool direct_async = true);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.

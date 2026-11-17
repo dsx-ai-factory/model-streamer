@@ -112,7 +112,8 @@ std::string directory_of(const std::string & path)
 FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & request,
                                             const FsQueueDepth & depth,
                                             common::Device destination,
-                                            const RegisterPolicy & registers)
+                                            const RegisterPolicy & registers,
+                                            bool direct_async)
 {
     Groups out;
     out.by_file.assign(request.size(), -1);
@@ -176,13 +177,14 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
 
                         // From the device, not the type name: a list of network file system names
                         // would miss the ones nobody wrote down, and those would get io-wq.
-                        out.async_direct.push_back(capability.block_backed);
+                        const bool to_io_wq = direct_async && capability.block_backed;
+                        out.async_direct.push_back(to_io_wq);
 
                         LOG(DEBUG) << "Mount " << major(capability.dev) << ":" << minor(capability.dev)
                                    << " is " << capability.fs_type << " and reads at a queue depth of "
                                    << resolved << (may_register ? " with" : " without")
                                    << " registered buffers, direct reads "
-                                   << (capability.block_backed ? "via io-wq" : "inline");
+                                   << (to_io_wq ? "via io-wq" : "inline");
                     }
                 }
             }

@@ -286,6 +286,22 @@ TEST(FsAsyncRouter, Io_Wq_Is_Decided_Per_Mount_From_The_Device)
     EXPECT_TRUE(groups.async_direct[1]) << "ext4 on md RAID: direct reads go to io-wq";
 }
 
+// RUNAI_STREAMER_FS_DIRECT_ASYNC=0: the kill switch keeps even a block device's direct reads inline.
+TEST(FsAsyncRouter, The_Kill_Switch_Keeps_Every_Direct_Read_Inline)
+{
+    FsAsyncRouter router(async_candidates, with_mounts([](const std::string &)
+    {
+        return posix_io::MountCapability{ makedev(9, 1), false, "ext4", true /* block_backed */ };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/raid/a.st" }), FsQueueDepth(512),
+                                      common::Device::host(), nullptr, false /* direct_async */);
+
+    ASSERT_EQ(groups.async_direct.size(), 1u);
+    EXPECT_FALSE(groups.async_direct[0]) << "switched off: inline even on a block device";
+}
+
 // Directories on one mount share a group, so they share an engine.
 TEST(FsAsyncRouter, One_Group_Per_Mount_Not_Per_Directory)
 {

@@ -336,7 +336,8 @@ common::ResponseCode Streamer::async_request(
     const auto groups = object_storage ? FsAsyncRouter::Groups{}
                                        : _router.groups(request, _config->fs_async_queue_depth, device,
                                                         [this](const std::string & fs_type)
-                                                        { return _config->registers_buffers(fs_type); });
+                                                        { return _config->registers_buffers(fs_type); },
+                                                        _config->fs_direct_async);
     Assigner assigner(request, _config, groups.by_file);
 
     std::vector<Workload> workloads(assigner.num_workloads());

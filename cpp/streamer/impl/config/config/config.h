@@ -47,7 +47,8 @@ struct Config
            std::string fs_strategy_candidates = default_fs_strategy_candidates,
            unsigned long object_storage_retry_timeout_seconds = 0,
            std::string fs_no_register_buffers = default_fs_no_register_buffers,
-           bool fs_register_buffers = default_fs_register_buffers);
+           bool fs_register_buffers = default_fs_register_buffers,
+           bool fs_direct_async = default_fs_direct_async);
     Config(bool enforce_minimum = true);
 
  private:
@@ -101,6 +102,14 @@ struct Config
     // show it.
     static constexpr bool default_fs_register_buffers = true;
 
+    // RUNAI_STREAMER_FS_DIRECT_ASYNC: whether direct reads may be handed to io_uring's io-wq workers
+    // (IOSQE_ASYNC) on the mounts where the streamer decides they should - see
+    // AsyncIoConfig::async_direct for which mounts and why. On by default.
+    //
+    // A kill switch, not a tuning knob: off issues every direct read inline, as before io-wq was used
+    // for them, on every mount. Buffered reads are always handed to io-wq and are not affected.
+    static constexpr bool default_fs_direct_async = true;
+
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
     // than a queue slot.
     static constexpr unsigned default_concurrency = 16;
@@ -147,6 +156,9 @@ struct Config
 
     // The master switch. False turns registered buffers off for every mount, whatever the list says.
     bool fs_register_buffers;
+
+    // False issues every direct read inline, whatever the mount. See default_fs_direct_async.
+    bool fs_direct_async;
 
     // Whether reads on a mount of this type may use registered buffers. Prefix matched, so `nfs`
     // covers `nfs4`. An unknown or empty type registers - we deny what we have measured, not what we

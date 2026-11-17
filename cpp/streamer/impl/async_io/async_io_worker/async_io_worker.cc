@@ -61,7 +61,7 @@ const char * direct_read_path(bool async_direct, posix_io::Strategy strategy)
 {
     if (!async_direct)
     {
-        return "inline (no block device)";
+        return "inline";
     }
     return strategy == posix_io::Strategy::LibaioDirect ? "inline (libaio)" : "via io-wq (block device)";
 }
