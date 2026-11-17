@@ -723,9 +723,14 @@ class _distributedStreamerParams:
         # set the value of RUNAI_STREAMER_PROCESS_GROUP_SIZE to be the number of processes in the distribution group (or 1 if process group is not initialized)
         # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
         current_job = _caches_for_this_job()
-        if self.discovered_job is not current_job:
-            # The instance outlived the job its layout was discovered under; the new job's layout
-            # may differ, so the old one must not be served.
+        if self.discovered_job is not current_job or _topology_cache is None:
+            # Two ways the instance's layout can be stale. The job changed: the instance outlived
+            # init_process_group, and the new job's layout may differ. Or the MODULE dropped its
+            # topology (_retire_discovery, after a failed vote) while this instance kept its copy:
+            # serving that copy would skip find_local_ranks, the discovery group would never be
+            # recreated, and the next load's cache vote would silently not happen - reopening the
+            # asymmetric-eviction hole the vote exists to close. Rediscovering is cheap when the
+            # module cache is warm: find_local_ranks answers from it without a collective.
             self.num_processes_on_node = None
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()

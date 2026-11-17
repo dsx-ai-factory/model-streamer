@@ -473,6 +473,34 @@ class TestTheCacheIsVoted(unittest.TestCase):
         self.assertEqual(find.call_count, 2, "the dead job's layout was served to the new job")
         self.assertEqual(params.num_processes_on_node, 4)
 
+    def test_a_reused_instance_rediscovers_after_the_module_topology_was_dropped(self):
+        # A failed vote retires the discovery group and drops the module topology. A reused
+        # instance under the SAME job must not serve its own copy of the layout: that would skip
+        # find_local_ranks, never recreate the discovery group, and silently skip later votes.
+        params = _distributedStreamerParams()
+        job = MagicMock(name="job")
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          return_value=(2, 0, [[0, 1]])) as find, \
+                patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", job), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module:
+            group_module.WORLD = job
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 1)
+
+            # The healthy fast path: module topology warm, instance warm - no rediscovery.
+            distributed_streamer._topology_cache = (2, 0, [[0, 1]])
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 1, "a warm cache should not rediscover")
+
+            # A failed vote dropped the module topology; the instance must follow.
+            distributed_streamer._topology_cache = None
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 2, "the instance served the dropped layout")
+
     def test_a_group_held_across_jobs_is_not_returned(self):
         # A worker can hold the dead job's distribution group; the new job must get a fresh one.
         worker = _distributedStreamer(None)
