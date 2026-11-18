@@ -137,7 +137,7 @@ What else to check after the change:
   (`libstdc++-9-dev`, `libgcc-9-dev`, `libc6-dev` for Ubuntu 20.04, GCC 9). `collect` stops if a key
   no longer matches a package, so update them to the new names, and update the toolchain entries
   (`gcc-runtime`, `glibc-nonshared`) of `third_party_notices/components.json`.
-- The Python version of the image (3.8 now) decides what pip resolves; see the limits below.
+- The Python version of the image (3.11 now) decides what pip resolves; see the limits below.
 
 `collect` does this:
 
@@ -152,7 +152,7 @@ What else to check after the change:
      script runs, such as the one the nodesource setup script runs, are mapped in `categories.json`
      (`apt_commands`).
    - **pip:** `pip install --dry-run --report` per requirement group, wheels only, for the image's
-     Python (3.8) and architecture. The `run` group is also resolved for aarch64, because users
+     Python (3.11) and architecture. The `run` group is also resolved for aarch64, because users
      install our aarch64 wheel. Test requirements use the PyTorch CPU index, as `make install_dev_dep` does.
    - **npm:** a lock file written without installing (`--package-lock-only`).
    - **bazel:** `bazel fetch //...` for both architectures, then every repository in the output base
@@ -166,9 +166,9 @@ What else to check after the change:
   (`generated`). A mutable reference (`ubuntu:20.04`, an unpinned `pip install boto3`) resolves to
   what it points to now. The Dockerfile does not pin those, so a rebuilt image can differ.
 - An apt package whose exact version has left the index has no download URL; the entry says so.
-- Python is resolved for 3.8, the devcontainer's Python. Our own wheels are `py3-none`, so users on
+- Python is resolved for 3.11, the devcontainer's Python. Our own wheels are `py3-none`, so users on
   other Python versions resolve other dependency versions. The dependency wheels in the list are
-  either universal (`py3-none-any`) or specific to Python 3.8 and an architecture (`cp38`,
+  either universal (`py3-none-any`) or specific to Python 3.11 and an architecture (`cp311`,
   `manylinux`).
 - Archives that no file pins (OpenSSL, curl, zlib, libxml2, fake-gcs-server) get a SHA-256 computed
   from the download; the entry says `computed from the download`.

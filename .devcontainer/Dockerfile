@@ -9,12 +9,11 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-# `make build` runs `setup.py bdist_wheel` directly, with no PEP 517 isolation, so it never
-# reads py/*/pyproject.toml's setuptools pin. Keep this in sync with that pin by hand. Exact
-# pin, not a floor, to match this file's other dependencies. Newest versions still compatible
-# with this image's Python 3.8 - setuptools 76.0.0 needs >=3.9, wheel 0.46.0 needs >=3.9.
-# Upgrade Ubuntu's pip before setuptools to avoid legacy version-parsing failures.
-# pip 25.1 drops Python 3.8 support.
+# Tooling for the system Python 3.8, which only the image build itself still uses (the GCS
+# SDK stage runs stdlib-only scripts with it). Builds and tests run on Python 3.11, installed
+# at the END of the devcontainer stage so that every SDK build layer below keeps its cache.
+# Newest versions still compatible with Python 3.8 - setuptools 76.0.0 needs >=3.9,
+# wheel 0.46.0 needs >=3.9. pip 25.1 drops Python 3.8 support.
 RUN python3 -m pip install --upgrade "pip==25.0.1" \
     && python3 -m pip install "setuptools==75.3.4" "wheel==0.45.1"
 
@@ -107,3 +106,35 @@ COPY --from=gcs-builder /opt/gcs-sdk /opt/gcs-sdk
 # Keep I/O libraries last so their changes can reuse the cloud SDK build layers.
 COPY .devcontainer/scripts/build-io-libs.sh /tmp/build-io-libs.sh
 RUN bash /tmp/build-io-libs.sh "$TARGETARCH"
+
+# Python 3.11 for builds and tests, from the deadsnakes PPA. The base image stays
+# Ubuntu 20.04 on purpose: the shared libraries released from this image are compiled
+# against its glibc 2.31, and a newer base would silently raise their ELF version
+# requirements (for example to pthread symbols at GLIBC_2.34) past the documented
+# manylinux_2_28 baseline - see "Linux wheel compatibility" in CONTRIBUTING.md. The
+# interpreter does not enter the wheels (they are py3-none), so it can move freely:
+# Python 3.11 lifts the torch ceiling the tests had on 3.8 (torch 2.4.1, whose gloo
+# process-group destructor bug made the distributed tests flaky).
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3.11-distutils \
+    && rm -rf /var/lib/apt/lists/*
+
+# `make build` runs `setup.py bdist_wheel` directly, with no PEP 517 isolation, so it never
+# reads py/*/pyproject.toml's setuptools pin (a floor of 70.1). Keep this in sync with that
+# pin by hand. Exact pin, not a floor, to match this file's other dependencies; the same
+# versions the 3.8 interpreter above pins, all of which also support Python 3.11.
+# The development tools reinstall here so they import from the interpreter that runs them.
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 10 \
+    && python3.11 -m ensurepip --upgrade \
+    && python3.11 -m pip install --upgrade "pip==25.0.1" \
+    && python3.11 -m pip install "setuptools==75.3.4" "wheel==0.45.1" \
+    && python3.11 -m pip install \
+    boto3 \
+    cpplint==1.5.4 \
+    pytest
