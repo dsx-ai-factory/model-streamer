@@ -83,6 +83,78 @@ with SafetensorsStreamer() as streamer:
         gpu_tensor = tensor.to(f'{device}:0')
 ```
 
+## Benchmarking
+
+[`benchmarks/bench.py`](benchmarks/bench.py) measures how fast a model loads on
+your machine and compares it with what the hardware can do. It runs on Linux and
+needs `torch`, `safetensors` and `runai-model-streamer` installed; it measures
+the streamer that this Python imports and prints where it came from.
+
+```bash
+# every single-process test that applies on this machine
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B
+
+# distributed load on 8 ranks of one node (needs torch with NCCL)
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
+```
+
+Each run is a fresh process on a cold page cache, and the loaded tensors are
+checked against `safetensors`; a run that returns wrong data fails. The summary
+table and `bench_results.json` give the median load time and GiB/s per test, the
+CPU time per GiB, peak memory, and the share of the machine's ceiling reached.
+
+| Test | What it loads |
+|---|---|
+| `streamer_cpu` | Streamer to host memory |
+| `streamer_cpu_notowned` | The same with `owned=False` |
+| `streamer_cuda` | Streamer to GPU |
+| `safeopen_page_in` | `safetensors.safe_open` baseline, host memory |
+| `safeopen_to_cuda` | `safe_open` + `.to("cuda")` baseline |
+| `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
+
+Common options:
+
+| Option | Meaning |
+|---|---|
+| `--tests a,b` | Run only the named tests |
+| `--env K=V` | Set a variable for the measured processes, for example `--env RUNAI_STREAMER_FS_STRATEGY=io_uring_buffered` (repeatable) |
+| `--warm` | Load from the page cache instead of a cold one |
+| `--repeats N` | Runs per test (default 3) |
+| `--out FILE` | Results file (default `bench_results.json`) |
+| `--log-dir DIR` | Keep each run's output |
+
+### Machine ceilings
+
+The ceilings come from a machine profile: the disk, memory and host-to-GPU
+rates measured by [`benchmarks/calibrate.py`](benchmarks/calibrate.py). On the
+first run `bench.py` calibrates on the model's directory (it writes 16 GiB of
+temporary files there and removes them) and keeps the profile in
+`machine_profile.json` for later runs on the same host and storage.
+
+To calibrate separately, for example when the model directory is read-only, run
+it yourself and pass the profile:
+
+```bash
+python3 benchmarks/calibrate.py --path /mnt/models/scratch --out machine_profile.json
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --profile machine_profile.json
+```
+
+`--no-calibrate` skips calibration; the ceiling columns are then empty.
+
+### S3 and network filesystems
+
+For a model on S3, pass the `s3://bucket/prefix` and a local copy of the same
+files with `--ref-dir`, which is used for validation. The endpoint and
+credentials are taken from the environment. S3 is not calibrated automatically:
+run `calibrate.py --s3-uri s3://bucket/prefix` (it needs `s5cmd`) and pass the
+profile.
+
+A model on NFS or another network filesystem is benchmarked like a local one.
+The page cache is dropped on this machine only, so a cache on the file server
+can still make a repeated run faster than a truly cold load.
+
+Run either script with `--help` for the full description.
+
 ## Contributing and support
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution steps, the Developer
