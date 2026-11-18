@@ -48,6 +48,7 @@ jobs:
   # Decides whether the run ends with the self-check. Every run runs the GPU tests, scheduled or manual.
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       self_check: ${{ steps.decide.outputs.self_check }}
     steps:

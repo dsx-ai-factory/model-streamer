@@ -19,6 +19,7 @@ jobs:
   setup:
     name: Setup
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
       devcontainer_changed: ${{ steps.devcontainer_changes.outputs.any_modified }}
@@ -164,6 +165,7 @@ jobs:
   lint:
     name: Python parses
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
@@ -185,6 +187,7 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
     env:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
       CI_IMAGE: ${{ (matrix.arch == 'aarch64' && needs.devcontainer_arm64.outputs.image || needs.devcontainer_amd64.outputs.image) || needs.setup.outputs.baseline_image }}
@@ -254,6 +257,7 @@ jobs:
     if: always()
     needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm, lint, tests, packages]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
     - name: Require all builds, tests, and package uploads to succeed
       env:

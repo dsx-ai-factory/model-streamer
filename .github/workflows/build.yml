@@ -40,6 +40,7 @@ jobs:
   build:
     name: Build component
     runs-on: ${{ inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
     env:
       PACKAGE_VERSION: ${{ inputs.package_version }}
       CI_IMAGE: ${{ inputs.devcontainer_image }}

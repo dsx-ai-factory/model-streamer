@@ -25,6 +25,7 @@ jobs:
   select-branch:
     name: Select devcontainer branch
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       publish: ${{ steps.branch.outputs.publish }}
       baseline_tag: ${{ steps.branch.outputs.baseline_tag }}
