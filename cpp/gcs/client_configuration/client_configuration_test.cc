@@ -13,6 +13,8 @@
 #include <string>
 #include <thread>
 
+#include "google/cloud/credentials.h"
+
 #include "common/exception/exception.h"
 #include "utils/temp/env/env.h"
 
@@ -105,7 +107,7 @@ TEST_F(GcsConcurrency, An_Explicit_Connection_Count_Overrides_The_Formula)
     EXPECT_EQ(ClientConfiguration(16).max_concurrency, 7u);
 }
 
-// Both credential variables are cleared before each test, so a test states only what it SETS.
+// Every credential variable is cleared before each test, so a test states only what it SETS.
 class GcsCredentials : public ::testing::Test
 {
  protected:
@@ -113,16 +115,22 @@ class GcsCredentials : public ::testing::Test
     {
         _key_file = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"));
         _adc_file = std::make_unique<utils::temp::UnsetEnv>(std::string("GOOGLE_APPLICATION_CREDENTIALS"));
+        _emulator = std::make_unique<utils::temp::UnsetEnv>(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"));
+        _testbench = std::make_unique<utils::temp::UnsetEnv>(std::string("CLOUD_STORAGE_TESTBENCH_ENDPOINT"));
     }
 
     void TearDown() override
     {
+        _testbench.reset();
+        _emulator.reset();
         _adc_file.reset();
         _key_file.reset();
     }
 
     std::unique_ptr<utils::temp::UnsetEnv> _key_file;
     std::unique_ptr<utils::temp::UnsetEnv> _adc_file;
+    std::unique_ptr<utils::temp::UnsetEnv> _emulator;
+    std::unique_ptr<utils::temp::UnsetEnv> _testbench;
 };
 
 TEST_F(GcsCredentials, Without_Variables_The_Sdk_Falls_Back_To_The_Metadata_Server)
@@ -175,6 +183,51 @@ TEST_F(GcsCredentials, An_Unreadable_Key_File_Fails_Configuration)
     utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/nonexistent/key.json"));
 
     EXPECT_THROW(ClientConfiguration(1), common::Exception);
+}
+
+// An emulator endpoint is authenticated with insecure credentials, set explicitly because the SDK
+// stopped applying its own: google-cloud-cpp 3.x maps them through a DefaultOptions overload that
+// drops its credentials argument, and the client then retries the metadata server for the whole
+// retry window without ever contacting the emulator.
+TEST_F(GcsCredentials, An_Emulator_Endpoint_Gets_Insecure_Credentials)
+{
+    utils::temp::Env emulator(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"), std::string("http://localhost:8000"));
+
+    const auto configuration = ClientConfiguration(1);
+
+    EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
+    EXPECT_NE(configuration.credentials.find("insecure"), std::string::npos) << configuration.credentials;
+    EXPECT_NE(configuration.credentials.find("http://localhost:8000"), std::string::npos) << configuration.credentials;
+}
+
+// The SDK accepts the older variable name too, in the same order it reads them.
+TEST_F(GcsCredentials, The_Testbench_Variable_Is_An_Emulator_Endpoint)
+{
+    utils::temp::Env testbench(std::string("CLOUD_STORAGE_TESTBENCH_ENDPOINT"), std::string("http://localhost:9000"));
+
+    const auto configuration = ClientConfiguration(1);
+
+    EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
+    EXPECT_NE(configuration.credentials.find("http://localhost:9000"), std::string::npos) << configuration.credentials;
+}
+
+// An explicit key file still wins over the emulator, matching the SDK's own precedence.
+TEST_F(GcsCredentials, The_Key_File_Takes_Precedence_Over_The_Emulator)
+{
+    utils::temp::Env emulator(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"), std::string("http://localhost:8000"));
+    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/path/key.json"));
+
+    const auto source = credentials_source();
+
+    EXPECT_NE(source.find("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string::npos) << source;
+    EXPECT_EQ(source.find("insecure"), std::string::npos) << source;
+}
+
+// Without an emulator nothing is set here: the SDK's own lookup (ADC or the metadata server)
+// stays in charge, exactly as before.
+TEST_F(GcsCredentials, No_Emulator_Leaves_The_Sdk_Lookup_Alone)
+{
+    EXPECT_FALSE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>());
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

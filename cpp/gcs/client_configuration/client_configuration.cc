@@ -5,6 +5,7 @@
 
 #include "gcs/client_configuration/client_configuration.h"
 
+#include "google/cloud/credentials.h"
 #include "google/cloud/storage/client.h"
 #include "google/cloud/storage/grpc_plugin.h"
 
@@ -33,6 +34,23 @@ namespace
 constexpr char kKeyFileEnv[] = "RUNAI_STREAMER_GCS_CREDENTIAL_FILE";
 constexpr char kAdcFileEnv[] = "GOOGLE_APPLICATION_CREDENTIALS";
 constexpr char kSdkTracingEnv[] = "GOOGLE_CLOUD_CPP_ENABLE_TRACING";
+constexpr char kEmulatorEnv[] = "CLOUD_STORAGE_EMULATOR_ENDPOINT";
+constexpr char kTestbenchEnv[] = "CLOUD_STORAGE_TESTBENCH_ENDPOINT";
+
+// The SDK's emulator lookup (storage::internal::GetEmulator), restated here because the
+// credentials it derives from it no longer reach the client: google-cloud-cpp 3.x maps the
+// insecure credentials for an emulator endpoint through a DefaultOptions overload that drops
+// its credentials argument (google/cloud/storage/client.cc), so the client falls back to
+// application default credentials and spends the whole retry window on the metadata server.
+std::string emulator_endpoint()
+{
+    const auto emulator = utils::getenv<std::string>(kEmulatorEnv, "");
+    if (!emulator.empty())
+    {
+        return emulator;
+    }
+    return utils::getenv<std::string>(kTestbenchEnv, "");
+}
 
 // Tracing components only produce messages; the SDK prints them through its log sink, whose
 // default backend passes FATAL and above unless GOOGLE_CLOUD_CPP_ENABLE_CLOG is set. Without this,
@@ -66,6 +84,12 @@ std::string credentials_source()
     if (!key_file.empty())
     {
         return std::string("service account key file ") + key_file + " (" + kKeyFileEnv + ")";
+    }
+
+    const auto emulator = emulator_endpoint();
+    if (!emulator.empty())
+    {
+        return std::string("insecure credentials for the emulator endpoint ") + emulator;
     }
 
     const auto adc_file = utils::getenv<std::string>(kAdcFileEnv, "");
@@ -163,6 +187,12 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
                        << " (" << kKeyFileEnv << "): " << std::strerror(error);
             throw common::Exception(common::ResponseCode::InvalidParameterError);
         }
+    } else if (!emulator_endpoint().empty()) {
+        // SDK 2.x authenticated an emulator endpoint with insecure credentials on its own; 3.x
+        // loses them (see emulator_endpoint() above), so they are set explicitly. An explicit
+        // key file still wins, matching the SDK's own precedence.
+        options.set<google::cloud::UnifiedCredentialsOption>(
+            google::cloud::MakeInsecureCredentials());
     }
 }
 
