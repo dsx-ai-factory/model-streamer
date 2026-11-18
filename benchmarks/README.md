@@ -178,7 +178,10 @@ The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
 `bench_results.html` shows the same results as a page: a bar per test against
-its ceiling, a table of every number, and the runs. It is one file with no
+its ceiling, a table of every number, and the runs. Below them it lists what
+the numbers were measured on: the machine (kernel, CPUs, memory, GPUs, the
+model's storage), the versions of the streamer, vLLM, torch and safetensors,
+the settings, and the calibration with every ceiling. It is one file with no
 external resources, so it can be copied off the machine and opened anywhere.
 To make it again from a results file:
 
@@ -186,8 +189,9 @@ To make it again from a results file:
 cd benchmarks && python3 -m streamer_bench.html /path/to/bench_results.json
 ```
 
-`bench_results.json` holds the host, the streamer, the model and the settings
-once, then one entry per test:
+`bench_results.json` holds the same once at the top (`host`, `environment`,
+`versions`, `streamer`, `model`, `settings`, and `calibration`, which is the
+machine profile without each stage's single runs), then one entry per test:
 
 ```json
 {
@@ -209,7 +213,8 @@ once, then one entry per test:
 
 - `ok` is true only when every run gave a result and none returned wrong data.
 - `load_s` and `gibps` are medians over the runs.
-- `ceiling` is absent when the benchmark ran without a profile.
+- `ceiling` is absent, and `calibration` is null, when the benchmark ran
+  without a profile.
 - A vLLM test has `startup_s` in place of `cpu_s_per_gib` and `peak_rss_gib`.
 - A run carries `errors` (wrong data) or `warnings` (for example a cache that
   was not cold) only when it has some. A run that gave no result is

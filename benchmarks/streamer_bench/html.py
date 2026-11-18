@@ -27,6 +27,8 @@ h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:32px 0 8px; }
 .wrap { overflow-x:auto; } table { border-collapse:collapse; width:100%; font-variant-numeric:tabular-nums; }
 th, td { text-align:right; padding:5px 10px; border-bottom:1px solid var(--grid); white-space:nowrap; }
 th { color:var(--ink2); font-weight:500; } th:first-child, td:first-child { text-align:left; }
+table.kv { width:auto; } table.kv td, table.kv th { text-align:left; white-space:normal; overflow-wrap:anywhere; }
+table.kv td:first-child { color:var(--ink2); white-space:nowrap; }
 details { margin:6px 0; } summary { cursor:pointer; } pre { white-space:pre-wrap; overflow-wrap:anywhere; }
 """
 
@@ -113,12 +115,59 @@ def _vllm(out):
     speedup = out.get("vllm_speedup")
     headline = (f"With the streamer vLLM loads the model {speedup}x as fast as with its default loader."
                 if speedup else "")
-    version = ", ".join(out.get("vllm", []))
+    version = out.get("versions", {}).get("vllm", "")
     return (f"<h2>vLLM model load: streamer vs default loader</h2>"
             f'<p class="meta">{escape(headline)}</p>{_chart(results)}'
             f'<p class="note">vLLM {escape(version)}. The time is the one vLLM logs as "Model loading took", '
             f"which covers building the model and loading its weights onto the GPU. "
             f"The tensors are not validated in these tests.</p>")
+
+
+def _pairs(rows):
+    """A two-column table of name and value; rows without a value are left out."""
+    rows = [(k, v) for k, v in rows if v not in (None, "", [])]
+    return ('<div class="wrap"><table class="kv">'
+            + "".join(f"<tr><td>{escape(str(k))}</td><td>{escape(str(v))}</td></tr>" for k, v in rows)
+            + "</table></div>")
+
+
+def _environment(out):
+    env, ver, st = out.get("environment", {}), out.get("versions", {}), out["settings"]
+    storage = env.get("storage") or {}
+    return ("<h2>Environment</h2>" + _pairs([
+        ("host", out["host"]), ("kernel", env.get("kernel")), ("CPUs", env.get("cpus")),
+        ("memory", f"{env['mem_total_gib']} GiB" if env.get("mem_total_gib") else None),
+        ("GPUs", ", ".join(env.get("gpus") or [])),
+        ("model storage", f"{storage.get('type')} on {storage.get('mount')}" if storage else None),
+        ("transparent huge pages", env.get("thp")), ("Python", env.get("python"))])
+        + "<h2>Versions</h2>" + _pairs([
+            ("runai-model-streamer", ver.get("runai-model-streamer")),
+            ("streamer imported from", ", ".join(out["streamer"])),
+            ("vLLM", ver.get("vllm")), ("torch", ver.get("torch")), ("safetensors", ver.get("safetensors"))])
+        + "<h2>Settings</h2>" + _pairs([
+            ("runs per test", st["repeats"]), ("page cache", "warm" if st["warm"] else "cold"),
+            ("ranks", st.get("nproc"))] + [(f"env {k}", v) for k, v in st.get("env", {}).items()]))
+
+
+def _calibration(out):
+    cal = out.get("calibration")
+    if not cal:
+        return ('<h2>Calibration</h2><p class="meta">No machine profile was used, so the tests have no '
+                "ceilings.</p>")
+    host, params = cal.get("host", {}), cal.get("params", {})
+    storage = host.get("storage") or {}
+    used = {s["ceiling"]["name"] for s in out["results"] if "ceiling" in s}
+    rows = "".join(f"<tr><td>{escape(k)}</td><td>{_num(v, 2)}</td><td>{'scored against' if k in used else ''}</td></tr>"
+                   for k, v in cal.get("ceilings_gibps", {}).items() if v is not None)
+    notes = "".join(f'<p class="note">{escape(n)}</p>' for n in cal.get("notes", []))
+    return ("<h2>Calibration</h2>" + _pairs([
+        ("profile", cal.get("path")), ("measured", cal.get("created")), ("on host", host.get("hostname")),
+        ("on storage", f"{storage.get('type')} on {storage.get('mount')}" if storage else None),
+        ("disk test", f"{params['files']} files of {params['file_gib']} GiB" if params.get("files") else None),
+        ("memory test", f"{params['mem_gib']} GiB, {params['threads']} threads" if params.get("threads") else None),
+        ("runs per stage", params.get("repeats"))])
+        + '<div class="wrap"><table class="kv"><tr><th>ceiling</th><th>GiB/s</th><th></th></tr>'
+        + rows + "</table></div>" + notes)
 
 
 def render(out):
@@ -146,6 +195,8 @@ def render(out):
 {_table(out["results"])}
 <h2>Runs</h2>
 {_runs(out["results"])}
+{_environment(out)}
+{_calibration(out)}
 </body></html>
 """
 

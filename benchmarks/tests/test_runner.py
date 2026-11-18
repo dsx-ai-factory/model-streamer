@@ -18,7 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from streamer_bench import DIST, profile, runner  # noqa: E402
 
 PKG = "/site/runai_model_streamer"
-PROFILE = {"host": {"hostname": "h"},
+MACHINE = {"kernel": "6.8", "python": "3.12", "cpus": 32, "mem_total_gib": 64.0, "thp": "always",
+           "storage": {"mount": "/mnt", "type": "ext4"}}
+PROFILE = {"schema": 1, "created": "2026-11-18T00:00:00+00:00", "raw_gibps": {"h2d_pinned": [6.0]},
+           "notes": ["a note"], "params": {"repeats": 3, "files": 8, "file_gib": 2.0, "mem_gib": 4, "threads": 32},
+           "host": {"hostname": "h", "storage": {"mount": "/mnt", "type": "ext4"}},
            "ceilings_gibps": {"disk_direct_read_parallel": 10.0, "h2d_pinned": 6.0, "host_memcpy_nt": 30.0}}
 
 
@@ -32,7 +36,8 @@ def child_output(cmd, load_s=5.0, errors=()):
     log = "Filesystem strategy: io_uring\n[RunAI Streamer][Distributed] x"
     if test.startswith("vllm_"):  # vLLM reports its own load time, in its log
         took = 8.0 if test == "vllm_streamer" else 40.0
-        one = {"startup_s": took + 20, "gib": 40.0, "tensors": 7, "vllm": "0.33.0", "errors": [],
+        one = {"startup_s": took + 20, "gib": 40.0, "tensors": 7, "errors": [], "gpus": ["H200"],
+               "versions": {"vllm": "0.33.0", "runai-model-streamer": "0.17.1"},
                "pkg": PKG if test == "vllm_streamer" else None}
         log = f"INFO Model loading took 15.1 GiB memory and {took:.6f} seconds"
     return "RESULT " + json.dumps(one), log, None
@@ -62,6 +67,7 @@ class RunnerTest(unittest.TestCase):
 
         code = 0
         with mock.patch.object(runner, "launch", fake), mock.patch.object(runner, "check_vllm"), \
+                mock.patch.object(runner, "describe_machine", return_value=dict(MACHINE)), \
                 mock.patch.object(runner, "get_profile", return_value=(prof, "p.json" if prof else None)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -97,7 +103,9 @@ class RunnerTest(unittest.TestCase):
         code, out = self.run_bench(prof=None, tests="streamer_cpu")
         self.assertEqual(code, 0)
         self.assertNotIn("ceiling", out["results"][0])
-        self.assertIsNone(out["profile"])
+        self.assertIsNone(out["calibration"])
+        with open(os.path.splitext(self.out)[0] + ".html") as f:
+            self.assertIn("No machine profile was used", f.read())
 
     def test_distributed_runs_under_torchrun(self):
         code, out = self.run_bench(nproc=2, env=["X=1"])
@@ -121,9 +129,24 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(streamer["runs"], [{"load_s": 8.0, "gibps": 5.0, "startup_s": 28.0}])
         self.assertNotIn("cpu_s_per_gib", streamer)
         self.assertEqual(streamer["ceiling"]["name"], "h2d_pinned")
-        self.assertEqual((out["vllm_speedup"], out["vllm"]), (5.0, ["0.33.0"]))
+        self.assertEqual(out["vllm_speedup"], 5.0)
+        self.assertEqual(out["versions"], {"vllm": "0.33.0", "runai-model-streamer": "0.17.1"})
+        self.assertEqual(out["environment"]["gpus"], ["H200"])
         with open(os.path.splitext(self.out)[0] + ".html") as f:
-            self.assertIn("5.0x as fast", f.read())
+            page = f.read()
+        for text in ("5.0x as fast", "vLLM 0.33.0", "0.17.1", "H200", "ext4 on /mnt"):
+            self.assertIn(text, page)
+
+    def test_calibration_is_kept_with_the_results(self):
+        code, out = self.run_bench(tests="streamer_cpu", repeats=1)
+        cal = out["calibration"]
+        self.assertEqual((cal["path"], cal["created"], cal["notes"]), ("p.json", PROFILE["created"], ["a note"]))
+        self.assertEqual(cal["ceilings_gibps"]["h2d_pinned"], 6.0)
+        self.assertNotIn("raw_gibps", cal)
+        with open(os.path.splitext(self.out)[0] + ".html") as f:
+            page = f.read()
+        for text in ("Calibration", "disk_direct_read_parallel", "scored against", "a note", "8 files of 2.0 GiB"):
+            self.assertIn(text, page)
 
     def test_vllm_without_its_log_line_fails(self):
         code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '

@@ -68,7 +68,14 @@ def _cell(value, spec):
     return f"{'n/a':>{width}s}" if value is None else f"{value:{spec}}"
 
 
-def report(a, runs_of, strategy_of, model, pkgs, versions, env, profile, profile_path, remote):
+def calibration_of(profile, path):
+    """What the results keep of the machine profile: everything but each stage's single runs."""
+    if not profile:
+        return None
+    return {"path": path, **{k: v for k, v in profile.items() if k not in ("schema", "raw_gibps")}}
+
+
+def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, profile, profile_path, remote):
     """Print the table and write the results file and its HTML page. True when every test is ok."""
     results = [summarize(n, runs, model, strategy_of[n], profile, remote, a.warm) for n, runs in runs_of.items()]
     print_table(results, pkgs)
@@ -78,8 +85,8 @@ def report(a, runs_of, strategy_of, model, pkgs, versions, env, profile, profile
     if env:
         settings["env"] = env
     out = {"schema": 2, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "host": platform.node(),
-           "streamer": pkgs, **versions, "profile": profile_path, "model": model, "settings": settings,
-           "results": results}
+           "streamer": pkgs, "versions": versions, "environment": environment, "model": model,
+           "settings": settings, "calibration": calibration_of(profile, profile_path), "results": results}
     if vllm_speedup(results):
         out["vllm_speedup"] = vllm_speedup(results)
     with open(a.out, "w") as f:

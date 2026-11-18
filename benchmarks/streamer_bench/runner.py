@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import platform
 import re
 import signal
 import subprocess
@@ -29,6 +30,18 @@ def check_vllm(a):
         sys.exit(f"the vLLM tests need vllm in this Python ({sys.executable}):\n    pip install vllm")
     if not os.path.exists(os.path.join(a.model_dir, "config.json")):
         sys.exit(f"the vLLM tests need the model's config.json in {a.model_dir}, next to the weights")
+
+
+def describe_machine(a, remote):
+    """The machine the benchmark ran on, for the results: kernel, CPUs, memory and the model's storage."""
+    from .calibration.host import fs_type, read_text
+    from .calibration.memory import meminfo_gib
+    info = {"kernel": platform.release(), "python": platform.python_version(),
+            "cpus": len(os.sched_getaffinity(0)), "mem_total_gib": round(meminfo_gib("MemTotal") or 0, 1),
+            "thp": read_text("/sys/kernel/mm/transparent_hugepage/enabled")}
+    if not remote:
+        info["storage"] = fs_type(a.model_dir)
+    return info
 
 
 def select_tests(a, remote):
@@ -132,7 +145,7 @@ def run_once(a, test, files, remote, env, tag):
     if warnings:
         r["warnings"] = warnings
     facts = {"gib": ranks[0]["gib"], "tensors": ranks[0]["tensors"], "pkg": ranks[0]["pkg"],
-             "vllm": raw.get("vllm") if test in VLLM else None,
+             "versions": ranks[0].get("versions", {}), "gpus": ranks[0].get("gpus"),
              "fs_strategy": sorted(set(re.findall(r"Filesystem strategy: (\S+)", out + err)))}
     return r, facts
 
@@ -160,7 +173,8 @@ def main(a):
 
     runs_of = {n: [] for n in names}
     strategy_of = {n: set() for n in names}
-    vllm_versions = set()
+    environment = describe_machine(a, remote)
+    versions = {}
     model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir)}
     if a.ref_dir:
         model["ref_dir"] = a.ref_dir
@@ -178,14 +192,15 @@ def main(a):
             strategy_of[name].update(facts["fs_strategy"])
             if facts["pkg"]:
                 pkgs.add(facts["pkg"])
-            if facts["vllm"]:
-                vllm_versions.add(facts["vllm"])
+            versions.update(facts["versions"])
+            if facts["gpus"]:
+                environment["gpus"] = facts["gpus"]
             print(f"  {tag}: {r['load_s']}s {r['gibps']} GiB/s"
                   + (f" [{','.join(facts['fs_strategy'])}]" if facts["fs_strategy"] else "")
                   + (f"  INVALID: {r['errors'][0]}" if "errors" in r else ""), flush=True)
             for w in r.get("warnings", []):
                 print(f"  {tag}: warning: {w}", file=sys.stderr, flush=True)
 
-    versions = {"vllm": sorted(vllm_versions)} if vllm_versions else {}
-    if not report(a, runs_of, strategy_of, model, sorted(pkgs), versions, extra, profile, profile_path, remote):
+    if not report(a, runs_of, strategy_of, model, sorted(pkgs), versions, environment, extra, profile,
+                  profile_path, remote):
         sys.exit(1)

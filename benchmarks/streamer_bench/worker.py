@@ -70,6 +70,23 @@ def check(seen, kept, expected, where):
     return errors
 
 
+def versions():
+    """Installed versions of the packages a load goes through, as pip knows them."""
+    from importlib.metadata import PackageNotFoundError, version
+    found = {}
+    for dist in ("runai-model-streamer", "torch", "safetensors", "vllm"):
+        try:
+            found[dist] = version(dist)
+        except PackageNotFoundError:
+            pass
+    return found
+
+
+def gpu_names():
+    import torch
+    return [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+
+
 def streamer_pkg():
     import runai_model_streamer
     return os.path.dirname(os.path.abspath(runai_model_streamer.__file__))
@@ -150,6 +167,7 @@ def single(a):
         "peak_rss_gib": round(ru1.ru_maxrss / (1 << 20), 2),
         "page_cache_after_gib": None if is_remote(a.model_dir) else round(resident(files) / GIB, 2),
         "validated": len(rec.kept), "pkg": streamer_pkg() if name.startswith("streamer") else None,
+        "versions": versions(), "gpus": gpu_names() if TESTS[name]["device"] == "cuda" else None,
         "errors": check(rec.seen, rec.kept, expected, where),
     }
     print("RESULT " + json.dumps(result), flush=True)
@@ -205,7 +223,7 @@ def distributed(a):
          "cpu_s": round(ru1.ru_utime + ru1.ru_stime - ru0.ru_utime - ru0.ru_stime, 2),
          "peak_rss_gib": round(ru1.ru_maxrss / (1 << 20), 2),
          "peak_gpu_gib": round(torch.cuda.max_memory_allocated() / GIB, 2),
-         "pkg": streamer_pkg(), "errors": errors}
+         "pkg": streamer_pkg(), "versions": versions(), "gpus": gpu_names(), "errors": errors}
     out = [None] * world
     dist.all_gather_object(out, r)
     if rank == 0:
@@ -221,7 +239,6 @@ def vllm(a):
 
     Eager mode and no tokenizer keep the start short and need only config.json next to the weights;
     neither changes how the weights are loaded."""
-    import vllm as vllm_pkg
     from vllm import LLM
     _, ref = model_files(a)
     expected, _ = expected_tensors(ref)
@@ -233,7 +250,8 @@ def vllm(a):
               skip_tokenizer_init=True)
     startup = time.perf_counter() - t0
     result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
-              "pkg": streamer_pkg() if streamer else None, "vllm": vllm_pkg.__version__, "errors": []}
+              "pkg": streamer_pkg() if streamer else None, "versions": versions(), "gpus": gpu_names(),
+              "errors": []}
     print("RESULT " + json.dumps(result), flush=True)
     # a normal exit, not os._exit: the engine process has to be shut down or it keeps the GPU
     del llm
