@@ -4,14 +4,14 @@
 import os
 
 GIB = 2**30
-DIST = "streamer_dist"
 TESTS = {
     "streamer_cpu": {"device": "cpu"},
     "streamer_cpu_notowned": {"device": "cpu"},
     "streamer_cuda": {"device": "cuda"},
     "safeopen_page_in": {"device": "cpu"},
     "safeopen_to_cuda": {"device": "cuda"},
-    DIST: {"device": "cuda", "dist": True},
+    # the streamer's distributed load over --nproc ranks, one GPU each
+    "streamer_dist": {"device": "cuda", "dist": True},
     # a whole vLLM model load: needs vllm installed and the model's config.json
     "vllm_default": {"device": "cuda", "load_format": "auto"},
     "vllm_streamer": {"device": "cuda", "load_format": "runai_streamer"},
@@ -24,6 +24,7 @@ TESTS = {
                            "extra": {"distributed": True}},
     "vllm_dist_instanttensor": {"device": "cuda", "load_format": "instanttensor", "dist": True},
 }
+DIST = "streamer_dist"
 VLLM = tuple(t for t in TESTS if t.startswith("vllm_"))
 
 
