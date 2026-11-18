@@ -83,6 +83,19 @@ with SafetensorsStreamer() as streamer:
         gpu_tensor = tensor.to(f'{device}:0')
 ```
 
+## Benchmarking
+
+[`benchmarks/bench.py`](benchmarks/bench.py) measures how fast a model loads on
+your machine, with the streamer and with `safetensors` baselines, and reports it
+as a share of what the hardware can do:
+
+```bash
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B
+```
+
+See the [benchmarks README](benchmarks/README.md) for the requirements, the
+tests, the distributed and S3 modes, and the results it writes.
+
 ## Contributing and support
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution steps, the Developer

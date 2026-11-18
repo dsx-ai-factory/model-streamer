@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# What bench.py loads with. Install into the Python that runs it:
+#     pip install -r benchmarks/requirements.txt
+#
+# The streamer brings torch. An already installed streamer is kept, so a build under test is not replaced.
+runai-model-streamer
+safetensors
+
+# For the vLLM tests. Without these the vLLM tests are left out and the rest still runs.
+vllm[instanttensor]
