@@ -241,7 +241,8 @@ def vllm(a):
     os._exit frees the GPU without a child engine to shut down.
 
     A distributed test is one rank of torchrun: tensor parallelism over the ranks with vLLM's
-    external launcher, and for the streamer its distributed mode, which loads straight to the GPUs."""
+    external launcher. For the streamer, vLLM's "distributed" loader option makes the GPU the
+    destination; without it the streamer loads to host memory and vLLM copies from there."""
     os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     import inspect
     from vllm import LLM
@@ -256,8 +257,8 @@ def vllm(a):
     if is_dist(a.child):
         options.update(tensor_parallel_size=int(os.environ["WORLD_SIZE"]),
                        distributed_executor_backend="external_launcher")
-        if streamer:
-            options["model_loader_extra_config"] = {"distributed": True}
+    if TESTS[a.child].get("extra"):
+        options["model_loader_extra_config"] = dict(TESTS[a.child]["extra"])
     if "kernel_config" in inspect.signature(EngineArgs).parameters:
         options["kernel_config"] = {"enable_flashinfer_autotune": False}  # minutes of tuning after the load
 

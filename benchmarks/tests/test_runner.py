@@ -173,7 +173,8 @@ class RunnerTest(unittest.TestCase):
     def test_vllm_runs_by_default_on_a_gpu_machine(self):
         self.run_bench(gpus=1, repeats=1)
         self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cpu_notowned", "streamer_cuda", "safeopen_page_in",
-                                      "safeopen_to_cuda", "vllm_default", "vllm_streamer", "vllm_instanttensor"])
+                                      "safeopen_to_cuda", "vllm_default", "vllm_streamer", "vllm_streamer_gpu",
+                                      "vllm_instanttensor"])
         self.assertFalse(any("torch.distributed.run" in c for c, _ in self.calls))
 
     def test_one_vllm_loader_missing_leaves_out_only_that_test(self):

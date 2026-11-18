@@ -84,6 +84,7 @@ again), so drift in the machine or the storage affects all of them alike.
 | `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
 | `vllm_default` | A vLLM engine start with vLLM's default loader |
 | `vllm_streamer` | The same with `load_format="runai_streamer"` |
+| `vllm_streamer_gpu` | The same with the streamer loading straight to the GPU |
 | `vllm_instanttensor` | The same with `load_format="instanttensor"` |
 | `vllm_dist_default`, `vllm_dist_streamer`, `vllm_dist_instanttensor` | The three vLLM tests with tensor parallelism over `--nproc` ranks |
 
@@ -113,6 +114,11 @@ distributed mode there (`model_loader_extra_config={"distributed": true}`),
 which loads straight to the GPUs. The load time is the slowest rank's, and
 `gpu_gib` is the sum over the ranks. The model's attention head count has to
 be divisible by N.
+
+`vllm_streamer` is what `--load-format runai_streamer` gives on its own: the
+streamer loads to host memory and vLLM copies each tensor to the GPU.
+`vllm_streamer_gpu` adds `model_loader_extra_config={"distributed": true}`,
+which makes the GPU the streamer's destination, on one GPU as well.
 
 vLLM's default loader reads the weights in one thread unless its
 `enable_multithread_load` option is set, which this benchmark leaves off, as

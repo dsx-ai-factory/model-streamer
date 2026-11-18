@@ -15,10 +15,13 @@ TESTS = {
     # a whole vLLM model load: needs vllm installed and the model's config.json
     "vllm_default": {"device": "cuda", "load_format": "auto"},
     "vllm_streamer": {"device": "cuda", "load_format": "runai_streamer"},
+    # the streamer loading straight to the GPU, which vLLM turns on with its "distributed" loader option
+    "vllm_streamer_gpu": {"device": "cuda", "load_format": "runai_streamer", "extra": {"distributed": True}},
     "vllm_instanttensor": {"device": "cuda", "load_format": "instanttensor"},  # needs instanttensor too
     # the same with tensor parallelism over --nproc ranks, one GPU each
     "vllm_dist_default": {"device": "cuda", "load_format": "auto", "dist": True},
-    "vllm_dist_streamer": {"device": "cuda", "load_format": "runai_streamer", "dist": True},
+    "vllm_dist_streamer": {"device": "cuda", "load_format": "runai_streamer", "dist": True,
+                           "extra": {"distributed": True}},
     "vllm_dist_instanttensor": {"device": "cuda", "load_format": "instanttensor", "dist": True},
 }
 VLLM = tuple(t for t in TESTS if t.startswith("vllm_"))
