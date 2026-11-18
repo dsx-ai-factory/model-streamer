@@ -66,6 +66,7 @@ IoUringEngine::IoUringEngine(const AsyncIoConfig & config, size_t max_read_bytes
     // either: several mounts may share an engine, but only ones that AGREE about this - the pools are
     // keyed by it, so an engine never serves two mounts that answered differently.
     _fixed_buffers = config.register_buffers && IoUringProbe::instance().capability().fixed_buffers;
+    _async_direct = config.async_direct;
 
     struct io_uring_params params;
     std::memset(&params, 0, sizeof(params));
@@ -291,15 +292,10 @@ common::ResponseCode IoUringEngine::stage(RequestId id, FileRef file, size_t off
 
     io_uring_sqe_set_data64(sqe, id);
 
-    if (!file.direct)
+    // io-wq, not our one worker: buffered reads always (the page-cache copy), direct reads where the
+    // mount asks (AsyncIoConfig::async_direct).
+    if (!file.direct || _async_direct)
     {
-        // IOSQE_ASYNC on buffered reads, always.
-        //
-        // Without it io_uring tries the read INLINE in the submitting task, and a page-cache hit is
-        // then copied on our one worker - which stages, flushes and reaps for everything. It never
-        // shows on a cold read, only on a second pass over the same model, and the benchmark harness
-        // drops caches. So the cost would ship unmeasured. Direct reads never punt, so the flag is
-        // pointless there.
         io_uring_sqe_set_flags(sqe, IOSQE_ASYNC);
     }
 
@@ -336,10 +332,10 @@ common::ResponseCode IoUringEngine::flush(unsigned & out_issued, bool & out_defe
         // Zero progress is the hazard, so it is REPORTED rather than retried here: only reaping frees
         // capacity, and reaping runs on this same thread, so a loop would spin against itself (5.9).
         //
-        // An INTERRUPTED submit belongs here too, and used to fall through: a direct read is
-        // performed inline by io_uring_submit, so a signal reaches it. Failing instead ends this
-        // engine, and a dead engine sends its whole mount to the synchronous reader for the life of
-        // the streamer - the cost of one signal.
+        // An INTERRUPTED submit belongs here too, and used to fall through: an inline direct read
+        // runs in io_uring_submit, so a signal reaches it. Failing instead ends this engine, and a
+        // dead engine sends its whole mount to the synchronous reader for the life of the streamer -
+        // the cost of one signal.
         if (submit_can_defer(error))
         {
             LOG(DEBUG) << "io_uring_submit deferred " << _staged << " staged reads: "

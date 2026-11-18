@@ -361,6 +361,21 @@ TEST_F(Creation, Register_Buffers_Can_Be_Switched_Off_Entirely)
     }
 }
 
+// RUNAI_STREAMER_FS_DIRECT_ASYNC is a kill switch: on unless set to a false value.
+TEST_F(Creation, Direct_Async_Is_On_Unless_Switched_Off)
+{
+    {
+        const Config config;
+        EXPECT_TRUE(config.fs_direct_async) << "on by default";
+    }
+
+    {
+        const utils::temp::Env env("RUNAI_STREAMER_FS_DIRECT_ASYNC", "0");
+        const Config config;
+        EXPECT_FALSE(config.fs_direct_async);
+    }
+}
+
 // An unknown type registers. We deny what we have measured to be worse, not what we have not seen.
 TEST_F(Creation, An_Unknown_File_System_Registers)
 {
