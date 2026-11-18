@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import annotations
-from typing import Any, List, Iterator, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, Iterator, NamedTuple, Optional, Tuple
 import torch
 import torch.distributed as dist
 import os
@@ -182,6 +182,93 @@ def dist_device_bytes_required(max_chunk: int, rows: int) -> int:
 
 
 DEFAULT_BROADCAST_TIMEOUT = timedelta(seconds=600)
+
+# PROCESS GROUPS ARE CACHED FOR THE LIFE OF THE PROCESS, and that is a fix, not an optimization.
+# gloo's group teardown can block inside the DESTRUCTOR waiting on the peer's sockets - after a
+# matched barrier, and silently, since a destructor cannot raise - and a teardown that races a peer
+# has been seen to corrupt the rank's TCPStore client, after which every group the rank tries to
+# create fails with "Socket Timeout" no matter how long the timeout. Creating and destroying groups
+# per stream rolled those dice on every load (and on every distributed test); reusing one group per
+# topology and timeout takes teardown off the healthy path entirely. The topology cannot change
+# within a torch job, so a cached group never goes stale - only a POISONED one, whose stream failed,
+# is evicted and retired (see release_group), because its pairs may already be closed.
+#
+# HIT OR MISS must be decided identically on every rank, because creating a group is a collective: a
+# rank that misses while its peers hit waits for them until the timeout. The key components are
+# job-global (the rank layout, the timeout env var) - and eviction, which is rank-local knowledge,
+# is reconciled by the vote in cached_or_created before any entry is reused.
+_topology_cache: Optional[Tuple[int, int, List[List[int]]]] = None
+_group_cache: Dict[Tuple, Any] = {}
+
+# The default process group the caches belong to. "The life of the process" above really means the
+# life of the JOB: a process that destroys the default group and initializes a new one may come back
+# with a different layout, and groups of the dead job must not serve the new one.
+_cache_job: Any = None
+
+
+def _caches_for_this_job() -> Any:
+    """Reset the caches when the default process group has changed since they were filled, and
+    return the current job's token.
+
+    Called before every cache read. Comparison is by identity: init_process_group builds a new
+    default group object, so a cache filled under another one belongs to a dead job. The dead job's
+    groups are retired, not dropped, for the reason _retire gives. The returned token lets
+    INSTANCE state - a discovered layout, a held distribution group - make the same staleness
+    check, since an instance can outlive the job it was filled under just as the module can."""
+    global _cache_job, _topology_cache
+    current = dist.group.WORLD if dist.is_initialized() else None
+    if current is _cache_job:
+        return current
+    for key in list(_group_cache):
+        if key != ("retired",):
+            _retire(_group_cache.pop(key))
+    _topology_cache = None
+    _cache_job = current
+    return current
+
+
+# The job whose discovery machinery failed; a sentinel no job token ever is, until then. See
+# _lose_distribution for why this is a one-way door for the job rather than a retry.
+_distribution_lost_for_job: Any = object()
+
+
+def _distribution_is_lost() -> bool:
+    """Whether a discovery-machinery collective failed earlier in THIS job."""
+    return dist.is_initialized() and dist.group.WORLD is _distribution_lost_for_job
+
+
+def _lose_distribution() -> None:
+    """A discovery-machinery collective failed - a cache vote, or discovery itself. Distribution
+    stays OFF for the remainder of this job: set_is_distributed falls back to plain streaming,
+    which posts no collectives and cannot hang.
+
+    Deliberately NOT a retry path. A vote can fail on one rank after succeeding on a peer - gloo
+    lets the peer complete once this rank's contribution is in, while this rank times out on the
+    return leg - and recovery cannot be re-synchronized afterwards: torch consumes its
+    group-creation ordinal BEFORE constructing a group and a failure does not restore it, so ranks
+    that failed DIFFERENTLY hold mismatched ordinals and can never meet in a later new_group. Any
+    rediscovery promise would be false.
+
+    Ranks that did not observe the failure time out ONCE against the missing peer - in their vote,
+    or in the stream's collectives - and land here too; every load after that succeeds, plainly. A
+    new init_process_group is a new job: the token no longer matches, and streaming distributes
+    again."""
+    global _topology_cache, _distribution_lost_for_job
+    discovery = _group_cache.pop(("discovery",), None)
+    if discovery is not None:
+        _retire(discovery)
+    _topology_cache = None
+    _distribution_lost_for_job = _cache_job
+
+
+def _retire(entry: Any) -> None:
+    """Keep a reference to a group (or list of them) that must never be used again.
+
+    Deliberately a leak: dropping the last reference runs gloo's destructor, which is the blocking,
+    store-corrupting teardown this module exists to avoid (see _group_cache). A retired group costs
+    its sockets until the process ends, and retirement only happens after a failed stream, so the
+    cost is bounded by failures."""
+    _group_cache.setdefault(("retired",), []).append(entry)
 
 
 def write_metadata_rows(metadata: torch.Tensor, ranges: List[SlotRange]) -> None:
@@ -417,6 +504,18 @@ class DistributedStreamer:
                 logger.info("[RunAI Streamer][Distributed] Torch distributed is not initialized - fallback to non distributed streaming")
             self.is_distributed = self.is_distributed and self.get_group_size() > 1
 
+        # A discovery-machinery collective failed earlier in this job, and group recovery cannot be
+        # re-synchronized across the ranks (see _lose_distribution) - so this load, and every later
+        # one in the job, streams plainly. EVERY RANK CONVERGES HERE: a rank that did not observe
+        # the failure times out once against the missing peer and loses distribution too.
+        if self.is_distributed and _distribution_is_lost():
+            logger.warning(
+                "[RunAI Streamer][Distributed] Warning: a distributed streaming collective failed "
+                "earlier in this job and the ranks can no longer agree on group creation - "
+                "fallback to non distributed streaming until the process group is reinitialized"
+            )
+            self.is_distributed = False
+
         # Do not distribute if backend type does not match device type
         # In auto mode, do not distribute if backend is not nccl
         backend_name = None
@@ -550,6 +649,10 @@ class DistributedStreamer:
 class _distributedStreamerParams:
     def __init__(self) -> None:
         self.num_processes_on_node = None
+        # The job the layout below was discovered under. An instance can be reused across
+        # init_process_group cycles, and the new job's layout may differ, so the layout is
+        # rediscovered when the token no longer matches (see discover_local_ranks).
+        self.discovered_job = None
         self.my_global_rank = 0
         self.groups_by_ranks = []
         self.broadcast_timeout = DEFAULT_BROADCAST_TIMEOUT
@@ -578,9 +681,14 @@ class _distributedStreamerParams:
         """
         Returns the number of processes on the node, global rank and the list of ranks on each node
 
-        This function performs all_gather_object on the global group which cause nccl to allocate  device memory which otherwise may never be allocated by the user application
-        To avoid this issue, we create a another global subgroup just for discovering the local ranks and then destroy that subgroup after the ranks are discovered.
+        The answer cannot change within a torch job, so it is computed once per process and cached.
+
+        The gather runs on a dedicated gloo subgroup rather than the global group: hostnames travel
+        through host memory there, so no backend allocates device memory that the user application
+        may never have allocated itself. The subgroup is KEPT, not destroyed - it costs a few
+        sockets, and tearing a gloo group down is what _group_cache's comment warns about.
         """
+        global _topology_cache
         if not dist.is_initialized():
             return 1, 0, [[0]]
 
@@ -589,16 +697,42 @@ class _distributedStreamerParams:
         if world_size == 1:
             return 1, 0, [[0]]
 
+        _caches_for_this_job()
+        if _topology_cache is not None:
+            return _topology_cache
+
         my_global_rank = dist.get_rank()
 
+        if _distribution_is_lost():
+            # Discovery would create a group, and after a possibly-asymmetric failure the ranks can
+            # no longer meet in one (see _lose_distribution). One process alone on its node is the
+            # conservative layout: the CPP layer sizes safely from it, and nothing distributed runs
+            # in this job anyway - set_is_distributed falls back.
+            return 1, my_global_rank, [[my_global_rank]]
+
         # 1. Discover all peers on all nodes (this is a global collective)
-        # create global group just for discovering the local ranks
-        sandbox_global_group = dist.new_group(ranks=list(range(world_size)), timeout=self.broadcast_timeout)
-        all_hostnames = [None] * world_size
-        dist.all_gather_object(all_hostnames, socket.gethostname(), group=sandbox_global_group)
-        dist.destroy_process_group(group=sandbox_global_group)
-        del sandbox_global_group
- 
+        #
+        # THE CONSTANT TIMEOUT, not this load's broadcast_timeout: the group is kept and serves
+        # every later load's cache vote, so its patience must not be whatever the FIRST load's
+        # environment happened to say - a first load configured for seconds would make every later
+        # vote give up on a peer the later load's own timeout still allows for.
+        # A leftover entry - a partial failure filled the group but not the topology - is retired,
+        # not overwritten: overwriting would drop its last reference and run the destructor.
+        stale = _group_cache.pop(("discovery",), None)
+        if stale is not None:
+            _retire(stale)
+        try:
+            discovery_group = dist.new_group(ranks=list(range(world_size)),
+                                             timeout=DEFAULT_BROADCAST_TIMEOUT, backend="gloo")
+            _group_cache[("discovery",)] = discovery_group
+            all_hostnames = [None] * world_size
+            dist.all_gather_object(all_hostnames, socket.gethostname(), group=discovery_group)
+        except BaseException:
+            # Discovery itself failed, possibly on this rank alone - the same asymmetry the vote
+            # can suffer, with the same consequence: no later group creation can be agreed.
+            _lose_distribution()
+            raise
+
         # 2. Create a list of rank lists, one for each unique host.
         # e.g., [[0,1,2,3,4,5,6,7], [8,9,10,11,12,13,14,15]]
         unique_hostnames = sorted(list(set(all_hostnames)))
@@ -613,7 +747,8 @@ class _distributedStreamerParams:
                 my_group_size = len(ranks_list)
                 break
 
-        return my_group_size, my_global_rank, groups_by_ranks
+        _topology_cache = (my_group_size, my_global_rank, groups_by_ranks)
+        return _topology_cache
 
     def set_params(
             self,
@@ -638,8 +773,19 @@ class _distributedStreamerParams:
     def discover_local_ranks(self) -> None:
         # set the value of RUNAI_STREAMER_PROCESS_GROUP_SIZE to be the number of processes in the distribution group (or 1 if process group is not initialized)
         # This is useful for auto adjustments in the CPP layer, which depends on the number of processes of this workload
+        current_job = _caches_for_this_job()
+        if self.discovered_job is not current_job or _topology_cache is None:
+            # Two ways the instance's layout can be stale. The job changed: the instance outlived
+            # init_process_group, and the new job's layout may differ. Or the MODULE dropped its
+            # topology (_retire_discovery, after a failed vote) while this instance kept its copy:
+            # serving that copy would skip find_local_ranks, the discovery group would never be
+            # recreated, and the next load's cache vote would silently not happen - reopening the
+            # asymmetric-eviction hole the vote exists to close. Rediscovering is cheap when the
+            # module cache is warm: find_local_ranks answers from it without a collective.
+            self.num_processes_on_node = None
         if self.num_processes_on_node is None:
             self.num_processes_on_node, self.my_global_rank, self.groups_by_ranks = self.find_local_ranks()
+            self.discovered_job = current_job
         if os.environ.get("RUNAI_STREAMER_PROCESS_GROUP_SIZE") is None:
             os.environ["RUNAI_STREAMER_PROCESS_GROUP_SIZE"] = str(self.num_processes_on_node)
 
@@ -667,6 +813,9 @@ class _distributedStreamer:
         self.rank = 0
         self.original_group_rank = 0
         self.distribution_group = None
+        # The job the held group belongs to; a handle held across init_process_group cycles is the
+        # dead job's and must not be returned for the new one (see create_distribution_group).
+        self.group_job = None
         self.reading_from_storage = False
         self.local_group_global_ranks = []
         self.is_error = False
@@ -682,18 +831,30 @@ class _distributedStreamer:
 
     def __exit__(self, exc_type: any, exc_value: any, traceback: any) -> None:
         if self.distribution_group:
+            # A failed stream poisons the group: a timed-out collective closes gloo pairs, so the
+            # next stream must not inherit it from the cache. The barrier's own failure counts.
+            poisoned = exc_type is not None
             try:
                 # Only attempt a barrier if there was no exception.
-                if exc_type is None:
+                if not poisoned:
                     torch.distributed.barrier(group=self.distribution_group)
+            except BaseException:
+                poisoned = True
+                raise
             finally:
-                # ALWAYS destroy the group.
-                self.release_group()
+                # ALWAYS let go of the group; evict and retire it only when it is poisoned.
+                self.release_group(poisoned=poisoned)
         return
 
     def create_distribution_group(self) -> Optional[dist.ProcessGroup]:
-        if self.distribution_group:
+        current_job = _caches_for_this_job()
+        if self.distribution_group and self.group_job is current_job:
             return self.distribution_group
+        # Either there is no group, or the held one belongs to a job that is gone - a reused
+        # instance can outlive init_process_group. The dead job's handle is dropped, not retired:
+        # the module cache held the reference, and _caches_for_this_job already retired it.
+        self.distribution_group = None
+        self.group_job = current_job
 
         if is_global_distribution():
             # create global group
@@ -701,13 +862,59 @@ class _distributedStreamer:
 
             all_ranks = list(range(world_size))
             self.local_group_global_ranks = all_ranks
-            group = dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout)
+            key = ("global", world_size, self.broadcast_timeout)
+            group = self.cached_or_created(
+                key, lambda: dist.new_group(ranks = all_ranks, timeout = self.broadcast_timeout))
 
         else:
             group = self.create_local_distribution_group()
 
         logger.debug(f"[RunAI Streamer][Distributed] Created distribution group with size {dist.get_world_size(group=group)}")
         return group
+
+    @staticmethod
+    def cached_or_created(key: Tuple, create) -> Any:
+        """The cached entry for key, or a fresh one from create() - AGREED ACROSS THE JOB.
+
+        Hit or miss is voted, not read locally. A rank whose stream failed evicted its entry
+        (release_group), while the ranks whose streams succeeded kept theirs - in per-node mode a
+        failure on one node never reaches the others - and creating a group needs every rank of the
+        job, so a rank that recreates alone waits for peers that never come. One MIN over the kept
+        discovery group settles it: everyone reuses, or everyone retires its entry and recreates.
+        The vote travels through host memory on gloo, so it allocates nothing on any device.
+        """
+        _caches_for_this_job()
+        discovery = _group_cache.get(("discovery",))
+        have = key in _group_cache
+        if discovery is not None:
+            # ON THE CPU EXPLICITLY: torch.set_default_device would otherwise put the vote on the
+            # application's device, and the gloo discovery group cannot reduce a device tensor.
+            vote = torch.tensor([1 if have else 0], dtype=torch.int64, device="cpu")
+            try:
+                dist.all_reduce(vote, op=dist.ReduceOp.MIN, group=discovery)
+            except BaseException:
+                # The vote itself failed, and it may have succeeded on a peer, so recovery cannot
+                # be re-synchronized - distribution is lost for the job (see _lose_distribution),
+                # and later loads fall back to plain streaming instead of retrying a group
+                # creation the ranks can no longer agree on.
+                _lose_distribution()
+                raise
+            have = bool(vote.item())
+        if have:
+            return _group_cache[key]
+        stale = _group_cache.pop(key, None)
+        if stale is not None:
+            _retire(stale)
+        try:
+            created = create()
+        except BaseException:
+            # A rank can reach creation ALONE - a peer's vote may have failed or answered
+            # differently - so a failed creation is possibly asymmetric, and it has consumed a
+            # group-creation ordinal the ranks can no longer re-agree on (see _lose_distribution).
+            _lose_distribution()
+            raise
+        _group_cache[key] = created
+        return created
 
     def create_local_distribution_group(self) -> Optional[dist.ProcessGroup]:
         """
@@ -725,9 +932,12 @@ class _distributedStreamer:
 
         # All processes must create ALL subgroups in the same order.
         # This is a global collective operation, done once for each subgroup.
-         
-        created_groups = [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout) for ranks in self.groups_by_ranks]
-        
+        key = ("local", tuple(tuple(ranks) for ranks in self.groups_by_ranks), self.broadcast_timeout)
+        created_groups = self.cached_or_created(
+            key,
+            lambda: [dist.new_group(ranks=ranks, timeout=self.broadcast_timeout)
+                     for ranks in self.groups_by_ranks])
+
         # Each process finds which of the newly created groups it belongs to.
         my_local_group = None
         for i, ranks_list in enumerate(self.groups_by_ranks):
@@ -747,11 +957,26 @@ class _distributedStreamer:
         self.distribution_group = self.create_distribution_group()
         return self.distribution_group
 
-    def release_group(self) -> None:
-        """Destroy the distribution group, if there is one. Local to this rank: no barrier."""
-        if self.distribution_group:
-            torch.distributed.destroy_process_group(group=self.distribution_group)
-            self.distribution_group = None
+    def release_group(self, poisoned: bool = False) -> None:
+        """Let go of the distribution group, if there is one. Local to this rank: no barrier.
+
+        The group is NOT destroyed in either case: it stays in _group_cache for the next stream,
+        because tearing a gloo group down is the hazard that cache exists to avoid (see its
+        comment). poisoned=True is the error path - the group's pairs may already be closed, so it
+        is evicted and retired rather than handed to the next stream. The eviction is LOCAL
+        knowledge: in per-node mode the other nodes' streams may have succeeded and kept their
+        entries, which is why the next stream VOTES before reusing the cache (cached_or_created) -
+        this rank's missing entry makes every rank recreate together."""
+        group = self.distribution_group
+        self.distribution_group = None
+        if group is None or not poisoned:
+            return
+        for key, cached in list(_group_cache.items()):
+            if key == ("retired",):
+                continue
+            if cached is group or (isinstance(cached, list) and group in cached):
+                del _group_cache[key]
+                _retire(cached)
 
     def set_rank(self) -> None:
         self.rank = dist.get_rank(group=self.distribution_group)

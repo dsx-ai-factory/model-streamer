@@ -8,11 +8,13 @@ from unittest.mock import MagicMock, call, patch
 
 import torch
 
+from runai_model_streamer.distributed_streamer import distributed_streamer
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     DEFAULT_BUFFER_MIN_BYTESIZE,
     DIST_BUFFER_ALIGNMENT,
     DistributedStreamer,
     _distributedStreamer,
+    _distributedStreamerParams,
     allocate_dist_staging,
     dist_buffer_bytesize,
     dist_device_bytes_required,
@@ -310,7 +312,10 @@ class TestASecondReadOnTheSameStreamer(unittest.TestCase):
         streamer.params.max_chunk = 4096
         streamer.params.my_global_rank = my_rank
         streamer.params.groups_by_ranks = groups_by_ranks
+        # A fresh module-level group cache per simulated rank: in a real job each rank is its own
+        # process, so two ranks simulated in one process must not see each other's cache.
         with job.patched(), \
+                patch.object(distributed_streamer, "_group_cache", {}), \
                 patch("torch.distributed.new_group",
                       side_effect=lambda **kwargs: MagicMock(name="group")) as new_group, \
                 patch("torch.distributed.destroy_process_group"):
@@ -345,13 +350,30 @@ class TestReleaseGroup(unittest.TestCase):
         worker.distribution_group = group
         return worker
 
-    def test_it_destroys_the_group_and_forgets_it(self):
+    def test_it_forgets_the_group_and_keeps_it_for_the_next_stream(self):
+        # The group is NOT destroyed on the healthy path: gloo teardown can block in the destructor
+        # and corrupt the rank's store client, which is why groups are cached for reuse instead.
         group = MagicMock(name="group")
         worker = self.worker(group)
         with patch("torch.distributed.destroy_process_group") as destroy:
             worker.release_group()
-        destroy.assert_called_once_with(group=group)
+        destroy.assert_not_called()
         self.assertIsNone(worker.distribution_group)
+
+    def test_a_poisoned_group_is_evicted_and_retired(self):
+        # The error path: a failed stream may have closed the group's pairs, so the next stream
+        # must not inherit it from the cache - and it is retired, never destroyed, because gloo
+        # teardown is the blocking hazard the cache exists to avoid.
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        with patch.object(distributed_streamer, "_group_cache",
+                          {("local", ((0, 1),), "test"): [group]}) as cache, \
+                patch("torch.distributed.destroy_process_group") as destroy:
+            worker.release_group(poisoned=True)
+            destroy.assert_not_called()
+            self.assertIsNone(worker.distribution_group)
+            self.assertNotIn(("local", ((0, 1),), "test"), cache)
+            self.assertIn([group], cache[("retired",)])
 
     def test_with_no_group_it_does_nothing(self):
         worker = self.worker(None)
@@ -368,14 +390,228 @@ class TestReleaseGroup(unittest.TestCase):
         barrier.assert_not_called()
         destroy.assert_not_called()
 
-    def test_exit_still_runs_the_barrier_and_destroys_a_live_group(self):
+    def test_exit_still_runs_the_barrier_and_keeps_a_live_group(self):
         group = MagicMock(name="group")
         worker = self.worker(group)
         with patch("torch.distributed.barrier") as barrier, patch("torch.distributed.destroy_process_group") as destroy:
             worker.__exit__(None, None, None)
         barrier.assert_called_once_with(group=group)
-        destroy.assert_called_once_with(group=group)
+        destroy.assert_not_called()
         self.assertIsNone(worker.distribution_group)
+
+    def test_exit_with_an_exception_evicts_the_group_without_a_barrier(self):
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        with patch.object(distributed_streamer, "_group_cache", {("global", 2, "test"): group}) as cache, \
+                patch("torch.distributed.barrier") as barrier, \
+                patch("torch.distributed.destroy_process_group") as destroy:
+            worker.__exit__(RuntimeError, RuntimeError("stream failed"), None)
+            barrier.assert_not_called()
+            destroy.assert_not_called()
+            self.assertIsNone(worker.distribution_group)
+            self.assertNotIn(("global", 2, "test"), cache)
+            self.assertIn(group, cache[("retired",)])
+
+
+class TestTheCacheIsVoted(unittest.TestCase):
+    """cached_or_created reuses an entry only when EVERY rank still holds one.
+
+    Eviction is rank-local knowledge - in per-node mode a failure on one node never reaches the
+    others - and creating a group is a collective, so a rank that recreates alone waits for peers
+    that never come. The vote over the kept discovery group is what keeps hit and miss identical."""
+
+    def vote(self, have_mine, group_min):
+        """One rank's trip through cached_or_created, with the group's MIN coming back as group_min."""
+        key = ("global", 2, "test")
+        cache = {("discovery",): MagicMock(name="discovery")}
+        old = MagicMock(name="old_group")
+        if have_mine:
+            cache[key] = old
+
+        def all_reduce(tensor, op=None, group=None):
+            tensor.fill_(group_min)
+
+        created = MagicMock(name="created_group")
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch("torch.distributed.all_reduce", side_effect=all_reduce):
+            returned = _distributedStreamer.cached_or_created(key, lambda: created)
+        return returned, old, created, cache
+
+    def test_everyone_has_it_so_it_is_reused(self):
+        returned, old, created, cache = self.vote(have_mine=True, group_min=1)
+        self.assertIs(returned, old)
+        self.assertNotIn(("retired",), cache)
+
+    def test_a_peer_evicted_so_everyone_recreates_and_this_ranks_entry_is_retired(self):
+        returned, old, created, cache = self.vote(have_mine=True, group_min=0)
+        self.assertIs(returned, created)
+        self.assertIn(old, cache[("retired",)])
+
+    def test_this_rank_evicted_so_everyone_recreates(self):
+        returned, old, created, cache = self.vote(have_mine=False, group_min=0)
+        self.assertIs(returned, created)
+        self.assertNotIn(("retired",), cache)
+
+    def test_an_instance_reused_across_jobs_rediscovers_the_layout(self):
+        # A params object can outlive init_process_group; the layout it discovered belongs to the
+        # dead job and must not be served to the new one.
+        params = _distributedStreamerParams()
+        old_job, new_job = MagicMock(name="old_job"), MagicMock(name="new_job")
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          side_effect=[(2, 0, [[0, 1]]), (4, 0, [[0, 1, 2, 3]])]) as find, \
+                patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", None), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module:
+            group_module.WORLD = old_job
+            params.discover_local_ranks()
+            self.assertEqual(params.num_processes_on_node, 2)
+            group_module.WORLD = new_job
+            params.discover_local_ranks()
+        self.assertEqual(find.call_count, 2, "the dead job's layout was served to the new job")
+        self.assertEqual(params.num_processes_on_node, 4)
+
+    def test_a_reused_instance_rediscovers_after_the_module_topology_was_dropped(self):
+        # A failed vote retires the discovery group and drops the module topology. A reused
+        # instance under the SAME job must not serve its own copy of the layout: that would skip
+        # find_local_ranks, never recreate the discovery group, and silently skip later votes.
+        params = _distributedStreamerParams()
+        job = MagicMock(name="job")
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          return_value=(2, 0, [[0, 1]])) as find, \
+                patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", job), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module:
+            group_module.WORLD = job
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 1)
+
+            # The healthy fast path: module topology warm, instance warm - no rediscovery.
+            distributed_streamer._topology_cache = (2, 0, [[0, 1]])
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 1, "a warm cache should not rediscover")
+
+            # A failed vote dropped the module topology; the instance must follow.
+            distributed_streamer._topology_cache = None
+            params.discover_local_ranks()
+            self.assertEqual(find.call_count, 2, "the instance served the dropped layout")
+
+    def test_a_group_held_across_jobs_is_not_returned(self):
+        # A worker can hold the dead job's distribution group; the new job must get a fresh one.
+        worker = _distributedStreamer(None)
+        worker.distribution_group = MagicMock(name="old_group")
+        old_job, new_job = MagicMock(name="old_job"), MagicMock(name="new_job")
+        worker.group_job = old_job
+        worker.groups_by_ranks = [[0, 1]]
+        worker.my_global_rank = 0
+        fresh = MagicMock(name="fresh_group")
+        with patch.object(distributed_streamer, "_group_cache", {}), \
+                patch.object(distributed_streamer, "_topology_cache", None), \
+                patch.object(distributed_streamer, "_cache_job", old_job), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.group") as group_module, \
+                patch("torch.distributed.new_group", return_value=fresh), \
+                patch("torch.distributed.get_world_size", return_value=2):
+            group_module.WORLD = new_job
+            got = worker.create_distribution_group()
+        self.assertIs(got, fresh)
+        self.assertIs(worker.group_job, new_job)
+
+    def test_a_failed_creation_loses_distribution_too(self):
+        # After a miss, a rank can enter group creation while a peer's vote failed or answered
+        # differently, so a creation failure is possibly asymmetric - and it consumed a
+        # group-creation ordinal the ranks can no longer re-agree on. It must flip the same switch
+        # a failed vote does; the retired discovery group is the proof _lose_distribution ran.
+        key = ("global", 2, "test")
+        discovery = MagicMock(name="discovery")
+        cache = {("discovery",): discovery}
+
+        def all_reduce(tensor, op=None, group=None):
+            tensor.fill_(0)
+
+        def explode():
+            raise RuntimeError("new_group timed out")
+
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 0, [[0, 1]])), \
+                patch.object(distributed_streamer, "_distribution_lost_for_job", object()), \
+                patch("torch.distributed.all_reduce", side_effect=all_reduce):
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, explode)
+            self.assertNotIn(("discovery",), cache)
+            self.assertIn(discovery, cache[("retired",)])
+            self.assertIsNone(distributed_streamer._topology_cache)
+
+    def test_a_failed_vote_loses_distribution_for_the_rest_of_the_job(self):
+        """A vote can fail on one rank after succeeding on a peer, and torch consumes its
+        group-creation ordinal before constructing a group, so ranks that failed differently can
+        never meet in a later new_group. The contract: the failure loses distribution for the
+        remainder of the job - no rediscovery, no group creation, loads fall back to plain
+        streaming - and a NEW job (a new default group) restores it."""
+        key = ("local", ((0, 1),), "timeout")
+        job = MagicMock(name="job")
+        old_discovery = MagicMock(name="old_discovery")
+        old_distribution = [MagicMock(name="old_distribution")]
+
+        fake_dist = MagicMock(name="dist")
+        fake_dist.is_initialized.return_value = True
+        fake_dist.get_world_size.return_value = 2
+        fake_dist.get_rank.return_value = 1
+        fake_dist.group.WORLD = job
+        fake_dist.all_reduce.side_effect = RuntimeError("vote timed out")
+
+        params = _distributedStreamerParams()
+        params.num_processes_on_node = 2      # a reused instance, layout from before the failure
+        params.discovered_job = job
+        params.my_global_rank = 1
+        params.groups_by_ranks = [[0, 1]]
+
+        cache = {("discovery",): old_discovery, key: old_distribution}
+        with patch.object(distributed_streamer, "dist", fake_dist), \
+                patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 1, [[0, 1]])), \
+                patch.object(distributed_streamer, "_cache_job", job), \
+                patch.object(distributed_streamer, "_distribution_lost_for_job", object()), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_PROCESS_GROUP_SIZE": "ignored"}):
+            # The vote fails on this rank (its peer's may have succeeded).
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, lambda: MagicMock())
+            self.assertNotIn(("discovery",), cache, "the failed vote kept the discovery group")
+            self.assertIsNone(distributed_streamer._topology_cache)
+            self.assertTrue(distributed_streamer._distribution_is_lost())
+
+            # The next load's discovery creates NO group - the ordinals can no longer be agreed -
+            # and answers the conservative lone layout instead, a reused instance included.
+            fake_dist.new_group.reset_mock()
+            params.discover_local_ranks()
+            fake_dist.new_group.assert_not_called()
+            self.assertEqual((params.num_processes_on_node, params.groups_by_ranks), (1, [[1]]))
+
+            # A new job - a new default group - is a clean slate.
+            fake_dist.group.WORLD = MagicMock(name="new_job")
+            self.assertFalse(distributed_streamer._distribution_is_lost())
+        self.assertIn(old_discovery, cache[("retired",)])
+
+    def test_a_failed_vote_retires_the_discovery_group_and_the_topology(self):
+        # A vote that fails may have closed the discovery group's pairs; keeping it would fail
+        # every later vote too. The next load must rediscover, on every rank together.
+        key = ("global", 2, "test")
+        discovery = MagicMock(name="discovery")
+        cache = {("discovery",): discovery, key: MagicMock(name="old_group")}
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch.object(distributed_streamer, "_topology_cache", (2, 0, [[0, 1]])), \
+                patch.object(distributed_streamer, "_distribution_lost_for_job", object()), \
+                patch("torch.distributed.all_reduce", side_effect=RuntimeError("vote timed out")):
+            with self.assertRaises(RuntimeError):
+                _distributedStreamer.cached_or_created(key, lambda: MagicMock())
+            self.assertNotIn(("discovery",), cache)
+            self.assertIn(discovery, cache[("retired",)])
+            self.assertIsNone(distributed_streamer._topology_cache)
 
 
 class TestARankThatCannotMeasure(unittest.TestCase):
