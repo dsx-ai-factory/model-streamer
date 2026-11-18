@@ -95,12 +95,36 @@ Positive integer, at most 1024. A larger value is capped, with a warning.
 
 ### RUNAI_STREAMER_FS_DIRECT_ASYNC
 
-Whether `io_uring_direct` hands direct reads to the kernel's io-wq workers (`IOSQE_ASYNC`) on mounts
-backed by a block device (local NVMe, RAID, EBS and other block volumes). This speeds up loads into
-newly allocated host memory.
+Whether the `io_uring` strategies hand reads to the kernel's io-wq workers (`IOSQE_ASYNC`) instead of
+issuing them inline on the streamer's one I/O thread per mount. When on:
 
-Set to `0` to issue every direct read inline, as before. Buffered reads and `libaio_direct` are not
-affected.
+- **Block devices** (local NVMe, RAID, EBS and other block volumes): direct reads go to io-wq. This
+  speeds up loads into newly allocated host memory.
+- **NFS**: direct reads go to io-wq too. An inline direct read on NFS pins its destination and builds
+  one request per page before any RPC goes out, so a deep window is read one request at a time. Each
+  file is also read through several descriptors, and at most 8 reads of one file are in flight; the
+  rest of the window goes to the next files queued, oldest first. A cold file server does not serve
+  one file faster to more concurrent readers, so a whole window on one file only spends server CPU.
+  The cap applies to `io_uring_buffered` reads on NFS as well, which always go to io-wq.
+
+Measured with one process loading to host memory, against a disk-backed NFS export with server and
+client caches dropped ("cold") or the server cache populated ("warm"):
+
+| | inline (`0`) | `1` |
+|---|---|---|
+| 141 GB, 30 shards, kernel nfsd, NFSv4.2 over RDMA, cold | 51.1 s | 24.0 s |
+| same, warm | 24.6 s | 6.6 s |
+| same, NFS-Ganesha 5.9 limited to 16 CPUs, NFSv4.1 over TCP, cold | 116.3 s | 22.2 s |
+| 61 GiB, 17 shards, NFS-Ganesha 4.3 limited to 32 CPUs, NFSv4.1 over TCP, cold | 12.9 s | 8.6 s |
+| same, warm | 11.7 s | 5.8 s |
+| same model as one 61 GiB file, cold | 12.4 s | 14.4 s |
+| same, warm | 13.0 s | 6.1 s |
+
+A checkpoint stored as one file has no other file to spread to, so on a cold server it can load about
+15% slower than inline. Sharded checkpoints, and any warm server, are faster.
+
+Set to `0` to issue every direct read inline and leave NFS reads unspread, as before. `libaio_direct`
+is not affected.
 
 #### Values accepted
 
@@ -109,6 +133,45 @@ Boolean: `1` or `0`
 #### Default value
 
 `1`
+
+### RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH
+
+How many reads of one file on NFS may be in flight at once, under the `io_uring` strategies while
+`RUNAI_STREAMER_FS_DIRECT_ASYNC` is on. The rest of the window goes to the next files queued, oldest
+first. Has no effect on other file systems, under `libaio_direct`, or with `RUNAI_STREAMER_FS_DIRECT_ASYNC=0`.
+
+The cap counts chunks, not bytes: the file server sees up to this many times
+`RUNAI_STREAMER_FS_CHUNK_BYTESIZE` (8 MiB by default) divided by the mount's `rsize` reads of one file
+at once. With kernel nfsd reading one file cold, about 4 MiB in flight per file was fastest, because
+every page of a file beyond that contends on the same lock in the server's page cache. A server short
+of CPU that serves single-file checkpoints cold may therefore do better with a lower cap and smaller
+chunks. Raise the cap, or set `0`, for a fast warm server: a single file read at 15 GB/s with a cap of
+4 and at 23 GB/s with 8.
+
+#### Values accepted
+
+Non-negative integer, at most 1024. `0` removes the cap. A larger value is capped, with a warning.
+
+#### Default value
+
+8
+
+### RUNAI_STREAMER_FS_DIRECT_FDS
+
+How many descriptors each file on NFS is opened with for direct reads, used in turn, under the
+`io_uring` strategies while `RUNAI_STREAMER_FS_DIRECT_ASYNC` is on. The Linux NFS client keeps one lock
+context per open file, so io-wq workers reading through one descriptor contend on it: a 141 GB load
+over NFSv4.2/RDMA reached 16.9 GB/s through one descriptor and 20.9 GB/s through eight, at less than
+a fifth of the CPU. Each file then holds this many descriptors while it is read; lower it if the
+process is short of descriptors.
+
+#### Values accepted
+
+Integer from 1 to 64. A value outside that range is clamped, with a warning.
+
+#### Default value
+
+8
 
 ### RUNAI_STREAMER_CHUNK_BYTESIZE
 
