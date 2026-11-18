@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The measured process: one load, timed and validated, reported as a RESULT line on stdout."""
+import gc
 import json
 import os
 import resource
@@ -8,7 +9,7 @@ import sys
 import time
 import zlib
 
-from . import DIST, GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB
+from . import DIST, GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM
 from .files import is_remote, model_files, read_header, resident
 
 
@@ -213,5 +214,36 @@ def distributed(a):
     os._exit(0)  # skip NCCL teardown; processes in some pods cannot signal each other
 
 
+def vllm(a):
+    """A vLLM engine start with the default loader or with the streamer. The load time is not taken
+    here: vLLM logs it ("Model loading took ... seconds") from its engine process, and the runner reads
+    it from the output. The tensors are not validated; a run is good when the engine came up.
+
+    Eager mode and no tokenizer keep the start short and need only config.json next to the weights;
+    neither changes how the weights are loaded."""
+    import vllm as vllm_pkg
+    from vllm import LLM
+    _, ref = model_files(a)
+    expected, _ = expected_tensors(ref)
+    nbytes = sum(n for _, n in expected.values())
+    streamer = TESTS[a.child]["load_format"] == "runai_streamer"
+
+    t0 = time.perf_counter()
+    llm = LLM(model=a.model_dir, load_format=TESTS[a.child]["load_format"], enforce_eager=True,
+              skip_tokenizer_init=True)
+    startup = time.perf_counter() - t0
+    result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
+              "pkg": streamer_pkg() if streamer else None, "vllm": vllm_pkg.__version__, "errors": []}
+    print("RESULT " + json.dumps(result), flush=True)
+    # a normal exit, not os._exit: the engine process has to be shut down or it keeps the GPU
+    del llm
+    gc.collect()
+
+
 def main(a):
-    (distributed if a.child == DIST else single)(a)
+    if a.child in VLLM:
+        vllm(a)
+    elif a.child == DIST:
+        distributed(a)
+    else:
+        single(a)

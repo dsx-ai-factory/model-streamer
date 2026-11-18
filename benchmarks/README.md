@@ -47,6 +47,9 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 # the distributed load on 8 ranks of this node
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
 
+# also load the model in vLLM, with its default loader and with the streamer
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --vllm
+
 # one test, with a streamer setting
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
     --env RUNAI_STREAMER_FS_STRATEGY=io_uring_buffered
@@ -55,6 +58,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | Option | Default | Meaning |
 |---|---|---|
 | `--nproc N` | off | Run the distributed test on N ranks; without `--tests`, only that test |
+| `--vllm` | off | Add the two vLLM tests |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |
@@ -78,6 +82,8 @@ again), so drift in the machine or the storage affects all of them alike.
 | `safeopen_page_in` | `safetensors.safe_open`, one byte touched per page |
 | `safeopen_to_cuda` | `safe_open` + `.to("cuda")`, the default loader's shape |
 | `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
+| `vllm_default` | A vLLM engine start with vLLM's default loader (`--vllm`) |
+| `vllm_streamer` | The same with `load_format="runai_streamer"` (`--vllm`) |
 
 Without `--tests`, the GPU tests run when a GPU is present, and only the
 streamer tests run for a model on S3.
@@ -87,6 +93,21 @@ Each rank keeps a 1/N share of the tensors on its GPU, so device memory is
 under real pressure, and drops the rest. The load time is measured from a
 barrier before the load to a barrier after the last tensor, which makes it the
 slowest rank's time.
+
+### vLLM
+
+`--vllm` loads the model in vLLM itself, once with its default loader and once
+with the streamer, each in a fresh process on a cold page cache like every
+other test. It needs `vllm` installed and the model's `config.json` next to
+the weights.
+
+The load time is the one vLLM logs as "Model loading took", which covers
+building the model and loading its weights onto the GPU. The results also
+give `startup_s`, the whole engine start, and `vllm_speedup`, the default
+loader's time over the streamer's. The engine starts in eager mode and without
+a tokenizer to keep the start short; neither changes how the weights are
+loaded. CPU time and memory are not measured for these tests, and the tensors
+are not validated: a run is good when the engine came up.
 
 ## Machine ceilings
 
@@ -189,6 +210,7 @@ once, then one entry per test:
 - `ok` is true only when every run gave a result and none returned wrong data.
 - `load_s` and `gibps` are medians over the runs.
 - `ceiling` is absent when the benchmark ran without a profile.
+- A vLLM test has `startup_s` in place of `cpu_s_per_gib` and `peak_rss_gib`.
 - A run carries `errors` (wrong data) or `warnings` (for example a cache that
   was not cold) only when it has some. A run that gave no result is
   `{"failed": "..."}`.

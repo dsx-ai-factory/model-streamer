@@ -29,7 +29,13 @@ def child_output(cmd, load_s=5.0, errors=()):
            "pkg": PKG if test.startswith("streamer") else None, "errors": list(errors)}
     if test == DIST:
         one = [dict(one, rank=i, rank_s=load_s - 1, peak_gpu_gib=6.0) for i in range(2)]
-    return "RESULT " + json.dumps(one), "Filesystem strategy: io_uring\n[RunAI Streamer][Distributed] x", None
+    log = "Filesystem strategy: io_uring\n[RunAI Streamer][Distributed] x"
+    if test.startswith("vllm_"):  # vLLM reports its own load time, in its log
+        took = 8.0 if test == "vllm_streamer" else 40.0
+        one = {"startup_s": took + 20, "gib": 40.0, "tensors": 7, "vllm": "0.33.0", "errors": [],
+               "pkg": PKG if test == "vllm_streamer" else None}
+        log = f"INFO Model loading took 15.1 GiB memory and {took:.6f} seconds"
+    return "RESULT " + json.dumps(one), log, None
 
 
 class RunnerTest(unittest.TestCase):
@@ -44,7 +50,8 @@ class RunnerTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def run_bench(self, launch=child_output, prof=PROFILE, **over):
-        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, tests="", env=[], warm=False,
+        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, tests="", vllm=False, env=[],
+                               warm=False,
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -54,7 +61,7 @@ class RunnerTest(unittest.TestCase):
             return launch(cmd)
 
         code = 0
-        with mock.patch.object(runner, "launch", fake), \
+        with mock.patch.object(runner, "launch", fake), mock.patch.object(runner, "check_vllm"), \
                 mock.patch.object(runner, "get_profile", return_value=(prof, "p.json" if prof else None)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             try:
@@ -105,6 +112,29 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(r["runs"][0]["cpu_s"], 16.0)  # summed over the ranks
         self.assertEqual(r["ceiling"]["name"], "disk_direct_read_parallel")
         self.assertEqual(out["settings"], {"repeats": 2, "warm": False, "nproc": 2, "env": {"X": "1"}})
+
+    def test_vllm_load_time_comes_from_its_log(self):
+        code, out = self.run_bench(tests="streamer_cuda", vllm=True, repeats=1)
+        self.assertEqual(code, 0)
+        _, default, streamer = out["results"]
+        self.assertEqual((default["load_s"], default["gibps"], default["startup_s"]), (40.0, 1.0, 60.0))
+        self.assertEqual(streamer["runs"], [{"load_s": 8.0, "gibps": 5.0, "startup_s": 28.0}])
+        self.assertNotIn("cpu_s_per_gib", streamer)
+        self.assertEqual(streamer["ceiling"]["name"], "h2d_pinned")
+        self.assertEqual((out["vllm_speedup"], out["vllm"]), (5.0, ["0.33.0"]))
+        with open(os.path.splitext(self.out)[0] + ".html") as f:
+            self.assertIn("5.0x as fast", f.read())
+
+    def test_vllm_without_its_log_line_fails(self):
+        code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '
+                                                       '"pkg": null, "vllm": "x", "errors": []}', "", None),
+                                   tests="vllm_default", repeats=1)
+        self.assertEqual(code, 1)
+        self.assertIn("Model loading took", out["results"][0]["runs"][0]["failed"])
+
+    def test_vllm_is_opt_in(self):
+        self.run_bench()
+        self.assertFalse(any("vllm" in " ".join(c) for c, _ in self.calls))
 
     def test_wrong_data_fails_the_test(self):
         code, out = self.run_bench(launch=lambda cmd: child_output(cmd, errors=["w: data differs from safetensors"]),

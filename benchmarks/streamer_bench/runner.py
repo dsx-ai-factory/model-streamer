@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The benchmark itself: which tests to run, and one fresh measured process per run."""
+import importlib.util
 import json
 import os
 import re
@@ -8,7 +9,7 @@ import signal
 import subprocess
 import sys
 
-from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S
+from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S, VLLM
 from .files import evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
@@ -22,17 +23,28 @@ def gpu_count():
         return 0
 
 
+def check_vllm(a):
+    """The vLLM tests need vllm in this Python and a model directory vLLM can start from."""
+    if importlib.util.find_spec("vllm") is None:
+        sys.exit(f"the vLLM tests need vllm in this Python ({sys.executable}):\n    pip install vllm")
+    if not os.path.exists(os.path.join(a.model_dir, "config.json")):
+        sys.exit(f"the vLLM tests need the model's config.json in {a.model_dir}, next to the weights")
+
+
 def select_tests(a, remote):
-    """The tests to run: --tests, else only the distributed one with --nproc, else all that apply here."""
+    """The tests to run: --tests, else only the distributed one with --nproc, else all that apply here.
+    --vllm adds the two vLLM tests."""
     if a.tests:
         names = a.tests.split(",")
     elif a.nproc:
         names = [DIST]
     else:
         gpu = gpu_count() > 0
-        names = [t for t in TESTS if t != DIST and (gpu or TESTS[t]["device"] == "cpu")]
+        names = [t for t in TESTS if t != DIST and t not in VLLM and (gpu or TESTS[t]["device"] == "cpu")]
         if remote:
             names = [n for n in names if n.startswith("streamer")]
+    if a.vllm:
+        names += [t for t in VLLM if t not in names]
     for n in names:
         if n not in TESTS:
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
@@ -42,6 +54,8 @@ def select_tests(a, remote):
         sys.exit(f"{DIST} needs --nproc N")
     if a.nproc and DIST not in names:
         sys.exit(f"--nproc is for {DIST}, which --tests leaves out")
+    if any(n in VLLM for n in names):
+        check_vllm(a)
     return names
 
 
@@ -94,11 +108,19 @@ def run_once(a, test, files, remote, env, tag):
         return {"failed": killed or (err or out)[-1500:]}, None
 
     raw = json.loads(line[7:])
+    if test in VLLM:
+        took = re.findall(r"Model loading took \S+ GiB memory and ([\d.]+) seconds", out + err)
+        if not took:
+            return {"failed": "vLLM started but logged no 'Model loading took ... seconds'"}, None
+        raw["load_s"] = round(float(took[-1]), 3)
     ranks = raw if test == DIST else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
-    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2),
-         "cpu_s": round(sum(x["cpu_s"] for x in ranks), 2),
-         "peak_rss_gib": max(x["peak_rss_gib"] for x in ranks)}
+    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2)}
+    if test in VLLM:
+        r["startup_s"] = raw["startup_s"]  # the engine's whole start; cpu and memory are not measured
+    else:
+        r["cpu_s"] = round(sum(x["cpu_s"] for x in ranks), 2)
+        r["peak_rss_gib"] = max(x["peak_rss_gib"] for x in ranks)
     if test == DIST:
         r["rank_s"] = [x["rank_s"] for x in ranks]
         r["peak_gpu_gib"] = max(x["peak_gpu_gib"] for x in ranks)
@@ -110,6 +132,7 @@ def run_once(a, test, files, remote, env, tag):
     if warnings:
         r["warnings"] = warnings
     facts = {"gib": ranks[0]["gib"], "tensors": ranks[0]["tensors"], "pkg": ranks[0]["pkg"],
+             "vllm": raw.get("vllm") if test in VLLM else None,
              "fs_strategy": sorted(set(re.findall(r"Filesystem strategy: (\S+)", out + err)))}
     return r, facts
 
@@ -137,6 +160,7 @@ def main(a):
 
     runs_of = {n: [] for n in names}
     strategy_of = {n: set() for n in names}
+    vllm_versions = set()
     model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir)}
     if a.ref_dir:
         model["ref_dir"] = a.ref_dir
@@ -154,11 +178,14 @@ def main(a):
             strategy_of[name].update(facts["fs_strategy"])
             if facts["pkg"]:
                 pkgs.add(facts["pkg"])
+            if facts["vllm"]:
+                vllm_versions.add(facts["vllm"])
             print(f"  {tag}: {r['load_s']}s {r['gibps']} GiB/s"
                   + (f" [{','.join(facts['fs_strategy'])}]" if facts["fs_strategy"] else "")
                   + (f"  INVALID: {r['errors'][0]}" if "errors" in r else ""), flush=True)
             for w in r.get("warnings", []):
                 print(f"  {tag}: warning: {w}", file=sys.stderr, flush=True)
 
-    if not report(a, runs_of, strategy_of, model, sorted(pkgs), extra, profile, profile_path, remote):
+    versions = {"vllm": sorted(vllm_versions)} if vllm_versions else {}
+    if not report(a, runs_of, strategy_of, model, sorted(pkgs), versions, extra, profile, profile_path, remote):
         sys.exit(1)

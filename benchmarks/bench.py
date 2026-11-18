@@ -33,6 +33,8 @@ def main():
                     help="directory with *.safetensors files, or s3://bucket/prefix")
     ap.add_argument("--model-dir", help=argparse.SUPPRESS)  # the older spelling of MODEL
     ap.add_argument("--nproc", type=int, help=f"ranks for {DIST}; without --tests, run only that test")
+    ap.add_argument("--vllm", action="store_true",
+                    help="also load the model in vLLM, with its default loader and with the streamer")
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")

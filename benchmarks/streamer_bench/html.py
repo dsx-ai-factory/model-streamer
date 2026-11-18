@@ -36,6 +36,8 @@ def _num(v, digits=1):
 
 
 def _chart(results):
+    if not results:
+        return ""
     scale = max([s["gibps_max"] for s in results if "gibps" in s]
                 + [s["ceiling"]["gibps"] for s in results if "ceiling" in s] + [1e-9])
     rows = []
@@ -70,7 +72,8 @@ def _table(results):
         if "gibps" in s:
             cells += [_num(s["gibps"], 2), _num(s["gibps_min"], 2), _num(s["gibps_max"], 2), _num(s["load_s"], 2),
                       _num(c.get("pct")), escape(c.get("name", "n/a")), escape(c.get("nearest") or "n/a"),
-                      _num(s["cpu_s_per_gib"], 2), _num(s["peak_rss_gib"]), escape(", ".join(s.get("fs_strategy", [])))]
+                      _num(s.get("cpu_s_per_gib"), 2), _num(s.get("peak_rss_gib")),
+                      escape(", ".join(s.get("fs_strategy", [])))]
         else:
             cells += ["failed"] + [""] * 9
         cells.append("&#10003; yes" if s["ok"] else '<span class="bad">&#10007; no</span>')
@@ -87,7 +90,11 @@ def _runs(results):
             if "failed" in r:
                 lines.append(f"run {i}: FAILED\n{r['failed']}")
                 continue
-            line = f"run {i}: {r['load_s']} s, {r['gibps']} GiB/s, cpu {r['cpu_s']} s, peak RSS {r['peak_rss_gib']} GiB"
+            line = f"run {i}: {r['load_s']} s, {r['gibps']} GiB/s"
+            if "cpu_s" in r:
+                line += f", cpu {r['cpu_s']} s, peak RSS {r['peak_rss_gib']} GiB"
+            if "startup_s" in r:
+                line += f", engine start {r['startup_s']} s"
             if "rank_s" in r:
                 line += f", ranks {r['rank_s']} s, peak GPU {r['peak_gpu_gib']} GiB"
             lines.append(line)
@@ -96,6 +103,22 @@ def _runs(results):
         out.append(f"<details><summary>{escape(s['test'])}: {len(s['runs'])} runs</summary>"
                    f"<pre>{escape(chr(10).join(lines))}</pre></details>")
     return "".join(out)
+
+
+def _vllm(out):
+    """The vLLM section: the same model loaded by vLLM with its default loader and with the streamer."""
+    results = [s for s in out["results"] if s["test"].startswith("vllm_")]
+    if not results:
+        return ""
+    speedup = out.get("vllm_speedup")
+    headline = (f"With the streamer vLLM loads the model {speedup}x as fast as with its default loader."
+                if speedup else "")
+    version = ", ".join(out.get("vllm", []))
+    return (f"<h2>vLLM model load: streamer vs default loader</h2>"
+            f'<p class="meta">{escape(headline)}</p>{_chart(results)}'
+            f'<p class="note">vLLM {escape(version)}. The time is the one vLLM logs as "Model loading took", '
+            f"which covers building the model and loading its weights onto the GPU. "
+            f"The tensors are not validated in these tests.</p>")
 
 
 def render(out):
@@ -116,8 +139,9 @@ def render(out):
 <p class="meta">{escape(out["host"])} &middot; {escape(out["created"])} &middot; {escape(", ".join(settings))}</p>
 <p class="meta">streamer: {escape(", ".join(out["streamer"]) or "not loaded")}</p>
 <h2>Load rate per test</h2>
-{_chart(out["results"])}
+{_chart([s for s in out["results"] if not s["test"].startswith("vllm_")])}
 <p class="note">{note}</p>
+{_vllm(out)}
 <h2>All numbers</h2>
 {_table(out["results"])}
 <h2>Runs</h2>
