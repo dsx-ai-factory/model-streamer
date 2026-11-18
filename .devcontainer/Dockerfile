@@ -124,8 +124,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libffi-dev \
     libbz2-dev \
     liblzma-dev \
+    libreadline-dev \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && wget -qO /tmp/Python-3.11.14.tgz https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz \
+    && curl -fsSL -o /tmp/Python-3.11.14.tgz https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz \
     && echo "563d2a1b2a5ba5d5409b5ecd05a0e1bf9b028cf3e6a6f0c87a5dc8dc3f2d9182  /tmp/Python-3.11.14.tgz" | sha256sum -c - \
     && tar -xzf /tmp/Python-3.11.14.tgz -C /tmp \
     && cd /tmp/Python-3.11.14 \

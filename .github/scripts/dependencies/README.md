@@ -168,8 +168,8 @@ What else to check after the change:
 - An apt package whose exact version has left the index has no download URL; the entry says so.
 - Python is resolved for 3.11, the devcontainer's Python. Our own wheels are `py3-none`, so users on
   other Python versions resolve other dependency versions. The dependency wheels in the list are
-  either universal (`py3-none-any`) or specific to Python 3.11 and an architecture (`cp311`,
-  `manylinux`).
+  either universal (`py3-none-any`) or compatible with Python 3.11 on an architecture (`cp311`
+  or `abi3`, `manylinux`).
 - Archives that no file pins (OpenSSL, curl, zlib, libxml2, fake-gcs-server) get a SHA-256 computed
   from the download; the entry says `computed from the download`.
 - Git submodule entries take the highest release tag that points to the pinned commit.
