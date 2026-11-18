@@ -87,7 +87,7 @@ def launch(cmd, env, timeout):
     """(stdout, stderr, None or why it was killed). The whole process group goes on a timeout.
 
     The output goes to files, not pipes: a process the measured one leaves behind would hold a pipe open
-    and stall the benchmark, and in some containers such a process cannot be signalled either."""
+    and stall the benchmark, and where signals are restricted it cannot be killed either."""
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         p = subprocess.Popen(cmd, stdout=out, stderr=err, env=env, start_new_session=True)
 

@@ -228,7 +228,7 @@ def distributed(a):
     if rank == 0:
         print("RESULT " + json.dumps(out), flush=True)
     sys.stdout.flush()
-    os._exit(0)  # skip NCCL teardown; processes in some pods cannot signal each other
+    os._exit(0)  # skip NCCL teardown, which can hang where processes are not allowed to signal each other
 
 
 def vllm(a):
@@ -271,7 +271,7 @@ def vllm(a):
         print("RESULT " + json.dumps(result), flush=True)
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(0)  # skip the engine's teardown; processes in some pods cannot signal each other
+    os._exit(0)  # skip the engine's teardown, which can hang the same way as NCCL's
 
 
 def main(a):
