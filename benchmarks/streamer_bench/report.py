@@ -6,7 +6,7 @@ import platform
 import statistics
 import time
 
-from . import VLLM, html
+from . import html
 from .profile import ceilings_for, nearest
 
 
@@ -37,7 +37,7 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
 def vllm_speedup(results):
     """How many times faster vLLM loads the model with the streamer than with its default loader."""
     by = {s["test"]: s for s in results if "load_s" in s}
-    if all(t in by for t in VLLM) and by["vllm_streamer"]["load_s"]:
+    if "vllm_default" in by and "vllm_streamer" in by and by["vllm_streamer"]["load_s"]:
         return round(by["vllm_default"]["load_s"] / by["vllm_streamer"]["load_s"], 2)
     return None
 

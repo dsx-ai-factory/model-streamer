@@ -16,6 +16,7 @@ GiB, peak memory, and the share of the machine's ceiling that was reached.
 - Python with `runai-model-streamer` (which brings `torch`) and `safetensors`:
   `pip install runai-model-streamer safetensors`. `bench.py` checks for them
   and names what is missing.
+- `vllm`, for the vLLM tests, and `instanttensor` for `vllm_instanttensor`
 - torch built with NCCL and one GPU per rank, for the distributed test
 - [`s5cmd`](https://github.com/peak/s5cmd) on `PATH`, only to calibrate S3
 
@@ -41,14 +42,11 @@ directory first on `PYTHONPATH`.
 ## Running a benchmark
 
 ```bash
-# every single-process test that applies on this machine
+# every single-process test that applies on this machine, including vLLM
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 
 # the distributed load on 8 ranks of this node
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
-
-# also load the model in vLLM, with its default loader and with the streamer
-python3 benchmarks/bench.py /mnt/models/Qwen3-8B --vllm
 
 # one test, with a streamer setting
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
@@ -58,7 +56,6 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | Option | Default | Meaning |
 |---|---|---|
 | `--nproc N` | off | Run the distributed test on N ranks; without `--tests`, only that test |
-| `--vllm` | off | Add the two vLLM tests |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |
@@ -82,11 +79,13 @@ again), so drift in the machine or the storage affects all of them alike.
 | `safeopen_page_in` | `safetensors.safe_open`, one byte touched per page |
 | `safeopen_to_cuda` | `safe_open` + `.to("cuda")`, the default loader's shape |
 | `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
-| `vllm_default` | A vLLM engine start with vLLM's default loader (`--vllm`) |
-| `vllm_streamer` | The same with `load_format="runai_streamer"` (`--vllm`) |
+| `vllm_default` | A vLLM engine start with vLLM's default loader |
+| `vllm_streamer` | The same with `load_format="runai_streamer"` |
+| `vllm_instanttensor` | The same with `load_format="instanttensor"` |
 
 Without `--tests`, the GPU tests run when a GPU is present, and only the
-streamer tests run for a model on S3.
+streamer tests run for a model on S3. A vLLM test is left out, with a note,
+when what it needs is not installed or the model has no `config.json`.
 
 In `streamer_dist` every rank streams all files and receives every tensor.
 Each rank keeps a 1/N share of the tensors on its GPU, so device memory is
@@ -96,18 +95,25 @@ slowest rank's time.
 
 ### vLLM
 
-`--vllm` loads the model in vLLM itself, once with its default loader and once
-with the streamer, each in a fresh process on a cold page cache like every
-other test. It needs `vllm` installed and the model's `config.json` next to
-the weights.
+The vLLM tests load the model in vLLM itself, once per loader: its default
+loader, the streamer, and InstantTensor. Each is a fresh process on a cold
+page cache like every other test. They need a GPU, `vllm` installed
+(`pip install vllm`) and the model's `config.json` next to the weights;
+`vllm_instanttensor` also needs `pip install 'vllm[instanttensor]'`.
+
+vLLM's default loader reads the weights in one thread unless its
+`enable_multithread_load` option is set, which this benchmark leaves off, as
+vLLM does.
 
 The load time is the one vLLM logs as "Model loading took", which covers
 building the model and loading its weights onto the GPU. The results also
 give `startup_s`, the whole engine start, and `vllm_speedup`, the default
 loader's time over the streamer's. The engine starts in eager mode and without
 a tokenizer to keep the start short; neither changes how the weights are
-loaded. CPU time and memory are not measured for these tests, and the tensors
-are not validated: a run is good when the engine came up.
+loaded. CPU time and host memory are not measured for these tests, and the
+tensors are not compared with `safetensors`: a run is good when the engine
+came up. Each run records `gpu_gib`, the GPU memory vLLM says the model took,
+and carries a warning when that is well below the size of the weights.
 
 ## Machine ceilings
 

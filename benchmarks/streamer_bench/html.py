@@ -96,7 +96,7 @@ def _runs(results):
             if "cpu_s" in r:
                 line += f", cpu {r['cpu_s']} s, peak RSS {r['peak_rss_gib']} GiB"
             if "startup_s" in r:
-                line += f", engine start {r['startup_s']} s"
+                line += f", engine start {r['startup_s']} s, {r.get('gpu_gib', 'n/a')} GiB on the GPU"
             if "rank_s" in r:
                 line += f", ranks {r['rank_s']} s, peak GPU {r['peak_gpu_gib']} GiB"
             lines.append(line)
@@ -108,7 +108,7 @@ def _runs(results):
 
 
 def _vllm(out):
-    """The vLLM section: the same model loaded by vLLM with its default loader and with the streamer."""
+    """The vLLM section: the same model loaded by vLLM with each of its loaders that was run."""
     results = [s for s in out["results"] if s["test"].startswith("vllm_")]
     if not results:
         return ""
@@ -116,7 +116,7 @@ def _vllm(out):
     headline = (f"With the streamer vLLM loads the model {speedup}x as fast as with its default loader."
                 if speedup else "")
     version = out.get("versions", {}).get("vllm", "")
-    return (f"<h2>vLLM model load: streamer vs default loader</h2>"
+    return (f"<h2>vLLM model load by loader</h2>"
             f'<p class="meta">{escape(headline)}</p>{_chart(results)}'
             f'<p class="note">vLLM {escape(version)}. The time is the one vLLM logs as "Model loading took", '
             f"which covers building the model and loading its weights onto the GPU. "
@@ -143,7 +143,8 @@ def _environment(out):
         + "<h2>Versions</h2>" + _pairs([
             ("runai-model-streamer", ver.get("runai-model-streamer")),
             ("streamer imported from", ", ".join(out["streamer"])),
-            ("vLLM", ver.get("vllm")), ("torch", ver.get("torch")), ("safetensors", ver.get("safetensors"))])
+            ("vLLM", ver.get("vllm")), ("instanttensor", ver.get("instanttensor")),
+            ("torch", ver.get("torch")), ("safetensors", ver.get("safetensors"))])
         + "<h2>Settings</h2>" + _pairs([
             ("runs per test", st["repeats"]), ("page cache", "warm" if st["warm"] else "cold"),
             ("ranks", st.get("nproc"))] + [(f"env {k}", v) for k, v in st.get("env", {}).items()]))

@@ -12,11 +12,12 @@ TESTS = {
     "safeopen_page_in": {"device": "cpu"},
     "safeopen_to_cuda": {"device": "cuda"},
     DIST: {"device": "cuda"},
-    # a whole vLLM model load: needs vllm installed and the model's config.json. Run with --vllm.
+    # a whole vLLM model load: needs vllm installed and the model's config.json
     "vllm_default": {"device": "cuda", "load_format": "auto"},
     "vllm_streamer": {"device": "cuda", "load_format": "runai_streamer"},
+    "vllm_instanttensor": {"device": "cuda", "load_format": "instanttensor"},  # needs instanttensor too
 }
-VLLM = ("vllm_default", "vllm_streamer")
+VLLM = ("vllm_default", "vllm_streamer", "vllm_instanttensor")
 DEFAULT_PROFILE = "machine_profile.json"
 VALIDATE = 20  # tensors compared byte for byte per run (across the ranks, for the distributed test)
 VALIDATE_MAX_MIB = 128  # the largest tensor picked for that

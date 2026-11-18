@@ -5,7 +5,8 @@
 
 Linux only. Needs torch, safetensors and runai_model_streamer (torch with NCCL for --nproc).
 
-    python3 bench.py /mnt/models/Qwen3-8B              every single-process test that applies here
+    python3 bench.py /mnt/models/Qwen3-8B              every single-process test that applies here,
+                                                       and vLLM with and without the streamer
     python3 bench.py /mnt/models/Qwen3-8B --nproc 8    the distributed load on 8 ranks of this node
 
 Every run is a fresh process on a cold page cache, and its tensors are checked against safetensors.
@@ -33,8 +34,6 @@ def main():
                     help="directory with *.safetensors files, or s3://bucket/prefix")
     ap.add_argument("--model-dir", help=argparse.SUPPRESS)  # the older spelling of MODEL
     ap.add_argument("--nproc", type=int, help=f"ranks for {DIST}; without --tests, run only that test")
-    ap.add_argument("--vllm", action="store_true",
-                    help="also load the model in vLLM, with its default loader and with the streamer")
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")

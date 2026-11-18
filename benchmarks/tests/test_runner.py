@@ -39,7 +39,7 @@ def child_output(cmd, load_s=5.0, errors=()):
         one = {"startup_s": took + 20, "gib": 40.0, "tensors": 7, "errors": [], "gpus": ["H200"],
                "versions": {"vllm": "0.33.0", "runai-model-streamer": "0.17.1"},
                "pkg": PKG if test == "vllm_streamer" else None}
-        log = f"INFO Model loading took 15.1 GiB memory and {took:.6f} seconds"
+        log = f"INFO Model loading took 40.2 GiB memory and {took:.6f} seconds"
     return "RESULT " + json.dumps(one), log, None
 
 
@@ -54,9 +54,8 @@ class RunnerTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def run_bench(self, launch=child_output, prof=PROFILE, **over):
-        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, tests="", vllm=False, env=[],
-                               warm=False,
+    def run_bench(self, launch=child_output, prof=PROFILE, no_vllm=None, gpus=0, **over):
+        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, tests="", env=[], warm=False,
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -66,7 +65,9 @@ class RunnerTest(unittest.TestCase):
             return launch(cmd)
 
         code = 0
-        with mock.patch.object(runner, "launch", fake), mock.patch.object(runner, "check_vllm"), \
+        with mock.patch.object(runner, "launch", fake), \
+                mock.patch.object(runner, "vllm_unavailable", return_value=no_vllm), \
+                mock.patch.object(runner, "gpu_count", return_value=gpus), \
                 mock.patch.object(runner, "describe_machine", return_value=dict(MACHINE)), \
                 mock.patch.object(runner, "get_profile", return_value=(prof, "p.json" if prof else None)), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -122,11 +123,11 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(out["settings"], {"repeats": 2, "warm": False, "nproc": 2, "env": {"X": "1"}})
 
     def test_vllm_load_time_comes_from_its_log(self):
-        code, out = self.run_bench(tests="streamer_cuda", vllm=True, repeats=1)
+        code, out = self.run_bench(tests="streamer_cuda,vllm_default,vllm_streamer", repeats=1)
         self.assertEqual(code, 0)
         _, default, streamer = out["results"]
         self.assertEqual((default["load_s"], default["gibps"], default["startup_s"]), (40.0, 1.0, 60.0))
-        self.assertEqual(streamer["runs"], [{"load_s": 8.0, "gibps": 5.0, "startup_s": 28.0}])
+        self.assertEqual(streamer["runs"], [{"load_s": 8.0, "gibps": 5.0, "startup_s": 28.0, "gpu_gib": 40.2}])
         self.assertNotIn("cpu_s_per_gib", streamer)
         self.assertEqual(streamer["ceiling"]["name"], "h2d_pinned")
         self.assertEqual(out["vllm_speedup"], 5.0)
@@ -148,6 +149,13 @@ class RunnerTest(unittest.TestCase):
         for text in ("Calibration", "disk_direct_read_parallel", "scored against", "a note", "8 files of 2.0 GiB"):
             self.assertIn(text, page)
 
+    def test_vllm_weights_missing_from_the_gpu_is_a_warning(self):
+        log = "Model loading took 3.0 GiB memory and 8.000000 seconds"
+        result = 'RESULT {"startup_s": 9, "gib": 40.0, "tensors": 7, "pkg": null, "versions": {}, "errors": []}'
+        _, out = self.run_bench(launch=lambda cmd: (result, log, None), tests="vllm_default", repeats=1)
+        self.assertEqual(out["results"][0]["runs"][0]["warnings"],
+                         ["vLLM reports 3.0 GiB on the GPU for 40.0 GiB of weights"])
+
     def test_vllm_without_its_log_line_fails(self):
         code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '
                                                        '"pkg": null, "vllm": "x", "errors": []}', "", None),
@@ -155,9 +163,35 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("Model loading took", out["results"][0]["runs"][0]["failed"])
 
-    def test_vllm_is_opt_in(self):
-        self.run_bench()
-        self.assertFalse(any("vllm" in " ".join(c) for c, _ in self.calls))
+    def ran(self):
+        return [c[c.index("--child") + 1] for c, _ in self.calls]
+
+    def test_vllm_runs_by_default_on_a_gpu_machine(self):
+        self.run_bench(gpus=1, repeats=1)
+        self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cpu_notowned", "streamer_cuda", "safeopen_page_in",
+                                      "safeopen_to_cuda", "vllm_default", "vllm_streamer", "vllm_instanttensor"])
+
+    def test_one_vllm_loader_missing_leaves_out_only_that_test(self):
+        with mock.patch.object(runner.importlib.util, "find_spec",
+                               lambda name: None if name == "instanttensor" else object()):
+            open(os.path.join(self.dir.name, "config.json"), "w").close()
+            a = argparse.Namespace(model_dir=self.dir.name)
+            self.assertIsNone(runner.vllm_unavailable(a, "vllm_streamer"))
+            self.assertIn("instanttensor is not installed", runner.vllm_unavailable(a, "vllm_instanttensor"))
+            os.remove(os.path.join(self.dir.name, "config.json"))
+            self.assertIn("config.json", runner.vllm_unavailable(a, "vllm_default"))
+
+    def test_vllm_is_left_out_when_it_cannot_run(self):
+        code, _ = self.run_bench(gpus=1, repeats=1, no_vllm="vllm is not installed")
+        self.assertEqual(code, 0)
+        self.assertFalse([t for t in self.ran() if t.startswith("vllm")])
+        self.assertFalse([t for t in self.run_bench(gpus=0, repeats=1) and self.ran() if t.startswith("vllm")])
+        # asked for by name, it is an error instead
+        self.assertIn("cannot run", self.run_bench(tests="vllm_default", no_vllm="vllm is not installed")[0])
+
+    def test_nproc_alone_runs_only_the_distributed_test(self):
+        self.run_bench(gpus=8, nproc=2, repeats=1)
+        self.assertEqual(self.ran(), [DIST])
 
     def test_wrong_data_fails_the_test(self):
         code, out = self.run_bench(launch=lambda cmd: child_output(cmd, errors=["w: data differs from safetensors"]),

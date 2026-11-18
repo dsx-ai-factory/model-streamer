@@ -74,7 +74,7 @@ def versions():
     """Installed versions of the packages a load goes through, as pip knows them."""
     from importlib.metadata import PackageNotFoundError, version
     found = {}
-    for dist in ("runai-model-streamer", "torch", "safetensors", "vllm"):
+    for dist in ("runai-model-streamer", "torch", "safetensors", "vllm", "instanttensor"):
         try:
             found[dist] = version(dist)
         except PackageNotFoundError:
@@ -233,7 +233,7 @@ def distributed(a):
 
 
 def vllm(a):
-    """A vLLM engine start with the default loader or with the streamer. The load time is not taken
+    """A vLLM engine start with the default loader, the streamer or InstantTensor. The load time is not taken
     here: vLLM logs it ("Model loading took ... seconds") from its engine process, and the runner reads
     it from the output. The tensors are not validated; a run is good when the engine came up.
 

@@ -24,12 +24,16 @@ def gpu_count():
         return 0
 
 
-def check_vllm(a):
-    """The vLLM tests need vllm in this Python and a model directory vLLM can start from."""
+def vllm_unavailable(a, test):
+    """Why a vLLM test cannot run here, or None: it needs vllm in this Python, a model directory vLLM
+    can start from, and for vllm_instanttensor the instanttensor package."""
     if importlib.util.find_spec("vllm") is None:
-        sys.exit(f"the vLLM tests need vllm in this Python ({sys.executable}):\n    pip install vllm")
+        return f"vllm is not installed in this Python ({sys.executable}): pip install vllm"
     if not os.path.exists(os.path.join(a.model_dir, "config.json")):
-        sys.exit(f"the vLLM tests need the model's config.json in {a.model_dir}, next to the weights")
+        return f"the model's config.json is not in {a.model_dir}, next to the weights"
+    if test == "vllm_instanttensor" and importlib.util.find_spec("instanttensor") is None:
+        return "instanttensor is not installed: pip install 'vllm[instanttensor]'"
+    return None
 
 
 def describe_machine(a, remote):
@@ -46,18 +50,22 @@ def describe_machine(a, remote):
 
 def select_tests(a, remote):
     """The tests to run: --tests, else only the distributed one with --nproc, else all that apply here.
-    --vllm adds the two vLLM tests."""
+    The vLLM tests are among those when they can run; when they cannot, they are left out with a note
+    unless --tests asked for them."""
     if a.tests:
         names = a.tests.split(",")
     elif a.nproc:
         names = [DIST]
     else:
         gpu = gpu_count() > 0
-        names = [t for t in TESTS if t != DIST and t not in VLLM and (gpu or TESTS[t]["device"] == "cpu")]
+        names = [t for t in TESTS if t != DIST and (gpu or TESTS[t]["device"] == "cpu")]
         if remote:
             names = [n for n in names if n.startswith("streamer")]
-    if a.vllm:
-        names += [t for t in VLLM if t not in names]
+        for n in [n for n in names if n in VLLM]:
+            why = vllm_unavailable(a, n)
+            if why:
+                print(f"skipping {n}: {why}", file=sys.stderr)
+                names.remove(n)
     for n in names:
         if n not in TESTS:
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
@@ -67,8 +75,9 @@ def select_tests(a, remote):
         sys.exit(f"{DIST} needs --nproc N")
     if a.nproc and DIST not in names:
         sys.exit(f"--nproc is for {DIST}, which --tests leaves out")
-    if any(n in VLLM for n in names):
-        check_vllm(a)
+    for n in names:
+        if a.tests and n in VLLM and vllm_unavailable(a, n):
+            sys.exit(f"{n} cannot run: {vllm_unavailable(a, n)}")
     return names
 
 
@@ -122,15 +131,18 @@ def run_once(a, test, files, remote, env, tag):
 
     raw = json.loads(line[7:])
     if test in VLLM:
-        took = re.findall(r"Model loading took \S+ GiB memory and ([\d.]+) seconds", out + err)
+        took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)
         if not took:
             return {"failed": "vLLM started but logged no 'Model loading took ... seconds'"}, None
-        raw["load_s"] = round(float(took[-1]), 3)
+        raw["gpu_gib"], raw["load_s"] = float(took[-1][0]), round(float(took[-1][1]), 3)
+        if raw["gpu_gib"] < 0.9 * raw["gib"]:  # the weights did not all reach the GPU, or were converted
+            warnings.append(f"vLLM reports {raw['gpu_gib']} GiB on the GPU for {raw['gib']} GiB of weights")
     ranks = raw if test == DIST else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
     r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2)}
     if test in VLLM:
-        r["startup_s"] = raw["startup_s"]  # the engine's whole start; cpu and memory are not measured
+        r["startup_s"] = raw["startup_s"]  # the engine's whole start; cpu and host memory are not measured
+        r["gpu_gib"] = raw["gpu_gib"]  # GPU memory the model took, as vLLM measured it
     else:
         r["cpu_s"] = round(sum(x["cpu_s"] for x in ranks), 2)
         r["peak_rss_gib"] = max(x["peak_rss_gib"] for x in ranks)
