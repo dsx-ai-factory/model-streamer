@@ -12,9 +12,19 @@ Every run is a fresh process on a cold page cache, and its tensors are checked a
 The tests, the machine profile and the results file are described in README.md next to this script.
 """
 import argparse
+import importlib.util
 import sys
 
 from streamer_bench import DEFAULT_PROFILE, DIST, TESTS
+
+
+def check_installed():
+    """Say what is missing before anything runs, instead of failing inside the first measured process."""
+    needed = {"torch": "torch", "safetensors": "safetensors", "runai_model_streamer": "runai-model-streamer"}
+    missing = [pip for module, pip in needed.items() if importlib.util.find_spec(module) is None]
+    if missing:
+        sys.exit(f"bench.py needs {', '.join(missing)} in this Python ({sys.executable}):\n"
+                 f"    pip install {' '.join(missing)}")
 
 
 def main():
@@ -50,6 +60,7 @@ def main():
         from streamer_bench import worker
         worker.main(a)
     else:
+        check_installed()
         from streamer_bench import runner
         runner.main(a)
 

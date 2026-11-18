@@ -13,7 +13,9 @@ GiB, peak memory, and the share of the machine's ceiling that was reached.
 ## Requirements
 
 - Linux
-- Python with `torch`, `safetensors` and `runai-model-streamer` installed
+- Python with `runai-model-streamer` (which brings `torch`) and `safetensors`:
+  `pip install runai-model-streamer safetensors`. `bench.py` checks for them
+  and names what is missing.
 - torch built with NCCL and one GPU per rank, for the distributed test
 - [`s5cmd`](https://github.com/peak/s5cmd) on `PATH`, only to calibrate S3
 
@@ -26,14 +28,15 @@ directory first on `PYTHONPATH`.
 | Path | Purpose |
 |---|---|
 | `bench.py` | Command-line entry point |
-| `calibrate.py` | Measures the machine's ceilings into a profile; standard library only |
+| `calibrate.py` | Command-line entry point for calibration |
 | `streamer_bench/runner.py` | Selects the tests and starts one measured process per run |
 | `streamer_bench/worker.py` | The measured process: one load, timed and validated |
 | `streamer_bench/files.py` | The model's files and their state in the page cache |
 | `streamer_bench/profile.py` | Finds or makes the machine profile and scores a test against it |
 | `streamer_bench/report.py` | Summary per test, the table and the results file |
 | `streamer_bench/html.py` | The results as a self-contained HTML page |
-| `tests/` | Unit tests of the runner and the report |
+| `streamer_bench/calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
+| `tests/` | Unit tests of the runner, the report and the calibration helpers |
 
 ## Running a benchmark
 
@@ -94,6 +97,22 @@ calibrates on the model's directory and keeps the profile in
 Calibration writes 16 GiB of temporary files to that directory and removes
 them, and uses about 40 GiB of memory; it uses less of both on a smaller
 machine.
+
+Calibration needs only the standard library; torch is used for the
+host-to-GPU rates when it is installed. Each ceiling is the median of three
+runs, in GiB/s:
+
+| Ceiling | What is measured |
+|---|---|
+| `disk_direct_read_parallel` | O_DIRECT reads, one thread per file, into memory already faulted in |
+| `disk_direct_read_fresh_dest` | The same into untouched memory, so the kernel faults it in during the read |
+| `disk_direct_read_single` | One thread, one file |
+| `disk_buffered_read_cold` | Buffered reads after evicting the page cache |
+| `host_first_touch_1t`, `_nt` | First touch of fresh memory, with one and many threads |
+| `host_memcpy_1t`, `_nt` | Memory-to-memory copy, with one and many threads |
+| `h2d_pinned`, `h2d_pageable` | Copy to GPU 0 from pinned and from pageable memory |
+| `s3_get_single` | One S3 object, one part in flight |
+| `s3_get_parallel` | Every object at once, the best of a sweep over parts in flight and part size |
 
 To calibrate separately, for example when the model directory is read-only,
 run it yourself and pass the profile:

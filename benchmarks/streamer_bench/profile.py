@@ -8,7 +8,7 @@ import platform
 import subprocess
 import sys
 
-from . import BENCH_DIR, CALIBRATE, DEFAULT_PROFILE, DIST, TESTS
+from . import CALIBRATE, DEFAULT_PROFILE, DIST, TESTS
 
 
 def load_json(path):
@@ -27,9 +27,7 @@ def profile_mismatch(profile, a, remote):
         if (host.get("s3") or {}).get("uri", "").rstrip("/") != a.model_dir.rstrip("/"):
             return "was measured against another S3 prefix"
         return None
-    if BENCH_DIR not in sys.path:
-        sys.path.insert(0, BENCH_DIR)
-    from calibrate import fs_type
+    from .calibration.host import fs_type
     mount = fs_type(a.model_dir)["mount"]
     measured = (host.get("storage") or {}).get("mount")
     if measured != mount:
