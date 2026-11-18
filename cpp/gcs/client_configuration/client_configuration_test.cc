@@ -115,22 +115,19 @@ class GcsCredentials : public ::testing::Test
     {
         _key_file = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"));
         _adc_file = std::make_unique<utils::temp::UnsetEnv>(std::string("GOOGLE_APPLICATION_CREDENTIALS"));
-        _emulator = std::make_unique<utils::temp::UnsetEnv>(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"));
-        _testbench = std::make_unique<utils::temp::UnsetEnv>(std::string("CLOUD_STORAGE_TESTBENCH_ENDPOINT"));
+        _anonymous = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"));
     }
 
     void TearDown() override
     {
-        _testbench.reset();
-        _emulator.reset();
+        _anonymous.reset();
         _adc_file.reset();
         _key_file.reset();
     }
 
     std::unique_ptr<utils::temp::UnsetEnv> _key_file;
     std::unique_ptr<utils::temp::UnsetEnv> _adc_file;
-    std::unique_ptr<utils::temp::UnsetEnv> _emulator;
-    std::unique_ptr<utils::temp::UnsetEnv> _testbench;
+    std::unique_ptr<utils::temp::UnsetEnv> _anonymous;
 };
 
 TEST_F(GcsCredentials, Without_Variables_The_Sdk_Falls_Back_To_The_Metadata_Server)
@@ -185,47 +182,52 @@ TEST_F(GcsCredentials, An_Unreadable_Key_File_Fails_Configuration)
     EXPECT_THROW(ClientConfiguration(1), common::Exception);
 }
 
-// An emulator endpoint is authenticated with insecure credentials, set explicitly because the SDK
-// stopped applying its own: google-cloud-cpp 3.x maps them through a DefaultOptions overload that
-// drops its credentials argument, and the client then retries the metadata server for the whole
-// retry window without ever contacting the emulator.
-TEST_F(GcsCredentials, An_Emulator_Endpoint_Gets_Insecure_Credentials)
+// Anonymous access is set as an explicit credential option, because google-cloud-cpp 3.x applies
+// none of its own below storage::Client: it maps the credentials it builds through a
+// DefaultOptions overload that drops its credentials argument, falls back to application default
+// credentials, and a client without reachable metadata then spends its whole retry window asking
+// for a token.
+TEST_F(GcsCredentials, Anonymous_Credentials_Are_Set_As_An_Explicit_Option)
 {
-    utils::temp::Env emulator(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"), std::string("http://localhost:8000"));
+    utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string("True"));
 
     const auto configuration = ClientConfiguration(1);
 
     EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
-    EXPECT_NE(configuration.credentials.find("insecure"), std::string::npos) << configuration.credentials;
-    EXPECT_NE(configuration.credentials.find("http://localhost:8000"), std::string::npos) << configuration.credentials;
+    EXPECT_NE(configuration.credentials.find("anonymous"), std::string::npos) << configuration.credentials;
 }
 
-// The SDK accepts the older variable name too, in the same order it reads them.
-TEST_F(GcsCredentials, The_Testbench_Variable_Is_An_Emulator_Endpoint)
+// The values the Python package documents for the same variable, and the ones it rejects.
+TEST_F(GcsCredentials, The_Anonymous_Variable_Parses_Like_The_Python_Package)
 {
-    utils::temp::Env testbench(std::string("CLOUD_STORAGE_TESTBENCH_ENDPOINT"), std::string("http://localhost:9000"));
+    for (const auto & accepted : { "true", "True", "TRUE", "1" })
+    {
+        utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string(accepted));
+        EXPECT_TRUE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>()) << accepted;
+    }
+
+    for (const auto & rejected : { "false", "0", "", "yes" })
+    {
+        utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string(rejected));
+        EXPECT_FALSE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>()) << rejected;
+    }
+}
+
+// Anonymous wins over a key file, matching the Python package's precedence for the same pair.
+TEST_F(GcsCredentials, Anonymous_Takes_Precedence_Over_The_Key_File)
+{
+    utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string("True"));
+    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/nonexistent/key.json"));
 
     const auto configuration = ClientConfiguration(1);
 
     EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
-    EXPECT_NE(configuration.credentials.find("http://localhost:9000"), std::string::npos) << configuration.credentials;
+    EXPECT_NE(configuration.credentials.find("anonymous"), std::string::npos) << configuration.credentials;
 }
 
-// An explicit key file still wins over the emulator, matching the SDK's own precedence.
-TEST_F(GcsCredentials, The_Key_File_Takes_Precedence_Over_The_Emulator)
-{
-    utils::temp::Env emulator(std::string("CLOUD_STORAGE_EMULATOR_ENDPOINT"), std::string("http://localhost:8000"));
-    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/path/key.json"));
-
-    const auto source = credentials_source();
-
-    EXPECT_NE(source.find("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string::npos) << source;
-    EXPECT_EQ(source.find("insecure"), std::string::npos) << source;
-}
-
-// Without an emulator nothing is set here: the SDK's own lookup (ADC or the metadata server)
+// Without the variable nothing is set here: the SDK's own lookup (ADC or the metadata server)
 // stays in charge, exactly as before.
-TEST_F(GcsCredentials, No_Emulator_Leaves_The_Sdk_Lookup_Alone)
+TEST_F(GcsCredentials, No_Anonymous_Request_Leaves_The_Sdk_Lookup_Alone)
 {
     EXPECT_FALSE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>());
 }
