@@ -48,7 +48,7 @@ directory first on `PYTHONPATH`.
 # every single-process test that applies on this machine, including vLLM
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 
-# the distributed load on 8 ranks of this node
+# the distributed tests on 8 ranks of this node, one GPU each: the streamer, and vLLM with each loader
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
 
 # one test, with a streamer setting
@@ -58,7 +58,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--nproc N` | off | Run the distributed test on N ranks; without `--tests`, only that test |
+| `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |
@@ -85,6 +85,7 @@ again), so drift in the machine or the storage affects all of them alike.
 | `vllm_default` | A vLLM engine start with vLLM's default loader |
 | `vllm_streamer` | The same with `load_format="runai_streamer"` |
 | `vllm_instanttensor` | The same with `load_format="instanttensor"` |
+| `vllm_dist_default`, `vllm_dist_streamer`, `vllm_dist_instanttensor` | The three vLLM tests with tensor parallelism over `--nproc` ranks |
 
 Without `--tests`, the GPU tests run when a GPU is present, and only the
 streamer tests run for a model on S3. A vLLM test is left out, with a note,
@@ -104,6 +105,14 @@ loader, the streamer, and InstantTensor. Each is a fresh process on a cold
 page cache like every other test. They need a GPU, `vllm` installed
 (`pip install vllm`) and the model's `config.json` next to the weights;
 `vllm_instanttensor` also needs `pip install 'vllm[instanttensor]'`.
+
+With `--nproc N` the `vllm_dist_*` tests start vLLM with
+`tensor_parallel_size=N` under torchrun, using vLLM's external launcher, so
+every rank loads its share onto its own GPU. The streamer runs in its
+distributed mode there (`model_loader_extra_config={"distributed": true}`),
+which loads straight to the GPUs. The load time is the slowest rank's, and
+`gpu_gib` is the sum over the ranks. The model's attention head count has to
+be divisible by N.
 
 vLLM's default loader reads the weights in one thread unless its
 `enable_multithread_load` option is set, which this benchmark leaves off, as

@@ -8,7 +8,7 @@ import platform
 import subprocess
 import sys
 
-from . import CALIBRATE, DEFAULT_PROFILE, DIST, TESTS
+from . import CALIBRATE, DEFAULT_PROFILE, TESTS, is_dist
 
 
 def load_json(path):
@@ -71,14 +71,14 @@ def get_profile(a, remote):
 def ceilings_for(test, profile, remote=False, warm=False):
     """(name of the ceiling this test is scored against, or None; the ceilings it may be nearest to).
 
-    Host tests and the distributed test are scored against the storage: disk_direct_read_parallel,
+    Host tests and the distributed tests are scored against the storage: disk_direct_read_parallel,
     s3_get_parallel for an S3 source, host_memcpy_nt for a warm reload. A single-process GPU test is
     scored against the lower of that and h2d_pinned."""
     if not profile:
         return None, {}
     c = {k: v for k, v in profile["ceilings_gibps"].items() if v}
     storage = "s3_get_parallel" if remote else "host_memcpy_nt" if warm else "disk_direct_read_parallel"
-    if test != DIST and TESTS[test]["device"] == "cuda":
+    if not is_dist(test) and TESTS[test]["device"] == "cuda":
         scored = [k for k in (storage, "h2d_pinned") if k in c]
         return (min(scored, key=c.get) if scored else None), c
     # the profile's h2d numbers are one stream to GPU 0, which says nothing about N ranks at once

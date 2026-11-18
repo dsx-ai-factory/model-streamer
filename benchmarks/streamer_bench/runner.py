@@ -9,8 +9,9 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 
-from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S, VLLM
+from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S, VLLM, is_dist
 from .files import evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
@@ -31,7 +32,7 @@ def vllm_unavailable(a, test):
         return f"vllm is not installed in this Python ({sys.executable}): pip install vllm"
     if not os.path.exists(os.path.join(a.model_dir, "config.json")):
         return f"the model's config.json is not in {a.model_dir}, next to the weights"
-    if test == "vllm_instanttensor" and importlib.util.find_spec("instanttensor") is None:
+    if "instanttensor" in test and importlib.util.find_spec("instanttensor") is None:
         return "instanttensor is not installed: pip install 'vllm[instanttensor]'"
     return None
 
@@ -49,16 +50,14 @@ def describe_machine(a, remote):
 
 
 def select_tests(a, remote):
-    """The tests to run: --tests, else only the distributed one with --nproc, else all that apply here.
-    The vLLM tests are among those when they can run; when they cannot, they are left out with a note
-    unless --tests asked for them."""
+    """The tests to run: --tests, else the distributed ones with --nproc, else all single-process ones
+    that apply here. The vLLM tests are among those when they can run; when they cannot, they are left
+    out with a note unless --tests asked for them."""
     if a.tests:
         names = a.tests.split(",")
-    elif a.nproc:
-        names = [DIST]
     else:
         gpu = gpu_count() > 0
-        names = [t for t in TESTS if t != DIST and (gpu or TESTS[t]["device"] == "cpu")]
+        names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
         if remote:
             names = [n for n in names if n.startswith("streamer")]
         for n in [n for n in names if n in VLLM]:
@@ -71,10 +70,11 @@ def select_tests(a, remote):
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
         if remote and not n.startswith("streamer"):
             sys.exit(f"{n} reads local files; only the streamer tests apply to an s3:// model")
-    if DIST in names and not a.nproc:
-        sys.exit(f"{DIST} needs --nproc N")
-    if a.nproc and DIST not in names:
-        sys.exit(f"--nproc is for {DIST}, which --tests leaves out")
+    dist = [n for n in names if is_dist(n)]
+    if dist and not a.nproc:
+        sys.exit(f"{dist[0]} needs --nproc N")
+    if a.nproc and not dist:
+        sys.exit("--nproc is for the distributed tests, which --tests leaves out")
     if a.nproc and a.nproc > gpu_count():  # each rank loads onto its own GPU; NCCL does not share one
         sys.exit(f"--nproc {a.nproc} needs {a.nproc} GPUs, one per rank; this machine has {gpu_count()}")
     for n in names:
@@ -84,26 +84,37 @@ def select_tests(a, remote):
 
 
 def launch(cmd, env, timeout):
-    """(stdout, stderr, None or why it was killed). The whole process group goes on a timeout."""
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-                         start_new_session=True)
+    """(stdout, stderr, None or why it was killed). The whole process group goes on a timeout.
 
-    def kill():
+    The output goes to files, not pipes: a process the measured one leaves behind would hold a pipe open
+    and stall the benchmark, and in some containers such a process cannot be signalled either."""
+    with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
+        p = subprocess.Popen(cmd, stdout=out, stderr=err, env=env, start_new_session=True)
+
+        def kill():
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                p.kill()
+            try:
+                p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass  # it could not be signalled; go on without it
+
+        def text():
+            out.seek(0)
+            err.seek(0)
+            return out.read(), err.read()
+
         try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            p.kill()
-
-    try:
-        out, err = p.communicate(timeout=timeout)
-        return out, err, None
-    except subprocess.TimeoutExpired:
-        kill()
-        out, err = p.communicate()
-        return out, err, f"timed out after {timeout} s"
-    except BaseException:
-        kill()
-        raise
+            p.wait(timeout=timeout)
+            return (*text(), None)
+        except subprocess.TimeoutExpired:
+            kill()
+            return (*text(), f"timed out after {timeout} s")
+        except BaseException:
+            kill()
+            raise
 
 
 def run_once(a, test, files, remote, env, tag):
@@ -121,7 +132,7 @@ def run_once(a, test, files, remote, env, tag):
     if a.ref_dir:
         args += ["--ref-dir", a.ref_dir]
     cmd = [sys.executable]
-    if test == DIST:
+    if is_dist(test):
         cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]
     out, err, killed = launch(cmd + args, env, TIMEOUT_S)
     if a.log_dir:
@@ -136,7 +147,9 @@ def run_once(a, test, files, remote, env, tag):
         took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)
         if not took:
             return {"failed": "vLLM started but logged no 'Model loading took ... seconds'"}, None
-        raw["gpu_gib"], raw["load_s"] = float(took[-1][0]), round(float(took[-1][1]), 3)
+        took = took[-(a.nproc if is_dist(test) else 1):]  # one line per rank: all GPUs, the slowest rank
+        raw["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
+        raw["load_s"] = round(max(float(s) for _, s in took), 3)
         if raw["gpu_gib"] < 0.9 * raw["gib"]:  # the weights did not all reach the GPU, or were converted
             warnings.append(f"vLLM reports {raw['gpu_gib']} GiB on the GPU for {raw['gib']} GiB of weights")
     ranks = raw if test == DIST else [raw]

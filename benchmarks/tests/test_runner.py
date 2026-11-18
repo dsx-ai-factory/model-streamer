@@ -40,6 +40,10 @@ def child_output(cmd, load_s=5.0, errors=()):
                "versions": {"vllm": "0.33.0", "runai-model-streamer": "0.17.1"},
                "pkg": PKG if test == "vllm_streamer" else None}
         log = f"INFO Model loading took 40.2 GiB memory and {took:.6f} seconds"
+        if "_dist_" in test:  # one line per rank
+            took = 9.0 if "streamer" in test else 30.0
+            log = "\n".join(f"(rank {i}) Model loading took 20.1 GiB memory and {took + i:.6f} seconds"
+                            for i in range(2))
     return "RESULT " + json.dumps(one), log, None
 
 
@@ -109,7 +113,7 @@ class RunnerTest(unittest.TestCase):
             self.assertIn("No machine profile was used", f.read())
 
     def test_distributed_runs_under_torchrun(self):
-        code, out = self.run_bench(gpus=2, nproc=2, env=["X=1"])
+        code, out = self.run_bench(gpus=2, nproc=2, env=["X=1"], tests=DIST)
         self.assertEqual(code, 0)
         cmd, env = self.calls[0]
         self.assertIn("torch.distributed.run", cmd)
@@ -170,6 +174,7 @@ class RunnerTest(unittest.TestCase):
         self.run_bench(gpus=1, repeats=1)
         self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cpu_notowned", "streamer_cuda", "safeopen_page_in",
                                       "safeopen_to_cuda", "vllm_default", "vllm_streamer", "vllm_instanttensor"])
+        self.assertFalse(any("torch.distributed.run" in c for c, _ in self.calls))
 
     def test_one_vllm_loader_missing_leaves_out_only_that_test(self):
         with mock.patch.object(runner.importlib.util, "find_spec",
@@ -193,8 +198,21 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("needs 8 GPUs, one per rank; this machine has 1", self.run_bench(gpus=1, nproc=8)[0])
 
     def test_nproc_alone_runs_only_the_distributed_test(self):
-        self.run_bench(gpus=8, nproc=2, repeats=1)
+        self.run_bench(gpus=8, nproc=2, repeats=1, tests=DIST)
         self.assertEqual(self.ran(), [DIST])
+
+    def test_nproc_runs_the_distributed_tests(self):
+        code, out = self.run_bench(gpus=8, nproc=2, repeats=1)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.ran(), [DIST, "vllm_dist_default", "vllm_dist_streamer", "vllm_dist_instanttensor"])
+        self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
+        streamer = out["results"][2]
+        # the slowest rank's time, and the GPU memory of all ranks
+        self.assertEqual(streamer["runs"], [{"load_s": 10.0, "gibps": 4.0, "startup_s": 60.0, "gpu_gib": 40.2}])
+        self.assertEqual(streamer["ceiling"]["name"], "disk_direct_read_parallel")
+        self.assertEqual(out["vllm_dist_speedup"], 3.1)
+        with open(os.path.splitext(self.out)[0] + ".html") as f:
+            self.assertIn("vLLM distributed model load by loader (2 ranks)", f.read())
 
     def test_wrong_data_fails_the_test(self):
         code, out = self.run_bench(launch=lambda cmd: child_output(cmd, errors=["w: data differs from safetensors"]),

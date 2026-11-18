@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The measured process: one load, timed and validated, reported as a RESULT line on stdout."""
-import gc
 import json
 import os
 import resource
@@ -9,7 +8,7 @@ import sys
 import time
 import zlib
 
-from . import DIST, GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM
+from . import DIST, GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM, is_dist
 from .files import is_remote, model_files, read_header, resident
 
 
@@ -238,24 +237,41 @@ def vllm(a):
     it from the output. The tensors are not validated; a run is good when the engine came up.
 
     Eager mode and no tokenizer keep the start short and need only config.json next to the weights;
-    neither changes how the weights are loaded."""
+    neither changes how the weights are loaded. The engine runs in this process, so that leaving with
+    os._exit frees the GPU without a child engine to shut down.
+
+    A distributed test is one rank of torchrun: tensor parallelism over the ranks with vLLM's
+    external launcher, and for the streamer its distributed mode, which loads straight to the GPUs."""
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    import inspect
     from vllm import LLM
+    from vllm.engine.arg_utils import EngineArgs
     _, ref = model_files(a)
     expected, _ = expected_tensors(ref)
     nbytes = sum(n for _, n in expected.values())
-    streamer = TESTS[a.child]["load_format"] == "runai_streamer"
+    load_format = TESTS[a.child]["load_format"]
+    streamer = load_format == "runai_streamer"
+
+    options = dict(model=a.model_dir, load_format=load_format, enforce_eager=True, skip_tokenizer_init=True)
+    if is_dist(a.child):
+        options.update(tensor_parallel_size=int(os.environ["WORLD_SIZE"]),
+                       distributed_executor_backend="external_launcher")
+        if streamer:
+            options["model_loader_extra_config"] = {"distributed": True}
+    if "kernel_config" in inspect.signature(EngineArgs).parameters:
+        options["kernel_config"] = {"enable_flashinfer_autotune": False}  # minutes of tuning after the load
 
     t0 = time.perf_counter()
-    llm = LLM(model=a.model_dir, load_format=TESTS[a.child]["load_format"], enforce_eager=True,
-              skip_tokenizer_init=True)
+    llm = LLM(**options)  # noqa: F841 - kept alive until the result is out
     startup = time.perf_counter() - t0
-    result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
-              "pkg": streamer_pkg() if streamer else None, "versions": versions(), "gpus": gpu_names(),
-              "errors": []}
-    print("RESULT " + json.dumps(result), flush=True)
-    # a normal exit, not os._exit: the engine process has to be shut down or it keeps the GPU
-    del llm
-    gc.collect()
+    if int(os.environ.get("RANK", "0")) == 0:
+        result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
+                  "pkg": streamer_pkg() if streamer else None, "versions": versions(), "gpus": gpu_names(),
+                  "errors": []}
+        print("RESULT " + json.dumps(result), flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)  # skip the engine's teardown; processes in some pods cannot signal each other
 
 
 def main(a):

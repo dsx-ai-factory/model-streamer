@@ -107,19 +107,24 @@ def _runs(results):
     return "".join(out)
 
 
-def _vllm(out):
-    """The vLLM section: the same model loaded by vLLM with each of its loaders that was run."""
-    results = [s for s in out["results"] if s["test"].startswith("vllm_")]
+def _vllm(out, dist):
+    """A vLLM section: the same model loaded by vLLM with each of its loaders that was run, on one GPU
+    or (dist) with tensor parallelism over the ranks."""
+    results = [s for s in out["results"]
+               if s["test"].startswith("vllm_") and s["test"].startswith("vllm_dist_") == dist]
     if not results:
         return ""
-    speedup = out.get("vllm_speedup")
+    speedup = out.get("vllm_dist_speedup" if dist else "vllm_speedup")
     headline = (f"With the streamer vLLM loads the model {speedup}x as fast as with its default loader."
                 if speedup else "")
     version = out.get("versions", {}).get("vllm", "")
-    return (f"<h2>vLLM model load by loader</h2>"
+    title = (f"vLLM distributed model load by loader ({out['settings'].get('nproc')} ranks)" if dist
+             else "vLLM model load by loader")
+    return (f"<h2>{title}</h2>"
             f'<p class="meta">{escape(headline)}</p>{_chart(results)}'
             f'<p class="note">vLLM {escape(version)}. The time is the one vLLM logs as "Model loading took", '
-            f"which covers building the model and loading its weights onto the GPU. "
+            f"which covers building the model and loading its weights onto the GPU"
+            f"{'; with several ranks it is the slowest rank' if dist else ''}. "
             f"The tensors are not validated in these tests.</p>")
 
 
@@ -191,7 +196,7 @@ def render(out):
 <h2>Load rate per test</h2>
 {_chart([s for s in out["results"] if not s["test"].startswith("vllm_")])}
 <p class="note">{note}</p>
-{_vllm(out)}
+{_vllm(out, False)}{_vllm(out, True)}
 <h2>All numbers</h2>
 {_table(out["results"])}
 <h2>Runs</h2>

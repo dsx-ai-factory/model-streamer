@@ -34,11 +34,13 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
     return s
 
 
-def vllm_speedup(results):
-    """How many times faster vLLM loads the model with the streamer than with its default loader."""
+def vllm_speedup(results, prefix="vllm_"):
+    """How many times faster vLLM loads the model with the streamer than with its default loader;
+    prefix "vllm_dist_" for the distributed pair."""
     by = {s["test"]: s for s in results if "load_s" in s}
-    if "vllm_default" in by and "vllm_streamer" in by and by["vllm_streamer"]["load_s"]:
-        return round(by["vllm_default"]["load_s"] / by["vllm_streamer"]["load_s"], 2)
+    default, streamer = by.get(prefix + "default"), by.get(prefix + "streamer")
+    if default and streamer and streamer["load_s"]:
+        return round(default["load_s"] / streamer["load_s"], 2)
     return None
 
 
@@ -56,11 +58,12 @@ def print_table(results, pkgs):
               f"{(str(round(c['pct'])) + '%') if c else 'n/a':>7s} "
               f"{_cell(s.get('cpu_s_per_gib'), '10.2f')} {_cell(s.get('peak_rss_gib'), '8.1f')}  "
               f"{'yes' if s['ok'] else 'NO ':5s}  {c['nearest'] if c else 'n/a'}")
-    speedup = vllm_speedup(results)
-    if speedup:
-        by = {s["test"]: s for s in results}
-        print(f"vLLM model load: {by['vllm_streamer']['load_s']} s with the streamer, "
-              f"{by['vllm_default']['load_s']} s with the default loader ({speedup}x)")
+    by = {s["test"]: s for s in results}
+    for prefix, what in (("vllm_", "vLLM model load"), ("vllm_dist_", "vLLM distributed model load")):
+        speedup = vllm_speedup(results, prefix)
+        if speedup:
+            print(f"{what}: {by[prefix + 'streamer']['load_s']} s with the streamer, "
+                  f"{by[prefix + 'default']['load_s']} s with the default loader ({speedup}x)")
 
 
 def _cell(value, spec):
@@ -87,8 +90,9 @@ def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, pro
     out = {"schema": 2, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "host": platform.node(),
            "streamer": pkgs, "versions": versions, "environment": environment, "model": model,
            "settings": settings, "calibration": calibration_of(profile, profile_path), "results": results}
-    if vllm_speedup(results):
-        out["vllm_speedup"] = vllm_speedup(results)
+    for key, prefix in (("vllm_speedup", "vllm_"), ("vllm_dist_speedup", "vllm_dist_")):
+        if vllm_speedup(results, prefix):
+            out[key] = vllm_speedup(results, prefix)
     with open(a.out, "w") as f:
         json.dump(out, f, indent=2)
     print(f"wrote {a.out} and {html.write(out, a.out)}")
