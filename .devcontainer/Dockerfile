@@ -107,31 +107,39 @@ COPY --from=gcs-builder /opt/gcs-sdk /opt/gcs-sdk
 COPY .devcontainer/scripts/build-io-libs.sh /tmp/build-io-libs.sh
 RUN bash /tmp/build-io-libs.sh "$TARGETARCH"
 
-# Python 3.11 for builds and tests, from the deadsnakes PPA. The base image stays
-# Ubuntu 20.04 on purpose: the shared libraries released from this image are compiled
-# against its glibc 2.31, and a newer base would silently raise their ELF version
-# requirements (for example to pthread symbols at GLIBC_2.34) past the documented
-# manylinux_2_28 baseline - see "Linux wheel compatibility" in CONTRIBUTING.md. The
-# interpreter does not enter the wheels (they are py3-none), so it can move freely:
-# Python 3.11 lifts the torch ceiling the tests had on 3.8 (torch 2.4.1, whose gloo
-# process-group destructor bug made the distributed tests flaky).
+# Python 3.11 for builds and tests, compiled from source like this image's other
+# dependencies - the deadsnakes PPA publishes no arm64 binaries, and both architecture
+# images build from this one file. The base image stays Ubuntu 20.04 on purpose: the
+# shared libraries released from this image are compiled against its glibc 2.31, and a
+# newer base would silently raise their ELF version requirements (for example to pthread
+# symbols at GLIBC_2.34) past the documented manylinux_2_28 baseline - see "Linux wheel
+# compatibility" in CONTRIBUTING.md. The interpreter does not enter the wheels (they are
+# py3-none), so it can move freely: Python 3.11 lifts the torch ceiling the tests had on
+# 3.8 (torch 2.4.1, whose gloo process-group destructor bug made the distributed tests
+# flaky). No --enable-optimizations: PGO/LTO buys interpreter speed this image does not
+# need at several times the build time. `make altinstall` leaves /usr/bin alone and
+# installs /usr/local/bin/python3.11 with pip via --with-ensurepip.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3.11 \
-    python3.11-dev \
-    python3.11-venv \
-    python3.11-distutils \
-    && rm -rf /var/lib/apt/lists/*
+    zlib1g-dev \
+    libffi-dev \
+    libbz2-dev \
+    liblzma-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -qO /tmp/Python-3.11.14.tgz https://www.python.org/ftp/python/3.11.14/Python-3.11.14.tgz \
+    && echo "563d2a1b2a5ba5d5409b5ecd05a0e1bf9b028cf3e6a6f0c87a5dc8dc3f2d9182  /tmp/Python-3.11.14.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/Python-3.11.14.tgz -C /tmp \
+    && cd /tmp/Python-3.11.14 \
+    && ./configure --with-ensurepip=install \
+    && make -j"$(nproc)" \
+    && make altinstall \
+    && cd / && rm -rf /tmp/Python-3.11.14 /tmp/Python-3.11.14.tgz
 
 # `make build` runs `setup.py bdist_wheel` directly, with no PEP 517 isolation, so it never
 # reads py/*/pyproject.toml's setuptools pin (a floor of 70.1). Keep this in sync with that
 # pin by hand. Exact pin, not a floor, to match this file's other dependencies; the same
 # versions the 3.8 interpreter above pins, all of which also support Python 3.11.
 # The development tools reinstall here so they import from the interpreter that runs them.
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 10 \
-    && python3.11 -m ensurepip --upgrade \
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.11 10 \
     && python3.11 -m pip install --upgrade "pip==25.0.1" \
     && python3.11 -m pip install "setuptools==75.3.4" "wheel==0.45.1" \
     && python3.11 -m pip install \
