@@ -13,10 +13,12 @@ GiB, peak memory, and the share of the machine's ceiling that was reached.
 ## Requirements
 
 - Linux
-- Python with `runai-model-streamer` (which brings `torch`) and `safetensors`:
-  `pip install runai-model-streamer safetensors`. `bench.py` checks for them
-  and names what is missing.
-- `vllm`, for the vLLM tests, and `instanttensor` for `vllm_instanttensor`
+- The packages in [`requirements.txt`](requirements.txt):
+  `pip install -r benchmarks/requirements.txt`
+  - `runai-model-streamer` (which brings `torch`) and `safetensors` are
+    required; `bench.py` checks for them and says what is missing.
+  - `vllm[instanttensor]` is for the vLLM tests. Without it they are left out
+    and the rest still runs.
 - torch built with NCCL and one GPU per rank, for the distributed test
 - [`s5cmd`](https://github.com/peak/s5cmd) on `PATH`, only to calibrate S3
 
@@ -37,6 +39,7 @@ directory first on `PYTHONPATH`.
 | `streamer_bench/report.py` | Summary per test, the table and the results file |
 | `streamer_bench/html.py` | The results as a self-contained HTML page |
 | `streamer_bench/calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
+| `requirements.txt` | The packages the benchmark loads with |
 | `tests/` | Unit tests of the runner, the report and the calibration helpers |
 
 ## Running a benchmark

@@ -14,6 +14,7 @@ The tests, the machine profile and the results file are described in README.md n
 """
 import argparse
 import importlib.util
+import os
 import sys
 
 from streamer_bench import DEFAULT_PROFILE, DIST, TESTS
@@ -25,7 +26,7 @@ def check_installed():
     missing = [pip for module, pip in needed.items() if importlib.util.find_spec(module) is None]
     if missing:
         sys.exit(f"bench.py needs {', '.join(missing)} in this Python ({sys.executable}):\n"
-                 f"    pip install {' '.join(missing)}")
+                 f"    pip install -r {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements.txt')}")
 
 
 def main():
