@@ -13,11 +13,13 @@
 #include "posix_io/completion_mapper/completion_mapper.h"
 
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <utility>
 
@@ -138,6 +140,10 @@ AsyncIoWorker::~AsyncIoWorker()
             if (batch_fd.fd >= 0)
             {
                 ::close(batch_fd.fd);
+            }
+            for (const int extra_fd : batch_fd.extra)
+            {
+                ::close(extra_fd);
             }
         }
     }
@@ -347,6 +353,7 @@ void AsyncIoWorker::enqueue(Workload && workload)
     Inflight & wl = it->second;
     wl.workload = std::move(workload);
     wl.fds.resize(wl.workload.batches().size());   // nothing is opened yet
+    _primaries_reserved += wl.fds.size();
 
     size_t queued_chunks = 0;
 
@@ -408,12 +415,24 @@ void AsyncIoWorker::enqueue(Workload && workload)
         for (const auto & chunk : batch.chunks)
         {
             const auto id = _chunks.add(chunk, workload_id, batch_index);
-            _queue->enqueue(QueuedChunk{ id, chunk.offset, chunk.bytesize, chunk.buffer }, 1);   // cost 1
+            const QueuedChunk queued{ id, chunk.offset, chunk.bytesize, chunk.buffer };
+            if (wl.workload.file_depth > 0)
+            {
+                hold_back(batch.path, wl.workload.file_depth, queued);
+            }
+            else
+            {
+                _queue->enqueue(queued, 1);   // cost 1
+            }
             ++queued_chunks;
+            ++wl.fds[batch_index].pending_chunks;
         }
     }
 
     wl.remaining_chunks = queued_chunks;
+
+    // Now rather than on the next pump, so the base sees chunks to submit for this workload.
+    fill_from_backlog();
 
     // Nothing to read: every task was zero-sized and has already been answered.
     if (wl.remaining_chunks == 0)
@@ -554,6 +573,26 @@ AsyncIoCounters AsyncIoWorker::counters() const
 size_t AsyncIoWorker::bytes_read() const
 {
     return _bytes_read.load(std::memory_order_relaxed);
+}
+
+size_t AsyncIoWorker::extra_fd_budget(uint64_t soft_limit, size_t primaries, size_t extras_open)
+{
+    const uint64_t quota = soft_limit / 4;
+    const uint64_t used = static_cast<uint64_t>(primaries) + extras_open;
+    return quota > used ? static_cast<size_t>(std::min<uint64_t>(quota - used, SIZE_MAX)) : 0;
+}
+
+void AsyncIoWorker::close_extras(BatchFd & batch_fd)
+{
+    for (const int extra_fd : batch_fd.extra)
+    {
+        ::close(extra_fd);
+    }
+
+    ASSERT(_extra_fds_open >= batch_fd.extra.size()) << "closing optional descriptors never counted";
+    _extra_fds_open -= batch_fd.extra.size();
+    batch_fd.extra.clear();
+    batch_fd.next = 0;
 }
 
 posix_io::FileRef AsyncIoWorker::file_of(const InflightChunk & entry) const
@@ -726,6 +765,28 @@ common::ResponseCode AsyncIoWorker::demote_to_buffered(const InflightChunk & ent
         batch_fd.fd = fd;
     }
 
+    // The extra descriptors go buffered the same way and for the same reason: requests staged on
+    // their numbers must run buffered too. Pointed at the one buffered open, which they may share.
+    for (const int extra_fd : batch_fd.extra)
+    {
+        // Retried on EINTR: the primary is already buffered, so giving up on a signal would fail a
+        // file that is still readable.
+        int replaced;
+        do
+        {
+            replaced = ::dup2(batch_fd.fd, extra_fd);
+        } while (replaced < 0 && errno == EINTR);
+
+        if (replaced < 0)
+        {
+            // A direct descriptor would remain under a batch about to be marked buffered, which no
+            // completion mapping describes. Failing the file is the honest answer.
+            LOG(ERROR) << "Cannot replace a direct descriptor for " << path << " with a buffered"
+                       << " one: " << std::strerror(errno);
+            return common::ResponseCode::FileAccessError;
+        }
+    }
+
     batch_fd.direct = false;
 
     // Remembered for the whole mount, not just this file - see _direct_refused. One engine per mount
@@ -756,7 +817,14 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
 
     if (entry.fd >= 0)
     {
-        return entry.fd;
+        if (entry.extra.empty())
+        {
+            return entry.fd;
+        }
+
+        // Dealt in turn, so reads in flight at once spread over every descriptor of the file.
+        const unsigned slot = entry.next++ % (entry.extra.size() + 1);
+        return slot == 0 ? entry.fd : entry.extra[slot - 1];
     }
 
     const auto & path = wl.workload.batches()[batch_index].path;
@@ -767,6 +835,55 @@ int AsyncIoWorker::fd_for(Inflight & wl, unsigned batch_index, size_t file_offse
         if (entry.fd >= 0)
         {
             entry.direct = true;
+
+            // Opened together with the first. All of it is optional: a failed open, a different
+            // file, or no budget left only means fewer descriptors to share the reads, never a
+            // wrong read or a failed one, so each of those stops here.
+            const size_t wanted = wl.workload.direct_fds > 1 ? wl.workload.direct_fds - 1 : 0;
+            size_t allowed = 0;
+            if (wanted > 0)
+            {
+                struct rlimit limit{};
+                const uint64_t soft = ::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY
+                                    ? static_cast<uint64_t>(limit.rlim_cur) : UINT64_MAX;
+                allowed = std::min(wanted, extra_fd_budget(soft, _primaries_reserved, _extra_fds_open));
+            }
+
+            struct stat primary{};
+            if (allowed > 0 && ::fstat(entry.fd, &primary) != 0)
+            {
+                allowed = 0;
+            }
+
+            // Room first, so a descriptor is never open without a place that will close it.
+            entry.extra.reserve(allowed);
+            for (size_t i = 0; i < allowed; ++i)
+            {
+                const int extra_fd = utils::Fd::open_for_read(path, O_DIRECT);
+                if (extra_fd < 0)
+                {
+                    LOG(DEBUG) << "Reading " << path << " through " << i + 1 << " direct descriptors, not "
+                               << wanted + 1 << ": " << std::strerror(errno);
+                    break;
+                }
+
+                // The same file, or reads dealt to it would mix bytes of two files: the path can
+                // be replaced between two opens.
+                struct stat other{};
+                if (::fstat(extra_fd, &other) != 0 || other.st_dev != primary.st_dev || other.st_ino != primary.st_ino)
+                {
+                    LOG(WARNING) << path << " changed while it was being opened; reading it through "
+                                 << i + 1 << " descriptors";
+                    ::close(extra_fd);
+                    break;
+                }
+
+                entry.extra.push_back(extra_fd);   // reserved above, so this cannot throw
+                ++_extra_fds_open;
+            }
+
+            // This read takes `fd`, so the turn starts at the first extra one.
+            entry.next = 1;
             return entry.fd;
         }
 
@@ -801,7 +918,7 @@ void AsyncIoWorker::stage_pending(posix_io::RequestId id)
     {
         // Its workload was aborted while this sat in the queue. Nothing left to answer for it; give
         // back the window credit and forget it.
-        _queue->complete(1);
+        free_slot(id);
         _chunks.release(id);
         return;
     }
@@ -1337,7 +1454,89 @@ unsigned AsyncIoWorker::waiting_for_a_buffer() const
 
 bool AsyncIoWorker::has_deferred_work() const
 {
-    return _copies_issued > 0 || !_waiting.empty();
+    return _copies_issued > 0 || !_waiting.empty() || !_backlog.empty();
+}
+
+void AsyncIoWorker::pre_pump()
+{
+    fill_from_backlog();
+}
+
+void AsyncIoWorker::hold_back(const std::string & path, unsigned depth, const QueuedChunk & chunk)
+{
+    // Behind the file's earlier chunks, wherever that file sits in the backlog, so one file's chunks
+    // keep their order across workloads.
+    for (auto & file : _backlog)
+    {
+        if (file.path == path)
+        {
+            file.chunks.push_back(chunk);
+            return;
+        }
+    }
+
+    _backlog.push_back(FileBacklog{ path, depth, { chunk } });
+}
+
+void AsyncIoWorker::fill_from_backlog()
+{
+    if (_queue == nullptr)
+    {
+        return;
+    }
+
+    // Room is what the window can still take. Chunks already moved to the queue count against it,
+    // so the backlog never runs ahead of the window and a later file is chosen only when a slot is
+    // actually free.
+    while (!_backlog.empty() && _queue->inflight() + _queue->pending() < _queue->capacity())
+    {
+        // The oldest file still under its cap. Few files are ever queued at once, so a scan is cheap.
+        auto file = _backlog.begin();
+        for (; file != _backlog.end(); ++file)
+        {
+            if (_file_reads[file->path] < file->depth)
+            {
+                break;
+            }
+        }
+
+        if (file == _backlog.end())
+        {
+            return;   // every queued file is at its cap; a completion will free one
+        }
+
+        const auto chunk = file->chunks.front();
+        file->chunks.pop_front();
+
+        ++_file_reads[file->path];
+        _counted_against.emplace(chunk.id, file->path);
+        _queue->enqueue(chunk, 1);   // cost 1
+
+        if (file->chunks.empty())
+        {
+            _backlog.erase(file);
+        }
+    }
+}
+
+void AsyncIoWorker::free_slot(posix_io::RequestId id)
+{
+    _queue->complete(1);
+
+    const auto counted = _counted_against.find(id);
+    if (counted == _counted_against.end())
+    {
+        return;   // not read through the backlog
+    }
+
+    const auto reads = _file_reads.find(counted->second);
+    ASSERT(reads != _file_reads.end() && reads->second > 0)
+        << "freeing a slot of " << counted->second << " that holds none";
+    if (--reads->second == 0)
+    {
+        _file_reads.erase(reads);
+    }
+    _counted_against.erase(counted);
 }
 
 void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode ret)
@@ -1364,7 +1563,7 @@ void AsyncIoWorker::complete_chunk(posix_io::RequestId id, common::ResponseCode 
                 // The read is done with its slot: the bytes are in pinned host memory and the window
                 // means reads in flight. Holding it until the copy retired cost a read its place,
                 // which is the whole reason the pool is no longer sized by the window.
-                _queue->complete(1);
+                free_slot(id);
                 return;
             }
 
@@ -1395,7 +1594,7 @@ void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode r
     // was issued gave its slot back when the read landed.
     if (free_slot)
     {
-        _queue->complete(1);
+        this->free_slot(id);
     }
 
     const auto wlit = _inflight.find(workload_id);
@@ -1429,6 +1628,16 @@ void AsyncIoWorker::account_chunk(posix_io::RequestId id, common::ResponseCode r
         {
             wl.error_by_file_index.emplace(batch.file_index, ret);   // first error per file
         }
+    }
+
+    // This batch's last chunk: nothing staged or in flight names its descriptors any more, so the
+    // optional ones go now rather than when the workload ends - a workload of many files would
+    // otherwise hold every file's extras at once.
+    BatchFd & batch_fd = wl.fds[batch_index];
+    ASSERT(batch_fd.pending_chunks > 0) << "completing a chunk of a batch with none outstanding";
+    if (--batch_fd.pending_chunks == 0)
+    {
+        close_extras(batch_fd);
     }
 
     // Once per chunk, after its tasks are answered. Counting chunks rather than tasks keeps this
@@ -1495,7 +1704,11 @@ void AsyncIoWorker::finalize(InflightMap::iterator it, common::ResponseCode code
         {
             ::close(batch_fd.fd);
         }
+        close_extras(batch_fd);
     }
+
+    ASSERT(_primaries_reserved >= it->second.fds.size()) << "releasing descriptors never reserved";
+    _primaries_reserved -= it->second.fds.size();
 
     _inflight.erase(it);
 }
@@ -1580,6 +1793,12 @@ void AsyncIoWorker::abort_all(common::ResponseCode code)
     {
         _queue->clear();
     }
+
+    // The backlog's chunks belong to the workloads finalized below, and _queue->clear() just released
+    // every slot the window held, so the per-file counts go with them.
+    _backlog.clear();
+    _file_reads.clear();
+    _counted_against.clear();
 
     // Then wait, and only then report. The order is the whole fix: report-then-abandon declares
     // buffers free while the kernel may still write to them.

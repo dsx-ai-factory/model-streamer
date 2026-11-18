@@ -72,6 +72,11 @@ class FsAsyncRouter
 
         // Whether each group's direct reads go to io-wq. See AsyncIoConfig::async_direct.
         std::vector<bool> async_direct;
+
+        // Whether each group's files are spread over several direct descriptors and capped in reads
+        // per file (Workload::direct_fds, Workload::file_depth). NFS with the switch on - see
+        // spreads_reads().
+        std::vector<bool> spreads;
     };
 
     // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
@@ -95,6 +100,11 @@ class FsAsyncRouter
     Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
                   common::Device destination, const RegisterPolicy & registers = nullptr,
                   bool direct_async = true);
+
+    // Whether reads on a mount of this type are spread: several direct descriptors per file and a cap
+    // on the reads of one file in flight. NFS only, matched as a prefix so `nfs4` counts. Its direct
+    // reads go to io-wq as well, which is what makes the descriptors and the cap matter.
+    static bool spreads_reads(const std::string & fs_type);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
