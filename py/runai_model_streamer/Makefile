@@ -18,8 +18,12 @@ FS_STRATEGY ?= sync_buffered
 
 .PHONY: install_dev_dep build mock real test test-unit test-unit-real test-unit-real-installed test-dist clean
 
+# The floor is not a version choice - pip takes the newest CPU wheel for the running
+# interpreter anyway - but a tripwire: on an interpreter old enough to resolve torch
+# below 2.6 (Python 3.8 got 2.4.1, whose gloo process-group destructor bug made
+# test-dist flaky), fail here instead of in a flaky distributed test.
 install_dev_dep:
-	python3 -m pip download torch --index-url https://download.pytorch.org/whl/cpu --no-deps --dest ./dst && \
+	python3 -m pip download "torch>=2.6" --index-url https://download.pytorch.org/whl/cpu --no-deps --dest ./dst && \
 	python3 -m pip install ./dst/torch-*.whl && \
 	python3 -m pip install -r requirements.dev && \
 	rm -rf ./dst

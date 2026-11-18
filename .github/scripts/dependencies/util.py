@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Helpers shared by the collectors. Python 3.8 compatible: part of the collection runs in the
-devcontainer, whose Python is 3.8."""
+devcontainer, and the host floor documented in README.md is Python 3.8."""
 
 import hashlib
 import json
