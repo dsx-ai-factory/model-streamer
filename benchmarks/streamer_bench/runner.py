@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""The benchmark itself: which tests to run, and one fresh measured process per run."""
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+
+from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S
+from .files import evict, is_remote, model_files, prime
+from .profile import get_profile
+from .report import report
+
+
+def gpu_count():
+    try:
+        import torch
+        return torch.cuda.device_count()
+    except Exception:
+        return 0
+
+
+def select_tests(a, remote):
+    """The tests to run: --tests, else only the distributed one with --nproc, else all that apply here."""
+    if a.tests:
+        names = a.tests.split(",")
+    elif a.nproc:
+        names = [DIST]
+    else:
+        gpu = gpu_count() > 0
+        names = [t for t in TESTS if t != DIST and (gpu or TESTS[t]["device"] == "cpu")]
+        if remote:
+            names = [n for n in names if n.startswith("streamer")]
+    for n in names:
+        if n not in TESTS:
+            sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
+        if remote and not n.startswith("streamer"):
+            sys.exit(f"{n} reads local files; only the streamer tests apply to an s3:// model")
+    if DIST in names and not a.nproc:
+        sys.exit(f"{DIST} needs --nproc N")
+    if a.nproc and DIST not in names:
+        sys.exit(f"--nproc is for {DIST}, which --tests leaves out")
+    return names
+
+
+def launch(cmd, env, timeout):
+    """(stdout, stderr, None or why it was killed). The whole process group goes on a timeout."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                         start_new_session=True)
+
+    def kill():
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            p.kill()
+
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return out, err, None
+    except subprocess.TimeoutExpired:
+        kill()
+        out, err = p.communicate()
+        return out, err, f"timed out after {timeout} s"
+    except BaseException:
+        kill()
+        raise
+
+
+def run_once(a, test, files, remote, env, tag):
+    """One measured process: (the run's record, facts about the model and the streamer). A run that gave
+    no result is ({"failed": why}, None). The record holds what differs from run to run; the measured
+    process's full record is in the log under --log-dir."""
+    warnings = []
+    if not remote:
+        left = prime(files) if a.warm else evict(files)
+        if a.warm and left < sum(os.path.getsize(f) for f in files):
+            warnings.append(f"only {left / GIB:.1f} GiB in the page cache after priming")
+        if left and not a.warm:
+            warnings.append(f"{left / GIB:.1f} GiB still in the page cache before the run")
+    args = [ENTRY, a.model_dir, "--child", test]
+    if a.ref_dir:
+        args += ["--ref-dir", a.ref_dir]
+    cmd = [sys.executable]
+    if test == DIST:
+        cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]
+    out, err, killed = launch(cmd + args, env, TIMEOUT_S)
+    if a.log_dir:
+        with open(os.path.join(a.log_dir, f"{tag.replace(' ', '-')}.log"), "w") as f:
+            f.write(out + "\n--- stderr ---\n" + err)
+    line = next((l for l in out.splitlines() if l.startswith("RESULT ")), None)
+    if killed or not line:
+        return {"failed": killed or (err or out)[-1500:]}, None
+
+    raw = json.loads(line[7:])
+    ranks = raw if test == DIST else [raw]
+    load_s = max(x["load_s"] for x in ranks)  # the slowest rank
+    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2),
+         "cpu_s": round(sum(x["cpu_s"] for x in ranks), 2),
+         "peak_rss_gib": max(x["peak_rss_gib"] for x in ranks)}
+    if test == DIST:
+        r["rank_s"] = [x["rank_s"] for x in ranks]
+        r["peak_gpu_gib"] = max(x["peak_gpu_gib"] for x in ranks)
+        if "[Distributed]" not in err + out:
+            warnings.append("the streamer logged no [Distributed] line")
+    errors = [e for x in ranks for e in x["errors"]]
+    if errors:
+        r["errors"] = errors
+    if warnings:
+        r["warnings"] = warnings
+    facts = {"gib": ranks[0]["gib"], "tensors": ranks[0]["tensors"], "pkg": ranks[0]["pkg"],
+             "fs_strategy": sorted(set(re.findall(r"Filesystem strategy: (\S+)", out + err)))}
+    return r, facts
+
+
+def main(a):
+    remote = is_remote(a.model_dir)
+    if remote and a.warm:
+        sys.exit("--warm applies to local files only")
+    files, _ = model_files(a)
+    names = select_tests(a, remote)
+
+    extra = {}
+    for kv in a.env:
+        k, sep, v = kv.partition("=")
+        if not sep:
+            sys.exit(f"--env {kv}: expected K=V")
+        extra[k] = v
+    env = dict(os.environ, RUNAI_STREAMER_LOG_LEVEL="INFO", RUNAI_STREAMER_LOG_TO_STDERR="1", **extra)
+    if a.log_dir:
+        os.makedirs(a.log_dir, exist_ok=True)
+
+    profile, profile_path = get_profile(a, remote)
+    if remote and profile and not profile["ceilings_gibps"].get("s3_get_parallel"):
+        print("warning: the profile has no s3_get_parallel; run calibrate.py with --s3-uri", file=sys.stderr)
+
+    runs_of = {n: [] for n in names}
+    strategy_of = {n: set() for n in names}
+    model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir)}
+    if a.ref_dir:
+        model["ref_dir"] = a.ref_dir
+    pkgs = set()
+    for rep in range(a.repeats):  # interleaved across the tests, so drift hits all alike
+        for name in names:
+            tag = f"{name} run {rep}"
+            r, facts = run_once(a, name, files, remote, env, tag)
+            runs_of[name].append(r)
+            if facts is None:
+                print(f"  {tag}: FAILED\n{r['failed']}", file=sys.stderr, flush=True)
+                continue
+            model.setdefault("gib", facts["gib"])
+            model.setdefault("tensors", facts["tensors"])
+            strategy_of[name].update(facts["fs_strategy"])
+            if facts["pkg"]:
+                pkgs.add(facts["pkg"])
+            print(f"  {tag}: {r['load_s']}s {r['gibps']} GiB/s"
+                  + (f" [{','.join(facts['fs_strategy'])}]" if facts["fs_strategy"] else "")
+                  + (f"  INVALID: {r['errors'][0]}" if "errors" in r else ""), flush=True)
+            for w in r.get("warnings", []):
+                print(f"  {tag}: warning: {w}", file=sys.stderr, flush=True)
+
+    if not report(a, runs_of, strategy_of, model, sorted(pkgs), extra, profile, profile_path, remote):
+        sys.exit(1)
