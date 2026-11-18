@@ -261,6 +261,7 @@ def vllm(a):
         options["model_loader_extra_config"] = dict(TESTS[a.child]["extra"])
     if "kernel_config" in inspect.signature(EngineArgs).parameters:
         options["kernel_config"] = {"enable_flashinfer_autotune": False}  # minutes of tuning after the load
+    options.update(a.vllm_args)  # --vllm-args: what this model needs, e.g. trust_remote_code
 
     t0 = time.perf_counter()
     llm = LLM(**options)  # noqa: F841 - kept alive until the result is out

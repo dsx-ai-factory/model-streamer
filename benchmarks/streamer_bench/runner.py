@@ -131,6 +131,8 @@ def run_once(a, test, files, remote, env, tag):
     args = [ENTRY, a.model_dir, "--child", test]
     if a.ref_dir:
         args += ["--ref-dir", a.ref_dir]
+    if a.vllm_args and test in VLLM:
+        args += ["--vllm-args", json.dumps(a.vllm_args)]
     cmd = [sys.executable]
     if is_dist(test):
         cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]

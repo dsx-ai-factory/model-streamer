@@ -152,7 +152,9 @@ def _environment(out):
             ("torch", ver.get("torch")), ("safetensors", ver.get("safetensors"))])
         + "<h2>Settings</h2>" + _pairs([
             ("runs per test", st["repeats"]), ("page cache", "warm" if st["warm"] else "cold"),
-            ("ranks", st.get("nproc"))] + [(f"env {k}", v) for k, v in st.get("env", {}).items()]))
+            ("ranks", st.get("nproc")),
+            ("vLLM options", json.dumps(st["vllm_args"]) if st.get("vllm_args") else None)]
+            + [(f"env {k}", v) for k, v in st.get("env", {}).items()]))
 
 
 def _calibration(out):

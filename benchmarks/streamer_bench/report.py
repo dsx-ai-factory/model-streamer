@@ -87,6 +87,8 @@ def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, pro
         settings["nproc"] = a.nproc
     if env:
         settings["env"] = env
+    if a.vllm_args:
+        settings["vllm_args"] = a.vllm_args
     out = {"schema": 2, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "host": platform.node(),
            "streamer": pkgs, "versions": versions, "environment": environment, "model": model,
            "settings": settings, "calibration": calibration_of(profile, profile_path), "results": results}

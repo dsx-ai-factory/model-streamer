@@ -60,6 +60,7 @@ class RunnerTest(unittest.TestCase):
 
     def run_bench(self, launch=child_output, prof=PROFILE, no_vllm=None, gpus=0, **over):
         a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, tests="", env=[], warm=False,
+                               vllm_args={},
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -159,6 +160,14 @@ class RunnerTest(unittest.TestCase):
         _, out = self.run_bench(launch=lambda cmd: (result, log, None), tests="vllm_default", repeats=1)
         self.assertEqual(out["results"][0]["runs"][0]["warnings"],
                          ["vLLM reports 3.0 GiB on the GPU for 40.0 GiB of weights"])
+
+    def test_vllm_args_reach_only_the_vllm_tests(self):
+        _, out = self.run_bench(tests="streamer_cuda,vllm_default", repeats=1, vllm_args={"trust_remote_code": True})
+        by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
+        self.assertNotIn("--vllm-args", by["streamer_cuda"])
+        self.assertEqual(json.loads(by["vllm_default"][by["vllm_default"].index("--vllm-args") + 1]),
+                         {"trust_remote_code": True})
+        self.assertEqual(out["settings"]["vllm_args"], {"trust_remote_code": True})
 
     def test_vllm_without_its_log_line_fails(self):
         code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '

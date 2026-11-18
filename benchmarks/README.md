@@ -61,6 +61,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
+| `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
 | `--warm` | cold | Load from the page cache instead of evicting first |
 | `--ref-dir DIR` | none | Local copy of an S3 model, used for validation |
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
