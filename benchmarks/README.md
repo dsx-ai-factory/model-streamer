@@ -88,6 +88,20 @@ again), so drift in the machine or the storage affects all of them alike.
 | `vllm_instanttensor` | The same with `load_format="instanttensor"` |
 | `vllm_dist_default`, `vllm_dist_streamer`, `vllm_dist_instanttensor` | The three vLLM tests with tensor parallelism over `--nproc` ranks |
 
+The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py)
+(`TESTS`) and each one's load is a function in
+[`streamer_bench/worker.py`](streamer_bench/worker.py):
+
+| Function in `worker.py` | Tests it runs |
+|---|---|
+| `run_streamer` | `streamer_cpu`, `streamer_cpu_notowned`, `streamer_cuda` |
+| `run_safeopen` | `safeopen_page_in`, `safeopen_to_cuda` |
+| `distributed` | `streamer_dist` |
+| `vllm` | every `vllm_*` test; the loader and its options come from the test's entry in `TESTS` |
+
+`single` wraps `run_streamer` and `run_safeopen` with the timing and the
+validation (`check`).
+
 Without `--tests`, the GPU tests run when a GPU is present, and only the
 streamer tests run for a model on S3. A vLLM test is left out, with a note,
 when what it needs is not installed or the model has no `config.json`.
