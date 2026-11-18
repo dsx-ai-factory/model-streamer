@@ -26,6 +26,9 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_floor,
     device_ring_sizing,
+    SlotBounds,
+    _largest_range,
+    RunaiStreamerMemoryLimitException,
 )
 from runai_model_streamer.file_streamer.slot_pool import Slot
 
@@ -122,6 +125,16 @@ def host_or_device(device: Optional[Union[str, torch.device]]) -> str:
     except (RuntimeError, TypeError) as error:
         raise RunaiStreamerInvalidInputException(f"Unusable device {device!r}: {error}") from error
     return "cpu" if resolved.type == "cpu" else str(device)
+
+def resolve_device(device: Union[str, torch.device]) -> torch.device:
+    """The device with its ordinal filled in.
+
+    RESOLVED, not just parsed. "cuda" with no ordinal means whichever device is current, and that
+    can answer differently later, so two reads of the same spelling can name different devices.
+    Asking torch for a tensor on it and taking that tensor's device pins the ordinal once.
+    torch.device("cuda") only parses, and leaves index None."""
+    return torch.empty(0, device=device).device
+
 
 def homogeneous_paths(paths: List[str]) -> bool:
     if not paths:
@@ -291,18 +304,66 @@ class FileStreamer:
             memory_limit: Optional[int] = None,
             owned: bool = True,
             ring_buffers: Optional[int] = None,
+            slot_shape: Optional[Tuple[int, int]] = None,
+            sent_from: bool = False,
+            max_ranges_per_slot: Optional[int] = None,
 ) -> None:
         """owned applies to a HOST destination only, and memory_limit to the host ring only.
 
-        A caller always owns what it receives: to a device the tensor is a copy, by .to() out of a
-        host ring or by a clone out of a device one, so the slot is never handed over and owned=False
-        saves nothing there. It cannot be honoured literally either - yielding views would make a
-        range's dtype view depend on its offset lining up with its element size, which the packing
-        does not promise across mixed dtypes.
+        sent_from says this caller will BROADCAST the ring's slots, so the ranges are packed one
+        after another and a peer can work out where each one is without being told.
+
+        max_ranges_per_slot caps how many ranges a slot may hold. A caller that describes a slot to
+        its peers has a fixed number of rows to describe it in, and the byte budget does not bound
+        the count - a four byte range takes a whole row. Without it the ring packs by bytes alone
+        and a slot of small tensors overflows whatever the peers agreed to read.
+
+        It needs a dictated slot_shape and is REFUSED without one, on either ring. A ring sized
+        here from a byte budget would be sized without the cap and then packed under it, which is
+        a slot the ring can never fill.
+
+        It asks two things of the caller, and refuses rather than give back a ring that cannot be
+        sent. A DEVICE the library can write into, because a host ring places its ranges congruent
+        with their file offsets - a layout that depends on the mount and on this rank's address. And
+        a DICTATED slot_shape, because agreeing where a range sits inside a slot is worth nothing
+        without agreeing which ranges are in it. That shape also settles the depth, so ring_buffers
+        says nothing here, as owned and memory_limit already do not.
+
+        A caller of THIS ring always owns what it receives: to a device the tensor is a copy, by
+        .to() out of a host ring or by a clone out of a device one, so the slot is never handed over
+        and owned=False saves nothing here. It cannot be honoured literally either - yielding views
+        would make a range's dtype view depend on its offset lining up with its element size, which
+        the packing does not promise across mixed dtypes.
+
+        A caller that takes slots through get_slots instead makes its own arrangement, and may hand
+        views on. Ownership there belongs to that caller, not to this method.
 
         memory_limit caps HOST memory, and says nothing about a GPU. A device ring is bounded by a
         fraction of free DEVICE memory, with RUNAI_STREAMER_DEVICE_MEMORY_LIMIT as a target that the
-        largest range can raise - so the ring can exceed that setting, but never the fraction."""
+        largest range can raise - so the ring can exceed that setting, but never the fraction. That
+        bound does NOT apply to a dictated slot_shape: see below.
+
+        slot_shape is (buffer_size, num_buffers) DICTATED by the caller, in place of sizing the ring
+        from this request list. Distributed streaming needs it: the sizes derived here are floored by
+        the largest range in THIS caller's share, so they differ between peers - and peers that pack
+        to different slot sizes lay their ranges out differently.
+
+        It says what SIZE, never WHERE. A device the C++ layer cannot write into still falls back to
+        the host ring, and takes the dictated shape there instead - unless sent_from is set, which
+        refuses instead of falling back.
+
+        A dictated shape REPLACES the sizing, and with it both of the sizing's safety nets. The
+        free-memory fraction is not consulted, so a device that cannot hold the shape raises an
+        allocation error here rather than quietly using the host ring; and the host memory limit is
+        not consulted either. A caller that dictates has taken both decisions, and a shape that will
+        not fit is REFUSED here rather than quietly falling back to the host ring - a rank that fell
+        back alone would lay its ranges out differently from the peers it broadcasts to.
+
+        (The intended caller is distributed streaming, which will agree a shape from a reading of
+        free memory taken across the group. Nothing implements that yet.)
+
+        What is still checked is the one invariant a ring cannot do without: a buffer must hold the
+        largest range. FilesRequestsIteratorWithBuffer raises if it does not."""
         # The previous stream has to be drained before another can start, because two things here are
         # single slots rather than per submission:
         #
@@ -358,9 +419,57 @@ class FileStreamer:
         # the switch - an engine asks for this by naming its device, which it has to do anyway, so
         # there is no second setting that could disagree with it. Decided before the probe below,
         # which it does not depend on: free memory and the range sizes name no mount.
+        if slot_shape is not None:
+            # CHECKED HERE, where the untrusted value arrives, rather than inside the ring. Every
+            # other way to a ring goes through a sizing function that FLOORS the buffer at the
+            # largest range; a dictated shape has no such floor, so this is the only path that can
+            # carry a buffer too small to hold one.
+            #
+            # And a buffer that cannot hold a range reads it as NOTHING: next_chunks() can only
+            # return an empty slice for it, next_request() then returns None, and the stream ends
+            # with those bytes missing. Silent wrong weights, not an error.
+            dictated_buffer, dictated_count = slot_shape
+            largest = _largest_range(file_stream_requests)
+            if dictated_buffer < largest:
+                raise RunaiStreamerMemoryLimitException(
+                    f"the ring shape asked for has {dictated_buffer}-byte buffers, which cannot "
+                    f"hold the largest range ({largest} bytes); it would be read as nothing at all"
+                )
+            if dictated_count < 1:
+                raise RunaiStreamerMemoryLimitException(
+                    f"a ring needs at least one buffer, got {dictated_count}"
+                )
+
+        if sent_from and slot_shape is None:
+            # A derived size is floored by the largest range in THIS rank's share, so peers derive
+            # different sizes, split the range list across slots differently, and each decodes the
+            # other's slot with the wrong list of ranges. The alignment alone does not save them:
+            # agreeing where a range sits inside a slot is worth nothing without agreeing which
+            # ranges are in it.
+            raise ValueError(
+                "a ring that will be sent from needs the slot shape its peers agreed, and this "
+                "stream dictated none"
+            )
+
+        if max_ranges_per_slot is not None and slot_shape is None:
+            # REFUSED, not ignored. A ring sized here from a byte budget would pack under the cap
+            # but be SIZED without it, so the chosen slot is one the ring can never fill - the
+            # split SlotBounds exists to prevent. The cap also only means anything to a caller
+            # describing its slots to peers, and such a caller always dictates the shape.
+            raise RunaiStreamerInvalidInputException(
+                f"max_ranges_per_slot={max_ranges_per_slot} needs a dictated slot_shape: a ring "
+                f"sized from a byte budget would be sized without the cap and packed under it"
+            )
+
         support = device_support(self.device_str)
         free = device_free_memory(self.device_str) if support else None
-        sizing = device_ring_sizing(free, file_stream_requests, ring_buffers)
+        sizing = None
+        if support is not None:
+            # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without it
+            # is a size for a packing the ring cannot produce.
+            sizing = (slot_shape if slot_shape is not None
+                      else device_ring_sizing(free, file_stream_requests,
+                                              SlotBounds(max_ranges=max_ranges_per_slot)))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
@@ -370,16 +479,42 @@ class FileStreamer:
             #
             # owned=False always, and memory_limit unread - see this method's docstring. A device
             # slot is reused, and the pool refuses an owned slot that is released with an event.
-            # Resolved ONCE, before anything uses it. "cuda" with no ordinal means the CURRENT
-            # device, which is not always 0 and can be asked again later with a different answer -
-            # so the slots, the stream their event is recorded on, and the index the library is told
-            # all take this one value rather than re-resolving the caller's spelling.
-            resolved = torch.empty(0, device=self.device_str).device
+            #
+            # Resolved ONCE, here, so the slots, the stream their event is recorded on, and the
+            # index the library is told all take one value instead of re-resolving the spelling.
+            resolved = resolve_device(self.device_str)
 
-            self.requests_iterator = FilesRequestsIteratorWithBuffer(
-                buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
-                slots=device_slots(str(resolved), support.new_event, support.current_stream),
-            )
+            try:
+                self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                    buffer_size, num_buffers, file_stream_requests, DIRECT_IO_BLOCK, owned=False,
+                    slots=device_slots(str(resolved), support.new_event, support.current_stream),
+                    sent_from=sent_from,
+                    max_ranges_per_slot=max_ranges_per_slot,
+                )
+            except torch.cuda.OutOfMemoryError as error:
+                if slot_shape is None:
+                    # A shape THIS LAYER derived, so there is no agreement to explain and no caller
+                    # to tell what it asked for. Left as the allocator raised it: an engine that
+                    # catches OutOfMemoryError to retry at a lower memory fraction must keep
+                    # catching it.
+                    raise
+                # REFUSE, do not fall back. A dictated shape is an agreement between peers, and a
+                # rank that quietly took the host ring instead would lay its ranges out differently
+                # from everyone it is broadcasting to - the exact failure the shape exists to
+                # prevent. So the stream ends here.
+                #
+                # Named rather than re-raised bare: the allocator's own message says nothing about
+                # the shape, the device or what was free, and this lands after credentials, the
+                # block probe and the device resolution have already run. It also usually means
+                # something GREW on this device since the shape was agreed, because the group takes
+                # the MINIMUM free memory across ranks before deciding - an anomaly worth naming.
+                asked = buffer_size * num_buffers
+                raise RunaiStreamerMemoryLimitException(
+                    f"cannot build the ring this stream asks for on {resolved}: "
+                    f"{num_buffers} x {naturalsize(buffer_size, binary=True)} = "
+                    f"{naturalsize(asked, binary=True)}, with "
+                    f"{naturalsize(free, binary=True) if free is not None else 'unknown'} free"
+                ) from error
             # A vendor with no ordinals at all reports None, and 0 is then the only device there is.
             self._device = (support.api_type, 0 if resolved.index is None else resolved.index)
 
@@ -389,6 +524,21 @@ class FileStreamer:
             # here, and an unowned pool never allocates again.
             support.current_stream(str(resolved)).synchronize()
         else:
+            if sent_from:
+                # REFUSE, never fall back, WHATEVER brought us here. This branch is every route to
+                # a host ring, and a host ring is read into directly: its ranges are placed
+                # congruent with their file offsets, a layout that depends on the mount and on this
+                # rank's address, which a peer computing the layout cannot reproduce. A rank that
+                # took it alone would send bytes its peers decode at the wrong offsets.
+                #
+                # Guarded on sent_from alone rather than on the cause, so a later change that opens
+                # a new way into this branch cannot quietly give a sender a ring it cannot send.
+                why = ("the library cannot read into that device" if support is None
+                       else "no ring fits on it")
+                raise ValueError(
+                    f"no ring on {self.device_str} that this stream can be sent from: {why}"
+                )
+
             if support is not None:
                 # The BUDGET, not free memory: it is the number that refused the ring, and a limit
                 # far below free memory is the usual reason.
@@ -426,10 +576,22 @@ class FileStreamer:
             # tensor.to(device)": .to() RETURNS SELF when the device already matches, so that reading
             # hands the live slot back on any ring whose memory is already on the target.
             self._device = (RUNAI_FILE_STREAMER_DEVICE_CPU, 0)
-            self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
-                file_stream_requests, memory_limit, direct_block,
-                owned and self.device_str == "cpu", ring_buffers
-            )
+            hands_over = owned and self.device_str == "cpu"
+            if slot_shape is not None:
+                # The memory limit is not consulted - see the docstring. Note what is ALLOCATED is
+                # larger than what is dictated on this ring: a host slot reserves pad room so a
+                # direct read can land congruently, so each slot costs buffer_size plus up to
+                # RUNAI_STREAMER_MAX_PADS_PER_BUFFER blocks. The device branch above does not, since
+                # nothing reads directly into a device.
+                buffer_size, num_buffers = slot_shape
+                self.requests_iterator = FilesRequestsIteratorWithBuffer(
+                    buffer_size, num_buffers, file_stream_requests, direct_block, owned=hands_over,
+                    max_ranges_per_slot=max_ranges_per_slot,
+                )
+            else:
+                self.requests_iterator = FilesRequestsIteratorWithBuffer.with_memory_mode(
+                    file_stream_requests, memory_limit, direct_block, hands_over, ring_buffers,
+                )
         # Built from the request list, which is where the file order is defined.
         self.yield_order = yield_order_for(file_stream_requests)
 
@@ -524,7 +686,10 @@ class FileStreamer:
             if device_ring:
                 self._clone_stream = current_stream()
 
-            while self.live_requests:
+            # self.streamer too: __exit__ ends the handle and clears it, and a generator can be
+            # resumed after that - which passed a freed handle to the library and crashed. Closing
+            # one is safe either way: GeneratorExit lands at the yield, so this loop is not re-entered.
+            while self.live_requests and self.streamer:
                 # runai_response blocks indefinitely (timeout 0) and returns None only on teardown. It
                 # serves whichever submission completed a range first, so responses INTERLEAVE.
                 response = runai_response(self.streamer)
@@ -637,6 +802,119 @@ class FileStreamer:
                         if self.requests_iterator is not None:
                             self.requests_iterator.release(ready_request, ready_event)
                             self._submit_while_buffers_free()
+        finally:
+            self.drain_live_submissions()
+
+    def get_slots(self) -> Iterator:
+        """WHOLE SLOTS instead of ranges, in the order they were submitted.
+
+        The distributed path broadcasts a slot, so it wants the slot and not its contents one at a
+        time. Two differences from get_chunks, and both matter:
+
+        A slot is handed over once every range in it has ARRIVED. get_chunks releases on the last
+        range being HANDED OVER, which is a later moment - there is no per range handover here, so
+        the slot is ready as soon as it is full.
+
+        IN SUBMISSION ORDER, never completion order. Submissions interleave, so a later slot can
+        fill first, while a peer reading this stream expects slot 0 then slot 1. A full slot waits
+        for its turn, the way yield_order parks a range. live_requests is written when a submission
+        is issued and deleted when it retires, so its first key is the oldest one still live.
+
+        Send an event back - gen.send(event) - to say when the slot may be refilled. The slot goes
+        back to the pool on that resume, so the consumer must have finished reading it by then: for
+        a device ring that means an event recorded after the broadcast AND after any copy out of the
+        slot. A host ring takes None, because nothing there is only enqueued.
+
+        ORDERING ACROSS STREAMS IS THE CALLER'S. get_chunks records the event itself, so it can
+        refuse a caller that moved to another stream. Here the event arrives already recorded and
+        nothing can ask which stream that was. A caller that records slot N on one stream and N+1 on
+        another leaves the teardown waiting on the second while the first is still reading.
+
+        It yields the REQUEST, not a description of what is in the slot. Which ids those ranges
+        carry for the consumer is the caller's business - this layer never saw a partition.
+        """
+        if not self.streamer:
+            raise ValueError("Streamer not initialized")
+
+        received: Dict[int, int] = {}
+        finished: Dict[int, Any] = {}
+
+        try:
+            # INSIDE the try and behind the live_requests check, as in get_chunks. A raise out here
+            # would leave every submission undrained, and the workers writing into a ring the next
+            # stream_files frees. Nothing is live when there is no iterator either, so the stream
+            # this records would belong to work that is not ours.
+            #
+            # The teardown reads it. __exit__ frees the ring, and the last slot's readers - a copy
+            # out of it, and on the distributed path a broadcast - are only ENQUEUED.
+            if self.live_requests and self.requests_iterator is not None:
+                slot_memory = self.requests_iterator.slots
+                if slot_memory.new_event is not None:
+                    self._clone_stream = slot_memory.current_stream()
+
+            # self.streamer too: __exit__ ends the handle and clears it, and a generator can be
+            # resumed after that. Asking a freed handle for a response is a use after free, and the
+            # answer could not arrive anyway - runai_end has joined the workers.
+            while self.live_requests and self.streamer:
+                response = runai_response(self.streamer)
+                if response is None:
+                    return    # teardown: no further responses are coming
+
+                ret, submission_id, _, _, done = response
+                self.outstanding -= 1
+
+                request = self.live_requests.get(submission_id)
+                if request is None:
+                    raise ValueError(f"response for unknown submission {submission_id}")
+
+                if done:
+                    self.reported_done.add(submission_id)
+
+                if ret != SUCCESS_ERROR_CODE:
+                    raise ValueError(
+                        f"Could not receive response from libstreamer due to: {runai_response_str(ret)}"
+                    )
+
+                received[submission_id] = received.get(submission_id, 0) + 1
+                if received[submission_id] == request.num_ranges:
+                    if submission_id not in self.reported_done:
+                        raise ValueError(
+                            f"submission {submission_id} received every range before the library "
+                            f"reported it complete"
+                        )
+                    finished[submission_id] = request
+
+                # Oldest first, stopping at the first that is not full.
+                while self.live_requests:
+                    ready_id = next(iter(self.live_requests))
+                    if ready_id not in finished:
+                        break
+                    if self.requests_iterator is None:
+                        # The context exited while this generator was parked at a yield. There is no
+                        # ring left to describe a slot with, and nothing will write into one again.
+                        return
+
+                    ready_request = finished.pop(ready_id)
+
+                    # BEFORE the release, which clears the request's buffer index.
+                    slot = self.requests_iterator.slot_memory_of(ready_request)
+                    ready_event = yield ready_request, slot
+
+                    # Serves the teardown as well as the pool: the newest one is after every read of
+                    # every slot handed over so far.
+                    if ready_event is not None:
+                        self._clone_event = ready_event
+
+                    self.reported_done.discard(ready_id)
+                    del received[ready_id]
+                    self.ranges_not_yielded.pop(ready_id, None)
+                    del self.live_requests[ready_id]
+
+                    # Checked again: the resume above is where the context can have exited, and it
+                    # is this yield that resumes.
+                    if self.requests_iterator is not None:
+                        self.requests_iterator.release(ready_request, ready_event)
+                        self._submit_while_buffers_free()
         finally:
             self.drain_live_submissions()
 

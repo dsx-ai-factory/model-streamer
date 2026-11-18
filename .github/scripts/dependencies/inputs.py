@@ -110,7 +110,9 @@ def pip_groups(repo):
             if spec:
                 add("test", spec, os.path.relpath(requirements, repo))
     for makefile in sorted(glob.glob(os.path.join(repo, "py", "*", "Makefile"))):
-        for name, index in re.findall(r"pip download (\S+) --index-url (\S+)", read(repo, makefile)):
+        # The requirement may be quoted: `pip download "torch>=2.6"` keeps the shell from
+        # taking `>` as a redirection. The quotes are not part of the requirement.
+        for name, index in re.findall(r"pip download \"?([^\"\s]+)\"? --index-url (\S+)", read(repo, makefile)):
             add("test", name, os.path.relpath(makefile, repo))
             if index not in groups["test"]["extra_index_urls"]:
                 groups["test"]["extra_index_urls"].append(index)

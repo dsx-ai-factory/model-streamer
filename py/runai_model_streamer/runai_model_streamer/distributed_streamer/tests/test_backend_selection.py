@@ -20,7 +20,8 @@ from runai_model_streamer.distributed_streamer.distributed_streamer import (
 
 MAX_CHUNK = 1000
 # From the function the check itself calls, so the boundary cannot drift from the production one.
-REQUIRED = dist_device_bytes_required(MAX_CHUNK)
+# No request is set on these streamers, so their params carry the empty-request height.
+REQUIRED = dist_device_bytes_required(MAX_CHUNK, 1)
 
 
 def init_string(backend: str, config: str, cuda_available: bool = False):

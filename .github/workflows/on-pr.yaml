@@ -19,6 +19,7 @@ jobs:
   setup:
     name: Setup
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       package_version: ${{ steps.version.outputs.PACKAGE_VERSION }}
       devcontainer_changed: ${{ steps.devcontainer_changes.outputs.any_modified }}
@@ -161,6 +162,22 @@ jobs:
       devcontainer_image: ${{ needs.devcontainer_arm64.outputs.image || needs.setup.outputs.baseline_image }}
       devcontainer_artifact: ${{ needs.devcontainer_arm64.outputs.artifact }}
 
+  lint:
+    name: Python parses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+      with:
+        persist-credentials: false
+
+    # The distributed tests need torchrun and two GPUs, so nothing in this workflow imports them.
+    # One of them stopped parsing and stayed that way for several commits, with every job green.
+    # This needs no dependencies and no devcontainer, so it answers in seconds and on its own.
+    - name: Every Python file parses
+      run: make -C py/runai_model_streamer lint-parse
+
   tests:
     name: Integration & strategies (${{ matrix.arch }})
     needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm]
@@ -170,6 +187,7 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 15
     env:
       PACKAGE_VERSION: ${{ needs.setup.outputs.package_version }}
       CI_IMAGE: ${{ (matrix.arch == 'aarch64' && needs.devcontainer_arm64.outputs.image || needs.devcontainer_amd64.outputs.image) || needs.setup.outputs.baseline_image }}
@@ -237,13 +255,15 @@ jobs:
   lifecycle-install-tests:
     name: Test, Build & Push
     if: always()
-    needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm, tests, packages]
+    needs: [setup, devcontainer_amd64, devcontainer_arm64, build_x86, build_arm, lint, tests, packages]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
     - name: Require all builds, tests, and package uploads to succeed
       env:
         X86_RESULT: ${{ needs.build_x86.result }}
         ARM_RESULT: ${{ needs.build_arm.result }}
+        LINT_RESULT: ${{ needs.lint.result }}
         TEST_RESULT: ${{ needs.tests.result }}
         PACKAGES_RESULT: ${{ needs.packages.result }}
         DEVCONTAINER_CHANGED: ${{ needs.setup.outputs.devcontainer_changed }}
@@ -252,6 +272,7 @@ jobs:
       run: |
         test "$X86_RESULT" = success
         test "$ARM_RESULT" = success
+        test "$LINT_RESULT" = success
         test "$TEST_RESULT" = success
         test "$PACKAGES_RESULT" = success
         if [[ "$DEVCONTAINER_CHANGED" == true ]]; then

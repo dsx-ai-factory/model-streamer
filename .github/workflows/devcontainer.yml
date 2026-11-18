@@ -30,6 +30,7 @@ jobs:
   build:
     name: Build devcontainer image
     runs-on: ${{ inputs.architecture == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 60
     outputs:
       image: ${{ steps.image.outputs.image }}
       artifact: ${{ steps.image.outputs.artifact }}

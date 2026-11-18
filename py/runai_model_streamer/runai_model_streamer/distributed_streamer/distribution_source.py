@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Where a rank's outgoing bytes come from, and how a slot is filled with them.
+
+A distribution source is ALWAYS a ring of slots on the device the collective sends from. What
+differs between devices is only how a slot gets filled:
+
+- DIRECT, where the C++ layer can write to that device: the ring IS the read destination, so there
+  is no copy at all;
+- STAGED, where it cannot - a CPU device under gloo, or any device type the library does not serve:
+  a host ring is read into, and the ranges are copied into the slot.
+
+The loop sees one thing, slots that are ready to send. So a new device type is a new implementation
+of this interface, rather than another branch in the loop.
+
+NAMED FOR DISTRIBUTION, NOT FOR BROADCASTING. Broadcasting is one way to distribute: every rank
+contributes a slot of the same size, which is also the condition an all-gather needs, and replacing
+N broadcasts with one all-gather is an open option. Nothing in this interface should have to change
+if the collective does.
+"""
+
+from __future__ import annotations
+from typing import Any, List, NamedTuple, Optional, Protocol, Tuple
+
+from runai_model_streamer.file_streamer.requests_iterator import (
+    advance as _ring_advance,
+)
+
+
+__all__ = ["SlotRange", "Filled", "DistributionSource", "EmptyDistributionSource", "advance"]
+
+
+def advance(cursor: int, size: int) -> Tuple[int, int]:
+    """Where this range starts, and where the cursor ends after it.
+
+    THE LAYOUT RULE, and it is the RING'S. A source that is sent from directly does not place its
+    own ranges - the ring did, when it built the request - so restating the rule here would make a
+    second one, and a zero-sized range already shows the two can differ.
+
+    Ranges are PACKED END TO END. A pad would cost bytes on the wire and slot room, and it would
+    split the read layer's whole-slot copy into one copy per range. A range whose dtype cannot be
+    read at the offset it lands on is copied once by the caller, which is cheaper than padding all
+    of them."""
+    return _ring_advance(cursor, size, 1)
+
+
+class SlotRange(NamedTuple):
+    """One range inside a filled slot, in THE CALLER'S NUMBERING.
+
+    file_id and range_index are the ones the consumer asked with - not the partition's, and not the
+    packer's. A receiving rank never saw the sender's partition and cannot interpret its numbering,
+    so the conversion belongs on the sending side. The metadata path already works this way:
+    prefill() converts through rank_dicts_map before writing a metadata row, so the ids that cross
+    the wire today are already the caller's.
+
+    offset is from the START OF THE SLOT, so it means the same thing to a receiver reading its own
+    copy at its own address.
+    """
+
+    file_id: int
+    range_index: int
+    offset: int
+    size: int
+
+
+class Filled(NamedTuple):
+    """A slot ready to send.
+
+    memory is EXACTLY the bytes to send - the used prefix, not the whole slot. A slot is sized for
+    the ring, not for what happens to be in it, so the last slot of a stream is usually part full
+    and its tail would cost a collective the same as real data.
+
+    ranges describes what is in those bytes, in layout order.
+    """
+
+    memory: Any
+    ranges: List[SlotRange]
+
+
+class DistributionSource(Protocol):
+    """What the distribution loop needs from a source, and nothing more.
+
+    FOUR GUARANTEES, which belong to this interface rather than to any implementation:
+
+    1. next_slot() BLOCKS until the slot is ready to send. Readiness differs - a direct source's
+       slot is ready when the reads land, a staged source's when its copies are ordered on the
+       sending stream - and the loop must not learn which, or every new source becomes a branch
+       in the loop.
+    2. memory is the USED PREFIX, never the whole slot.
+    3. ranges follow ONE LAYOUT RULE, `advance`: the first starts at offset 0, and each next one
+       starts at the previous range's end. No padding and no reordering.
+
+       The rule reads sizes only, never an address, so every rank computes the same layout. Later
+       work computes what a peer will send instead of being told, and two rules would disagree
+       silently.
+    4. release() takes the EVENT after which the slot may be refilled, or None when nothing is
+       enqueued against it. A direct source needs the clone event; a staged source on a host
+       device may need nothing.
+
+       AFTER release, the slot is the source's again. A caller must not read `memory` or `ranges`
+       once it has released them - a ring hands the same buffer out again, so what it reads then
+       belongs to a later slot.
+
+    MORE THAN ONE SLOT MAY BE OUT AT A TIME, where the source has more than one. A loop with an
+    asynchronous collective wants to fill the next slot while the previous is still in flight, which
+    is the overlap a ring exists for. Such a source must not assume its last slot was released
+    before next_slot() is called again; it blocks when no slot is free, which is a different thing.
+
+    A ONE-SLOT SOURCE REFUSES INSTEAD. It has nothing to wait for, so blocking would never end, and
+    a deadlock is worse than an error. A caller that wants the overlap must give the source a ring
+    deep enough for it.
+
+    WHAT IS NOT GUARANTEED HERE: how many slots exist, or how long a source will block. Both belong
+    to the ring an implementation was built with.
+    """
+
+    def next_slot(self) -> Optional[Filled]:
+        """The next slot to send, in layout order, or None when the stream is done.
+
+        Blocks until it is ready to send."""
+        ...
+
+    def release(self, filled: Filled, done: Any = None) -> None:
+        """Give the slot back, to be refilled once `done` has completed.
+
+        The caller must not touch `filled` afterwards."""
+        ...
+
+
+class EmptyDistributionSource:
+    """A source with nothing to send.
+
+    A rank whose share is empty still takes part in every broadcast, as a receiver. It has no ring
+    behind it and no buffer to stage through, so the other two sources would both have to be given
+    something to hold - and on the direct path there is no send buffer to give.
+
+    It is a source rather than a None, because the loop asks a source every round and a rank with
+    nothing to send is not a rank with nothing to do."""
+
+    def next_slot(self) -> Optional[Filled]:
+        return None
+
+    def release(self, filled: Filled, done: Any = None) -> None:
+        raise RuntimeError("release() on a source that never handed a slot out")

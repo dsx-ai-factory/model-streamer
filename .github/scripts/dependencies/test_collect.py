@@ -283,6 +283,7 @@ class InputsTest(unittest.TestCase):
         groups = inputs.pip_groups(util.REPO)
         self.assertIn("boto3", groups["run"]["specs"])
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
+        self.assertIn("torch>=2.6", groups["test"]["specs"])  # quoted in the Makefile; the quotes must not survive
         self.assertTrue(groups["test"]["extra_index_urls"])
         self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/setup.py"])
         self.assertTrue(any(spec.startswith("setuptools") for spec in groups["build"]["specs"]))

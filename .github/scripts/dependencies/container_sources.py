@@ -128,7 +128,7 @@ def _apt_files(pins):
 
 def pip_dependencies(repo):
     """The pip packages each use resolves to, as wheels. The resolver runs on this image, so the
-    result is for this Python (3.8) and architecture. The `run` group is also resolved for aarch64,
+    result is for this Python (the image's, 3.11) and architecture. The `run` group is also resolved for aarch64,
     because users install our aarch64 wheel with their own pip."""
     arch = architecture()
     found = {}
