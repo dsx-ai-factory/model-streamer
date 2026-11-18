@@ -109,7 +109,7 @@ class RunnerTest(unittest.TestCase):
             self.assertIn("No machine profile was used", f.read())
 
     def test_distributed_runs_under_torchrun(self):
-        code, out = self.run_bench(nproc=2, env=["X=1"])
+        code, out = self.run_bench(gpus=2, nproc=2, env=["X=1"])
         self.assertEqual(code, 0)
         cmd, env = self.calls[0]
         self.assertIn("torch.distributed.run", cmd)
@@ -189,6 +189,9 @@ class RunnerTest(unittest.TestCase):
         # asked for by name, it is an error instead
         self.assertIn("cannot run", self.run_bench(tests="vllm_default", no_vllm="vllm is not installed")[0])
 
+    def test_more_ranks_than_gpus_is_refused(self):
+        self.assertIn("needs 8 GPUs, one per rank; this machine has 1", self.run_bench(gpus=1, nproc=8)[0])
+
     def test_nproc_alone_runs_only_the_distributed_test(self):
         self.run_bench(gpus=8, nproc=2, repeats=1)
         self.assertEqual(self.ran(), [DIST])
@@ -216,7 +219,7 @@ class RunnerTest(unittest.TestCase):
 
     def test_test_selection_errors(self):
         self.assertIn("needs --nproc", self.run_bench(tests=DIST)[0])
-        self.assertIn("--nproc is for", self.run_bench(nproc=2, tests="streamer_cuda")[0])
+        self.assertIn("--nproc is for", self.run_bench(gpus=2, nproc=2, tests="streamer_cuda")[0])
         self.assertIn("unknown test", self.run_bench(tests="nope")[0])
 
     def test_warm_is_scored_against_memcpy(self):

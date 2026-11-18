@@ -75,6 +75,8 @@ def select_tests(a, remote):
         sys.exit(f"{DIST} needs --nproc N")
     if a.nproc and DIST not in names:
         sys.exit(f"--nproc is for {DIST}, which --tests leaves out")
+    if a.nproc and a.nproc > gpu_count():  # each rank loads onto its own GPU; NCCL does not share one
+        sys.exit(f"--nproc {a.nproc} needs {a.nproc} GPUs, one per rank; this machine has {gpu_count()}")
     for n in names:
         if a.tests and n in VLLM and vllm_unavailable(a, n):
             sys.exit(f"{n} cannot run: {vllm_unavailable(a, n)}")

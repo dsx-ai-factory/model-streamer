@@ -94,7 +94,8 @@ In `streamer_dist` every rank streams all files and receives every tensor.
 Each rank keeps a 1/N share of the tensors on its GPU, so device memory is
 under real pressure, and drops the rest. The load time is measured from a
 barrier before the load to a barrier after the last tensor, which makes it the
-slowest rank's time.
+slowest rank's time. Each rank needs its own GPU, so `--nproc` cannot be more
+than the number of GPUs on the machine.
 
 ### vLLM
 
