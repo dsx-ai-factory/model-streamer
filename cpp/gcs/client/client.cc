@@ -14,7 +14,6 @@
 
 #include "google/cloud/future.h"
 #include "google/cloud/storage/client.h"
-#include "google/cloud/storage/oauth2/credentials.h"
 #include "google/cloud/common_options.h"
 #include "google/cloud/status_or.h"
 

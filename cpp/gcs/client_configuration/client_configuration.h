@@ -28,10 +28,10 @@ struct ClientConfiguration
     std::string credentials;
 };
 
-// Describes where the SDK will look for credentials, following its lookup order: our key file
-// variable, then GOOGLE_APPLICATION_CREDENTIALS, then the gcloud well-known file or the metadata
-// server. Reads the environment only - the last two cannot be told apart without probing the metadata
-// server, so the description names both.
+// Describes where the client's credentials will come from, following the lookup order: our
+// anonymous-credentials variable, then our key file variable, then GOOGLE_APPLICATION_CREDENTIALS,
+// then the gcloud well-known file or the metadata server. Reads the environment only - the last two
+// cannot be told apart without probing the metadata server, so the description names both.
 std::string credentials_source();
 
 }; //namespace runai::llm::streamer::impl::gcs

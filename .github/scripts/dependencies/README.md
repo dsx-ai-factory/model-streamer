@@ -51,7 +51,7 @@ The collector reads these files, so a new dependency is picked up when it is add
 | `py/*/pyproject.toml` | build requirements (`build`) |
 | `py/runai_model_streamer/requirements.dev` and the `pip download` line of `py/runai_model_streamer/Makefile` | test requirements and the torch index (`test`) |
 | `cpp/.bazelversion` | the Bazel release |
-| `cpp/WORKSPACE` and what it loads | the Bazel repositories, as Bazel resolves them |
+| `cpp/MODULE.bazel` and `.devcontainer/gcs/MODULE.bazel` | the Bazel modules, as Bzlmod resolves them |
 | `.github/workflows/*` | GitHub actions |
 
 `categories.json` holds the judgment calls the files cannot tell: which packages are only for tests,
@@ -155,8 +155,10 @@ What else to check after the change:
      Python (3.11) and architecture. The `run` group is also resolved for aarch64, because users
      install our aarch64 wheel. Test requirements use the PyTorch CPU index, as `make install_dev_dep` does.
    - **npm:** a lock file written without installing (`--package-lock-only`).
-   - **bazel:** `bazel fetch //...` for both architectures, then every repository in the output base
-     with the URL and hash of its repository rule.
+   - **bazel:** `bazel fetch //...` in the application (`cpp/`) and the SDK builder
+     (`.devcontainer/gcs/`), then every fetched module of the resolved graphs (`bazel mod graph`)
+     with the URL and hash `bazel mod show_repo` records for it. Module resolution does not depend
+     on the architecture, so the native configuration covers the set.
    - **tools:** the bazelisk and buildifier versions the devcontainer feature installed.
 3. The two sets are merged: one entry per ecosystem, name and version, categories united.
 

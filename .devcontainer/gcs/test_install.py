@@ -35,7 +35,6 @@ class InstallTest(unittest.TestCase):
             (execution_root / virtual_header).symlink_to(actual_header)
             headers.append(virtual_header)
             manifest = {
-                "source_checksums": {"google_cloud_cpp": "sdk-sha", "protobuf": "protobuf-sha"},
                 "headers": headers,
                 "libraries": [
                     {"path": archive, "alwayslink": False},
@@ -74,14 +73,13 @@ class InstallTest(unittest.TestCase):
             contents = {
                 ".bazelrc": "build --compilation_mode=opt\n",
                 ".bazelversion": "7.6.1\n",
-                "WORKSPACE": "SDK workspace\n",
+                "MODULE.bazel": "SDK modules\n",
                 "BUILD.bazel": "SDK targets\n",
                 "abi_check.cc": "ABI check\n",
                 "../scripts/build-gcs-sdk.sh": "SDK build command\n",
                 "export.bzl": "SDK exporter\n",
                 "install.py": "SDK installer\n",
-                "config/sources.bzl": "SDK dependency pins\n",
-                "config/deps.bzl": "Bazel dependency pins\n",
+                "config/MODULE.bazel": "SDK configuration module\n",
                 "config/model_streamer_gcs_sdk/compatibility.h": "ABI contract\n",
             }
             for name, content in contents.items():
@@ -106,7 +104,11 @@ class InstallTest(unittest.TestCase):
                 script.write_text("updated SDK build command\n")
                 self.assertNotEqual(build_metadata(root, "/usr/bin/g++"), metadata)
                 script.write_text(contents["../scripts/build-gcs-sdk.sh"])
-                (root / "config/sources.bzl").write_text("updated SDK pin\n")
+                (root / "config/MODULE.bazel").write_text("updated SDK configuration\n")
+                self.assertNotEqual(build_metadata(root, "/usr/bin/g++"), metadata)
+                (root / "config/MODULE.bazel").write_text(contents["config/MODULE.bazel"])
+                # A google-cloud-cpp bump is a MODULE.bazel change: the SDK must be rebuilt.
+                (root / "MODULE.bazel").write_text("updated SDK modules\n")
                 self.assertNotEqual(build_metadata(root, "/usr/bin/g++"), metadata)
 
     def test_missing_archive_fails_installation(self):

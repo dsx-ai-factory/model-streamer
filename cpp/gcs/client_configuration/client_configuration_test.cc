@@ -13,6 +13,8 @@
 #include <string>
 #include <thread>
 
+#include "google/cloud/credentials.h"
+
 #include "common/exception/exception.h"
 #include "utils/temp/env/env.h"
 
@@ -105,7 +107,7 @@ TEST_F(GcsConcurrency, An_Explicit_Connection_Count_Overrides_The_Formula)
     EXPECT_EQ(ClientConfiguration(16).max_concurrency, 7u);
 }
 
-// Both credential variables are cleared before each test, so a test states only what it SETS.
+// Every credential variable is cleared before each test, so a test states only what it SETS.
 class GcsCredentials : public ::testing::Test
 {
  protected:
@@ -113,16 +115,19 @@ class GcsCredentials : public ::testing::Test
     {
         _key_file = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"));
         _adc_file = std::make_unique<utils::temp::UnsetEnv>(std::string("GOOGLE_APPLICATION_CREDENTIALS"));
+        _anonymous = std::make_unique<utils::temp::UnsetEnv>(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"));
     }
 
     void TearDown() override
     {
+        _anonymous.reset();
         _adc_file.reset();
         _key_file.reset();
     }
 
     std::unique_ptr<utils::temp::UnsetEnv> _key_file;
     std::unique_ptr<utils::temp::UnsetEnv> _adc_file;
+    std::unique_ptr<utils::temp::UnsetEnv> _anonymous;
 };
 
 TEST_F(GcsCredentials, Without_Variables_The_Sdk_Falls_Back_To_The_Metadata_Server)
@@ -175,6 +180,56 @@ TEST_F(GcsCredentials, An_Unreadable_Key_File_Fails_Configuration)
     utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/nonexistent/key.json"));
 
     EXPECT_THROW(ClientConfiguration(1), common::Exception);
+}
+
+// Anonymous access is set as an explicit credential option, because google-cloud-cpp 3.x applies
+// none of its own below storage::Client: it maps the credentials it builds through a
+// DefaultOptions overload that drops its credentials argument, falls back to application default
+// credentials, and a client without reachable metadata then spends its whole retry window asking
+// for a token.
+TEST_F(GcsCredentials, Anonymous_Credentials_Are_Set_As_An_Explicit_Option)
+{
+    utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string("True"));
+
+    const auto configuration = ClientConfiguration(1);
+
+    EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
+    EXPECT_NE(configuration.credentials.find("anonymous"), std::string::npos) << configuration.credentials;
+}
+
+// The values the Python package documents for the same variable, and the ones it rejects.
+TEST_F(GcsCredentials, The_Anonymous_Variable_Parses_Like_The_Python_Package)
+{
+    for (const auto & accepted : { "true", "True", "TRUE", "1" })
+    {
+        utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string(accepted));
+        EXPECT_TRUE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>()) << accepted;
+    }
+
+    for (const auto & rejected : { "false", "0", "", "yes" })
+    {
+        utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string(rejected));
+        EXPECT_FALSE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>()) << rejected;
+    }
+}
+
+// Anonymous wins over a key file, matching the Python package's precedence for the same pair.
+TEST_F(GcsCredentials, Anonymous_Takes_Precedence_Over_The_Key_File)
+{
+    utils::temp::Env anonymous(std::string("RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS"), std::string("True"));
+    utils::temp::Env key(std::string("RUNAI_STREAMER_GCS_CREDENTIAL_FILE"), std::string("/nonexistent/key.json"));
+
+    const auto configuration = ClientConfiguration(1);
+
+    EXPECT_TRUE(configuration.options.has<google::cloud::UnifiedCredentialsOption>());
+    EXPECT_NE(configuration.credentials.find("anonymous"), std::string::npos) << configuration.credentials;
+}
+
+// Without the variable nothing is set here: the SDK's own lookup (ADC or the metadata server)
+// stays in charge, exactly as before.
+TEST_F(GcsCredentials, No_Anonymous_Request_Leaves_The_Sdk_Lookup_Alone)
+{
+    EXPECT_FALSE(ClientConfiguration(1).options.has<google::cloud::UnifiedCredentialsOption>());
 }
 
 }; // namespace runai::llm::streamer::impl::gcs

@@ -1,7 +1,7 @@
 {
  "abseil-cpp/LICENSE": {
   "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747",
-  "url": "https://raw.githubusercontent.com/abseil/abseil-cpp/20250127.1/LICENSE"
+  "url": "https://raw.githubusercontent.com/abseil/abseil-cpp/20250814.2/LICENSE"
  },
  "aws-c-auth/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
@@ -108,28 +108,28 @@
   "url": "https://raw.githubusercontent.com/Azure/azure-sdk-for-cpp/azure-storage-blobs_12.15.0/LICENSE.txt"
  },
  "boringssl-fiat/LICENSE": {
-  "sha256": "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061",
-  "url": "https://raw.githubusercontent.com/google/boringssl/82a53d8c902f940eb1310f76a0b96c40c67f632f/src/third_party/fiat/LICENSE"
+  "sha256": "9eacbcb81be660840c714a560a9d65ba07913db98dd4baf969f78dd499fdd60f",
+  "url": "https://raw.githubusercontent.com/google/boringssl/0.20251124.0/third_party/fiat/LICENSE"
  },
  "boringssl/LICENSE": {
-  "sha256": "a78d37138db9a43843736b2973284b61af19cd5384cf3c752e922171b0d4fc56",
-  "url": "https://raw.githubusercontent.com/google/boringssl/82a53d8c902f940eb1310f76a0b96c40c67f632f/LICENSE"
+  "sha256": "827c8d8fc207c2392794eef9e00fe246f9f61fdcc132556c275be3dd8c3cd97f",
+  "url": "https://raw.githubusercontent.com/google/boringssl/0.20251124.0/LICENSE"
  },
  "c-ares/LICENSE.md": {
-  "sha256": "db4eb63fe09daebdf57d3f79b091bb5ee5070c0d761040e83264e648d307af4c",
-  "url": "https://raw.githubusercontent.com/c-ares/c-ares/6360e96b5cf8e5980c887ce58ef727e53d77243a/LICENSE.md"
+  "sha256": "460f5e768fda3752ca2169a95df062578a10fb126bfd65f3b9b1a1bed2f84807",
+  "url": "https://raw.githubusercontent.com/c-ares/c-ares/v1.34.5/LICENSE.md"
+ },
+ "cel-spec/LICENSE": {
+  "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+  "url": "https://raw.githubusercontent.com/google/cel-spec/v0.25.1/LICENSE"
  },
  "cncf-xds/LICENSE": {
   "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-  "url": "https://raw.githubusercontent.com/cncf/xds/3a472e524827f72d1ad621c4983dd5af54c46776/LICENSE"
+  "url": "https://raw.githubusercontent.com/cncf/xds/ee656c7534f5d7dc23d44dd611689568f72017a6/LICENSE"
  },
- "crc32c/LICENSE": {
-  "sha256": "a1f30b77c01e0995fa32a00119e00749e8731ee8a3c4c3549bce74083c72b0b6",
-  "url": "https://raw.githubusercontent.com/google/crc32c/1.1.2/LICENSE"
- },
- "curl-7.69.1/COPYING": {
-  "sha256": "db3c4a3b3695a0f317a0c5176acd2f656d18abc45b3ee78e50935a78eb1e132e",
-  "url": "https://raw.githubusercontent.com/curl/curl/curl-7_69_1/COPYING"
+ "curl-8.8.0/COPYING": {
+  "sha256": "adb1fc06547fd136244179809f7b7c2d2ae6c4534f160aa513af9b6a12866a32",
+  "url": "https://raw.githubusercontent.com/curl/curl/curl-8_8_0/COPYING"
  },
  "curl/COPYING": {
   "sha256": "e18f1989333b70044b2adfb7dc2f905d0119dbdcac3bc9f4bc9d540e3a29de5b",
@@ -137,7 +137,7 @@
  },
  "envoy-api/LICENSE": {
   "sha256": "58a365fe99e6a28ca903dad980080f109a18ccad888db1a010ce0ada20f90042",
-  "url": "https://raw.githubusercontent.com/envoyproxy/data-plane-api/f8b75d1efa92bbf534596a013d9ca5873f79dd30/LICENSE"
+  "url": "https://raw.githubusercontent.com/envoyproxy/data-plane-api/84e84367f2560cdb47b9bb78fd3e615feb80c3e4/LICENSE"
  },
  "gcc-runtime/COPYING.RUNTIME": {
   "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
@@ -153,23 +153,23 @@
  },
  "google-cloud-cpp/LICENSE": {
   "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-  "url": "https://raw.githubusercontent.com/googleapis/google-cloud-cpp/v2.37.0/LICENSE"
+  "url": "https://raw.githubusercontent.com/googleapis/google-cloud-cpp/v3.7.0/LICENSE"
  },
  "googleapis/LICENSE": {
   "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-  "url": "https://raw.githubusercontent.com/googleapis/googleapis/079e5305050859d0e3a8c0768611283ee4863c07/LICENSE"
+  "url": "https://raw.githubusercontent.com/googleapis/googleapis/b6f9ff05aaec18070232a1ab36da98e684bc7909/LICENSE"
  },
  "grpc-address-sorting/LICENSE": {
   "sha256": "be1227afc73a4d58af895a0f95eb21f67697e0a6a0c5b1a3e17436280e9158a6",
-  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/third_party/address_sorting/LICENSE"
+  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.81.0/third_party/address_sorting/LICENSE"
  },
  "grpc/LICENSE": {
-  "sha256": "590198e3f305f2c347fde64d637c65492bbef554db6c8364e149cd375e3797ee",
-  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/LICENSE"
+  "sha256": "58c86a3f2b5cca0ebdf9ed3e7f4e6dc38e3b38796d8c3dc92064c62a4e39d0dd",
+  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.81.0/LICENSE"
  },
  "grpc/NOTICE.txt": {
   "sha256": "693ff28ec216d5112ac1bbfe64ef539005867d1c7bd427b57d579683293b947f",
-  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.69.0/NOTICE.txt"
+  "url": "https://raw.githubusercontent.com/grpc/grpc/v1.81.0/NOTICE.txt"
  },
  "libaio/COPYING": {
   "member": "COPYING",
@@ -185,12 +185,8 @@
   "url": "https://raw.githubusercontent.com/GNOME/libxml2/v2.13.5/Copyright"
  },
  "nlohmann-json/LICENSE.MIT": {
-  "sha256": "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14",
-  "url": "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT"
- },
- "opencensus-proto/LICENSE": {
-  "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/census-instrumentation/opencensus-proto/v0.3.0/LICENSE"
+  "sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603",
+  "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT"
  },
  "openssl/LICENSE.txt": {
   "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
@@ -198,19 +194,19 @@
  },
  "opentelemetry-cpp/LICENSE": {
   "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
-  "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-cpp/v1.20.0/LICENSE"
+  "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-cpp/v1.24.0/LICENSE"
  },
  "protobuf/LICENSE": {
   "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
-  "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v27.0/LICENSE"
+  "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v33.6/LICENSE"
  },
  "protoc-gen-validate/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-  "url": "https://raw.githubusercontent.com/bufbuild/protoc-gen-validate/v1.0.4/LICENSE"
+  "url": "https://raw.githubusercontent.com/bufbuild/protoc-gen-validate/v1.2.1/LICENSE"
  },
  "re2/LICENSE": {
   "sha256": "6040cda75d90b1738292a631d89934c411ef7ffd543c4d6a1b7edfc8edf29449",
-  "url": "https://raw.githubusercontent.com/google/re2/2022-04-01/LICENSE"
+  "url": "https://raw.githubusercontent.com/google/re2/2025-08-12/LICENSE"
  },
  "s2n-tls/LICENSE": {
   "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
@@ -222,11 +218,11 @@
  },
  "utf8-range/LICENSE": {
   "sha256": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074",
-  "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v27.0/third_party/utf8_range/LICENSE"
+  "url": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v33.6/third_party/utf8_range/LICENSE"
  },
- "zlib-grpc/LICENSE": {
+ "zlib-bazel/LICENSE": {
   "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
-  "url": "https://raw.githubusercontent.com/madler/zlib/09155eaa2f9270dc4ed1fa13e2b4b2613e6e4851/LICENSE"
+  "url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE"
  },
  "zlib/LICENSE": {
   "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
