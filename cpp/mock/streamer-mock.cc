@@ -352,6 +352,21 @@ extern "C" int runai_file_streamer_probe_direct_block_size(void * streamer, cons
     return static_cast<int>(runai::llm::streamer::common::ResponseCode::Success);
 }
 
+// One reader, always. The mock deliberately depends on no implementation, and resolving this needs
+// the configuration that lives there; the sizing arithmetic is tested directly instead.
+extern "C" int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_readers)
+{
+    (void)streamer;
+
+    if (out_readers == nullptr)
+    {
+        return static_cast<int>(runai::llm::streamer::common::ResponseCode::InvalidParameterError);
+    }
+
+    *out_readers = 1;
+    return static_cast<int>(runai::llm::streamer::common::ResponseCode::Success);
+}
+
 extern "C" const char * runai_file_streamer_response_str(int response_code)
 {
     return 0;

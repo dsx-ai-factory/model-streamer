@@ -15,6 +15,7 @@
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
 #include "common/s3_credentials/s3_credentials.h"
+#include "streamer/impl/config/config/config.h"
 #include "streamer/impl/streamer/streamer.h"
 #include "posix_io/alignment/alignment.h"
 
@@ -340,6 +341,37 @@ int runai_file_streamer_probe_direct_block_size(
         }
 
         return static_cast<int>(s->direct_block_for(list, *out_block));
+    }
+    catch (const common::Exception & e)
+    {
+        return static_cast<int>(e.error());
+    }
+    catch (...)
+    {
+    }
+    return static_cast<int>(common::ResponseCode::UnknownError);
+}
+
+int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_readers)
+{
+    if (out_readers == nullptr)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+
+    // Written before anything that can fail, as the block probe is: a caller sizes a ring from this
+    // number, and an unwritten one is read as a ring of nothing.
+    *out_readers = 1;
+
+    try
+    {
+        if (static_cast<impl::Streamer *>(streamer) == nullptr)
+        {
+            return static_cast<int>(common::ResponseCode::InvalidParameterError);
+        }
+
+        *out_readers = impl::Config::fs_workers_per_mount();
+        return static_cast<int>(common::ResponseCode::Success);
     }
     catch (const common::Exception & e)
     {

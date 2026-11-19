@@ -826,6 +826,33 @@ TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+// The reader count a caller reads back is the one THIS PROCESS runs with - node wide, divided.
+TEST(ReadersPerMount, Reports_The_Resolved_Count)
+{
+    const int invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
+
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::Env processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 2UL);
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &readers),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(readers, 4u) << "8 readers over 2 processes is 4 each";
+
+    // A null streamer. Rejected, and the count must still be usable.
+    readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(nullptr, &readers), invalid);
+    EXPECT_EQ(readers, 1u) << "an error exit left the out-parameter untouched, so the caller reads 0";
+
+    // Nowhere to write, so this only reports.
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr), invalid);
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
 // The device is validated HERE, before any batch exists and before the caller is owed a response.
 TEST(Device, Is_Validated_At_The_Boundary)
 {

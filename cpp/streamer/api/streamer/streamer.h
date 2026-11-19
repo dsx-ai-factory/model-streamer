@@ -199,6 +199,20 @@ int runai_file_streamer_probe_direct_block_size(
     size_t *      out_block
 );
 
+// How many asynchronous readers this process gives one mount.
+//
+// The setting is node wide and divided between the processes on the node, so a caller cannot work
+// this out from the environment without repeating that rule. A ring sized from it matches the
+// readers that fill it.
+//
+//  out_readers  always set; 1 where it could not be resolved.
+//
+// ret is Success, or InvalidParameterError for a null streamer or a null out_readers.
+int runai_file_streamer_fs_readers_per_mount(
+    void *     streamer,
+    unsigned * out_readers
+);
+
 // List files at the given object storage prefix.
 //
 // streamer is a handle from runai_file_streamer_start; listing reuses its object-storage clients, backend handle and
