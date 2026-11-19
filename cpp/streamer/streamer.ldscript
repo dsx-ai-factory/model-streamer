@@ -54,6 +54,7 @@ RUNAI_FILE_STREAMER_1.0 {
         runai_file_streamer_response;
         runai_file_streamer_response_str;
         runai_file_streamer_probe_direct_block_size;
+        runai_file_streamer_fs_readers_per_mount;
         runai_file_streamer_list_files;
     local: *;
 };
