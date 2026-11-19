@@ -153,6 +153,29 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         files.pull_files("gs://bucket/models/llama/", self.dst)
 
         self.assertTrue(os.path.exists(os.path.join(self.dst, "subdir", "config.json")))
+        mock_gcs.get_bucket.assert_not_called()
+
+    @patch("runai_model_streamer_gcs.files.files._create_client")
+    @patch("runai_model_streamer_gcs.files.files.list_files")
+    def test_pull_files_creates_bucket_handle_once_without_get_bucket(
+            self, mock_list_files, mock_create_client):
+        mock_gcs = MagicMock()
+        mock_create_client.return_value = mock_gcs
+        mock_list_files.return_value = (
+            "bucket", "models/llama/",
+            ["models/llama/config.json", "models/llama/tokenizer.json"])
+
+        def fake_download_to_filename(destination_file):
+            with open(destination_file, "wb") as f:
+                f.write(b"content")
+        mock_gcs.bucket.return_value.blob.return_value.download_to_filename.side_effect = (
+            fake_download_to_filename)
+
+        files.pull_files("gs://bucket/models/llama/", self.dst)
+
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        self.assertEqual(mock_gcs.bucket.return_value.blob.call_count, 2)
+        mock_gcs.get_bucket.assert_not_called()
 
     @patch("runai_model_streamer_gcs.files.files._create_client")
     @patch("runai_model_streamer_gcs.files.files.list_files")
@@ -172,6 +195,23 @@ class TestPullFilesTraversalRegression(unittest.TestCase):
         files.pull_files("gs://bucket/models/llama/", self.dst)
 
         self.assertTrue(os.path.exists(os.path.join(self.dst, "a", "b", "c", "deep.safetensors")))
+
+
+class TestListFilesBucketHandle(unittest.TestCase):
+    def test_list_files_does_not_call_get_bucket(self):
+        mock_gcs = MagicMock()
+        blob = MagicMock()
+        blob.name = "models/llama/config.json"
+        mock_gcs.bucket.return_value.list_blobs.return_value = [blob]
+
+        bucket_name, prefix, paths = files.list_files(
+            mock_gcs, "gs://bucket/models/llama/", recursive=True)
+
+        self.assertEqual(
+            (bucket_name, prefix, paths),
+            ("bucket", "models/llama/", ["models/llama/config.json"]))
+        mock_gcs.bucket.assert_called_once_with("bucket")
+        mock_gcs.get_bucket.assert_not_called()
 
 
 if __name__ == "__main__":

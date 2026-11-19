@@ -40,12 +40,12 @@ def pull_files(model_path: str,
     if len(files) == 0:
         return
 
+    bucket = gcs.bucket(bucket_name)
 
     for file in files:
         destination_file = _safe_destination_path(dst, base_dir, file)
         local_dir = Path(destination_file).parent
         os.makedirs(local_dir, exist_ok=True)
-        bucket = gcs.bucket(bucket_name)
         blob = bucket.blob(file)
         blob.download_to_filename(destination_file)
 
