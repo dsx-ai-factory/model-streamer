@@ -4,6 +4,7 @@
 from typing import Any, Callable, Dict, List, Iterator, Optional, Tuple, Union
 from runai_model_streamer.libstreamer.libstreamer import (
     runai_probe_direct_block_size,
+    runai_fs_readers_per_mount,
     SUCCESS_ERROR_CODE,
     runai_start,
     runai_end,
@@ -467,9 +468,13 @@ class FileStreamer:
         if support is not None:
             # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without it
             # is a size for a packing the ring cannot produce.
+            # ASKED OF THE LIBRARY, not read from the environment: the reader count is node wide
+            # and divided between the processes on the node, and a ring sized from a second copy of
+            # that rule would drift from the readers that fill it.
             sizing = (slot_shape if slot_shape is not None
                       else device_ring_sizing(free, file_stream_requests,
-                                              SlotBounds(max_ranges=max_ranges_per_slot)))
+                                              SlotBounds(max_ranges=max_ranges_per_slot),
+                                              readers=runai_fs_readers_per_mount(self.streamer)))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
