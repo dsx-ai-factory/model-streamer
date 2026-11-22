@@ -366,7 +366,9 @@ jobs:
 
       # run.sh pulls the image, prints its digest (so that a red run names the exact engine build behind the floating
       # tag), and runs the steps inside it: the resolver check, the install, the stream through the native library.
+      # bash with pipefail, so that the exit status is the script's and not that of tee (as in the gpu-tests job).
       - name: Run the compatibility check
+        shell: bash
         run: |
           mkdir -p test-results/engine-compat
           tests/engine_compat/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \

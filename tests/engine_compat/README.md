@@ -39,7 +39,8 @@ tests/engine_compat/run.sh --engine vllm --image vllm/vllm-openai:latest \
 ```
 
 `--engine sglang --image lmsysorg/sglang:latest` for SGLang. `--wheel-dir` must hold exactly one
-`runai_model_streamer-*.whl`. The images are 10-20 GB; the first run pulls them.
+`runai_model_streamer-*.whl`, anywhere under it (the search is recursive: the CI artifact nests the
+wheel under `runai_model_streamer/dist/`). The images are 10-20 GB; the first run pulls them.
 
 ## Where it runs in CI
 

@@ -45,16 +45,19 @@ esac
 [ -n "$image" ] || { echo "--image is required" >&2; exit 2; }
 [ -d "$wheel_dir" ] || { echo "--wheel-dir '$wheel_dir' is not a directory" >&2; exit 2; }
 
-# Exactly one streamer wheel, the same rule as tests/gpu/tests_entrypoint.sh: two would make the
-# tested version ambiguous.
-shopt -s nullglob
-wheels=("$wheel_dir"/runai_model_streamer-*.whl)
-shopt -u nullglob
+# Exactly one streamer wheel, found the way tests/gpu/tests_entrypoint.sh finds it - recursively,
+# because the gpu-test-wheel artifact keeps the build's directories (the wheel is nested under
+# runai_model_streamer/dist/). Two wheels would make the tested version ambiguous.
+# Not mapfile: this script runs on the host, which may be a Mac with bash 3.2 (the harness scripts
+# run inside Linux containers and can assume bash 4).
+wheels=()
+while IFS= read -r found; do wheels+=("$found"); done < <(find "$wheel_dir" -name 'runai_model_streamer-*.whl')
 if [ ${#wheels[@]} -ne 1 ]; then
-  echo "expected exactly one runai_model_streamer-*.whl in $wheel_dir, found ${#wheels[@]}" >&2
+  echo "expected exactly one runai_model_streamer-*.whl under $wheel_dir, found ${#wheels[@]}: ${wheels[*]:-none}" >&2
   exit 2
 fi
 wheel_name=$(basename "${wheels[0]}")
+wheel_mount_dir=$(cd "$(dirname "${wheels[0]}")" && pwd)
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 
@@ -68,7 +71,7 @@ echo "ENGINE-COMPAT IMAGE: ${digest:-$image}"
 # environment; the script below runs with its python3/pip, whatever they are.
 docker run --rm \
   --entrypoint bash \
-  --volume "$wheel_dir:/wheel:ro" \
+  --volume "$wheel_mount_dir:/wheel:ro" \
   --volume "$repo_root:/workspace:ro" \
   --env ENGINE="$engine" \
   --env WHEEL="/wheel/$wheel_name" \
