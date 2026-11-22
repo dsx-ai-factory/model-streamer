@@ -4,7 +4,7 @@
 """Exercise the installed streamer inside an inference engine's environment.
 
 Run inside an official engine image (vLLM or SGLang) after the streamer wheel
-under test was installed there (tests/engine_compat/run.sh does both). It
+under test was installed there (tests/engine_compatibility/run.sh does both). It
 checks what a plain `pip install` cannot:
 
 1. importing the package and streaming a tiny safetensors file, which dlopens
@@ -27,10 +27,10 @@ ENGINE_MODULES = {
 
 
 def fail(step: str, error: BaseException) -> None:
-    print(f"ENGINE-COMPAT FAIL [{step}]: {type(error).__name__}: {error}")
+    print(f"ENGINE-COMPATIBILITY FAIL [{step}]: {type(error).__name__}: {error}")
     if isinstance(error, OSError) and "GLIBC" in str(error):
         print(
-            "ENGINE-COMPAT HINT: libstreamer.so needs glibc symbols newer than the engine "
+            "ENGINE-COMPATIBILITY HINT: libstreamer.so needs glibc symbols newer than the engine "
             "image ships - the wheel's build toolchain is too new for this environment."
         )
     sys.exit(1)
@@ -60,7 +60,7 @@ def stream_roundtrip() -> None:
     for name, expected in tensors.items():
         if not torch.equal(streamed[name], expected):
             raise AssertionError(f"tensor {name!r} does not match after streaming")
-    print("ENGINE-COMPAT OK [stream]: streamed 2 tensors through libstreamer.so")
+    print("ENGINE-COMPATIBILITY OK [stream]: streamed 2 tensors through libstreamer.so")
 
 
 def import_engine(engine: str) -> None:
@@ -68,7 +68,7 @@ def import_engine(engine: str) -> None:
 
     module = importlib.import_module(ENGINE_MODULES[engine])
     version = getattr(module, "__version__", "unknown")
-    print(f"ENGINE-COMPAT OK [engine-import]: {engine} {version} imports after the install")
+    print(f"ENGINE-COMPATIBILITY OK [engine-import]: {engine} {version} imports after the install")
 
 
 def main() -> None:
@@ -85,7 +85,7 @@ def main() -> None:
         import_engine(engine)
     except BaseException as error:  # noqa: B036
         fail("engine-import", error)
-    print("ENGINE-COMPAT PASS")
+    print("ENGINE-COMPATIBILITY PASS")
 
 
 if __name__ == "__main__":

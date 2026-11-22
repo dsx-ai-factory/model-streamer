@@ -49,7 +49,7 @@ the `gpu-test-wheel` artifact of a nightly run (`gh run download --name gpu-test
 then:
 
 ```bash
-tests/engine_compat/run.sh --engine vllm --image vllm/vllm-openai:latest \
+tests/engine_compatibility/run.sh --engine vllm --image vllm/vllm-openai:latest \
   --wheel-dir py/runai_model_streamer/dist
 ```
 
@@ -59,7 +59,7 @@ wheel under `runai_model_streamer/dist/`). The images are 10-20 GB; the first ru
 
 ## Where it runs in CI
 
-The `engine-compat` job of [nightly-gpu.yaml](../../.github/workflows/nightly-gpu.yaml), on
+The `engine-compatibility` job of [nightly-gpu.yaml](../../.github/workflows/nightly-gpu.yaml), on
 `ubuntu-latest`, against the wheel the run's `build-wheel` job built from the commit under test:
 one leg per engine image (`vllm`, `sglang`), and the `vllm-cpu-serve` leg, which adds `--serve` on
 the vLLM CPU image. The engine images are `:latest` on purpose - the job exists to catch breakage

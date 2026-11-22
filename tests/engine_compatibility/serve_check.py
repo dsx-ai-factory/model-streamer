@@ -5,7 +5,7 @@
 completion.
 
 Run inside vLLM's official CPU image (public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo) after the
-streamer wheel under test was installed there (tests/engine_compat/run.sh --serve does both, after
+streamer wheel under test was installed there (tests/engine_compatibility/run.sh --serve does both, after
 check.py). This is the end-to-end loader check without a GPU: vLLM's own loader streams real
 weights through the installed streamer into CPU tensors, the server comes up, and one completion
 comes back. The server log must show the streamer's marker - a server that quietly fell back to
@@ -32,7 +32,7 @@ MODEL_REVISION = "060db6499f32faf8b98477b0a26969ef7d8b9987"
 
 PORT = 8000
 BASE_URL = f"http://127.0.0.1:{PORT}"
-LOG_PATH = "/tmp/engine-compat-server.log"
+LOG_PATH = "/tmp/engine-compatibility-server.log"
 DOWNLOAD_ATTEMPTS = 3
 HEALTH_DEADLINE_SECONDS = 900  # a healthy CPU start of this model takes a few minutes
 
@@ -56,7 +56,7 @@ def say(line: str) -> None:
 
 
 def fail(step: str, message: str) -> None:
-    say(f"ENGINE-COMPAT FAIL [{step}]: {message}")
+    say(f"ENGINE-COMPATIBILITY FAIL [{step}]: {message}")
     sys.exit(1)
 
 
@@ -67,7 +67,7 @@ def download_model(target: str) -> str:
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         try:
             path = snapshot_download(MODEL_REPO, revision=MODEL_REVISION, local_dir=target)
-            say(f"ENGINE-COMPAT OK [model]: {MODEL_REPO}@{MODEL_REVISION[:7]} in {path}")
+            say(f"ENGINE-COMPATIBILITY OK [model]: {MODEL_REPO}@{MODEL_REVISION[:7]} in {path}")
             return path
         except Exception as error:  # noqa: BLE001 - retried, then reported
             last_error = error
@@ -107,7 +107,7 @@ def wait_for_health(process: subprocess.Popen) -> None:
         try:
             with urllib.request.urlopen(f"{BASE_URL}/health", timeout=5) as response:
                 if response.status == 200:
-                    say("ENGINE-COMPAT OK [health]: the server is up")
+                    say("ENGINE-COMPATIBILITY OK [health]: the server is up")
                     return
         except (urllib.error.URLError, OSError, TimeoutError):
             pass
@@ -127,7 +127,7 @@ def completion() -> None:
     text = answer["choices"][0]["text"]
     if not text.strip():
         raise AssertionError(f"the completion came back empty: {answer}")
-    say(f"ENGINE-COMPAT OK [completion]: {text.strip()!r}")
+    say(f"ENGINE-COMPATIBILITY OK [completion]: {text.strip()!r}")
 
 
 def check_streamer_marker() -> None:
@@ -139,7 +139,7 @@ def check_streamer_marker() -> None:
             f"the server log has no {STREAMER_MARKER!r} line: the engine did not load the weights "
             "through the streamer (a silent fallback to its default loader?)",
         )
-    say("ENGINE-COMPAT OK [loader]: the weights went through the streamer")
+    say("ENGINE-COMPATIBILITY OK [loader]: the weights went through the streamer")
 
 
 def main() -> None:
@@ -148,7 +148,7 @@ def main() -> None:
         sys.exit(2)
     engine = sys.argv[1]
 
-    model_dir = download_model(os.environ.get("MODEL_DIR", "/tmp/engine-compat-model"))
+    model_dir = download_model(os.environ.get("MODEL_DIR", "/tmp/engine-compatibility-model"))
 
     environment = dict(os.environ)
     environment["RUNAI_STREAMER_LOG_TO_STDERR"] = "1"  # the streamer's marker must reach the log
@@ -173,7 +173,7 @@ def main() -> None:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 process.kill()
-    say("ENGINE-COMPAT SERVE PASS")
+    say("ENGINE-COMPATIBILITY SERVE PASS")
 
 
 if __name__ == "__main__":

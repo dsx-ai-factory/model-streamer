@@ -4,20 +4,20 @@
 #
 # Check that the streamer wheel under test installs and runs inside an official inference-engine
 # image (vLLM or SGLang). No GPU is needed: the wheel's native library is exercised by streaming a
-# tiny generated safetensors file to CPU tensors (tests/engine_compat/check.py). Catches what broke
+# tiny generated safetensors file to CPU tensors (tests/engine_compatibility/check.py). Catches what broke
 # before without CI noticing: a wheel whose libstreamer.so needs a newer glibc than the engine image
 # ships, a dependency pin of the streamer that conflicts with the engine's, a packaging mistake.
 #
 # Usage:
-#   tests/engine_compat/run.sh --engine vllm   --image vllm/vllm-openai:latest --wheel-dir DIR
-#   tests/engine_compat/run.sh --engine sglang --image lmsysorg/sglang:latest  --wheel-dir DIR
-#   tests/engine_compat/run.sh --engine vllm --serve --wheel-dir DIR \
+#   tests/engine_compatibility/run.sh --engine vllm   --image vllm/vllm-openai:latest --wheel-dir DIR
+#   tests/engine_compatibility/run.sh --engine sglang --image lmsysorg/sglang:latest  --wheel-dir DIR
+#   tests/engine_compatibility/run.sh --engine vllm --serve --wheel-dir DIR \
 #     --image public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
 #
 # --serve (vLLM only, with vLLM's official CPU image): after the steps below, vLLM serves the
 # pinned small real model with load_format=runai_streamer - its own loader streaming real weights
 # through the wheel into CPU tensors - and answers one completion; the server log must show the
-# streamer's marker (tests/engine_compat/serve_check.py). No GPU anywhere. The prebuilt CPU image
+# streamer's marker (tests/engine_compatibility/serve_check.py). No GPU anywhere. The prebuilt CPU image
 # needs avx512f: on a machine without it the serve part reports a SKIP instead of running.
 #
 # DIR holds exactly one runai_model_streamer-*.whl (the gpu-test-wheel artifact in CI, py/
@@ -28,7 +28,7 @@
 #   2. install   pip install --force-reinstall --no-deps, then assert that pip reports the version
 #                encoded in the wheel's filename: proof the wheel under test replaced the engine's
 #                pinned streamer.
-#   3. check     tests/engine_compat/check.py: stream a generated safetensors file (dlopens
+#   3. check     tests/engine_compatibility/check.py: stream a generated safetensors file (dlopens
 #                libstreamer.so), then import the engine itself.
 
 set -o errexit -o nounset -o pipefail
@@ -76,7 +76,7 @@ repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 # The pull, and the digest behind the floating tag, so that a red run names the exact engine build.
 docker pull "$image"
 digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null || true)
-echo "ENGINE-COMPAT IMAGE: ${digest:-$image}"
+echo "ENGINE-COMPATIBILITY IMAGE: ${digest:-$image}"
 
 # --entrypoint: both official images set a serving ENTRYPOINT (vllm serve / sglang launch_server),
 # so the command would otherwise become its arguments. The container is the engine's own
@@ -98,4 +98,4 @@ docker run --rm \
   --env PIP_DISABLE_PIP_VERSION_CHECK=1 \
   $serve_args \
   "$image" \
-  /workspace/tests/engine_compat/container_steps.sh
+  /workspace/tests/engine_compatibility/container_steps.sh

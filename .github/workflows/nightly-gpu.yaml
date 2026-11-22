@@ -35,17 +35,17 @@ on:
           - '2'
           - '1'
       vllm_image:
-        description: The vLLM image of the engine-compat job. Latest by default, on purpose; pin a tag here to bisect a red run.
+        description: The vLLM image of the engine-compatibility job. Latest by default, on purpose; pin a tag here to bisect a red run.
         required: false
         default: vllm/vllm-openai:latest
         type: string
       sglang_image:
-        description: The SGLang image of the engine-compat job. Latest by default, on purpose; pin a tag here to bisect a red run.
+        description: The SGLang image of the engine-compatibility job. Latest by default, on purpose; pin a tag here to bisect a red run.
         required: false
         default: lmsysorg/sglang:latest
         type: string
       vllm_cpu_image:
-        description: The vLLM CPU image of the engine-compat serve leg. Latest by default, on purpose; pin a tag here to bisect a red run.
+        description: The vLLM CPU image of the engine-compatibility serve leg. Latest by default, on purpose; pin a tag here to bisect a red run.
         required: false
         default: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
         type: string
@@ -329,15 +329,15 @@ jobs:
           retention-days: 14
 
   # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang): a pip
-  # resolver check, the install, and a stream through the native library (tests/engine_compat/README.md). No GPU: it
+  # resolver check, the install, and a stream through the native library (tests/engine_compatibility/README.md). No GPU: it
   # catches what a wheel can break without one - a glibc/ABI mismatch of libstreamer.so, a dependency conflict, a
   # packaging mistake - which is how a glibc upgrade of the devcontainer once broke installing with vLLM.
   # The vllm-cpu-serve leg goes further on vLLM's official CPU image: vLLM serves the pinned small real model with
   # load_format=runai_streamer - its own loader streaming real weights through the wheel into CPU tensors - and
   # answers one completion, still without a GPU. (The prebuilt CPU image needs avx512f; on a runner VM without it,
   # the serve step says SKIP and the leg passes on the earlier steps alone.)
-  engine-compat:
-    name: Engine compat (${{ matrix.name }})
+  engine-compatibility:
+    name: Engine compatibility (${{ matrix.name }})
     needs: build-wheel
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -388,20 +388,20 @@ jobs:
       - name: Run the compatibility check
         shell: bash
         run: |
-          mkdir -p test-results/engine-compat
+          mkdir -p test-results/engine-compatibility
           args=(--engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" --wheel-dir "$RUNNER_TEMP/wheel")
           if [ "${{ matrix.serve }}" = true ]; then args+=(--serve); fi
-          tests/engine_compat/run.sh "${args[@]}" 2>&1 | tee "test-results/engine-compat/${{ matrix.name }}.log"
+          tests/engine_compatibility/run.sh "${args[@]}" 2>&1 | tee "test-results/engine-compatibility/${{ matrix.name }}.log"
 
-      # The ENGINE-COMPAT lines of the log: the image digest and each step's verdict.
+      # The ENGINE-COMPATIBILITY lines of the log: the image digest and each step's verdict.
       - name: Summarize
         if: always()
         run: |
-          log="test-results/engine-compat/${{ matrix.name }}.log"
+          log="test-results/engine-compatibility/${{ matrix.name }}.log"
           {
-            echo "### Engine compat (${{ matrix.name }})"
+            echo "### Engine compatibility (${{ matrix.name }})"
             echo '```'
-            grep -E '^ENGINE-COMPAT' "$log" 2>/dev/null \
+            grep -E '^ENGINE-COMPATIBILITY' "$log" 2>/dev/null \
               || echo "the run ended before the checks could report (see the log)"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -410,7 +410,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: engine-compat-${{ matrix.name }}-${{ github.run_attempt }}
-          path: test-results/engine-compat/
+          name: engine-compatibility-${{ matrix.name }}-${{ github.run_attempt }}
+          path: test-results/engine-compatibility/
           if-no-files-found: warn
           retention-days: 14
