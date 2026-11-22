@@ -20,7 +20,14 @@ echo "engine image streamer (before): $(python3 -m pip show runai-model-streamer
 wheel_version=$(basename "$WHEEL" | cut -d- -f2)
 
 echo "=== step 1: resolver check (pip install --dry-run, with dependencies) ==="
-if ! python3 -m pip install --dry-run "$WHEEL"; then
+# Constrained to the versions the image ships (everything pip freeze pins with ==, less the
+# streamer itself): an unconstrained dry run passes by PLANNING an upgrade of an engine pin, which
+# is exactly the conflict this step exists to report. Editable and URL-pinned entries cannot be
+# constraints, and leaving one out only loosens the check for that package.
+constraints=/tmp/engine-compatibility-constraints.txt
+python3 -m pip freeze 2>/dev/null | grep '==' | grep -iv '^runai[-_]model[-_]streamer' > "$constraints" || true
+echo "constraining to $(wc -l < "$constraints") installed packages"
+if ! python3 -m pip install --dry-run --constraint "$constraints" "$WHEEL"; then
   echo "ENGINE-COMPATIBILITY FAIL [resolver]: the wheel's dependencies conflict with the $ENGINE image's packages"
   status=1
 else
@@ -28,10 +35,14 @@ else
 fi
 
 echo "=== step 2: install the wheel over the engine's pinned streamer ==="
-# With its dependencies, the way a user installs it: pip's only-if-needed upgrade strategy leaves
-# the engine's satisfied pins (torch, numpy) alone and adds only what is missing - an image that
-# does not ship the streamer has none of its dependencies either, and --no-deps would leave the
-# install broken (no humanize). What pip changes beyond the streamer, the log of this step says.
+# The bundled streamer goes first: pip skips a local wheel whose version is already installed, so a
+# rebuild of the very version the image pins would otherwise leave the bundled copy under test (CI
+# versions are 0.0.0+dev.<sha> and never collide; a developer's local rebuild of a release can).
+python3 -m pip uninstall --yes runai-model-streamer 2>/dev/null || true
+# Then the wheel with its dependencies, the way a user installs it: pip's only-if-needed upgrade
+# strategy leaves the engine's satisfied pins (torch, numpy) alone and adds only what is missing -
+# an image that does not ship the streamer has none of its dependencies either, and --no-deps would
+# leave the install broken (no humanize). What pip changes beyond the streamer, this step's log says.
 if ! python3 -m pip install "$WHEEL"; then
   echo "ENGINE-COMPATIBILITY FAIL [install]: pip could not install the wheel"
   exit 1
