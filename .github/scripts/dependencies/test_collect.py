@@ -76,10 +76,12 @@ class DockerfileTest(unittest.TestCase):
     def test_pip_install_of_a_copied_requirements_file(self):
         text = ("COPY .devcontainer/requirements.txt /tmp/r.txt\n"
                 "RUN pip install -r /tmp/r.txt \\\n    && rm /tmp/r.txt\n")
-        packages = [p for _, p in dockerfile.pip_packages(text)]
-        self.assertEqual(len(packages), 1)
-        self.assertTrue(all(r[0].isalpha() and "==" in r for r in packages[0]), packages)
-        self.assertIn("cpplint==1.5.4", packages[0])
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, ".devcontainer"))
+            with open(os.path.join(root, ".devcontainer", "requirements.txt"), "w") as f:
+                f.write("# a comment\na==1.0\n\nb>=2\n")
+            packages = [p for _, p in dockerfile.pip_packages(text, root=root)]
+        self.assertEqual(packages, [["a==1.0", "b>=2"]])
         with self.assertRaises(ValueError):
             dockerfile.pip_packages("RUN pip install -r /tmp/missing.txt\n")
 

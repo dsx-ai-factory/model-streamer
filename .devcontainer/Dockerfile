@@ -140,10 +140,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # pin by hand. Exact pin, not a floor, to match this file's other dependencies; the same
 # versions the 3.8 interpreter above pins, all of which also support Python 3.11.
 # The development tools reinstall here so they import from the interpreter that runs them.
+COPY .devcontainer/requirements.txt /tmp/devcontainer-requirements.txt
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.11 10 \
     && python3.11 -m pip install --upgrade "pip==25.0.1" \
     && python3.11 -m pip install "setuptools==75.3.4" "wheel==0.45.1" \
-    && python3.11 -m pip install \
-    boto3 \
-    cpplint==1.5.4 \
-    pytest
+    && python3.11 -m pip install -r /tmp/devcontainer-requirements.txt \
+    && rm /tmp/devcontainer-requirements.txt

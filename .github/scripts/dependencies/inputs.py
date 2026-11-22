@@ -107,7 +107,7 @@ def pip_groups(repo):
         for spec in setup_requirements(setup):
             add("run", spec, os.path.relpath(declaring, repo))
     for path in build_files(repo):
-        for line, requirements in dockerfile.pip_packages(read(repo, path), path):
+        for line, requirements in dockerfile.pip_packages(read(repo, path), path, repo):
             for spec in requirements:
                 name = re.split(r"[<>=!~\[; ]", spec, 1)[0]
                 for category in categories_for("pip", name):

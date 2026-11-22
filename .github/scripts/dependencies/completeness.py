@@ -96,7 +96,7 @@ def unparsed_commands(repo):
             "curl": len(dockerfile.downloads(text, path)),
             "git clone": len(dockerfile.git_clones(text, path)),
             "npm install": len(dockerfile.npm_packages(text, path)),
-            "pip install": len(dockerfile.pip_packages(text, path)),
+            "pip install": len(dockerfile.pip_packages(text, path, repo)),
             "apt-get install": len(dockerfile.apt_packages(text, path)),
         }
         for kind, count in parsed.items():
