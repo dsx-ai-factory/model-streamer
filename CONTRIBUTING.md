@@ -105,6 +105,17 @@ A pull request check fails when a file is missing the header. To add it, run
 To add the header automatically on every commit, install [pre-commit](https://pre-commit.com) and run
 `pre-commit install` once.
 
+### Code Comments
+
+Comment *why*, not *what*. A comment states the contract or invariant that holds today, and the code shows the rest.
+
+- Explain constraints the code cannot show: kernel or filesystem quirks, ownership and lifetime rules, ordering requirements, and why an error maps to a given code.
+- Do not narrate change history ("used to", "no longer", "previously"). That belongs in the commit message or pull request. Describe the current behavior only.
+- Do not record benchmark numbers or review debates in code. Keep the conclusion in the comment and put the measurements in `docs/` with the hardware and date.
+- In public headers, describe the contract. If the rationale runs past about 10 lines, move it to a design document and link to it.
+- In tests, state which behavior the test pins down, not how the test came to exist.
+- When you change code, re-read the comments around it and update or remove any that no longer hold.
+
 ### Reporting Issues
 Open an issue with a clear description, steps to reproduce, and relevant environment details.
 
@@ -199,6 +210,7 @@ Each pull request should meet the following requirements:
 - Documentation – Update relevant documentation to reflect your changes.
 - PR description – Clearly describe what changed and why.
 - Linked issue – For non-trivial changes, the description references the associated issue (`Fixes #123`).
+- Comments – Explain why, contain no change history, and still match the code (see [Code Comments](#code-comments)).
 - DCO – Every commit has the contributor's `Signed-off-by` line.
 
 ## Pull Request CI Environment
