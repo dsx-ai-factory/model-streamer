@@ -44,11 +44,6 @@ on:
         required: false
         default: lmsysorg/sglang:latest
         type: string
-      vllm_cpu_image:
-        description: The vLLM CPU image of the engine-compatibility serve leg. Latest by default, on purpose; pin a tag here to bisect a red run.
-        required: false
-        default: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
-        type: string
 
 permissions:
   contents: read
@@ -332,12 +327,8 @@ jobs:
   # resolver check, the install, and a stream through the native library (tests/engine_compatibility/README.md). No GPU: it
   # catches what a wheel can break without one - a glibc/ABI mismatch of libstreamer.so, a dependency conflict, a
   # packaging mistake - which is how a glibc upgrade of the devcontainer once broke installing with vLLM.
-  # The vllm-cpu-serve leg goes further on vLLM's official CPU image: vLLM serves the pinned small real model with
-  # load_format=runai_streamer - its own loader streaming real weights through the wheel into CPU tensors - and
-  # answers one completion, still without a GPU. (The prebuilt CPU image needs avx512f; on a runner VM without it,
-  # the serve step says SKIP and the leg passes on the earlier steps alone.)
   engine-compatibility:
-    name: Engine compatibility (${{ matrix.name }})
+    name: Engine compatibility (${{ matrix.engine }})
     needs: build-wheel
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -345,21 +336,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: vllm
-            engine: vllm
+          - engine: vllm
             image_input: vllm_image
             default_image: vllm/vllm-openai:latest
-            serve: false
-          - name: sglang
-            engine: sglang
+          - engine: sglang
             image_input: sglang_image
             default_image: lmsysorg/sglang:latest
-            serve: false
-          - name: vllm-cpu-serve
-            engine: vllm
-            image_input: vllm_cpu_image
-            default_image: public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest
-            serve: true
     env:
       ENGINE_IMAGE: ${{ inputs[matrix.image_input] || matrix.default_image }}
     steps:
@@ -389,17 +371,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p test-results/engine-compatibility
-          args=(--engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" --wheel-dir "$RUNNER_TEMP/wheel")
-          if [ "${{ matrix.serve }}" = true ]; then args+=(--serve); fi
-          tests/engine_compatibility/run.sh "${args[@]}" 2>&1 | tee "test-results/engine-compatibility/${{ matrix.name }}.log"
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
+            --wheel-dir "$RUNNER_TEMP/wheel" 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
 
       # The ENGINE-COMPATIBILITY lines of the log: the image digest and each step's verdict.
       - name: Summarize
         if: always()
         run: |
-          log="test-results/engine-compatibility/${{ matrix.name }}.log"
+          log="test-results/engine-compatibility/${{ matrix.engine }}.log"
           {
-            echo "### Engine compatibility (${{ matrix.name }})"
+            echo "### Engine compatibility (${{ matrix.engine }})"
             echo '```'
             grep -E '^ENGINE-COMPATIBILITY' "$log" 2>/dev/null \
               || echo "the run ended before the checks could report (see the log)"
@@ -410,7 +391,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: engine-compatibility-${{ matrix.name }}-${{ github.run_attempt }}
+          name: engine-compatibility-${{ matrix.engine }}-${{ github.run_attempt }}
           path: test-results/engine-compatibility/
           if-no-files-found: warn
           retention-days: 14

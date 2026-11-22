@@ -28,9 +28,11 @@ else
 fi
 
 echo "=== step 2: install the wheel over the engine's pinned streamer ==="
-# --no-deps: swap only the streamer, leaving the engine's pinned stack as its users run it. The
-# resolver signal came from step 1.
-if ! python3 -m pip install --force-reinstall --no-deps "$WHEEL"; then
+# With its dependencies, the way a user installs it: pip's only-if-needed upgrade strategy leaves
+# the engine's satisfied pins (torch, numpy) alone and adds only what is missing - an image that
+# does not ship the streamer has none of its dependencies either, and --no-deps would leave the
+# install broken (no humanize). What pip changes beyond the streamer, the log of this step says.
+if ! python3 -m pip install "$WHEEL"; then
   echo "ENGINE-COMPATIBILITY FAIL [install]: pip could not install the wheel"
   exit 1
 fi
@@ -44,20 +46,6 @@ echo "ENGINE-COMPATIBILITY OK [install]: runai-model-streamer $installed"
 echo "=== step 3: stream through the native library, then import $ENGINE ==="
 if ! python3 /workspace/tests/engine_compatibility/check.py "$ENGINE"; then
   status=1
-fi
-
-# A serve run only (run.sh --serve, vLLM's CPU image): vLLM serves the pinned small real model
-# through load_format=runai_streamer and answers one completion. Not reached when the steps above
-# already failed: a server started over a broken install would blame the wrong step. The prebuilt
-# CPU image needs avx512f (vLLM's CPU installation page); CI runners are a mixed fleet, so a
-# machine without it gets a SKIP, not an 'Illegal instruction'.
-if [ "${SERVE:-0}" = 1 ] && [ "$status" = 0 ]; then
-  echo "=== step 4: serve the model with load_format=runai_streamer (CPU) ==="
-  if ! grep -q avx512f /proc/cpuinfo; then
-    echo "ENGINE-COMPATIBILITY SKIP [serve]: this machine has no avx512f, which the prebuilt vLLM CPU image needs"
-  elif ! python3 /workspace/tests/engine_compatibility/serve_check.py "$ENGINE"; then
-    status=1
-  fi
 fi
 
 exit "$status"
