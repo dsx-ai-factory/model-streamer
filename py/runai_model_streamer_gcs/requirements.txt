@@ -2,5 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Runtime requirements: setup.py reads them as install_requires.
-google-cloud-storage>=3.9.0
-google-auth>=2.50.0
+# Caps are majors only; google-cloud-storage itself already caps google-auth below 3.
+google-cloud-storage>=3.9.0, <4
+google-auth>=2.50.0, <3

@@ -288,12 +288,12 @@ class InputsTest(unittest.TestCase):
     def test_makefile_installs_are_test_packages(self):
         test = inputs.pip_groups(util.REPO)["test"]
         self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])  # `pip install -r requirements.txt`
-        self.assertIn("azure-storage-blob>=12.26.0", test["specs"])  # the bound must survive the parsing
+        self.assertIn("azure-storage-blob>=12.26.0, <13", test["specs"])  # the bound must survive the parsing
         self.assertFalse([s for s in test["specs"] if "/" in s or s.startswith(("-", "."))])  # no paths or wheels of ours
 
     def test_pip_groups(self):
         groups = inputs.pip_groups(util.REPO)
-        self.assertIn("boto3>=1.28.0", groups["run"]["specs"])  # the bound must survive the parsing
+        self.assertIn("boto3>=1.28.0, <2", groups["run"]["specs"])  # the bound must survive the parsing
         self.assertIn("boto3", groups["run"]["specs"])
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
         self.assertIn("torch>=2.6", groups["test"]["specs"])  # quoted in the Makefile; the quotes must not survive

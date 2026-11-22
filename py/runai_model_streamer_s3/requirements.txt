@@ -2,4 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Runtime requirements: setup.py reads them as install_requires.
-boto3>=1.28.0
+# The cap is the major only (boto3 has been 1.x for a decade); 1.28.0 is the first boto3
+# that reads AWS_ENDPOINT_URL*, which files.py needs to target the same endpoint as the C++.
+boto3>=1.28.0, <2
