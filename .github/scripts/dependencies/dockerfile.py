@@ -144,13 +144,21 @@ def apt_packages(text, path=DOCKERFILE):
     return found
 
 
-def _copied_requirements(text, destination, root):
+def _copied_requirements(text, destination, root, path):
     """The requirements of the file that `pip install -r <destination>` reads: the Dockerfile copies it
-    from the repository at `root` (`COPY <source> <destination>`)."""
-    copy = re.search(r"^COPY\s+(?:--\S+\s+)*(\S+)\s+%s\s*$" % re.escape(destination), text, re.M)
+    from the repository at `root` (a `COPY <source> <destination>` of exactly one source file)."""
+    if is_script(path):
+        raise ValueError("%s: `pip install -r` in a script is not read (a script has no COPY); name the "
+                         "packages, or teach _copied_requirements where the file comes from" % path)
+    copy = re.search(r"^COPY\s+([^\n]*\S)\s+%s\s*$" % re.escape(destination), text, re.M)
     if not copy:
-        raise ValueError("pip install -r %s: no COPY of that file in the Dockerfile" % destination)
-    with open(os.path.join(root, copy.group(1))) as f:
+        raise ValueError("%s: pip install -r %s: no COPY of that exact file in the Dockerfile (a COPY to a "
+                         "directory is not read)" % (path, destination))
+    sources = [t for t in copy.group(1).split() if not t.startswith("--")]
+    if len(sources) != 1:
+        raise ValueError("%s: the COPY of %s names %d sources and the collector reads exactly one"
+                         % (path, destination, len(sources)))
+    with open(os.path.join(root, sources[0])) as f:
         return requirement_lines(f.read())
 
 
@@ -164,7 +172,7 @@ def pip_packages(text, path=DOCKERFILE, root=REPO):
                 requirements, tokens = [], _tokens(match.group(1))
                 for index, token in enumerate(tokens):
                     if token == "-r" and index + 1 < len(tokens):
-                        requirements += _copied_requirements(text, tokens[index + 1], root)
+                        requirements += _copied_requirements(text, tokens[index + 1], root, path)
                     elif not token.startswith("-") and not (index and tokens[index - 1] == "-r"):
                         requirements.append(token)
                 if requirements:

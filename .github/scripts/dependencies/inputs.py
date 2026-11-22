@@ -66,8 +66,9 @@ def devcontainer_features(repo):
 
 
 def setup_requirements(path):
-    """The install_requires list of a setup.py, read without running it. A setup.py that reads it from
-    the requirements.txt next to it (`install_requires=read_requirements()`) gives that file's lines."""
+    """The install_requires of a setup.py, read without running it, as (specs, declaring file): the
+    setup.py itself for a literal list, or the requirements file that `read_requirements(...)` names
+    (requirements.txt unless an argument says otherwise). Any other shape stops the collector."""
     with open(path) as f:
         tree = ast.parse(f.read())
     for node in ast.walk(tree):
@@ -75,10 +76,16 @@ def setup_requirements(path):
             for keyword in node.keywords:
                 if keyword.arg == "install_requires":
                     if isinstance(keyword.value, ast.Call):
-                        with open(os.path.join(os.path.dirname(path), REQUIREMENTS)) as f:
-                            return requirement_lines(f.read())
-                    return list(ast.literal_eval(keyword.value))
-    return []
+                        call = keyword.value
+                        if getattr(call.func, "id", getattr(call.func, "attr", "")) != "read_requirements":
+                            raise ValueError("%s: install_requires is a call the collector does not read; "
+                                             "use read_requirements() or a literal list" % path)
+                        name = ast.literal_eval(call.args[0]) if call.args else REQUIREMENTS
+                        declaring = os.path.join(os.path.dirname(path), name)
+                        with open(declaring) as f:
+                            return requirement_lines(f.read()), declaring
+                    return list(ast.literal_eval(keyword.value)), path
+    return [], path
 
 
 def spec_name(spec):
@@ -101,10 +108,8 @@ def pip_groups(repo):
             files.append(declared_by)
 
     for setup in sorted(glob.glob(os.path.join(repo, "py", "*", "setup.py"))):
-        declaring = os.path.join(os.path.dirname(setup), REQUIREMENTS)
-        if not os.path.exists(declaring):
-            declaring = setup  # install_requires written in the setup.py itself
-        for spec in setup_requirements(setup):
+        specs, declaring = setup_requirements(setup)
+        for spec in specs:
             add("run", spec, os.path.relpath(declaring, repo))
     for path in build_files(repo):
         for line, requirements in dockerfile.pip_packages(read(repo, path), path, repo):
