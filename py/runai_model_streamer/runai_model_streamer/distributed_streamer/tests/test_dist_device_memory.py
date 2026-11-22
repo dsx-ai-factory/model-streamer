@@ -837,6 +837,18 @@ class TestARankThatCannotMeasure(unittest.TestCase):
         self.assertEqual(contributed, [-1], "it reduced something a real reading could be")
         self.assertIsInstance(result, RuntimeError)
 
+    def test_the_joint_raise_passes_through_set_is_distributed_and_keeps_the_group(self):
+        # The completed reduction reports the failed query on EVERY rank together, so it is not a
+        # loss of distribution and must not be swallowed into a per-node fallback: a node that
+        # destroyed its held group here would ask for a new one alone on the next read of the same
+        # context - its peers reuse their held handles - and stall there until the timeout.
+        job = DistributedJob([-1, 1 << 40])
+        streamer = job.streamer()
+        with job.patched():
+            with self.assertRaises(RuntimeError):
+                streamer.set_is_distributed(True, "cuda:1")
+        job.events.release_group.assert_not_called()
+
     def test_every_rank_of_the_group_raises_not_only_the_one_that_failed(self):
         """This rank measured its own device without trouble. It learns from the reduction that a
         peer did not, and fails at the same point rather than streaming on alone."""

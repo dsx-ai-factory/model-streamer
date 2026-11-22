@@ -573,11 +573,20 @@ class DistributedStreamer:
             try:
                 free_memory = self.get_min_device_free_memory(device)
             except Exception:
-                # The group could not be created, or could not agree on the reduction - a peer may
-                # have lost distribution and never joined. The job-wide loss is already recorded
-                # where recovery is impossible (_lose_distribution); THIS load must still succeed:
-                # vLLM loads once per worker, and a raise here kills the worker and the server.
-                # The group this rank may hold is poisoned - its peers may never have joined it.
+                # ONLY a recorded loss of distribution falls back here - the group could not be
+                # created, or the vote could not agree, and the job-wide loss is already where
+                # recovery is impossible (_lose_distribution). THIS load must then still succeed:
+                # vLLM loads once per worker, and a raise would kill the worker and the server.
+                # The group this rank may hold is poisoned - its peers may never have joined it -
+                # and every rank converges on the lost flag, so no rank asks for a group alone.
+                #
+                # Anything else re-raises as master did - above all the COMPLETED reduction that
+                # reports a rank's failed memory query, which raises on EVERY rank together. That
+                # node must keep its held group: destroying it here while its peers keep theirs
+                # would send it into dist.new_group alone on the next read of the same context,
+                # where it stalls until the timeout for peers that reuse their held handles.
+                if not _distribution_is_lost():
+                    raise
                 logger.warning(
                     "[RunAI Streamer][Distributed] Warning: could not create or agree on the "
                     "distribution group - fallback to non distributed streaming", exc_info=True)
