@@ -412,6 +412,187 @@ class TestReleaseGroup(unittest.TestCase):
             self.assertNotIn(("global", 2, "test"), cache)
             self.assertIn(group, cache[("retired",)])
 
+    def test_a_caught_stream_error_still_poisons_the_group(self):
+        # The caller can catch the stream's failure inside the with block, so __exit__ sees no
+        # exception - but a timed-out broadcast closed the group's pairs all the same. is_error is
+        # the record of that, and it must evict the group and skip the barrier exactly as a raise
+        # would: a barrier on closed pairs blocks, and the next load would vote the group healthy.
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        worker.is_error = True
+        with patch.object(distributed_streamer, "_group_cache", {("global", 2, "test"): group}) as cache, \
+                patch("torch.distributed.barrier") as barrier, \
+                patch("torch.distributed.destroy_process_group") as destroy:
+            worker.__exit__(None, None, None)
+            barrier.assert_not_called()
+            destroy.assert_not_called()
+            self.assertIsNone(worker.distribution_group)
+            self.assertNotIn(("global", 2, "test"), cache)
+            self.assertIn(group, cache[("retired",)])
+
+    def test_a_device_backed_group_is_destroyed_at_release(self):
+        # The opposite treatment from gloo, on purpose: a device-backed group holds a communicator
+        # on the device, taken before vLLM measures the KV cache, so keeping it would shrink the
+        # cache for the life of the server. Its backend was named at creation, so it owns no gloo
+        # backend and destroying it is safe - master's behavior, restored.
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        worker.group_is_cached = False
+        with patch("torch.distributed.destroy_process_group") as destroy:
+            worker.release_group()
+        destroy.assert_called_once_with(group=group)
+        self.assertIsNone(worker.distribution_group)
+
+    def test_exit_runs_the_barrier_then_destroys_a_device_backed_group(self):
+        group = MagicMock(name="group")
+        worker = self.worker(group)
+        worker.group_is_cached = False
+        with patch("torch.distributed.barrier") as barrier, \
+                patch("torch.distributed.destroy_process_group") as destroy:
+            worker.__exit__(None, None, None)
+        barrier.assert_called_once_with(group=group)
+        destroy.assert_called_once_with(group=group)
+        self.assertIsNone(worker.distribution_group)
+
+
+class TestOnlyGlooGroupsAreCached(unittest.TestCase):
+    """The backend decides the group's lifecycle: gloo is cached and voted, a device backend is
+    created per stream with no cache entry and no vote - the vote would charge every load a
+    world-wide all_reduce to learn an answer that is always 'miss'. The backend is always NAMED on
+    new_group, so the group never copies the default map, which may hold a gloo backend beside the
+    device's."""
+
+    def worker(self, backend, groups_by_ranks=None):
+        worker = _distributedStreamer(None)
+        worker.distribution_backend = backend
+        worker.my_global_rank = 0
+        worker.groups_by_ranks = groups_by_ranks or [[0, 1]]
+        worker.broadcast_timeout = "test-timeout"
+        return worker
+
+    @contextlib.contextmanager
+    def job(self, cache):
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch("torch.distributed.is_initialized", return_value=True), \
+                patch("torch.distributed.get_world_size", return_value=2), \
+                patch.dict(os.environ, {"RUNAI_STREAMER_DIST_GLOBAL": "1"}), \
+                patch("torch.distributed.new_group",
+                      side_effect=lambda **kwargs: MagicMock(name="group")) as new_group, \
+                patch("torch.distributed.all_reduce") as vote:
+            yield new_group, vote
+
+    def test_the_backend_is_named_on_every_new_group(self):
+        worker = self.worker("nccl")
+        with self.job({}) as (new_group, _):
+            worker.create_distribution_group()
+        self.assertEqual(new_group.call_args.kwargs.get("backend"), "nccl")
+
+    def test_an_unnamed_backend_takes_the_default_map(self):
+        # None means no caller named one - only then may the group copy the default backend map,
+        # and it is cached, because that map may include gloo.
+        worker = self.worker(None)
+        with self.job({}) as (new_group, _):
+            worker.create_distribution_group()
+        self.assertNotIn("backend", new_group.call_args.kwargs)
+        self.assertTrue(worker.group_is_cached)
+
+    def test_a_gloo_group_is_cached(self):
+        cache = {}
+        worker = self.worker("gloo")
+        with self.job(cache) as (new_group, _):
+            group = worker.create_distribution_group()
+        self.assertTrue(worker.group_is_cached)
+        self.assertIn(group, cache.values())
+
+    def test_a_device_backed_group_is_not_cached_and_not_voted(self):
+        cache = {("discovery",): MagicMock(name="discovery")}
+        worker = self.worker("nccl")
+        with self.job(cache) as (new_group, vote):
+            group = worker.create_distribution_group()
+        self.assertFalse(worker.group_is_cached)
+        self.assertNotIn(group, cache.values())
+        vote.assert_not_called()
+
+    def test_a_partial_creation_failure_retires_what_was_built(self):
+        # The creator builds several groups; if a later new_group raises, the earlier ones must not
+        # lose their last reference while the exception unwinds - their destructors would run, the
+        # blocking teardown this module avoids. They are retired instead.
+        first = MagicMock(name="first_group")
+        cache = {}
+        worker = self.worker("gloo", groups_by_ranks=[[0], [1]])
+        with patch.object(distributed_streamer, "_group_cache", cache), \
+                patch("torch.distributed.new_group",
+                      side_effect=[first, RuntimeError("the second creation failed")]):
+            with self.assertRaises(RuntimeError):
+                worker._new_distribution_groups(worker.groups_by_ranks)
+        self.assertIn([first], cache[("retired",)])
+
+
+class TestAFailedSetupFallsBackWithinTheLoad(unittest.TestCase):
+    """A discovery or group-creation failure must not fail the load.
+
+    The failure already ended distribution for the JOB (_lose_distribution) - but vLLM loads once
+    per worker, so a raise out of stream_files kills the worker and the server over a stream that
+    still has a working plain path. The rank that observes the failure falls back within its own
+    load; only a failure that is NOT a recorded loss of distribution - a programming error - may
+    still raise."""
+
+    def setUp(self):
+        self.dist = MagicMock(name="dist")
+        self.dist.is_initialized.return_value = True
+        self.dist.get_world_size.return_value = 2
+        self.dist.get_rank.return_value = 0
+        self.dist.get_backend_config.return_value = "cpu:gloo"
+        patches = [
+            patch.object(distributed_streamer, "dist", self.dist),
+            patch.object(distributed_streamer, "_group_cache", {}),
+            patch.object(distributed_streamer, "_topology_cache", None),
+            patch.object(distributed_streamer, "_cache_job", None),
+            patch.object(distributed_streamer, "_distribution_lost_for_job", object()),
+            patch.dict(os.environ, {"RUNAI_STREAMER_DIST": "1"}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def streamer(self):
+        streamer = DistributedStreamer()
+        streamer.file_streamer = MagicMock(name="file_streamer")
+        return streamer
+
+    def lose_and_raise(self, *_args, **_kwargs):
+        distributed_streamer._lose_distribution()
+        raise RuntimeError("the collective failed")
+
+    def test_a_discovery_failure_streams_this_load_plainly(self):
+        streamer = self.streamer()
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          side_effect=self.lose_and_raise):
+            streamer.stream_files([], None, "cpu", True)
+        self.assertFalse(streamer.is_distributed)
+        streamer.file_streamer.stream_files.assert_called_once()
+
+    def test_a_group_creation_failure_streams_this_load_plainly(self):
+        streamer = self.streamer()
+
+        def discovered():
+            distributed_streamer._topology_cache = (2, 0, [[0, 1]])
+            return 2, 0, [[0, 1]]
+
+        with patch.object(_distributedStreamerParams, "find_local_ranks", side_effect=discovered), \
+                patch.object(_distributedStreamer, "create_group", side_effect=self.lose_and_raise):
+            streamer.stream_files([], None, "cpu", True)
+        self.assertFalse(streamer.is_distributed)
+        streamer.file_streamer.stream_files.assert_called_once()
+
+    def test_a_failure_that_is_not_a_loss_of_distribution_still_raises(self):
+        streamer = self.streamer()
+        with patch.object(_distributedStreamerParams, "find_local_ranks",
+                          side_effect=RuntimeError("a programming error")):
+            with self.assertRaises(RuntimeError):
+                streamer.stream_files([], None, "cpu", True)
+        streamer.file_streamer.stream_files.assert_not_called()
+
 
 class TestTheCacheIsVoted(unittest.TestCase):
     """cached_or_created reuses an entry only when EVERY rank still holds one.

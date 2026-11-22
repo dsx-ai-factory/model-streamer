@@ -763,8 +763,10 @@ class TestDistributedStreamer(unittest.TestCase):
         Rank 1 loses distribution the way a failed vote does it; rank 0 saw nothing. Rank 0's next
         vote then times out against the missing peer and must lose distribution too - WITHOUT
         creating any group, because torch's group-creation ordinal cannot be re-agreed after an
-        asymmetric failure. From then on every load on every rank succeeds plainly, reuse of a
-        streamer within one context included."""
+        asymmetric failure - and WITHOUT failing its load: the failure is caught before the stream
+        and the load succeeds plainly (vLLM loads once per worker, so a raise would kill the
+        worker). From then on every load on every rank succeeds plainly, reuse of a streamer
+        within one context included."""
         if self.world_size != 2:
             self.skipTest("the staged vote failure choreographs exactly two ranks")
 
@@ -774,7 +776,10 @@ class TestDistributedStreamer(unittest.TestCase):
             original = f.read()
 
         module = distributed_streamer_module
-        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+        # The 5 second timeout reaches the recreated discovery group through the environment - the
+        # group carries the configured timeout - so the staged failures below cost seconds.
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
+                    "RUNAI_STREAMER_DIST_TIMEOUT": "5"}
 
         def stream_all(streamer):
             chunks = [None] * len(requests[0].sizes)
@@ -802,23 +807,24 @@ class TestDistributedStreamer(unittest.TestCase):
 
                 # THE REAL ASYMMETRIC VOTE FAILURE, not a staged flag: rank 0 votes while rank 1
                 # is simply between loads, so rank 0's vote times out and rank 0 alone loses
-                # distribution - its discovery entry is retired, and no group was asked for.
+                # distribution - its discovery entry is retired, no group was asked for, and THE
+                # LOAD STILL SUCCEEDS, plainly: the failure is caught before the stream begins.
                 if self.rank == 0:
-                    with self.assertRaises(Exception):
-                        with DistributedStreamer() as streamer:
-                            stream_all(streamer)
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
                     self.assertTrue(module._distribution_is_lost())
                     self.assertNotIn(("discovery",), module._group_cache)
                 dist.barrier()
 
                 # Rank 1, whose state is intact, now votes against the lost peer: it must time out
-                # and lose too, without asking for any group. Rank 0's load meanwhile already
-                # falls back and succeeds plainly - and stays fallen back when the same context
-                # is reused, because the decision is re-made per stream call.
+                # and lose too, without asking for any group - and its load, too, must fall back
+                # and succeed plainly. Rank 0 meanwhile stays fallen back when the same context is
+                # reused, because the decision is re-made per stream call.
                 if self.rank == 1:
-                    with self.assertRaises(Exception):
-                        with DistributedStreamer() as streamer:
-                            stream_all(streamer)
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
                     self.assertTrue(module._distribution_is_lost())
                 else:
                     with DistributedStreamer() as streamer:
