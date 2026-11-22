@@ -20,13 +20,33 @@ echo "engine image streamer (before): $(python3 -m pip show runai-model-streamer
 wheel_version=$(basename "$WHEEL" | cut -d- -f2)
 
 echo "=== step 1: resolver check (pip install --dry-run, with dependencies) ==="
-# Constrained to the versions the image ships (everything pip freeze pins with ==, less the
-# streamer itself): an unconstrained dry run passes by PLANNING an upgrade of an engine pin, which
-# is exactly the conflict this step exists to report. Editable and URL-pinned entries cannot be
-# constraints, and leaving one out only loosens the check for that package.
+# Constrained to the image's versions of the wheel's DIRECT dependencies: an unconstrained dry run
+# passes by PLANNING an upgrade of an engine pin, which is exactly the conflict this step exists to
+# report. Not every installed package, though: engine images hold version sets pip would never
+# produce (the vLLM image overrides torch's NCCL pin on purpose), and constraining them all makes
+# pip re-litigate the image's own inconsistencies instead of answering for OUR requirements.
 constraints=/tmp/engine-compatibility-constraints.txt
-python3 -m pip freeze 2>/dev/null | grep '==' | grep -iv '^runai[-_]model[-_]streamer' > "$constraints" || true
-echo "constraining to $(wc -l < "$constraints") installed packages"
+python3 - "$WHEEL" > "$constraints" <<'PY'
+import re, subprocess, sys, zipfile
+
+def canonical(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+names = set()
+with zipfile.ZipFile(sys.argv[1]) as wheel:
+    metadata = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
+    for line in wheel.read(metadata).decode(errors="replace").splitlines():
+        if line.lower().startswith("requires-dist:"):
+            match = re.match(r"\s*([A-Za-z0-9._-]+)", line.split(":", 1)[1])
+            if match:
+                names.add(canonical(match.group(1)))
+names.discard("runai-model-streamer")
+frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True).stdout
+for line in frozen.splitlines():
+    if "==" in line and canonical(line.split("==")[0].strip()) in names:
+        print(line)
+PY
+echo "constraining to the image's versions of: $(tr '\n' ' ' < "$constraints")"
 if ! python3 -m pip install --dry-run --constraint "$constraints" "$WHEEL"; then
   echo "ENGINE-COMPATIBILITY FAIL [resolver]: the wheel's dependencies conflict with the $ENGINE image's packages"
   status=1

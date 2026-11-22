@@ -18,7 +18,8 @@ loads the native library (importing the package does not) - a glibc or ABI misma
 there. The steps, per engine image (details in [run.sh](run.sh)):
 
 1. **resolver** - `pip install --dry-run` of the wheel *with* its dependencies, constrained to the
-   versions the image ships (so pip cannot pass by planning an upgrade of an engine pin): catches a
+   image's versions of the wheel's direct dependencies (so pip cannot pass by planning an upgrade
+   of an engine pin, while the image's own transitive version choices stay its business): catches a
    dependency conflict a new pin of ours would introduce.
 2. **install** - uninstall the bundled streamer (pip skips a local wheel whose version is already
    installed), then `pip install` the wheel the way a user installs it (missing dependencies are
