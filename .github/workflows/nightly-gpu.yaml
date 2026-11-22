@@ -34,6 +34,16 @@ on:
         options:
           - '2'
           - '1'
+      vllm_image:
+        description: The vLLM image of the engine-compat job. Latest by default, on purpose; pin a tag here to bisect a red run.
+        required: false
+        default: vllm/vllm-openai:latest
+        type: string
+      sglang_image:
+        description: The SGLang image of the engine-compat job. Latest by default, on purpose; pin a tag here to bisect a red run.
+        required: false
+        default: lmsysorg/sglang:latest
+        type: string
 
 permissions:
   contents: read
@@ -310,5 +320,76 @@ jobs:
         with:
           name: gpu-test-results-${{ matrix.name }}-${{ github.run_attempt }}
           path: test-results/gpu/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang): a pip
+  # resolver check, the install, and a stream through the native library (tests/engine_compat/README.md). No GPU: it
+  # catches what a wheel can break without one - a glibc/ABI mismatch of libstreamer.so, a dependency conflict, a
+  # packaging mistake - which is how a glibc upgrade of the devcontainer once broke installing with vLLM.
+  engine-compat:
+    name: Engine compat (${{ matrix.engine }})
+    needs: build-wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: vllm
+            image_input: vllm_image
+            default_image: vllm/vllm-openai:latest
+          - engine: sglang
+            image_input: sglang_image
+            default_image: lmsysorg/sglang:latest
+    env:
+      ENGINE_IMAGE: ${{ inputs[matrix.image_input] || matrix.default_image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The engine images are 10-20 GB and the runner's disk mostly holds toolchains this job never uses.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/ghc
+          df -h /
+
+      # The artifact may also hold the S3 plugin's wheel (the object_storage suite); run.sh picks the streamer's.
+      - name: Download the wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-wheel
+          path: ${{ runner.temp }}/wheel
+
+      # run.sh pulls the image, prints its digest (so that a red run names the exact engine build behind the floating
+      # tag), and runs the steps inside it: the resolver check, the install, the stream through the native library.
+      - name: Run the compatibility check
+        run: |
+          mkdir -p test-results/engine-compat
+          tests/engine_compat/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
+            --wheel-dir "$RUNNER_TEMP/wheel" 2>&1 | tee "test-results/engine-compat/${{ matrix.engine }}.log"
+
+      # The ENGINE-COMPAT lines of the log: the image digest and each step's verdict.
+      - name: Summarize
+        if: always()
+        run: |
+          log="test-results/engine-compat/${{ matrix.engine }}.log"
+          {
+            echo "### Engine compat (${{ matrix.engine }})"
+            echo '```'
+            grep -E '^ENGINE-COMPAT' "$log" 2>/dev/null \
+              || echo "the run ended before the checks could report (see the log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-compat-${{ matrix.engine }}-${{ github.run_attempt }}
+          path: test-results/engine-compat/
           if-no-files-found: warn
           retention-days: 14
