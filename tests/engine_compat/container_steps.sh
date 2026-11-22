@@ -46,4 +46,18 @@ if ! python3 /workspace/tests/engine_compat/check.py "$ENGINE"; then
   status=1
 fi
 
+# A serve run only (run.sh --serve, vLLM's CPU image): vLLM serves the pinned small real model
+# through load_format=runai_streamer and answers one completion. Not reached when the steps above
+# already failed: a server started over a broken install would blame the wrong step. The prebuilt
+# CPU image needs avx512f (vLLM's CPU installation page); CI runners are a mixed fleet, so a
+# machine without it gets a SKIP, not an 'Illegal instruction'.
+if [ "${SERVE:-0}" = 1 ] && [ "$status" = 0 ]; then
+  echo "=== step 4: serve the model with load_format=runai_streamer (CPU) ==="
+  if ! grep -q avx512f /proc/cpuinfo; then
+    echo "ENGINE-COMPAT SKIP [serve]: this machine has no avx512f, which the prebuilt vLLM CPU image needs"
+  elif ! python3 /workspace/tests/engine_compat/serve_check.py "$ENGINE"; then
+    status=1
+  fi
+fi
+
 exit "$status"
