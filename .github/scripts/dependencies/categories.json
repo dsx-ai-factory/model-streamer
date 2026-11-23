@@ -75,6 +75,7 @@
   "docker-image:nvidia/cuda": {"license": "NVIDIA Deep Learning Container License", "url": "https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license"},
   "docker-image:chrislusf/seaweedfs": "Apache-2.0",
   "devcontainer-feature:ghcr.io/rocker-org/devcontainer-features/apt-packages": "MIT",
+  "devcontainer-feature:ghcr.io/devcontainers-community/features/bazel": "MIT",
   "git:aws-lc": {"license": "Apache-2.0 OR ISC (code derived from BoringSSL and OpenSSL keeps its own licenses)", "url": "https://github.com/aws/aws-lc/blob/main/LICENSE"},
   "git:aws-verification-model-for-libcrypto": "Apache-2.0",
   "github-action:actions/cache": "MIT",
