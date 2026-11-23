@@ -11,8 +11,8 @@ to compute its hash.
 ## What is in the list
 
 Each entry has a `name`, a `version`, an `ecosystem`, the `categories` that say why we need it, the
-files or lines that declare it (`declared_by`), and the `files` to download (one per platform where
-the file depends on the architecture).
+files or lines that declare it (`declared_by`), the `files` to download (one per platform where
+the file depends on the architecture), and its [`license`](#licenses).
 
 | Category | Meaning |
 |---|---|
@@ -28,7 +28,7 @@ and linked into a native library (`ship`).
 
 | Ecosystem | Where the entry comes from | Download |
 |---|---|---|
-| `docker-image` | the `FROM` lines of `.devcontainer/Dockerfile` | the digest of the image |
+| `docker-image` | the `FROM` lines of `.devcontainer/Dockerfile` (a `FROM` that names an earlier stage pulls nothing), and the `image:` lines of the test compose files (`test`) | the digest of the image |
 | `devcontainer-feature` | `.devcontainer/devcontainer.json` | the digest of the OCI artifact |
 | `apt` | packages the devcontainer has on top of its base image | the `.deb` and its SHA-256 from the package index |
 | `pip` | the `run`, `test` and `build` requirement groups, resolved by pip | the wheel and its SHA-256 |
@@ -45,8 +45,9 @@ The collector reads these files, so a new dependency is picked up when it is add
 | File | Gives |
 |---|---|
 | `.devcontainer/Dockerfile` | base images, `apt-get install`, `pip install`, `npm install`, `curl` downloads (with the hash the file pins), `git clone` |
-| `.devcontainer/scripts/*.sh` | the same commands, in the shell scripts the Dockerfile runs. A script is not run: the architecture argument (`amd64`, `arm64`), `NAME=value` lines and `case amd64)` branches are expanded to give one URL and hash per architecture, and the hash is the `echo "<hash>  <file>" \| sha256sum -c -` line for the file. A URL with a variable that cannot be expanded stops the collector with the script and line. |
+| `.devcontainer/scripts/*.sh` | the same commands, in the shell scripts the Dockerfile runs. A script is not run: the architecture argument (`amd64`, `arm64`), `NAME=value` lines and `case amd64)` branches are expanded to give one URL and hash per architecture, and the hash is the `echo "<hash>  <file>" \| sha256sum -c -` line for the file. A `NAME=$(cat FILE)` line is expanded from the file the Dockerfile `COPY`s to that path in the image (for example the SDK builder's `.bazelversion`). A URL with a variable that cannot be expanded stops the collector with the script and line. |
 | `.devcontainer/devcontainer.json` | devcontainer features and the packages of the apt-packages feature |
+| `tests/**/compose*.yaml` | the images of the test environments (`image: name:tag`, or the default of `${VARIABLE:-name:tag}`) (`test`) |
 | `py/*/setup.py` | `install_requires` of the four wheels (`run`) |
 | `py/*/pyproject.toml` | build requirements (`build`) |
 | `py/runai_model_streamer/requirements.dev` and the `pip download` line of `py/runai_model_streamer/Makefile` | test requirements and the torch index (`test`) |
@@ -55,8 +56,39 @@ The collector reads these files, so a new dependency is picked up when it is add
 | `.github/workflows/*` | GitHub actions |
 
 `categories.json` holds the judgment calls the files cannot tell: which packages are only for tests,
-and which dependencies are linked into a native library (`ship`, mapped to component ids). Edit it
-when a dependency is added.
+which dependencies are linked into a native library (`ship`, mapped to component ids), and the
+licenses nothing else names (`licenses`). Edit it when a dependency is added.
+
+## Licenses
+
+Every entry has a `license`, a `license_source` that says where the license came from, and, for a
+nonstandard license, a `license_url` with its text. The collector takes the license from the first
+source that covers the entry:
+
+1. The row of `cpp/NOTICE` for the component, for an entry with the `ship` category. This is the license the shipped
+   notices state. The row is found by the last part of its package name (`github.com/axboe/liburing` is `liburing`).
+   An entry that maps to two components lists both licenses.
+2. `categories.json`, section `licenses`: `"<ecosystem>:<name>": "<SPDX>"` or `{"license": "<SPDX>", "url": "<license text>"}`.
+   Use it for what the package cannot say: a Docker image, a GitHub action, a downloaded archive, a git repository.
+3. What the package says about itself:
+
+| Ecosystem | Source |
+|---|---|
+| `pip` | the wheel metadata in pip's resolver report: `License-Expression`, then a short `License`, then a `License` that is the text of a common license, then the trove classifiers |
+| `apt` | `/usr/share/doc/<package>/copyright` in the image: its `License:` fields, or the `/usr/share/common-licenses` files it points to, or the text of a common license |
+| `npm` | the `license` of the lock file |
+| `bazel`, `go` | the top-level license files of the fetched repository, when every one of them is the text of one common license |
+
+An entry no source covers has the license `UNKNOWN`. The collector never guesses. `collect` logs how many
+dependencies have each license and lists the `UNKNOWN` ones, to add to `licenses` in `categories.json` once you have read their license;
+`check --strict-licenses` fails while any is left. A license from `components.json` or `categories.json` that is not a common
+one (`curl`, a CUDA header notice) must have a `license_url`, and `check` fails without it.
+A `ship` entry whose component has no row in `cpp/NOTICE` is reported as a warning: the component ships but is not
+declared for the notice pipeline.
+
+`collect` also writes `dependencies.md` next to `dependencies.json`: one row per dependency with its name, license, category and
+ecosystem, with the link for a nonstandard license. It is what to paste into a review. To print it again, as a markdown or CSV
+table: `python3 .github/scripts/dependencies/collect.py table --format md|csv [--out FILE]`.
 
 ### Finding what the collector does not read
 
@@ -81,9 +113,9 @@ under `coverage` with a reason: a command that is not an input of the build (a C
 ## Reproducing the list
 
 Run this again whenever a dependency, a Dockerfile line, a workflow action or a requirement file
-changes, and before a release. The build environment is the devcontainer image. CI builds both
-architectures in the one x86_64 image (aarch64 is cross-compiled with the cross toolchain in it),
-so one run of the image covers the build and the tests for both.
+changes, and before a release. The build environment is the devcontainer image. CI builds the image
+natively for each architecture; the collector runs the x86_64 one (see [Limits](#limits) for what
+that leaves out of the aarch64 build environment).
 
 1. **Prerequisites:** Docker, network access, Python 3.8 or newer, and `git` on the host. On an ARM
    host, Docker runs the x86_64 image under emulation, which is slower but gives the same result.
@@ -94,21 +126,29 @@ so one run of the image covers the build and the tests for both.
    ```
    python3 .github/scripts/dependencies/collect.py collect --image ghcr.io/dsx-ai-factory/model-streamer/devcontainer:latest
    ```
-   It writes `.github/scripts/dependencies/dependencies.json` and takes tens of minutes; the Bazel fetch, which
+   It writes `.github/scripts/dependencies/dependencies.json` and, next to it, the license table
+   `dependencies.md` (see [Licenses](#licenses)), and takes tens of minutes; the Bazel fetch, which
    downloads the external repositories for both architectures into a temporary cache inside the
    container, is the longest part and needs several GB of disk. `--no-hash` skips the downloads
-   that only compute a hash. `--out` writes elsewhere.
+   that only compute a hash. `--out` writes elsewhere (the table goes next to it, with the extension `.md`).
+   Neither file is committed.
 4. **Validate and test:**
    ```
    python3 .github/scripts/dependencies/collect.py check
    python3 .github/scripts/dependencies/test_collect.py
    ```
-   `check` fails on an unknown category, an entry with nothing to download, or a file or command
-   the collector does not read (see above).
+   `check` fails on an unknown category, an entry with nothing to download or without a license, a nonstandard
+   license without a link, or a file or command the collector does not read (see above). It also lists the
+   dependencies whose license is `UNKNOWN`; pass `--strict-licenses` to fail on them.
 5. **Review the list.** Compare it with the previous one you generated. New entries mean a new dependency; if one is linked
    into a native library, add it to `ship` in `categories.json`, and mark it
    `# attribution: shipped` where it is pinned so the `NOTICE` files list it. A package that is only for tests belongs in `categories.json`
    under its ecosystem. `collect` stops if a `ship` key matches nothing.
+6. **Complete the licenses.** Read the license of each dependency that `collect` lists as `UNKNOWN`, add it to `licenses` in
+   `categories.json` (with a `url` if it is not a common license), then run
+   `python3 .github/scripts/dependencies/collect.py relicense`. It applies the licenses again to the existing list and rewrites
+   `dependencies.md`, with no new collection. Repeat until `collect.py check --strict-licenses` passes.
+7. **Take the table.** `dependencies.md` has one row per dependency with its name, license and category: it is what a review asks for.
 
 ### Base images
 
@@ -167,6 +207,10 @@ What else to check after the change:
   (`generated`). A mutable reference (`ubuntu:20.04`, an unpinned `pip install boto3`) resolves to
   what it points to now. The Dockerfile does not pin those, so a rebuilt image can differ.
 - An apt package whose exact version has left the index has no download URL; the entry says so.
+- The devcontainer image is built natively for each architecture, and the collector runs the x86_64 one. The apt packages
+  and Bazel repositories are those of the x86_64 build environment; the arm64 image installs the same packages for its own
+  architecture (same names and versions, different `.deb` files), which the list does not repeat. Archives that a script
+  downloads for both architectures, and the `run` requirements, are listed for both.
 - Python is resolved for 3.11, the devcontainer's Python. Our own wheels are `py3-none`, so users on
   other Python versions resolve other dependency versions. The dependency wheels in the list are
   either universal (`py3-none-any`) or compatible with Python 3.11 on an architecture (`cp311`
@@ -174,3 +218,9 @@ What else to check after the change:
 - Archives that no file pins (OpenSSL, curl, zlib, libxml2, fake-gcs-server) get a SHA-256 computed
   from the download; the entry says `computed from the download`.
 - Git submodule entries take the highest release tag that points to the pinned commit.
+- The real-GPU tests (`tests/gpu`) install Python and apt packages inside their container when they run, from
+  requirement specs the run passes in, and a nightly run takes the newest torch. Those packages are not in the list; the
+  images of the test environments are (from `tests/gpu/compose.yaml`), and the packages the tests share with the
+  `test` group are listed there. The scripts are named under `resolved_at_test_time` in `categories.json`.
+- A license is what the package's own metadata or license file says, matched by its text. It is not a legal review: a license
+  the matcher does not recognize is `UNKNOWN`, and a package with a nonstandard license must be read.

@@ -27,25 +27,51 @@ def base_images(repo):
     the one a registry serves today for a tag. The last FROM is the base of the devcontainer image;
     the others are build stages whose files are copied in."""
     found = []
-    images = dockerfile.base_images(inputs.read(repo, inputs.DOCKERFILE))
-    for index, (line, image, tag, digest, stage) in enumerate(images):
-        registry, repository = image_parts(image)
+    images, final = dockerfile.external_images(inputs.read(repo, inputs.DOCKERFILE))
+    for index, item in enumerate(images):
+        line, image, tag, digest, stage = item
         tag = tag or "latest"
-        source = "pinned in Dockerfile"
-        if not digest:
-            digest, source = oci_digest(registry, repository, tag), "registry, for the mutable tag"
-        if not digest:  # a registry without anonymous access, or Docker Hub rate-limiting (HTTP 429)
-            digest, source = imagetools_digest("%s:%s" % (image, tag)), "the registry, with this machine's Docker credentials, for the mutable tag"
-        if not digest:
-            digest, source = local_image_digest("%s:%s" % (image, tag)), "the image pulled by the local Docker, for the mutable tag"
+        record, source = _image_file(image, tag, digest, "pinned in Dockerfile")
         note = ("The Dockerfile pins this digest." if source.startswith("pinned") else
                 "The Dockerfile uses the mutable tag %s:%s; the digest is what it pointed to when the list was made." % (image, tag))
-        note += (" Base of the devcontainer image." if index == len(images) - 1 else
+        note += (" Base of the devcontainer image." if item == final else
                  " Build stage %s: files are copied from it into the image." % (stage or index))
-        found.append(entry(image, tag, "docker-image", ["base-image"],
-                           [file_record(_page(registry, repository), digest=("sha256", digest.split(":")[1], source) if digest else None,
-                                        reference="%s/%s:%s@%s" % (registry, repository, tag, digest) if digest else None)],
-                           ["%s:%d" % (inputs.DOCKERFILE, line)], note))
+        found.append(entry(image, tag, "docker-image", ["base-image"], [record], ["%s:%d" % (inputs.DOCKERFILE, line)], note))
+    return found
+
+
+def _image_file(image, tag, digest, pinned_where):
+    """(file record, where the digest came from) of an image: the digest it is pinned to, or the one a
+    registry serves today for its tag."""
+    registry, repository = image_parts(image)
+    source = pinned_where
+    if not digest:
+        digest, source = oci_digest(registry, repository, tag), "registry, for the mutable tag"
+    if not digest:  # a registry without anonymous access, or Docker Hub rate-limiting (HTTP 429)
+        digest, source = imagetools_digest("%s:%s" % (image, tag)), "the registry, with this machine's Docker credentials, for the mutable tag"
+    if not digest:
+        digest, source = local_image_digest("%s:%s" % (image, tag)), "the image pulled by the local Docker, for the mutable tag"
+    return (file_record(_page(registry, repository), digest=("sha256", digest.split(":")[1], source) if digest else None,
+                        reference="%s/%s:%s@%s" % (registry, repository, tag, digest) if digest else None), source)
+
+
+def compose_images(repo):
+    """The images the compose files of the tests name (`image: name:tag`, or `${VARIABLE:-name:tag}`,
+    whose default is the image a plain run uses). They are what the tests run in or against."""
+    found = []
+    for path in inputs.compose_files(repo):
+        for number, line in enumerate(inputs.read(repo, path).splitlines(), 1):
+            match = re.match(r"\s*image:\s*(\S+)\s*(?:#.*)?$", line)
+            if not match:
+                continue
+            reference = re.sub(r"^\$\{\w+:-(.*)\}$", r"\1", match.group(1).strip("\"'"))
+            if "$" in reference:
+                raise ValueError("%s line %d: cannot work out the image %s" % (path, number, reference))
+            name = re.match(r"(\S+?)(?::([^@\s/]+))?(?:@(sha256:[0-9a-f]+))?$", reference)
+            image, tag, digest = name.group(1), name.group(2) or "latest", name.group(3)
+            record, source = _image_file(image, tag, digest, "pinned in " + path)
+            found.append(entry(image, tag, "docker-image", ["test"], [record], ["%s:%d" % (path, number)],
+                               "Image of a test environment, named in %s." % path))
     return found
 
 
@@ -64,8 +90,9 @@ def downloads(repo, compute_hashes):
     """Archives the Dockerfile and its scripts download. A hash the file pins is used as it is;
     otherwise it is computed from the file the URL serves now."""
     found = []
+    read_value = inputs.image_file_reader(repo)  # for `NAME=$(cat FILE)` in a script
     for path in inputs.build_files(repo):
-        for record in dockerfile.downloads(inputs.read(repo, path), path):
+        for record in dockerfile.downloads(inputs.read(repo, path), path, read_value):
             name, version = _download_name(record)
             categories = inputs.categories_for("download", name)
             files = []
@@ -174,7 +201,7 @@ def github_actions(repo):
 
 def collect(repo, compute_hashes=True):
     found = []
-    for step in (base_images, devcontainer_features, bazel_binary, github_actions, git_repositories):
+    for step in (base_images, compose_images, devcontainer_features, bazel_binary, github_actions, git_repositories):
         log("static: " + step.__name__)
         found += step(repo)
     log("static: downloads")

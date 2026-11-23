@@ -33,6 +33,24 @@ def read(repo, path):
         return f.read()
 
 
+def compose_files(repo):
+    """The compose files of the tests, as paths relative to the repository."""
+    return sorted({os.path.relpath(path, repo) for pattern in ("compose*.y*ml", "*/compose*.y*ml", "*/*/compose*.y*ml")
+                   for path in glob.glob(os.path.join(repo, "tests", pattern))})
+
+
+def image_file_reader(repo):
+    """A function that reads a file of the devcontainer image by its path in the image, when the
+    Dockerfile copies it there from the repository (a version file a script reads with `cat`), or
+    gives None."""
+    copies = dockerfile.copy_map(read(repo, DOCKERFILE))
+
+    def read_value(image_path):
+        return read(repo, copies[image_path]) if image_path in copies else None
+
+    return read_value
+
+
 def build_files(repo):
     """The files that hold the commands which build the devcontainer image, as paths relative to the
     repository: the Dockerfile and the shell scripts it runs."""

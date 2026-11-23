@@ -8,6 +8,7 @@ also runs in the image).
 Every reader takes the text of the file and its path. A path that ends in `.sh` is read as a script
 (every line is a command); any other path is read as a Dockerfile (the `RUN` instructions)."""
 
+import posixpath
 import re
 
 DOCKERFILE = ".devcontainer/Dockerfile"
@@ -73,6 +74,24 @@ def is_script(path):
     return path.endswith(".sh")
 
 
+def copy_map(text):
+    """{path inside the image: path in the repository} for the files the COPY instructions of a
+    Dockerfile place. A destination that ends in `/` (or several sources) is a directory, and each
+    source keeps its file name. Directories and globs are listed as written."""
+    found = {}
+    for _, word, rest in instructions(text):
+        if word != "COPY":
+            continue
+        tokens = [token for token in rest.split() if not token.startswith("--")]
+        if len(tokens) < 2:
+            continue
+        sources, destination = tokens[:-1], tokens[-1]
+        for source in sources:
+            into_directory = destination.endswith("/") or len(sources) > 1
+            found[destination.rstrip("/") + "/" + posixpath.basename(source) if into_directory else destination] = source
+    return found
+
+
 def runs(text, path):
     """The shell commands of a file as (line, command): the `RUN` instructions of a Dockerfile, or
     every logical line of a script."""
@@ -93,6 +112,27 @@ def base_images(text):
         match = re.match(r"(\S+?)(?::([^@\s/]+))?(?:@(sha256:[0-9a-f]+))?(?:\s+AS\s+(\S+))?$", rest, re.I)
         found.append((number, match.group(1), match.group(2), match.group(3), match.group(4)))
     return found
+
+
+def external_images(text):
+    """(images, final): the images the FROM lines pull, and the one the last stage builds on.
+
+    A `FROM base AS devcontainer` line whose image is the name of an earlier stage pulls nothing: it
+    continues that stage, so it is not an image of its own. `images` has each pulled image once, as
+    `base_images` gives it (line, image, tag, digest, stage name); `final` is the image the last stage
+    starts from, following stage names back to a pulled image."""
+    stages, images, final = {}, [], None
+    for item in base_images(text):
+        line, image, tag, digest, stage = item
+        if image in stages and not tag and not digest:
+            origin = stages[image]
+        else:
+            origin = item
+            images.append(item)
+        if stage:
+            stages[stage] = origin
+        final = origin
+    return images, final
 
 
 def _tokens(segment):
@@ -204,6 +244,24 @@ def script_variables(text):
     return common, specific
 
 
+def script_file_variables(text):
+    """{name: absolute path} for the `NAME=$(cat FILE)` lines of a script, where FILE is relative to
+    the directory the last `cd /absolute/dir` before the line moved to. The script is not run: the
+    path says which file of the image holds the value (a version a COPY instruction placed)."""
+    found, cwd = {}, None
+    for _, line in logical_lines(text):
+        move = re.match(r"cd\s+(/\S+)\s*$", line)
+        if move:
+            cwd = move.group(1)
+            continue
+        assignment = re.match(r"([A-Za-z_]\w*)=\$\(\s*cat\s+(\S+)\s*\)\s*$", line)
+        if assignment:
+            path = assignment.group(2).strip("\"'")
+            if path.startswith("/") or cwd:
+                found[assignment.group(1)] = path if path.startswith("/") else posixpath.join(cwd, path)
+    return found
+
+
 def _expand(text, variables):
     """Replace `${NAME}` by the value of NAME, also inside the values, and the shell forms the
     scripts use: `${NAME//a/b}` (replace every a), `${NAME%pattern}` (drop the shortest matching
@@ -253,8 +311,9 @@ def dockerfile_arguments(path=None):
     return found
 
 
-def _script_environment(text, arch):
-    """The variables of a script when it runs for `arch` (a key of SCRIPT_ARCHES)."""
+def _script_environment(text, arch, read_value=None):
+    """The variables of a script when it runs for `arch` (a key of SCRIPT_ARCHES). `read_value(path)`
+    gives the text of a file of the image that a `NAME=$(cat FILE)` line reads, or None."""
     common, specific = script_variables(text)
     variables = dockerfile_arguments()
     variables.update(common)
@@ -262,12 +321,17 @@ def _script_environment(text, arch):
     for name, value in common.items():
         if value == "$1":  # `target_arch=$1`: the architecture argument
             variables[name] = arch
+    if read_value:
+        for name, path in script_file_variables(text).items():
+            value = read_value(path)
+            if value is not None:
+                variables[name] = value.strip()
     return variables
 
 
-def _script_downloads(text, path):
+def _script_downloads(text, path, read_value=None):
     found = []
-    environments = {arch: _script_environment(text, arch) for arch in SCRIPT_ARCHES}
+    environments = {arch: _script_environment(text, arch, read_value) for arch in SCRIPT_ARCHES}
     for number, line in logical_lines(text):
         for segment in _segments(line):
             if not re.match(r"curl\b", segment):
@@ -304,12 +368,13 @@ def _script_downloads(text, path):
     return found
 
 
-def downloads(text, path=DOCKERFILE):
+def downloads(text, path=DOCKERFILE, read_value=None):
     """Archives and scripts fetched with curl or wget, as dicts with line, filename, urls ({arch: url})
     and sha256 ({arch: hash}) where the file pins one. In a script the pin is an `echo "<hash>  <file>" |
-    sha256sum -c -` line anywhere in the script; the architecture comes from `case amd64)` branches."""
+    sha256sum -c -` line anywhere in the script; the architecture comes from `case amd64)` branches.
+    `read_value(path)` reads a file of the image for the `NAME=$(cat FILE)` lines of a script."""
     if is_script(path):
-        return _script_downloads(text, path)
+        return _script_downloads(text, path, read_value)
     found = []
     for number, word, rest in instructions(text):
         if word != "RUN" or "curl" not in rest:
