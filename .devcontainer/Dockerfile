@@ -17,8 +17,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
 RUN python3 -m pip install --upgrade "pip==25.0.1" \
     && python3 -m pip install "setuptools==75.3.4" "wheel==0.45.1"
 
+# libc6-dev is pinned because the binaries statically link libc_nonshared.a (LGPL) and the release
+# publishes the matching glibc source (.github/release-sources.json, id glibc-nonshared).
+# If this version leaves the Ubuntu archive or the base image changes, the build fails here:
+# update this pin and the glibc source entry in .github/release-sources.json together (the
+# glibc-nonshared version in attribution.json stays the upstream 2.31).
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential binutils \
+    build-essential binutils libc6-dev=2.31-0ubuntu9.18 \
     && rm -rf /var/lib/apt/lists/*
 
 ARG TARGETARCH

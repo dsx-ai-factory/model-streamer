@@ -12,15 +12,19 @@ and licenses; the `# attribution:` comments in `cpp/MODULE.bazel` (and, for the 
 the development container builds, `.devcontainer/Dockerfile`) say which library each
 component is linked into. The binary deliverables contain shared libraries, public
 SDK headers and notices; they do not include dependency source archives or a
-separate set of relinkable object files. The replacement mechanism described here
-is a full rebuild from source.
+separate set of relinkable object files. Each GitHub release attaches a
+[source archive](#release-source-delivery) with those sources. The replacement
+mechanism described here is a full rebuild from source.
 
 ## Obtain matching sources
 
 Start with the Git tag or commit used to produce your installed binary, rather
 than the moving `master` branch. Release tags have no `v` prefix. The repository's
-GitHub release page provides its tagged source as a tar or zip archive; cloning
-and checking out that tag gives the same project source and build scripts:
+GitHub release page provides its tagged source as a tar or zip archive, and the
+release's `runai-model-streamer-sources-X.Y.Z.tar.gz` asset holds the dependency
+sources and build materials described under
+[Release source delivery](#release-source-delivery). Cloning and checking out the
+tag gives the same project source and build scripts:
 
 ```sh
 git clone https://github.com/dsx-ai-factory/model-streamer.git
@@ -211,25 +215,67 @@ io_uring; see the development container's `runArgs`.
 
 ## Release source delivery
 
-Before distributing a binary release, maintainers must provide recipients with:
+Every release provides recipients with:
 
-- The exact Streamer source tag or commit, including build scripts and this guide.
-- The complete corresponding libaio source archive and any patches used in the
-  binary, with its license and notices. A license-text download alone is not source.
+- The exact Streamer source tag, including build scripts and this guide: the
+  release's tagged source archive.
+- The complete corresponding source of each statically linked component whose
+  license requires it, and any patches used in the binary. Today these are libaio
+  (LGPL-2.1-or-later) and the glibc `libc_nonshared.a` stubs (LGPL-2.1-or-later).
+  No patches are applied.
 - The dependency versions, checksums and build instructions needed to rebuild
   the core with a modified library: `cpp/MODULE.bazel`, the registry's
   `source.json` and every overlay file for each module version (`MODULE.bazel`,
   `BUILD.bazel`, and helpers such as liburing's `liburing_configure.bzl`), and the
   patches under `cpp/third_party`.
 
-Publish those source materials alongside the downloadable binaries and link them
-from the release notes. Check that recipients can download them without employee
-credentials. Retain the source archives used for the release so the delivery does
-not depend solely on upstream URLs remaining available. Include any other source
-materials required by the licenses of statically linked components listed in the
-component manifest.
+The release workflow builds the second and third items into one asset,
+`runai-model-streamer-sources-X.Y.Z.tar.gz`, and attaches it to the GitHub release
+next to the wheels and SDK archives, with its checksum in `SHA256SUMS`. The archive
+holds one subdirectory per component (for example `libaio-0.3.113/`), each with the
+unmodified upstream source files, and a `build-materials/` subdirectory with the
+development container recipe, the pinned dependency builds, the Bazel toolchain
+files, the source manifest, `attribution.json`, `cpp/NOTICE` and this guide.
+`build-materials/bazel-registry/<module>/<version>/` holds the registry's
+`source.json` and overlay files of each module the build takes from the Bazel
+Central Registry (libaio and liburing), copied from the registry and checked against
+a sha256, because the registry is not ours and these build files are not in this
+repository. `SOURCES.txt` in the archive root lists the contents with their sha256.
 
-The current bundle automation assembles wheels and SDK binaries with notices;
-it does not upload a corresponding-source bundle. Preparing and publishing the
-source materials above is therefore a separate release step. Confirm their
-availability and the recipient rebuild procedure before marking that step complete.
+`.github/scripts/release_sources.py` builds the archive from
+[`.github/release-sources.json`](../.github/release-sources.json), which lists the
+statically linked components under a copyleft license (LGPL, GPL) without a runtime
+exception, each with its upstream source URLs and sha256. Each download is checked
+against that sha256. The GCC runtime libraries (libstdc++, libgcc) are linked under
+the GCC Runtime Library Exception, which permits distributing the result under other
+terms, so their sources are not included.
+
+### Adding or updating a component
+
+- **New statically linked copyleft component:** add it to `cpp/NOTICE` through the
+  dependency notice pipeline (a `# attribution:` mark where it is pinned, or an entry
+  in `attribution.json`), then add an entry to `.github/release-sources.json` with
+  its `id` (the name in the `cpp/NOTICE` row; for a path such as
+  `github.com/org/name` the last part), `name`, `version`, archive `dir` and the
+  `url` and `sha256` of each source file.
+- **New version of a listed component:** change its `version`, `url` and `sha256`
+  entries in the same pull request that changes the pin. For glibc, also change the
+  `libc6-dev=` pin in `.devcontainer/Dockerfile`.
+- **Module that the build takes from the Bazel Central Registry:** add or update its
+  entry under `registry` in `.github/release-sources.json`: the `module`, the
+  `version` that `cpp/MODULE.bazel` depends on, and each file the registry holds for
+  that version (`source.json` and every file under `overlay/`, from
+  `https://bcr.bazel.build/modules/<module>/<version>/`) with its `path`, `url` and
+  `sha256`. The `source.json` lists the overlay files and their hashes in base64
+  (`sha256-...`); the manifest uses hex.
+- **Checks:** the release build fails when an `id` has no row in `cpp/NOTICE`, when
+  the manifest `version` differs from the row's version (a Debian revision such as
+  `2.31-0ubuntu9.18` after the row's `2.31` is accepted, and so is the upstream
+  `0.3.113` for a Bazel registry row `0.3.113.bcr.1`), when an id appears twice,
+  or when a download does not match its sha256. It also fails when a `registry`
+  entry has a version that `cpp/MODULE.bazel` does not depend on. The licence in
+  `SOURCES.txt` is the one in the `cpp/NOTICE` row.
+
+Recipients download the archive from the release page without credentials, and the
+sources it holds do not depend on the upstream URLs staying available after the
+release.
