@@ -30,9 +30,17 @@ there. The steps, per engine image (details in [run.sh](run.sh)):
    engine's environment).
 
 A resolver conflict fails the run but the later steps still run, so one run reports every signal.
-For vLLM, the check also streams the generated file through vLLM's own
-`runai_safetensors_weights_iterator` - the engine's real integration, on CPU; SGLang has no public
-equivalent, so its leg covers the same call shape through the streamer's API directly.
+
+## The serve check (`--serve`, needs a GPU of compute capability 8.0+)
+
+With `--serve`, after the steps above pass, [serve_check.py](serve_check.py) runs the engine end to
+end through its public command - the only stable surface, unlike engine internals, which move
+between releases: it snapshot-downloads `Qwen/Qwen2.5-0.5B` at the revision the GPU harness pins
+(serving needs the config and tokenizer files too, not only the weights), starts `vllm serve` /
+`sglang.launch_server` with `load_format=runai_streamer`, waits for `/health`, asks
+`/v1/completions` for one completion, and requires the streamer's `[RunAI Streamer]` marker in the
+server log: a server that quietly fell back to the engine's default loader fails, because then
+nothing was tested. SGLang's kernels need sm80 or newer, which is why this does not run on T4s.
 
 **Scope: the core streamer, local files only.** The engine images install
 `runai-model-streamer[s3,gcs,azure]`, and only the core package is replaced by the wheel under
@@ -52,15 +60,17 @@ tests/engine_compatibility/run.sh --engine vllm --image vllm/vllm-openai:latest 
   --wheel-dir py/runai_model_streamer/dist
 ```
 
-`--engine sglang --image lmsysorg/sglang:latest` for SGLang. `--wheel-dir` must hold exactly one
-`runai_model_streamer-*.whl`, anywhere under it (the search is recursive: the CI artifact nests the
-wheel under `runai_model_streamer/dist/`). The images are 10-20 GB; the first run pulls them.
+`--engine sglang --image lmsysorg/sglang:latest` for SGLang, and `--serve` for the serve check on
+a machine with an sm80+ GPU. `--wheel-dir` must hold exactly one `runai_model_streamer-*.whl`,
+anywhere under it (the search is recursive: the CI artifact nests the wheel under
+`runai_model_streamer/dist/`). The images are 10-20 GB; the first run pulls them.
 
 ## Where it runs in CI
 
-The `engine-compatibility` job of [nightly-gpu.yaml](../../.github/workflows/nightly-gpu.yaml), on
-`ubuntu-latest`, one matrix leg per engine, against the wheel the run's `build-wheel` job built
-from the commit under test. The engine images are `:latest` on purpose - the job exists to catch
-breakage against what users install today - and each run logs the pulled image's digest, so a red
-run names the exact engine build; a manual run can pin another tag through the `vllm_image` /
-`sglang_image` inputs.
+Two jobs of [nightly-gpu.yaml](../../.github/workflows/nightly-gpu.yaml), each one matrix leg per
+engine, against the wheel the run's `build-wheel` job built from the commit under test:
+`engine-compatibility` (the install checks, on `ubuntu-latest`) and `engine-serve` (the same plus
+`--serve`, on the `nv-gpu-amd64-l40g-1gpu` runners). The engine images are `:latest` on purpose -
+the jobs exist to catch breakage against what users install today - and each run logs the pulled
+image's digest, so a red run names the exact engine build; a manual run can pin another tag through
+the `vllm_image` / `sglang_image` inputs.

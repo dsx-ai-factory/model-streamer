@@ -11,9 +11,10 @@ checks what a plain `pip install` cannot:
    use, which dlopens the native libstreamer.so - the step that catches a
    glibc/ABI mismatch between the wheel's build toolchain and the engine image;
 2. importing the engine itself afterwards, which catches the streamer's
-   install having replaced a dependency with a version the engine cannot use;
-3. for vLLM, streaming the same file through vLLM's own
-   runai_safetensors_weights_iterator - the engine's real integration, on CPU.
+   install having replaced a dependency with a version the engine cannot use.
+
+The engine's own load path is covered by serve_check.py on a GPU runner, through
+the public serve command - engine internals are not called here on purpose.
 
 The safetensors file is generated here, so the check needs no network and no
 GPU. Exits non-zero on the first failure, with the failing step named.
@@ -26,9 +27,6 @@ ENGINE_MODULES = {
     "vllm": "vllm",
     "sglang": "sglang",
 }
-
-TENSOR_NAMES = ["a", "b"]
-
 
 def fail(step: str, error: BaseException) -> None:
     print(f"ENGINE-COMPATIBILITY FAIL [{step}]: {type(error).__name__}: {error}")
@@ -83,21 +81,6 @@ def import_engine(engine: str) -> None:
     print(f"ENGINE-COMPATIBILITY OK [engine-import]: {engine} {version} imports after the install")
 
 
-def engine_loader(engine: str, path: str) -> None:
-    if engine != "vllm":
-        print(
-            f"ENGINE-COMPATIBILITY SKIP [engine-loader]: {engine} has no public weights iterator; "
-            "the stream step mirrors its loader's call shape"
-        )
-        return
-    from vllm.model_executor.model_loader.weight_utils import runai_safetensors_weights_iterator
-
-    names = sorted(name for name, _ in runai_safetensors_weights_iterator([path], False))
-    if names != TENSOR_NAMES:
-        raise AssertionError(f"vLLM's iterator yielded {names}, expected {TENSOR_NAMES}")
-    print("ENGINE-COMPATIBILITY OK [engine-loader]: vLLM's weights iterator streamed the file")
-
-
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in ENGINE_MODULES:
         print(f"usage: {sys.argv[0]} {{{'|'.join(ENGINE_MODULES)}}}")
@@ -114,10 +97,6 @@ def main() -> None:
             import_engine(engine)
         except BaseException as error:  # noqa: B036
             fail("engine-import", error)
-        try:
-            engine_loader(engine, path)
-        except BaseException as error:  # noqa: B036
-            fail("engine-loader", error)
     print("ENGINE-COMPATIBILITY PASS")
 
 

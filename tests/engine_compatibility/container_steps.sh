@@ -57,4 +57,13 @@ if ! python3 /workspace/tests/engine_compatibility/check.py "$ENGINE"; then
   status=1
 fi
 
+# A GPU run only (run.sh --serve). Not reached when the steps above already failed: a server
+# started over a broken install would blame the wrong step.
+if [ "${SERVE:-0}" = 1 ] && [ "$status" = 0 ]; then
+  echo "=== step 4: serve the model with load_format=runai_streamer ==="
+  if ! python3 /workspace/tests/engine_compatibility/serve_check.py "$ENGINE"; then
+    status=1
+  fi
+fi
+
 exit "$status"
