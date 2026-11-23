@@ -16,13 +16,14 @@
     {
       "name": "nvidia-cuda-headers",
       "version": "12.8.57",
+      "license": "LicenseRef-NVIDIA-CUDA-Header-Notice",
       "modules": [
         "py/runai_model_streamer",
         "cpp"
       ],
-      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.57-archive.tar.xz",
+      "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.57-archive.tar.xz#include/cuda.h",
       "sha256": "5bd3ac35ea8e8ab880e595d5054ee373abf6d9e53dcb8cef0a5c75358dbc0ae2",
-      "reason": "cuda.h, compiled against (libcuda is loaded at run time); its license asks for the notice. Installed by .devcontainer/scripts/install-cuda-headers.sh; no Renovate datasource serves NVIDIA's redistributables, so update both together"
+      "reason": "cuda.h, compiled against (libcuda is loaded at run time); the notice at the top of cuda.h asks for its disclaimer and U.S. Government End Users notice to be reproduced. Installed by .devcontainer/scripts/install-cuda-headers.sh; no Renovate datasource serves NVIDIA's redistributables, so update both together"
     },
     {
       "name": "libaio",
