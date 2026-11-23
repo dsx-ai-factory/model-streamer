@@ -23,33 +23,7 @@ echo "=== step 1: resolver check (pip install --dry-run, with dependencies) ==="
 # run passes by planning an upgrade of an engine pin; constraining every installed package trips on
 # the images' own intentional inconsistencies (e.g. vLLM overrides torch's NCCL pin).
 constraints=/tmp/engine-compatibility-constraints.txt
-if ! python3 - "$WHEEL" > "$constraints" <<'PY'
-import re, subprocess, sys, zipfile
-
-def canonical(name):
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-names = set()
-with zipfile.ZipFile(sys.argv[1]) as wheel:
-    metadata = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
-    for line in wheel.read(metadata).decode(errors="replace").splitlines():
-        if line.lower().startswith("requires-dist:"):
-            match = re.match(r"\s*([A-Za-z0-9._-]+)", line.split(":", 1)[1])
-            if match:
-                names.add(canonical(match.group(1)))
-names.discard("runai-model-streamer")
-frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, check=True).stdout
-constrained = set()
-for line in frozen.splitlines():
-    if "==" in line and canonical(line.split("==")[0].strip()) in names:
-        constrained.add(canonical(line.split("==")[0].strip()))
-        print(line)
-for name in sorted(names - constrained):
-    # Not installed, or installed without an == pin (editable, name @ url): the dry run cannot
-    # hold the image's version of it.
-    print(f"unconstrained direct dependency: {name}", file=sys.stderr)
-PY
-then
+if ! python3 /workspace/tests/engine_compatibility/make_constraints.py "$WHEEL" > "$constraints"; then
   echo "ENGINE-COMPATIBILITY FAIL [resolver]: could not derive the constraints from the wheel and the image"
   status=1
 else
