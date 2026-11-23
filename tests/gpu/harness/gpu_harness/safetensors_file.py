@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """A small safetensors file, written by hand (numpy and torch are not needed), for a test that needs a file and not a model:
 a few tensors with known bytes, to put somewhere and read back. A suite that tests with models of every shape has a

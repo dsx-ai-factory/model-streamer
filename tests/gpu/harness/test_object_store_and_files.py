@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of the helpers that suites use to put objects and files somewhere: ObjectStore (with a client that is made
 up here, so no service and no boto3) and the safetensors writer, whose files are also read back with the safetensors

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of how the harness runs suites, and of what every suite of tests/gpu/suites/ must be (the contract that
 tests/gpu/README.md, "Adding a test", describes): they fail when a suite is added in a way that the runner cannot run.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Tests of the byte view and the CRC32 that the GPU test compares tensors by, on CPU tensors (they need torch, no GPU).
 They are skipped where torch is not installed; the GPU job installs it before it runs them.
