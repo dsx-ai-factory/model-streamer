@@ -65,7 +65,7 @@ def _name(test):
 
 
 def _chart(results, ceilings=True):
-    """A bar per test: its median load rate, with the load time next to it. With ceilings, a mark where
+    """A bar per test: its median load rate, then the rate and the load time in numbers. With ceilings, a mark where
     the test's ceiling is and the share of it that was reached."""
     if not results:
         return ""
@@ -77,7 +77,7 @@ def _chart(results, ceilings=True):
             rows.append(f'{_name(s["test"])}<div class="track"></div><div class="val bad">&#10007; failed</div>')
             continue
         c = s.get("ceiling") if ceilings else None
-        tip = f'{s["test"]}: {s["load_s"]} s, {s["gibps"]} GiB/s'
+        tip = f'{s["test"]}: {s["gibps"]} GiB/s, {s["load_s"]} s'
         tick, share = "", ""
         if c:
             tip += f', {c["pct"]}% of {c["name"]} ({c["gibps"]} GiB/s)'
@@ -88,7 +88,7 @@ def _chart(results, ceilings=True):
             f'{_name(s["test"])}'
             f'<div class="track" title="{escape(tip)}"><div class="bar" style="width:{100 * s["gibps"] / scale:.2f}%">'
             f'</div>{tick}</div>'
-            f'<div class="val"><b>{_num(s["load_s"], 2)} s</b><small>{_num(s["gibps"])} GiB/s</small>{share}{bad}</div>')
+            f'<div class="val"><b>{_num(s["gibps"])} GiB/s</b><small>{_num(s["load_s"], 2)} s</small>{share}{bad}</div>')
     return '<div class="chart">' + "".join(rows) + "</div>"
 
 
@@ -104,13 +104,13 @@ def _table(results):
         c = s.get("ceiling") or {}
         cells = [f'<span title="{escape(_about(s["test"]))}">{escape(s["test"])}</span>']
         if "gibps" in s:
-            cells += [_num(s["load_s"], 2), _num(s["gibps"], 2), f'{_num(s["gibps_min"])}&ndash;{_num(s["gibps_max"])}',
+            cells += [_num(s["gibps"], 2), f'{_num(s["gibps_min"])}&ndash;{_num(s["gibps_max"])}', _num(s["load_s"], 2),
                       escape(c.get("name", "n/a")), f'{_num(c["pct"], 0)}%' if c else "n/a"]
         else:
             cells += ["failed"] + [""] * 4
         cells.append("&#10003;" if s["ok"] else '<span class="bad">&#10007; no</span>')
         rows.append(cells)
-    return _grid(("test", "load s", "GiB/s", "range", "ceiling", "% of ceiling", "valid"), rows)
+    return _grid(("test", "GiB/s", "range", "load s", "ceiling", "% of ceiling", "valid"), rows)
 
 
 def _resources(results):
