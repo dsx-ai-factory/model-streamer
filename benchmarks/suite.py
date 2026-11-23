@@ -12,14 +12,14 @@ Each option is one case, and any of them can be left out:
     --cpu DIR          the model loaded to host memory
 
 Every case is one bench.py run, so the loaders, the cold page cache, the validation and the machine profile
-are bench.py's. The results of each case and the combined report.html and report.md go to --out-dir.
+are bench.py's. The results of each case and the combined report.md go to --out-dir.
 """
 import argparse
 import os
 import subprocess
 import sys
 
-from streamer_bench import html
+from streamer_bench import markdown
 
 BENCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench.py")
 
@@ -66,11 +66,8 @@ def main():
             failed.append(name)
 
     if written:
-        page = os.path.join(a.out_dir, "report.html")
-        table = html.combine(written, page)
-        with open(os.path.join(a.out_dir, "report.md"), "w") as f:
-            f.write(table + "\n")
-        print("\n" + table + f"\n\nwrote {page} and {os.path.join(a.out_dir, 'report.md')}")
+        report = os.path.join(a.out_dir, "report.md")
+        print("\n" + markdown.combine(written, report) + f"\n\nwrote {report}")
     if failed:
         sys.exit(f"failed: {', '.join(failed)}")
 

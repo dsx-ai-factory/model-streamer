@@ -6,7 +6,7 @@ import platform
 import statistics
 import time
 
-from . import LOADERS, group_of, html, loader_of
+from . import LOADERS, group_of, loader_of, markdown
 from .profile import ceilings_for, nearest
 
 
@@ -70,7 +70,7 @@ def calibration_of(profile, path):
 
 
 def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, profile, profile_path, remote):
-    """Print the table and write the results file and its HTML page. True when every test is ok."""
+    """Print the table and write the results file and its Markdown report. True when every test is ok."""
     results = [summarize(n, runs, model, strategy_of[n], profile, remote, a.warm) for n, runs in runs_of.items()]
     add_speedups(results)
     print_table(results, pkgs)
@@ -84,5 +84,5 @@ def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, pro
            "settings": settings, "calibration": calibration_of(profile, profile_path), "results": results}
     with open(a.out, "w") as f:
         json.dump(out, f, indent=2)
-    print(f"wrote {a.out} and {html.write(out, a.out)}")
+    print(f"wrote {a.out} and {markdown.write(out, a.out)}")
     return all(s["ok"] for s in results)

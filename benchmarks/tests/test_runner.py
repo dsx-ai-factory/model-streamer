@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from streamer_bench import html, profile, runner  # noqa: E402
+from streamer_bench import markdown, profile, runner  # noqa: E402
 
 DIST = "streamer_dist"
 
@@ -92,10 +92,9 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(cuda["ceiling"]["name"], "h2d_pinned")  # the lower of storage and host-to-GPU
         self.assertEqual(cpu["runs"][0], {"load_s": 5.0, "gibps": 8.0, "cpu_s": 8.0, "peak_rss_gib": 4.0})
         self.assertEqual(base["fs_strategy"], ["io_uring"])
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("streamer_cuda", page)
-        self.assertIn("delivers the tensors on one GPU", page)  # the test's setup, shown next to its loader
+        self.assertIn("`streamer_cuda`: The streamer reads every file and delivers the tensors on one GPU", page)
         # interleaved: every test once, then every test again
         order = [c[c.index("--child") + 1] for c, _ in self.calls]
         self.assertEqual(order, ["streamer_cpu", "streamer_cuda", "safetensors_cuda"] * 2)
@@ -105,8 +104,8 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("ceiling", out["results"][0])
         self.assertIsNone(out["calibration"])
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
-            self.assertIn("No machine profile was used", f.read())
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertNotIn("parallel direct read", f.read())
 
     def test_distributed_runs_under_torchrun(self):
         code, out = self.run_bench(gpus=2, nproc=2, env=["X=1"], tests=DIST)
@@ -128,10 +127,9 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual((cal["path"], cal["created"], cal["notes"]), ("p.json", PROFILE["created"], ["a note"]))
         self.assertEqual(cal["ceilings_gibps"]["h2d_pinned"], 6.0)
         self.assertNotIn("raw_gibps", cal)
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        for text in ("Calibration", "disk_direct_read_parallel", "scored against", "a note", "8 files of 2.0 GiB"):
-            self.assertIn(text, page)
+        self.assertIn("- Storage: ext4 on /mnt, 10 GiB/s parallel direct read", page)
 
     def ran(self):
         return [c[c.index("--child") + 1] for c, _ in self.calls]
@@ -155,11 +153,14 @@ class RunnerTest(unittest.TestCase):
                          [1.0, 4.0, 4.0])
         self.assertEqual((by["streamer_cuda"]["loader"], by["streamer_cuda"]["group"]), ("streamer", "cuda"))
         self.assertEqual(out["versions"], {"runai-model-streamer": "0.17.1", "instanttensor": "0.2.3"})
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        for text in ("Model Streamer", "InstantTensor", "Safetensors", "<b>4.00x</b>", "1 × H200", "0.2.3",
-                     "ext4 on /mnt"):
-            self.assertIn(text, page)
+        for text in ("| Qwen | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |",
+                     "| | | InstantTensor | 5.00 | 8.0 | **4.00x** |",
+                     "| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", "- instanttensor: 0.2.3",
+                     f"- runai_model_streamer: 0.17.1 (imported from {PKG})", "- GPUs: 1 × H200",
+                     "- Runs: median of 1 per loader, cold page cache"):
+            self.assertIn(text.replace("Qwen", os.path.basename(self.dir.name)), page)
         # without the safetensors test there is nothing to compare with
         _, out = self.run_bench(tests="streamer_cuda", repeats=1)
         self.assertNotIn("speedup", out["results"][0])
@@ -178,22 +179,22 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(self.ran(), ["safetensors_dist", "instanttensor_dist", DIST])
         self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
         self.assertEqual([s["group"] for s in out["results"]], ["dist"] * 3)
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
-            self.assertIn("2 × H200", f.read())
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertIn("| 2 × H200 | Safetensors |", f.read())
 
     def test_several_results_make_one_page_and_one_table(self):
         self.run_bench(gpus=1, repeats=1, device="cuda")
         first = os.path.join(self.dir.name, "first.json")
         os.rename(self.out, first)
         self.run_bench(gpus=0, repeats=1)
-        page = os.path.join(self.dir.name, "report.html")
-        table = html.combine([first, self.out], page)
+        page = os.path.join(self.dir.name, "report.md")
+        table = markdown.combine([first, self.out], page)
         name = os.path.basename(self.dir.name)
         self.assertIn(f"| {name} | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |", table)
-        self.assertIn("| | | Model Streamer | 5.00 | 8.0 | 4.00x |", table)
+        self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", table)
         self.assertIn(f"| {name} | host memory | Safetensors | 20.00 | 2.0 | 1.00x |", table)
         with open(page) as f:
-            self.assertEqual(f.read().count('class="case"'), 2)
+            self.assertIn(table, f.read())
 
     def test_more_ranks_than_gpus_is_refused(self):
         self.assertIn("needs 8 GPUs, one per rank; this machine has 1", self.run_bench(gpus=1, nproc=8)[0])
@@ -214,8 +215,8 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out["results"][0], {"test": "streamer_cpu", "loader": "streamer", "group": "cpu", "ok": False,
                                              "runs": [{"failed": "timed out after 3600 s"}] * 2})
-        with open(os.path.splitext(self.out)[0] + ".html") as f:
-            self.assertIn("failed", f.read())
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertIn("| Model Streamer | failed | | |", f.read())
 
     def test_cache_left_before_a_cold_run_is_a_warning(self):
         with mock.patch.object(runner, "evict", return_value=2 << 30):

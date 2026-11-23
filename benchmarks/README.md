@@ -38,7 +38,7 @@ directory first on `PYTHONPATH`.
 | `streamer_bench/files.py` | The model's files and their state in the page cache |
 | `streamer_bench/profile.py` | Finds or makes the machine profile and scores a test against it |
 | `streamer_bench/report.py` | Summary per test, the table and the results file |
-| `streamer_bench/html.py` | Results as a self-contained HTML page and a Markdown table |
+| `streamer_bench/markdown.py` | Results as a Markdown report |
 | `streamer_bench/calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
 | `requirements.txt` | The packages the benchmark loads with |
 | `tests/` | Unit tests of the runner, the report and the calibration helpers |
@@ -62,8 +62,9 @@ Each option is one case, and any of them can be left out:
 
 Every case is one `bench.py` run with each loader that applies. `--repeats`,
 `--env`, `--profile` and `--no-calibrate` are passed on to it. The results go
-to `--out-dir` (default `bench_suite`): a results file, a page and the logs
-per case, and the combined `report.html` and `report.md`:
+to `--out-dir` (default `bench_suite`): a results file, a report and the logs
+per case, and the combined `report.md`, which has the test setting and this
+table:
 
 | Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
 |---|---|---|---|---|---|
@@ -101,7 +102,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
 | `--no-calibrate` | off | Never calibrate; the ceiling columns are then empty |
 | `--repeats N` | 3 | Runs per test |
-| `--out FILE` | `bench_results.json` | Results file; the HTML page gets the same name with `.html` |
+| `--out FILE` | `bench_results.json` | Results file; the Markdown report gets the same name with `.md` |
 | `--log-dir DIR` | none | Keep each run's output |
 
 Runs are interleaved across the tests (every test once, then every test
@@ -208,29 +209,20 @@ cache between runs when you need server-cold numbers.
 The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
-`bench_results.html` shows the same results as a page: per destination, a row
-per loader with its load time, throughput and speedup. Pointing at the "i"
-next to a loader shows how that test is set up. A folded section below holds
-the rest: the spread, CPU and memory per test, the runs, what the numbers were
-measured on (the machine, the versions of the streamer, InstantTensor,
-safetensors and torch, the settings), and the calibration with every ceiling.
-It is one file with no external resources, so it can be copied off the machine
-and opened anywhere. To make it again from a results file:
+`bench_results.md` is the report: the test setting (the machine, the storage
+and its measured read rate, the versions of each loader), a table with a row
+per loader giving its load time, throughput and speedup, and how each loader
+was run. To make it again from a results file, or one report from several:
 
 ```bash
-cd benchmarks && python3 -m streamer_bench.html /path/to/bench_results.json
+cd benchmarks && python3 -m streamer_bench.markdown /path/to/bench_results.json
+cd benchmarks && python3 -m streamer_bench.markdown a.json b.json --out report.md
 ```
 
-Several results files make one page, and the same table is printed as
-Markdown:
-
-```bash
-cd benchmarks && python3 -m streamer_bench.html a.json b.json --out report.html
-```
-
-`bench_results.json` holds the same once at the top (`host`, `environment`,
-`versions`, `streamer`, `model`, `settings`, and `calibration`, which is the
-machine profile without each stage's single runs), then one entry per test:
+`bench_results.json` holds everything that was measured. At the top are
+`host`, `environment`, `versions`, `streamer`, `model`, `settings`, and
+`calibration` (the machine profile without each stage's single runs). Then
+comes one entry per test:
 
 ```json
 {
