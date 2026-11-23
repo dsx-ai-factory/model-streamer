@@ -365,19 +365,56 @@ jobs:
           name: gpu-test-wheel
           path: ${{ runner.temp }}/wheel
 
-      # bash with pipefail, so that the exit status is the script's and not that of tee (as in the gpu-tests job).
-      - name: Run the compatibility and serve checks
+      # One workflow step per check from here on, each a docker exec into the container this step starts (the
+      # build-wheel job's pattern), so a red run names the failed check in the job's step list. Every step tees into
+      # one log for the artifact and the summary; bash with pipefail, so that a step's exit status is the script's
+      # and not that of tee (as in the gpu-tests job).
+      - name: Start the engine container
         shell: bash
         run: |
           mkdir -p test-results/engine-compatibility
           tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
-            --wheel-dir "$RUNNER_TEMP/wheel" --serve 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
+            --wheel-dir "$RUNNER_TEMP/wheel" --serve --start 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --step environment \
+            2>&1 | tee -a "test-results/engine-compatibility/${{ matrix.engine }}.log"
+
+      # continue-on-error: a resolver conflict must be reported, but the other checks still answer for the wheel;
+      # the step is red in the step list, and the verdict step at the end fails the job.
+      - name: Resolver check
+        id: resolver
+        continue-on-error: true
+        shell: bash
+        run: |
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --step resolver \
+            2>&1 | tee -a "test-results/engine-compatibility/${{ matrix.engine }}.log"
+
+      - name: Install the wheel
+        shell: bash
+        run: |
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --step install \
+            2>&1 | tee -a "test-results/engine-compatibility/${{ matrix.engine }}.log"
+
+      - name: Import the engine
+        shell: bash
+        run: |
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --step import \
+            2>&1 | tee -a "test-results/engine-compatibility/${{ matrix.engine }}.log"
+
+      - name: Serve the model through the streamer
+        shell: bash
+        run: |
+          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --step serve \
+            2>&1 | tee -a "test-results/engine-compatibility/${{ matrix.engine }}.log"
+
+      - name: Fail the job if the resolver check failed
+        if: steps.resolver.outcome == 'failure'
+        run: exit 1
 
       # A cancelled or timed-out job kills the docker client, not the container, and a serving container that goes
-      # on holds the GPU (the name is set by run.sh --serve).
-      - name: Remove the container of the run if it is still there
+      # on holds the GPU.
+      - name: Remove the container of the run
         if: always()
-        run: docker rm -f "engine-compatibility-serve-${{ matrix.engine }}" >/dev/null 2>&1 || true
+        run: tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --stop
 
       - name: Summarize
         if: always()

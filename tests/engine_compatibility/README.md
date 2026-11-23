@@ -65,7 +65,9 @@ anywhere under it (the search is recursive: the CI artifact nests the wheel unde
 
 The `engine-compatibility` job of [nightly-gpu.yaml](../../.github/workflows/nightly-gpu.yaml), on
 the `nv-gpu-amd64-l40g-1gpu` runners, one matrix leg per engine, against the wheel the run's
-`build-wheel` job built from the commit under test. The engine images are `:latest` on purpose -
-the job exists to catch breakage against what users install today - and each run logs the pulled
-image's digest, so a red run names the exact engine build; a manual run can pin another tag through
-the `vllm_image` / `sglang_image` inputs.
+`build-wheel` job built from the commit under test. Each check is a workflow step of its own
+(`run.sh --start`, then `--step resolver|install|import|serve`, then `--stop`), so a red run names
+the failed check in the job's step list. The engine images are `:latest` on purpose - the job
+exists to catch breakage against what users install today - and each run logs the pulled image's
+digest, so a red run names the exact engine build; a manual run can pin another tag through the
+`vllm_image` / `sglang_image` inputs.
