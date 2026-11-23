@@ -91,16 +91,41 @@ and third-party contributions before accepting or distributing them.
 
 ### Source File Headers
 
-Every source file needs this two-line NVIDIA SPDX header, written in the comment style of the file type:
+Every source file starts with a copyright notice and a license identifier, written in the comment style of the file type.
+A file written by NVIDIA carries:
 
 ```text
-SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) <year> NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 ```
 
-Documentation, configuration and data files (for example `.md`, `.yaml`, `.json`) do not need one.
-A pull request check fails when a file is missing the header. To add it, run
-`python3 .github/scripts/spdx_headers/spdx_headers.py --fix` from the repository root.
+`<year>` is the year the file was created. If NVIDIA changed the file in later years, use a range from the year of
+creation to the year of the last change, for example `2024-2026`. Take the years from the git history of the file.
+
+Rules for contributors:
+
+- Never remove or edit an existing copyright notice, including its year.
+- When you create a file, put your own copyright holder (you or your employer) in the header, in the same
+  `SPDX-FileCopyrightText: Copyright (c) <year> <holder>` form, with the year you created the file. Do not add an
+  NVIDIA notice to a file NVIDIA did not write.
+- When you change an existing file, add your own notice below the existing ones, with the year of your first change.
+  Every change counts, except fixing a trivial typo.
+- Notices stack in the order they were added, one line each, above the `SPDX-License-Identifier` line. Do not use
+  a general line such as "the contributors": name the actual holder.
+
+For example, a file first written by an outside contributor and later changed by NVIDIA starts with:
+
+```text
+SPDX-FileCopyrightText: Copyright (c) 2025 Example Corp
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+```
+
+Documentation, configuration and data files (for example `.md`, `.yaml`, `.json`) do not need a header.
+A pull request check fails when a file has no SPDX copyright line and license identifier near its top, or when an
+NVIDIA line is not in the exact form above. To add the NVIDIA header to files that have none, run
+`python3 .github/scripts/spdx_headers/spdx_headers.py --fix` from the repository root. It takes the years from git
+history, uses the current year for a new file, and never changes a notice that exists.
 
 To add the header automatically on every commit, install [pre-commit](https://pre-commit.com) and run
 `pre-commit install` once.

@@ -25,5 +25,5 @@ jobs:
     - name: Test the header script
       run: python3 .github/scripts/spdx_headers/test_spdx_headers.py
 
-    - name: Check that every source file has the NVIDIA SPDX header
+    - name: Check that every source file has an SPDX copyright header
       run: python3 .github/scripts/spdx_headers/spdx_headers.py
