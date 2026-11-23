@@ -86,7 +86,7 @@ class RunnerTest(unittest.TestCase):
             return code, json.load(f)
 
     def test_results_layout_and_ceilings(self):
-        code, out = self.run_bench(tests="streamer_cpu,streamer_cuda,safeopen_page_in")
+        code, out = self.run_bench(tests="streamer_cpu,streamer_cuda,safeopen_to_cuda")
         self.assertEqual(code, 0)
         self.assertEqual(out["streamer"], [PKG])
         self.assertEqual(out["model"]["gib"], 40.0)
@@ -100,10 +100,11 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".html") as f:
             page = f.read()
         self.assertIn("streamer_cuda", page)
-        self.assertIn("80% of disk_direct_read_parallel", page)
+        self.assertIn("80% of ceiling", page)
+        self.assertIn("delivers the tensors on one GPU", page)  # the test's setup, shown on its name
         # interleaved: every test once, then every test again
         order = [c[c.index("--child") + 1] for c, _ in self.calls]
-        self.assertEqual(order, ["streamer_cpu", "streamer_cuda", "safeopen_page_in"] * 2)
+        self.assertEqual(order, ["streamer_cpu", "streamer_cuda", "safeopen_to_cuda"] * 2)
 
     def test_no_profile_has_no_ceiling(self):
         code, out = self.run_bench(prof=None, tests="streamer_cpu")
@@ -181,9 +182,8 @@ class RunnerTest(unittest.TestCase):
 
     def test_vllm_runs_by_default_on_a_gpu_machine(self):
         self.run_bench(gpus=1, repeats=1)
-        self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cpu_notowned", "streamer_cuda", "safeopen_page_in",
-                                      "safeopen_to_cuda", "vllm_default", "vllm_streamer", "vllm_streamer_gpu",
-                                      "vllm_instanttensor"])
+        self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cuda", "safeopen_to_cuda", "vllm_default", "vllm_streamer",
+                                      "vllm_streamer_gpu", "vllm_instanttensor"])
         self.assertFalse(any("torch.distributed.run" in c for c, _ in self.calls))
 
     def test_one_vllm_loader_missing_leaves_out_only_that_test(self):
@@ -222,7 +222,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(streamer["ceiling"]["name"], "disk_direct_read_parallel")
         self.assertEqual(out["vllm_dist_speedup"], 3.1)
         with open(os.path.splitext(self.out)[0] + ".html") as f:
-            self.assertIn("vLLM distributed model load by loader (2 ranks)", f.read())
+            self.assertIn("vLLM with tensor parallelism (2 ranks)", f.read())
 
     def test_wrong_data_fails_the_test(self):
         code, out = self.run_bench(launch=lambda cmd: child_output(cmd, errors=["w: data differs from safetensors"]),

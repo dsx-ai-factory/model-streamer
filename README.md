@@ -86,7 +86,7 @@ with SafetensorsStreamer() as streamer:
 ## Benchmarking
 
 [`benchmarks/bench.py`](benchmarks/bench.py) measures how fast a model loads on
-your machine, with the streamer and with `safetensors` baselines, and reports it
+your machine, with the streamer, a `safetensors` baseline and vLLM, and reports it
 as a share of what the hardware can do:
 
 ```bash

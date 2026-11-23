@@ -1,9 +1,9 @@
 # Model Streamer Benchmarks
 
 `bench.py` measures how fast a model loads on your machine and compares it with
-what the hardware can do. It loads the model with the streamer and with
-`safetensors` baselines, each run in a fresh process on a cold page cache, and
-checks the loaded tensors against `safetensors`. A run that returns wrong data
+what the hardware can do. It loads the model with the streamer, with a
+`safetensors` baseline and in vLLM, each run in a fresh process on a cold page
+cache, and checks the loaded tensors against `safetensors`. A run that returns wrong data
 fails.
 
 Each benchmark prints a summary table and writes `bench_results.json` and
@@ -77,10 +77,8 @@ again), so drift in the machine or the storage affects all of them alike.
 
 | Test | What it loads |
 |---|---|
-| `streamer_cpu` | Streamer to host memory, `owned=True` (the default) |
-| `streamer_cpu_notowned` | The same with `owned=False` |
+| `streamer_cpu` | Streamer to host memory |
 | `streamer_cuda` | Streamer to GPU |
-| `safeopen_page_in` | `safetensors.safe_open`, one byte touched per page |
 | `safeopen_to_cuda` | `safe_open` + `.to("cuda")`, the default loader's shape |
 | `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
 | `vllm_default` | A vLLM engine start with vLLM's default loader |
@@ -90,13 +88,13 @@ again), so drift in the machine or the storage affects all of them alike.
 | `vllm_dist_default`, `vllm_dist_streamer`, `vllm_dist_instanttensor` | The three vLLM tests with tensor parallelism over `--nproc` ranks |
 
 The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py)
-(`TESTS`) and each one's load is a function in
+(`TESTS`), with a sentence on each one's setup, and each one's load is a function in
 [`streamer_bench/worker.py`](streamer_bench/worker.py):
 
 | Function in `worker.py` | Tests it runs |
 |---|---|
-| `run_streamer` | `streamer_cpu`, `streamer_cpu_notowned`, `streamer_cuda` |
-| `run_safeopen` | `safeopen_page_in`, `safeopen_to_cuda` |
+| `run_streamer` | `streamer_cpu`, `streamer_cuda` |
+| `run_safeopen` | `safeopen_to_cuda` |
 | `distributed` | `streamer_dist` |
 | `vllm` | every `vllm_*` test; the loader and its options come from the test's entry in `TESTS` |
 
@@ -217,11 +215,12 @@ cache between runs when you need server-cold numbers.
 The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
-`bench_results.html` shows the same results as a page: a bar per test against
-its ceiling, a table of every number, and the runs. Below them it lists what
-the numbers were measured on: the machine (kernel, CPUs, memory, GPUs, the
-model's storage), the versions of the streamer, vLLM, torch and safetensors,
-the settings, and the calibration with every ceiling. It is one file with no
+`bench_results.html` shows the same results as a page: a bar per test, with
+its ceiling for the streamer tests, and a short table. Pointing at a test's
+name shows how that test is set up. Three folded sections below hold the rest:
+the runs with CPU and memory, what the numbers were measured on (the machine,
+the versions of the streamer, vLLM, torch and safetensors, the settings), and
+the calibration with every ceiling. It is one file with no
 external resources, so it can be copied off the machine and opened anywhere.
 To make it again from a results file:
 

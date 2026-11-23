@@ -92,51 +92,41 @@ def streamer_pkg():
 
 
 class Recorder:
-    """Counts bytes, keeps the tensors chosen for validation, and times its own copies so the caller can
-    take them out of the load time."""
+    """Counts bytes and keeps the tensors chosen for validation."""
 
     def __init__(self, keep_names):
         self.keep_names = keep_names
         self.kept = {}
         self.nbytes = 0
         self.seen = {}
-        self.overhead = 0.0
 
-    def __call__(self, name, tensor, copy):
+    def __call__(self, name, tensor):
         n = tensor.numel() * tensor.element_size()
         self.nbytes += n
         self.seen[name] = (tuple(tensor.shape), n)
         if name in self.keep_names:
-            t0 = time.perf_counter()
-            self.kept[name] = tensor.clone() if copy else tensor
-            self.overhead += time.perf_counter() - t0
+            self.kept[name] = tensor
 
 
-def run_streamer(files, device, owned, rec):
+def run_streamer(files, device, rec):
     import torch
     from runai_model_streamer import SafetensorsStreamer
     with SafetensorsStreamer() as s:
-        s.stream_files(files, device=device, owned=owned)
+        s.stream_files(files, device=device)
         for name, t in s.get_tensors():
-            rec(name, t, copy=not owned)
+            rec(name, t)
     if device == "cuda":
         torch.cuda.synchronize()
 
 
-def run_safeopen(files, device, rec):
+def run_safeopen(files, rec):
     import torch
     from safetensors import safe_open
     for f in files:
         with safe_open(f, framework="pt", device="cpu") as sf:
             for k in sf.keys():
-                t = sf.get_tensor(k)
-                if device == "cuda":
-                    rec(k, t.to("cuda", non_blocking=True), copy=False)
-                else:
-                    t.reshape(-1).view(torch.uint8)[::4096].sum()
-                    rec(k, t, copy=True)
-    if device == "cuda":
-        torch.cuda.synchronize()
+                rec(k, sf.get_tensor(k).to("cuda", non_blocking=True))
+    torch.cuda.synchronize()
 
 
 def single(a):
@@ -152,10 +142,10 @@ def single(a):
     ru0, th0 = resource.getrusage(resource.RUSAGE_SELF), thread_cpu()
     t0 = time.perf_counter()
     if name.startswith("streamer"):
-        run_streamer(files, TESTS[name]["device"], name != "streamer_cpu_notowned", rec)
+        run_streamer(files, TESTS[name]["device"], rec)
     else:
-        run_safeopen(files, TESTS[name]["device"], rec)
-    wall = time.perf_counter() - t0 - rec.overhead
+        run_safeopen(files, rec)
+    wall = time.perf_counter() - t0
     ru1, th1 = resource.getrusage(resource.RUSAGE_SELF), thread_cpu()
 
     sys_by_thread = max(th1[t][1] - th0.get(t, (0, 0))[1] for t in th1)
