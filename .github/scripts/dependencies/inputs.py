@@ -80,7 +80,12 @@ def setup_requirements(path):
                         if getattr(call.func, "id", getattr(call.func, "attr", "")) != "read_requirements":
                             raise ValueError("%s: install_requires is a call the collector does not read; "
                                              "use read_requirements() or a literal list" % path)
-                        name = ast.literal_eval(call.args[0]) if call.args else REQUIREMENTS
+                        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+                        if set(keywords) - {"name"}:
+                            raise ValueError("%s: read_requirements() got keywords the collector does not "
+                                             "read: %s" % (path, ", ".join(sorted(set(keywords) - {"name"}))))
+                        source = call.args[0] if call.args else keywords.get("name")
+                        name = ast.literal_eval(source) if source is not None else REQUIREMENTS
                         declaring = os.path.join(os.path.dirname(path), name)
                         with open(declaring) as f:
                             return requirement_lines(f.read()), declaring
