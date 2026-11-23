@@ -339,6 +339,10 @@ The availability of this Exception does not imply any general presumption that t
 --------------------------------------------------------------------------------
 Applies to:
   - github.com/aws/aws-sdk-cpp
+
+[Reproduced verbatim from upstream. This file itself contains unfilled license
+template fields (for example <COPYRIGHT HOLDER>). They are left exactly as the
+copyright holder published them: a third-party license text must not be edited.]
 --------------------------------------------------------------------------------
 
                                  Apache License
@@ -798,6 +802,10 @@ Applies to:
 --------------------------------------------------------------------------------
 Applies to:
   - github.com/awslabs/aws-checksums
+
+[Reproduced verbatim from upstream. This file itself contains unfilled license
+template fields (for example <COPYRIGHT HOLDER>). They are left exactly as the
+copyright holder published them: a third-party license text must not be edited.]
 --------------------------------------------------------------------------------
 
                                  Apache License
