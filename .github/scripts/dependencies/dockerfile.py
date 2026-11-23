@@ -205,19 +205,59 @@ def script_variables(text):
 
 
 def _expand(text, variables):
-    """Replace `${NAME}` by the value of NAME, also inside the values."""
+    """Replace `${NAME}` by the value of NAME, also inside the values, and the shell forms the
+    scripts use: `${NAME//a/b}` (replace every a), `${NAME%pattern}` (drop the shortest matching
+    suffix, pattern a glob), `${NAME:?}` (NAME, required) and `${NAME:-default}`."""
+    import fnmatch
+
+    def value(match):
+        name, operator, argument = match.group(1), match.group(2), match.group(3)
+        if operator == ":-" and not variables.get(name):
+            return argument
+        if name not in variables:
+            return match.group(0)
+        found = variables[name]
+        if operator == "//":
+            old, _, new = argument.partition("/")
+            return found.replace(old, new)
+        if operator == "%":
+            for cut in range(len(found), -1, -1):
+                if fnmatch.fnmatchcase(found[cut:], argument):
+                    return found[:cut]
+        return found
+
     for _ in range(5):
-        replaced = re.sub(r"\$\{(\w+)\}", lambda m: variables.get(m.group(1), m.group(0)), text)
+        replaced = re.sub(r"\$\{(\w+)(?:(//|%|:\?|:-)([^}]*))?\}", value, text)
         if replaced == text:
             break
         text = replaced
     return text
 
 
+def dockerfile_arguments(path=None):
+    """The default of every `ARG NAME=value` in the Dockerfile: the versions it passes to the
+    scripts it runs (`RUN NAME="$NAME" bash script.sh`)."""
+    import os
+
+    path = path or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))), DOCKERFILE)
+    found = {}
+    try:
+        with open(path) as handle:
+            for line in handle:
+                match = re.match(r"\s*ARG\s+([A-Za-z_]\w*)=(\S*)", line)
+                if match and match.group(1) not in found:
+                    found[match.group(1)] = match.group(2).strip("\"'")
+    except OSError:
+        pass
+    return found
+
+
 def _script_environment(text, arch):
     """The variables of a script when it runs for `arch` (a key of SCRIPT_ARCHES)."""
     common, specific = script_variables(text)
-    variables = dict(common)
+    variables = dockerfile_arguments()
+    variables.update(common)
     variables.update(specific[arch])
     for name, value in common.items():
         if value == "$1":  # `target_arch=$1`: the architecture argument
@@ -233,10 +273,13 @@ def _script_downloads(text, path):
             if not re.match(r"curl\b", segment):
                 continue
             urls = read_urls(segment)
+            if not urls:  # `curl ... "${LIBURING_URL:?}"`: the URL is the value of a variable
+                urls = [token for token in re.findall(r"\$\{\w+[^}]*\}", segment)
+                        if URL_START.match(_expand(token, environments["amd64"]))][:1]
             if not urls:
                 continue
             output = re.search(r"-o\s+(\S+)", segment)
-            filename = output.group(1) if output else None
+            filename = _expand(output.group(1), environments["amd64"]) if output else None
             per_arch = {SCRIPT_ARCHES[arch]: _expand(urls[0], environments[arch]) for arch in SCRIPT_ARCHES}
             for url in per_arch.values():
                 if "$" in url:
@@ -244,7 +287,9 @@ def _script_downloads(text, path):
                                      "branch or an assignment, or teach script_variables about the new shape" % (path, number, url))
             pins = {}
             if filename:
-                pinned = re.search(r'echo\s+"(\S+)\s+%s"\s*\|\s*sha256sum' % re.escape(filename), text)
+                # The checksum line may spell the file name differently (`${V}` against `${V:?}`).
+                pinned = next((m for m in re.finditer(r'echo\s+"(\S+)\s+(\S+)"\s*\|\s*sha256sum', text)
+                               if _expand(m.group(2), environments["amd64"]) == filename), None)
                 if pinned:
                     for arch, name in SCRIPT_ARCHES.items():
                         value = _expand(pinned.group(1), environments[arch])
@@ -296,13 +341,14 @@ def git_clones(text, path=DOCKERFILE):
     """`git clone` lines as (line, url, ref) where ref is --branch or a later `git checkout`."""
     found = []
     current = None  # the clone that a later `git checkout` applies to
+    variables = _script_environment(text, "amd64") if is_script(path) else dockerfile_arguments()
     for number, rest in runs(text, path):
         if "git clone" not in rest and "git checkout" not in rest:
             continue
         if not is_script(path):
             current = None  # in a Dockerfile a checkout applies to a clone of the same RUN only
         for segment in _segments(rest):
-            tokens = _tokens(segment)
+            tokens = [_expand(token, variables) for token in _tokens(segment)]
             if tokens[:2] == ["git", "clone"]:
                 branch = None
                 for index, token in enumerate(tokens):

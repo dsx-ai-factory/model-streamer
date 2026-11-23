@@ -26,7 +26,7 @@
   "nodesource-setup": ["test"]
  },
  "ship": {
-  "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the matching entries in third_party_notices/components.json. `collect.py check` fails when a key matches nothing or a component id is not covered.",
+  "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the components the NOTICE files list (the `# attribution:` comments). `collect.py check` fails when a key matches nothing.",
   "url:cuda_cudart": ["nvidia-cuda-headers"],
   "apt:libstdc++-9-dev": ["gcc-runtime"],
   "apt:libgcc-9-dev": ["gcc-runtime"],

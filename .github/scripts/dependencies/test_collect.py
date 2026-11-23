@@ -181,6 +181,25 @@ class ScriptTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"x\.sh line 1: cannot work out the URL"):
             dockerfile.downloads('curl -fsSL -o a.tar.gz "https://h/${UNKNOWN}/a.tar.gz"\n', self.PATH)
 
+    def test_required_and_default_forms_are_expanded(self):
+        self.assertEqual(dockerfile._expand("a-${V:?}-${W:-9}-${X:-d}", {"V": "1", "W": "2"}), "a-1-2-d")
+
+    def test_a_url_held_in_a_variable_is_read_with_its_pin(self):
+        script = ('V=2.14\nU=https://example.org/lib-${V}.tar.gz\nH=' + "6" * 64 + '\n'
+                  'curl -fsSL -o lib-${V:?}.tar.gz "${U:?}"\n'
+                  'echo "${H:?}  lib-${V}.tar.gz" | sha256sum -c -\n')
+        (lib,) = dockerfile.downloads(script, self.PATH)
+        self.assertEqual((lib["filename"], lib["urls"], lib["sha256"]),
+                         ("lib-2.14.tar.gz", {"any": "https://example.org/lib-2.14.tar.gz"}, {"any": "6" * 64}))
+        self.assertEqual(static_sources._download_name(lib), ("lib", "2.14"))
+
+    def test_a_clone_branch_or_checkout_held_in_a_variable_is_expanded(self):
+        script = ('V=1.2\ngit clone --branch "${V:?}" https://example.org/org/a /opt/a\n'
+                  'git clone https://example.org/org/b /opt/b\ncd /opt/b\ngit checkout "b_${V:?}"\n')
+        clones = dockerfile.git_clones(script, self.PATH)
+        self.assertEqual([(c["url"], c["ref"]) for c in clones],
+                         [("https://example.org/org/a", "1.2"), ("https://example.org/org/b", "b_1.2")])
+
     def test_the_redistributable_archive_is_named_after_its_component(self):
         self.assertEqual(static_sources._download_name(self.downloads()[1]), ("cuda_cudart", "12.8.57"))
 

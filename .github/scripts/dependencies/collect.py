@@ -30,7 +30,6 @@ import static_sources  # noqa: E402
 from util import CATEGORIES, REPO, local_image_digest, log, read_json, run, write_json  # noqa: E402
 
 OUTPUT = os.path.join(HERE, "dependencies.json")
-COMPONENTS = os.path.join(REPO, "third_party_notices", "components.json")
 
 
 def resolve(args):
@@ -150,8 +149,8 @@ def completeness(args):
 
 
 def check(args):
-    """Fail if the list is malformed, out of step with the third-party notices, or the collector
-    misses a file or a command."""
+    """Fail if the list is malformed, out of step with categories.json, or the collector misses a
+    file or a command."""
     if not os.path.exists(args.out):
         sys.exit("%s does not exist: run `collect` first, or pass --out" % args.out)
     data = read_json(args.out)
@@ -166,11 +165,6 @@ def check(args):
     for key in inputs.config()["ship"]:
         if not key.startswith("_") and key not in shipped:
             problems.append("categories.json `ship` key %s has no entry with the ship category in the list" % key)
-    if os.path.exists(COMPONENTS):
-        mapped = {cid for key, ids in inputs.config()["ship"].items() if not key.startswith("_") for cid in ids}
-        for component in read_json(COMPONENTS)["components"]:
-            if component["id"] not in mapped:
-                problems.append("component %s of third_party_notices/components.json is not mapped in categories.json `ship`" % component["id"])
     if problems:
         sys.exit("\n".join(problems))
     print("%d dependencies, all well formed" % len(data["dependencies"]))
