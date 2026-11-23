@@ -76,6 +76,8 @@
   "docker-image:chrislusf/seaweedfs": "Apache-2.0",
   "devcontainer-feature:ghcr.io/rocker-org/devcontainer-features/apt-packages": "MIT",
   "devcontainer-feature:ghcr.io/devcontainers-community/features/bazel": "MIT",
+  "_note_cuda-toolkit": "ASSUMED, not stated by the package: the cuda-toolkit meta-package (NVIDIA Kitmaker Team) names no license in its wheel metadata, in any of its 43 PyPI releases, or in a license file. Every other NVIDIA CUDA wheel from the same publisher names LicenseRef-NVIDIA-Proprietary, the CUDA EULA, so the same license is recorded here. Replace it if NVIDIA publishes one for this package.",
+  "pip:cuda-toolkit": {"license": "LicenseRef-NVIDIA-Proprietary", "url": "https://docs.nvidia.com/cuda/eula/index.html"},
   "git:aws-lc": {"license": "Apache-2.0 OR ISC (code derived from BoringSSL and OpenSSL keeps its own licenses)", "url": "https://github.com/aws/aws-lc/blob/main/LICENSE"},
   "git:aws-verification-model-for-libcrypto": "Apache-2.0",
   "github-action:actions/cache": "MIT",
