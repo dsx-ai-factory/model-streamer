@@ -62,6 +62,14 @@ def license_expression(license_text):
     return _NOTE.split(license_text, 1)[0]
 
 
+def join_licenses(names):
+    """The SPDX expression that holds all the given license expressions. AND binds tighter than OR, so
+    an expression with OR is grouped when it is joined with another."""
+    if len(names) > 1:
+        names = ["(%s)" % name if re.search(r"\sOR\s", name) else name for name in names]
+    return " AND ".join(names)
+
+
 def is_standard(license_text):
     """True when every license named in the expression is a common one. The expression is what comes
     before a parenthesized note: `MIT (dual-licensed LGPL-2.1 OR MIT; the MIT option is used)`."""
@@ -209,8 +217,11 @@ def notice_components(root):
     for line in lines:
         match = NOTICE_ROW.match(line)
         if match:
+            # The source cell is a link, then an optional note: `<url> (via google_cloud_cpp 3.7.0)`.
+            # A link has no space, and keeps its #fragment.
+            link = match.group(4).strip().split(None, 1)
             found.append({"id": component_id(match.group(1)), "version": match.group(2),
-                          "spdx": match.group(3), "url": match.group(4).strip()})
+                          "spdx": match.group(3), "url": link[0] if link else ""})
     return found
 
 
@@ -244,7 +255,9 @@ def assign(entries, components, config):
     """Set `license`, `license_source` and, for a nonstandard license, `license_url` on every entry,
     from the sources described at the top of this file. `components` is the list `notice_components`
     returns; `config` is categories.json. An entry that arrives with a detected `license` keeps it unless
-    a better source covers it. Returns the entries."""
+    a better source covers it. The detected license is kept apart (`detected_license`), and every field
+    derived from the sources is rebuilt on each call, so removing or changing an override in
+    categories.json and assigning again leaves nothing of the old one. Returns the entries."""
     by_id = {}
     for component in components:
         by_id.setdefault(component["id"], []).append(component)
@@ -252,18 +265,27 @@ def assign(entries, components, config):
     manual = {key: value for key, value in config.get("licenses", {}).items() if not key.startswith("_")}
     urls = {key: value for key, value in config.get("license_urls", {}).items() if not key.startswith("_")}
     for item in entries:
+        if "detected_license" not in item:
+            item["detected_license"] = item.get("license")
+            item["detected_license_source"] = item.get("license_source")
+        item["license"], item["license_source"] = item["detected_license"], item["detected_license_source"]
+        item.pop("license_url", None)
         key = "%s:%s" % (item["ecosystem"], item["name"])
-        found = ([_row_for(by_id[cid], item["version"]) for cid in ship.get(key, []) if cid in by_id]
-                 if "ship" in item["categories"] else [])
+        # The rows replace a detected license only when every component the dependency maps to has one:
+        # with a row missing, the combined license would lose that component (ship_without_notice warns).
+        wanted = ship.get(key, []) if "ship" in item["categories"] else []
+        found = [_row_for(by_id[cid], item["version"]) for cid in wanted] if wanted and all(cid in by_id for cid in wanted) else []
         if found:
             names = []
             for component in found:
                 if component["spdx"] not in names:
                     names.append(component["spdx"])
-            item["license"] = " AND ".join(names)
+            item["license"] = join_licenses(names)
             item["license_source"] = NOTICE_SOURCE
             if not is_standard(item["license"]):
-                texts = [component["url"] for component in found if component.get("url")]
+                # The text to link is the one of a component whose own license is not a common one.
+                texts = [component["url"] for component in found
+                         if component.get("url") and not is_standard(component["spdx"])]
                 if texts:
                     item["license_url"] = texts[0]
         elif key in manual:

@@ -805,6 +805,36 @@ class AssignTest(unittest.TestCase):
         licenses.assign([entry], self.COMPONENTS, self.CONFIG)
         self.assertEqual((entry["license"], entry["license_source"]), ("Apache-2.0", "categories.json licenses"))
 
+    def test_a_removed_override_gives_back_the_detected_license(self):
+        entry = self.item("url", "seaweedfs", ["test"], ("MIT", "detected"))
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entry["license"], "Apache-2.0")
+        licenses.assign([entry], self.COMPONENTS, {"ship": {}})
+        self.assertEqual((entry["license"], entry["license_source"]), ("MIT", "detected"))
+
+    def test_a_removed_override_without_a_detected_license_gives_unknown(self):
+        entry = self.item("url", "seaweedfs", ["test"])
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        licenses.assign([entry], self.COMPONENTS, {"ship": {}})
+        self.assertEqual((entry["license"], entry["license_source"]), (licenses.UNKNOWN, "no source names a license"))
+
+    def test_changing_a_custom_license_to_a_common_one_drops_its_link(self):
+        entry = self.item("url", "custom", ["test"])
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entry["license_url"], "https://example.org/terms")
+        config = dict(self.CONFIG, licenses={"url:custom": "MIT"})
+        licenses.assign([entry], self.COMPONENTS, config)
+        self.assertEqual(entry["license"], "MIT")
+        self.assertNotIn("license_url", entry)
+
+    def test_assigning_twice_gives_the_same_result(self):
+        entries = [self.item("url", "curl", ["ship"]), self.item("url", "custom", ["test"]),
+                   self.item("pip", "numpy", ["run"], ("BSD-3-Clause", "wheel metadata"))]
+        licenses.assign(entries, self.COMPONENTS, self.CONFIG)
+        once = [dict(entry) for entry in entries]
+        licenses.assign(entries, self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entries, once)
+
     def test_notice_rows_are_read_by_the_last_part_of_the_package_name(self):
         import tempfile
         with tempfile.TemporaryDirectory() as root:
@@ -823,6 +853,51 @@ class AssignTest(unittest.TestCase):
         components = [{"id": "headers", "spdx": "LicenseRef-Vendor-Header-Notice", "url": "https://example.org/n.txt"}]
         (found,) = licenses.assign([self.item("url", "headers", ["ship"])], components, {"ship": {"url:headers": ["headers"]}})
         self.assertEqual(found["license_url"], "https://example.org/n.txt")
+
+    def test_a_dependency_keeps_its_detected_license_when_a_mapped_component_has_no_row(self):
+        entry = self.item("bazel", "grpc", ["ship"], ("Apache-2.0 AND BSD-3-Clause", "detected"))
+        config = {"ship": {"bazel:grpc": ["grpc", "grpc-address-sorting"]}}
+        only_grpc = [{"id": "grpc", "version": "1.81.0", "spdx": "Apache-2.0", "url": None}]
+        both = only_grpc + [{"id": "grpc-address-sorting", "version": "1.81.0", "spdx": "BSD-3-Clause", "url": None}]
+        self.assertEqual(licenses.ship_without_notice([entry], only_grpc, config),
+                         ["bazel grpc: no row in cpp/NOTICE for grpc-address-sorting"])
+        licenses.assign([entry], only_grpc, config)
+        self.assertEqual((entry["license"], entry["license_source"]), ("Apache-2.0 AND BSD-3-Clause", "detected"))
+        licenses.assign([entry], both, config)
+        self.assertEqual((entry["license"], entry["license_source"]),
+                         ("Apache-2.0 AND BSD-3-Clause", "cpp/NOTICE"))
+
+    def test_a_note_after_the_link_of_a_notice_row_is_not_part_of_the_url(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "cpp"))
+            with open(os.path.join(root, "cpp", "NOTICE"), "w") as handle:
+                handle.write("| Package | Version | License | License source |\n|---|---|---|---|\n"
+                             "| `curl` | 8.8.0.bcr.3 | curl | https://example.org/curl.tar.gz#curl-8.8.0/COPYING (via google_cloud_cpp 3.7.0) |\n"
+                             "| `plain` | 1 | MIT | https://example.org/LICENSE |\n"
+                             "| `blank` | 1 | MIT |  |\n")
+            found = licenses.notice_components(root)
+        self.assertEqual([c["url"] for c in found],
+                         ["https://example.org/curl.tar.gz#curl-8.8.0/COPYING", "https://example.org/LICENSE", ""])
+        components = [dict(found[0], id="curl")]
+        (item,) = licenses.assign([self.item("url", "curl", ["ship"])], components, {"ship": {"url:curl": ["curl"]}})
+        self.assertEqual(item["license_url"], "https://example.org/curl.tar.gz#curl-8.8.0/COPYING")
+
+    def test_components_are_joined_with_their_or_expressions_grouped(self):
+        self.assertEqual(licenses.join_licenses(["MIT OR Apache-2.0", "BSD-3-Clause"]), "(MIT OR Apache-2.0) AND BSD-3-Clause")
+        self.assertEqual(licenses.join_licenses(["Apache-2.0", "BSD-3-Clause"]), "Apache-2.0 AND BSD-3-Clause")
+        # One component alone is not wrapped.
+        self.assertEqual(licenses.join_licenses(["MIT OR Apache-2.0"]), "MIT OR Apache-2.0")
+        components = [{"id": "a", "spdx": "MIT OR Apache-2.0", "url": None}, {"id": "b", "spdx": "BSD-3-Clause", "url": None}]
+        (found,) = licenses.assign([self.item("url", "both", ["ship"])], components, {"ship": {"url:both": ["a", "b"]}})
+        self.assertEqual(found["license"], "(MIT OR Apache-2.0) AND BSD-3-Clause")
+
+    def test_the_license_link_of_a_mixed_component_is_the_nonstandard_ones(self):
+        components = [{"id": "std", "spdx": "Apache-2.0", "url": "https://example.org/apache"},
+                      {"id": "vendor", "spdx": "LicenseRef-Vendor", "url": "https://example.org/vendor"}]
+        (found,) = licenses.assign([self.item("url", "both", ["ship"])], components, {"ship": {"url:both": ["std", "vendor"]}})
+        self.assertEqual(found["license"], "Apache-2.0 AND LicenseRef-Vendor")
+        self.assertEqual(found["license_url"], "https://example.org/vendor")
 
     def test_a_ship_dependency_without_a_notice_row_is_reported_and_keeps_another_source(self):
         entry = self.item("url", "libaio", ["ship"], ("LGPL-2.1", "detected"))

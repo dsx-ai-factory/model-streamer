@@ -70,7 +70,7 @@
   "bazel:nlohmann_json": ["nlohmann-json"]
  },
  "licenses": {
-  "_comment": "The license of a dependency nothing else names: '<ecosystem>:<name>' -> an SPDX expression, or {\"license\": ..., \"url\": the license text}. A dependency linked into a native library takes its license from third_party_notices/components.json first. An entry here overrides what a pip, npm, apt or Bazel package says about itself, so use it for what the package cannot name. A license that is not a common one needs a `url`. The license is what the project's own license file says, read on the date in the commit; it is not a legal review.",
+  "_comment": "The license of a dependency nothing else names: '<ecosystem>:<name>' -> an SPDX expression, or {\"license\": ..., \"url\": the license text}. A dependency linked into a native library takes its license from its row in cpp/NOTICE first. An entry here overrides what a pip, npm, apt or Bazel package says about itself, so use it for what the package cannot name. A license that is not a common one needs a `url`. The license is what the project's own license file says, read on the date in the commit; it is not a legal review.",
   "docker-image:ubuntu": {"license": "Varies per package (Ubuntu distribution image)", "url": "https://ubuntu.com/legal/intellectual-property-policy"},
   "docker-image:nvidia/cuda": {"license": "NVIDIA Deep Learning Container License", "url": "https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license"},
   "docker-image:chrislusf/seaweedfs": "Apache-2.0",

@@ -79,9 +79,13 @@ source that covers the entry:
 | `npm` | the `license` of the lock file |
 | `bazel`, `go` | the top-level license files of the fetched repository, when every one of them is the text of one common license |
 
+What the package says about itself is kept in `detected_license`, and `license`, `license_source` and `license_url` are rebuilt
+from the sources on every run, `relicense` included: removing or changing an override in `categories.json` and running
+`relicense` leaves nothing of the old value.
+
 An entry no source covers has the license `UNKNOWN`. The collector never guesses. `collect` logs how many
 dependencies have each license and lists the `UNKNOWN` ones, to add to `licenses` in `categories.json` once you have read their license;
-`check --strict-licenses` fails while any is left. A license from `components.json` or `categories.json` that is not a common
+`check --strict-licenses` fails while any is left. A license from `cpp/NOTICE` or `categories.json` that is not a common
 one (`curl`, a CUDA header notice) must have a `license_url`, and `check` fails without it.
 A `ship` entry whose component has no row in `cpp/NOTICE` is reported as a warning: the component ships but is not
 declared for the notice pipeline.
