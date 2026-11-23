@@ -112,10 +112,6 @@
     {
       "name": "rapidjson",
       "reason": "grpc's optional OpenCensus plugin and xDS CEL protos; not built into the SDK (the removed linker-map manifest did not list them)"
-    },
-    {
-      "name": "cel-spec",
-      "reason": "grpc's optional OpenCensus plugin and xDS CEL protos; not built into the SDK (the removed linker-map manifest did not list them)"
     }
   ]
 }
