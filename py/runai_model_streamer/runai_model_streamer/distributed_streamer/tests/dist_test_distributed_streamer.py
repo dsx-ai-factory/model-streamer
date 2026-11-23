@@ -4,6 +4,7 @@
 import contextlib
 import logging
 import unittest
+from datetime import timedelta
 import hashlib
 import os
 import sys
@@ -17,6 +18,7 @@ import time
 import random
 from unittest.mock import patch
 
+from runai_model_streamer.distributed_streamer import distributed_streamer as distributed_streamer_module
 from runai_model_streamer.distributed_streamer.distributed_streamer import (
     AgreedRing,
     DistributedStreamer,
@@ -708,6 +710,148 @@ class TestDistributedStreamer(unittest.TestCase):
 
         if self.rank == 0:
             print(f"\n✅ Empty-share rank test verified on all {self.world_size} ranks.")
+
+    def test_1_success_after_an_asymmetric_cache_eviction(self):
+        """Every rank, for real, through the cache vote after an asymmetric eviction.
+
+        A failed stream evicts the cached distribution group on ITS ranks only; in per-node mode
+        the other ranks keep theirs. The vote in cached_or_created must then bring EVERY rank to
+        recreate together - a rank that recreated alone would wait in dist.new_group for peers that
+        never call it, until the timeout. Staged here without a failure: after a healthy stream,
+        rank 1 retires its cached entries exactly as release_group(poisoned=True) would, and the
+        next stream must still deliver every byte on every rank."""
+        if self.world_size < 2:
+            self.skipTest("an asymmetric eviction needs at least two ranks")
+
+        file_specs = [{"size": 1000, "chunks": [500, 500]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0"}
+
+        def stream_all():
+            chunks = [None] * len(requests[0].sizes)
+            with DistributedStreamer() as streamer:
+                streamer.stream_files(requests, None, "cpu", True)
+                for _, chunk_idx, tensor in streamer.get_chunks():
+                    chunks[chunk_idx] = tensor.cpu().numpy().tobytes()
+            return b"".join(chunks)
+
+        with patch.dict(os.environ, env_vars):
+            self.assertEqual(stream_all(), original)
+
+            # The asymmetry: this rank's entries are retired the way a poisoned release does it,
+            # while every other rank keeps its cache. AFTER the context, so the exit barrier above
+            # ran on every rank.
+            if self.rank == 1:
+                cache = distributed_streamer_module._group_cache
+                for key in [k for k in cache if k and k[0] in ("local", "global")]:
+                    distributed_streamer_module._retire(cache.pop(key))
+            dist.barrier()
+
+            # The next stream votes before reusing: rank 1's miss must make every rank recreate
+            # together, and the data must still arrive whole.
+            self.assertEqual(stream_all(), original)
+
+        if self.rank == 0:
+            print(f"\n✅ Asymmetric-eviction recovery verified on all {self.world_size} ranks.")
+
+    def test_1_the_job_falls_back_everywhere_after_an_asymmetric_vote_failure(self):
+        """Every rank, for real, to the plain-streaming fallback after an asymmetric vote failure.
+
+        Rank 1 loses distribution the way a failed vote does it; rank 0 saw nothing. Rank 0's next
+        vote then times out against the missing peer and must lose distribution too - WITHOUT
+        creating any group, because torch's group-creation ordinal cannot be re-agreed after an
+        asymmetric failure - and WITHOUT failing its load: the failure is caught before the stream
+        and the load succeeds plainly (vLLM loads once per worker, so a raise would kill the
+        worker). From then on every load on every rank succeeds plainly, reuse of a streamer
+        within one context included."""
+        if self.world_size != 2:
+            self.skipTest("the staged vote failure choreographs exactly two ranks")
+
+        file_specs = [{"size": 1000, "chunks": [500, 500]}]
+        requests = self._prepare_file_requests(file_specs)
+        with open(requests[0].path, "rb") as f:
+            original = f.read()
+
+        module = distributed_streamer_module
+        # The 5 second timeout reaches the recreated discovery group through the environment - the
+        # group carries the configured timeout - so the staged failures below cost seconds.
+        env_vars = {"RUNAI_STREAMER_DIST": "1", "RUNAI_STREAMER_DIST_BUFFER_MIN_BYTESIZE": "0",
+                    "RUNAI_STREAMER_DIST_TIMEOUT": "5"}
+
+        def stream_all(streamer):
+            chunks = [None] * len(requests[0].sizes)
+            streamer.stream_files(requests, None, "cpu", True)
+            for _, chunk_idx, tensor in streamer.get_chunks():
+                chunks[chunk_idx] = tensor.cpu().numpy().tobytes()
+            return b"".join(chunks)
+
+        def drop_discovery():
+            stale = module._group_cache.pop(("discovery",), None)
+            if stale is not None:
+                module._retire(stale)
+            module._topology_cache = None
+
+        # The kept discovery group carries the constant default timeout; the failures below must
+        # cost seconds, not minutes, so both ranks drop it and recreate one together under a short
+        # default.
+        with patch.dict(os.environ, env_vars), \
+                patch.object(module, "DEFAULT_BROADCAST_TIMEOUT", timedelta(seconds=5)):
+            try:
+                drop_discovery()
+                dist.barrier()
+                with DistributedStreamer() as streamer:
+                    self.assertEqual(stream_all(streamer), original)
+
+                # THE REAL ASYMMETRIC VOTE FAILURE, not a staged flag: rank 0 votes while rank 1
+                # is simply between loads, so rank 0's vote times out and rank 0 alone loses
+                # distribution - its discovery entry is retired, no group was asked for, and THE
+                # LOAD STILL SUCCEEDS, plainly: the failure is caught before the stream begins.
+                if self.rank == 0:
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                    self.assertTrue(module._distribution_is_lost())
+                    self.assertNotIn(("discovery",), module._group_cache)
+                dist.barrier()
+
+                # Rank 1, whose state is intact, now votes against the lost peer: it must time out
+                # and lose too, without asking for any group - and its load, too, must fall back
+                # and succeed plainly. Rank 0 meanwhile stays fallen back when the same context is
+                # reused, because the decision is re-made per stream call.
+                if self.rank == 1:
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                    self.assertTrue(module._distribution_is_lost())
+                else:
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                        self.assertEqual(stream_all(streamer), original)
+                dist.barrier()
+
+                # Both ranks are now lost; every load on every rank succeeds plainly, and NO
+                # process group of any kind is asked for - asserted on the call itself, not
+                # inferred from the cache.
+                self.assertTrue(module._distribution_is_lost())
+                self.assertNotIn(("discovery",), module._group_cache)
+                with patch.object(dist, "new_group",
+                                  side_effect=AssertionError("a lost job asked for a group")) as forbidden:
+                    with DistributedStreamer() as streamer:
+                        self.assertEqual(stream_all(streamer), original)
+                        self.assertFalse(streamer.is_distributed)
+                    forbidden.assert_not_called()
+
+                if self.rank == 0:
+                    print(f"\n✅ Post-failure fallback verified on all {self.world_size} ranks.")
+            finally:
+                # Hand the suite back a distributing job: the staged loss was this test's own.
+                module._distribution_lost_for_job = object()
+                drop_discovery()
+                dist.barrier()
 
     def test_1_success_random_files(self):
         file_specs = []
