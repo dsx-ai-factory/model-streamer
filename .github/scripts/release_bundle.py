@@ -68,7 +68,8 @@ def sdk_name(version, arch):
 
 def sdk_inputs(artifacts, notices):
     """Validate component artifacts and return SDK files grouped by architecture."""
-    require(notices.is_file() and not notices.is_symlink(), f"Missing third-party notices: {notices}")
+    require(notices.is_file() and not notices.is_symlink() and notices.stat().st_size > 0,
+            f"Missing or empty third-party notices: {notices}")
     shared_hashes = None
     sdks = {}
     for arch, machine in ARCHITECTURES.items():

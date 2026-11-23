@@ -236,6 +236,13 @@ class ReleaseBundleTests(unittest.TestCase):
         self.notices.unlink()
         self.assertNotEqual(self.collect().returncode, 0)
 
+    def test_empty_third_party_notices_rejected(self):
+        """Reject packaging, before any archive is written, when the third-party notice input is empty."""
+        self.notices.write_text("")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing or empty third-party notices", result.stderr + result.stdout)
+
     def test_sdk_without_third_party_notices_rejected(self):
         self.collect_ok()
         path = self.archive_path()
