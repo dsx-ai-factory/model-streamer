@@ -15,16 +15,13 @@ python3 --version
 python3 -m pip --version
 echo "engine image streamer (before): $(python3 -m pip show runai-model-streamer 2>/dev/null | sed -n 's/^Version: //p' || true)"
 
-# The version the wheel's filename encodes (runai_model_streamer-<version>-py3-...whl), normalized
-# the way pip reports it ('+' survives, '_' in the local part does not occur in our versions).
+# The version encoded in the wheel's filename (runai_model_streamer-<version>-...whl).
 wheel_version=$(basename "$WHEEL" | cut -d- -f2)
 
 echo "=== step 1: resolver check (pip install --dry-run, with dependencies) ==="
-# Constrained to the image's versions of the wheel's DIRECT dependencies: an unconstrained dry run
-# passes by PLANNING an upgrade of an engine pin, which is exactly the conflict this step exists to
-# report. Not every installed package, though: engine images hold version sets pip would never
-# produce (the vLLM image overrides torch's NCCL pin on purpose), and constraining them all makes
-# pip re-litigate the image's own inconsistencies instead of answering for OUR requirements.
+# Constrained to the image's versions of the wheel's direct dependencies: unconstrained, the dry
+# run passes by planning an upgrade of an engine pin; constraining every installed package trips on
+# the images' own intentional inconsistencies (e.g. vLLM overrides torch's NCCL pin).
 constraints=/tmp/engine-compatibility-constraints.txt
 python3 - "$WHEEL" > "$constraints" <<'PY'
 import re, subprocess, sys, zipfile
@@ -55,14 +52,10 @@ else
 fi
 
 echo "=== step 2: install the wheel over the engine's pinned streamer ==="
-# The bundled streamer goes first: pip skips a local wheel whose version is already installed, so a
-# rebuild of the very version the image pins would otherwise leave the bundled copy under test (CI
-# versions are 0.0.0+dev.<sha> and never collide; a developer's local rebuild of a release can).
+# Uninstall first: pip skips a local wheel whose version is already installed.
 python3 -m pip uninstall --yes runai-model-streamer 2>/dev/null || true
-# Then the wheel with its dependencies, the way a user installs it: pip's only-if-needed upgrade
-# strategy leaves the engine's satisfied pins (torch, numpy) alone and adds only what is missing -
-# an image that does not ship the streamer has none of its dependencies either, and --no-deps would
-# leave the install broken (no humanize). What pip changes beyond the streamer, this step's log says.
+# With dependencies: an image that does not ship the streamer has none of its dependencies either,
+# and --no-deps would leave the install broken.
 if ! python3 -m pip install "$WHEEL"; then
   echo "ENGINE-COMPATIBILITY FAIL [install]: pip could not install the wheel"
   exit 1

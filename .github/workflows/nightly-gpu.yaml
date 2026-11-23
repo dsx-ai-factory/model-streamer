@@ -323,10 +323,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang): a pip
-  # resolver check, the install, and a stream through the native library (tests/engine_compatibility/README.md). No GPU: it
-  # catches what a wheel can break without one - a glibc/ABI mismatch of libstreamer.so, a dependency conflict, a
-  # packaging mistake - which is how a glibc upgrade of the devcontainer once broke installing with vLLM.
+  # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang), on a
+  # CPU runner: catches a glibc/ABI mismatch of libstreamer.so, a dependency conflict, or a packaging mistake
+  # (tests/engine_compatibility/README.md).
   engine-compatibility:
     name: Engine compatibility (${{ matrix.engine }})
     needs: build-wheel
@@ -364,8 +363,6 @@ jobs:
           name: gpu-test-wheel
           path: ${{ runner.temp }}/wheel
 
-      # run.sh pulls the image, prints its digest (so that a red run names the exact engine build behind the floating
-      # tag), and runs the steps inside it: the resolver check, the install, the stream through the native library.
       # bash with pipefail, so that the exit status is the script's and not that of tee (as in the gpu-tests job).
       - name: Run the compatibility check
         shell: bash
@@ -374,7 +371,6 @@ jobs:
           tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
             --wheel-dir "$RUNNER_TEMP/wheel" 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
 
-      # The ENGINE-COMPATIBILITY lines of the log: the image digest and each step's verdict.
       - name: Summarize
         if: always()
         run: |
