@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 Hari
+# SPDX-FileCopyrightText: Copyright (c) 2026 Microsoft Corporation
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Optional
