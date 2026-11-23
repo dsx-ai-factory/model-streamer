@@ -8,7 +8,7 @@ import sys
 import time
 import zlib
 
-from . import DIST, GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM, is_dist
+from . import GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, is_dist, loader_of
 from .files import is_remote, model_files, read_header, resident
 
 
@@ -73,7 +73,7 @@ def versions():
     """Installed versions of the packages a load goes through, as pip knows them."""
     from importlib.metadata import PackageNotFoundError, version
     found = {}
-    for dist in ("runai-model-streamer", "torch", "safetensors", "vllm", "instanttensor"):
+    for dist in ("runai-model-streamer", "instanttensor", "safetensors", "torch"):
         try:
             found[dist] = version(dist)
         except PackageNotFoundError:
@@ -91,42 +91,34 @@ def streamer_pkg():
     return os.path.dirname(os.path.abspath(runai_model_streamer.__file__))
 
 
-class Recorder:
-    """Counts bytes and keeps the tensors chosen for validation."""
-
-    def __init__(self, keep_names):
-        self.keep_names = keep_names
-        self.kept = {}
-        self.nbytes = 0
-        self.seen = {}
-
-    def __call__(self, name, tensor):
-        n = tensor.numel() * tensor.element_size()
-        self.nbytes += n
-        self.seen[name] = (tuple(tensor.shape), n)
-        if name in self.keep_names:
-            self.kept[name] = tensor
-
-
-def run_streamer(files, device, rec):
+def load(loader, files, device, distributed=False):
+    """Yield (name, tensor) for every tensor of the model, loaded by `loader` to `device`. With distributed,
+    this is one rank of a torch.distributed job and its GPU is the current device."""
     import torch
-    from runai_model_streamer import SafetensorsStreamer
-    with SafetensorsStreamer() as s:
-        s.stream_files(files, device=device)
-        for name, t in s.get_tensors():
-            rec(name, t)
+    if loader == "streamer":
+        from runai_model_streamer import SafetensorsStreamer
+        with SafetensorsStreamer() as s:
+            s.stream_files(files, device=device, is_distributed=distributed)
+            yield from s.get_tensors()
+    elif loader == "instanttensor":
+        import torch.distributed as dist
+        from instanttensor import safe_open
+        group = dist.GroupMember.WORLD if distributed else None
+        with safe_open(files, framework="pt", device=torch.cuda.current_device(), process_group=group) as f:
+            yield from f.tensors()
+    else:
+        from safetensors import safe_open
+        for path in files:
+            with safe_open(path, framework="pt", device="cpu") as f:
+                for name in f.keys():
+                    t = f.get_tensor(name)
+                    if device == "cuda":
+                        t = t.to("cuda", non_blocking=True)
+                    else:
+                        t.reshape(-1).view(torch.uint8)[::4096].sum()  # the file is mapped: read every page
+                    yield name, t
     if device == "cuda":
         torch.cuda.synchronize()
-
-
-def run_safeopen(files, rec):
-    import torch
-    from safetensors import safe_open
-    for f in files:
-        with safe_open(f, framework="pt", device="cpu") as sf:
-            for k in sf.keys():
-                rec(k, sf.get_tensor(k).to("cuda", non_blocking=True))
-    torch.cuda.synchronize()
 
 
 def single(a):
@@ -134,45 +126,48 @@ def single(a):
     import torch
     files, ref = model_files(a)
     expected, where = expected_tensors(ref)
-    rec = Recorder(pick(sorted(expected), expected, VALIDATE, VALIDATE_MAX_MIB))
-    name = a.child
-    if TESTS[name]["device"] == "cuda":
+    keep = pick(sorted(expected), expected, VALIDATE, VALIDATE_MAX_MIB)
+    name, device = a.child, TESTS[a.child]["device"]
+    if device == "cuda":
         torch.zeros(1, device="cuda")
 
+    kept, seen, nbytes = {}, {}, 0
     ru0, th0 = resource.getrusage(resource.RUSAGE_SELF), thread_cpu()
     t0 = time.perf_counter()
-    if name.startswith("streamer"):
-        run_streamer(files, TESTS[name]["device"], rec)
-    else:
-        run_safeopen(files, rec)
+    for tensor_name, t in load(loader_of(name), files, device):
+        n = t.numel() * t.element_size()
+        nbytes += n
+        seen[tensor_name] = (tuple(t.shape), n)
+        if tensor_name in keep:
+            kept[tensor_name] = t
     wall = time.perf_counter() - t0
     ru1, th1 = resource.getrusage(resource.RUSAGE_SELF), thread_cpu()
 
     sys_by_thread = max(th1[t][1] - th0.get(t, (0, 0))[1] for t in th1)
     result = {
-        "load_s": round(wall, 3), "gib": round(rec.nbytes / GIB, 2), "tensors": len(rec.seen),
+        "load_s": round(wall, 3), "gib": round(nbytes / GIB, 2), "tensors": len(seen),
         "cpu_s": round(ru1.ru_utime + ru1.ru_stime - ru0.ru_utime - ru0.ru_stime, 2),
         "max_sys_thread_s": round(sys_by_thread, 2), "minor_faults": ru1.ru_minflt - ru0.ru_minflt,
         "peak_rss_gib": round(ru1.ru_maxrss / (1 << 20), 2),
         "page_cache_after_gib": None if is_remote(a.model_dir) else round(resident(files) / GIB, 2),
-        "validated": len(rec.kept), "pkg": streamer_pkg() if name.startswith("streamer") else None,
-        "versions": versions(), "gpus": gpu_names() if TESTS[name]["device"] == "cuda" else None,
-        "errors": check(rec.seen, rec.kept, expected, where),
+        "validated": len(kept), "pkg": streamer_pkg() if loader_of(name) == "streamer" else None,
+        "versions": versions(), "gpus": gpu_names() if device == "cuda" else None,
+        "errors": check(seen, kept, expected, where),
     }
     print("RESULT " + json.dumps(result), flush=True)
-    os._exit(0)
+    sys.stdout.flush()
+    os._exit(0)  # skip the loaders' teardown, which can hang where processes are not allowed to signal each other
 
 
 def distributed(a):
-    """One rank of the distributed test, started by torchrun.
+    """One rank of a distributed test, started by torchrun.
 
-    Every rank streams all files, as vLLM does, and receives every tensor. Rank r keeps the tensors whose
-    name hashes (crc32) to r mod world on its GPU (a TP-like 1/world shard, so device memory is under real
-    pressure) and drops the rest. load_s is from a barrier before stream_files to a barrier after the
-    last tensor, i.e. the slowest rank."""
+    Every rank receives every tensor on its GPU, as a tensor-parallel engine's ranks do. Rank r keeps the
+    tensors whose name hashes (crc32) to r mod world (a 1/world share, so device memory is under real
+    pressure) and drops the rest. load_s is from a barrier before the load to a barrier after the last
+    tensor, i.e. the slowest rank."""
     import torch
     import torch.distributed as dist
-    from runai_model_streamer import SafetensorsStreamer
 
     local = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local)
@@ -184,6 +179,7 @@ def distributed(a):
     names = sorted(expected)
     keep = {n for n in names if zlib.crc32(n.encode()) % world == rank}
     chosen = pick([n for n in names if n in keep], expected, -(-VALIDATE // world), VALIDATE_MAX_MIB)
+    loader = loader_of(a.child)
 
     kept, seen, nbytes = {}, {}, 0
     torch.zeros(1, device="cuda")
@@ -191,15 +187,12 @@ def distributed(a):
     torch.cuda.synchronize()
     ru0 = resource.getrusage(resource.RUSAGE_SELF)
     t0 = time.perf_counter()
-    with SafetensorsStreamer() as s:
-        s.stream_files(files, device="cuda", is_distributed=True)
-        for name, t in s.get_tensors():
-            n = t.numel() * t.element_size()
-            nbytes += n
-            seen[name] = (tuple(t.shape), n)
-            if name in keep:
-                kept[name] = t
-    torch.cuda.synchronize()
+    for name, t in load(loader, files, "cuda", distributed=True):
+        n = t.numel() * t.element_size()
+        nbytes += n
+        seen[name] = (tuple(t.shape), n)
+        if name in keep:
+            kept[name] = t
     t_rank = time.perf_counter() - t0
     dist.barrier()
     wall = time.perf_counter() - t0
@@ -212,7 +205,8 @@ def distributed(a):
          "cpu_s": round(ru1.ru_utime + ru1.ru_stime - ru0.ru_utime - ru0.ru_stime, 2),
          "peak_rss_gib": round(ru1.ru_maxrss / (1 << 20), 2),
          "peak_gpu_gib": round(torch.cuda.max_memory_allocated() / GIB, 2),
-         "pkg": streamer_pkg(), "versions": versions(), "gpus": gpu_names(), "errors": errors}
+         "pkg": streamer_pkg() if loader == "streamer" else None, "versions": versions(), "gpus": gpu_names(),
+         "errors": errors}
     out = [None] * world
     dist.all_gather_object(out, r)
     if rank == 0:
@@ -221,55 +215,8 @@ def distributed(a):
     os._exit(0)  # skip NCCL teardown, which can hang where processes are not allowed to signal each other
 
 
-def vllm(a):
-    """A vLLM engine start with the default loader, the streamer or InstantTensor. The load time is not taken
-    here: vLLM logs it ("Model loading took ... seconds") from its engine process, and the runner reads
-    it from the output. The tensors are not validated; a run is good when the engine came up.
-
-    Eager mode and no tokenizer keep the start short and need only config.json next to the weights;
-    neither changes how the weights are loaded. The engine runs in this process, so that leaving with
-    os._exit frees the GPU without a child engine to shut down.
-
-    A distributed test is one rank of torchrun: tensor parallelism over the ranks with vLLM's
-    external launcher. For the streamer, vLLM's "distributed" loader option makes the GPU the
-    destination; without it the streamer loads to host memory and vLLM copies from there."""
-    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    import inspect
-    from vllm import LLM
-    from vllm.engine.arg_utils import EngineArgs
-    _, ref = model_files(a)
-    expected, _ = expected_tensors(ref)
-    nbytes = sum(n for _, n in expected.values())
-    load_format = TESTS[a.child]["load_format"]
-    streamer = load_format == "runai_streamer"
-
-    options = dict(model=a.model_dir, load_format=load_format, enforce_eager=True, skip_tokenizer_init=True)
-    if is_dist(a.child):
-        options.update(tensor_parallel_size=int(os.environ["WORLD_SIZE"]),
-                       distributed_executor_backend="external_launcher")
-    if TESTS[a.child].get("extra"):
-        options["model_loader_extra_config"] = dict(TESTS[a.child]["extra"])
-    if "kernel_config" in inspect.signature(EngineArgs).parameters:
-        options["kernel_config"] = {"enable_flashinfer_autotune": False}  # minutes of tuning after the load
-    options.update(a.vllm_args)  # --vllm-args: what this model needs, e.g. trust_remote_code
-
-    t0 = time.perf_counter()
-    llm = LLM(**options)  # noqa: F841 - kept alive until the result is out
-    startup = time.perf_counter() - t0
-    if int(os.environ.get("RANK", "0")) == 0:
-        result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
-                  "pkg": streamer_pkg() if streamer else None, "versions": versions(), "gpus": gpu_names(),
-                  "errors": []}
-        print("RESULT " + json.dumps(result), flush=True)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)  # skip the engine's teardown, which can hang the same way as NCCL's
-
-
 def main(a):
-    if a.child in VLLM:
-        vllm(a)
-    elif a.child == DIST:
+    if is_dist(a.child):
         distributed(a)
     else:
         single(a)

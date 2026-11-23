@@ -6,4 +6,6 @@ test-results/
 # benchmarks/bench.py and calibrate.py output
 bench_results.json
 bench_results.html
+bench_report.html
+bench_suite/
 machine_profile.json

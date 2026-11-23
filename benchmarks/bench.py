@@ -5,20 +5,20 @@
 
 Linux only. Needs torch, safetensors and runai_model_streamer (torch with NCCL for --nproc).
 
-    python3 bench.py /mnt/models/Qwen3-8B              every single-process test that applies here,
-                                                       and vLLM with and without the streamer
-    python3 bench.py /mnt/models/Qwen3-8B --nproc 8    the distributed load on 8 ranks of this node
+    python3 bench.py /mnt/models/Qwen3-8B                  to host memory and to one GPU, with each loader
+    python3 bench.py /mnt/models/Qwen3-8B --device cuda    to one GPU only
+    python3 bench.py /mnt/models/Qwen3-8B --nproc 8        to the GPUs of 8 ranks on this node
 
-Every run is a fresh process on a cold page cache, and its tensors are checked against safetensors.
+The loaders are safetensors, InstantTensor and the streamer. Every run is a fresh process on a cold page
+cache, and its tensors are checked against safetensors. suite.py runs several models and makes one report.
 The tests, the machine profile and the results file are described in README.md next to this script.
 """
 import argparse
 import importlib.util
-import json
 import os
 import sys
 
-from streamer_bench import DEFAULT_PROFILE, DIST, TESTS
+from streamer_bench import DEFAULT_PROFILE, TESTS
 
 
 def check_installed():
@@ -35,12 +35,12 @@ def main():
     ap.add_argument("model", nargs="?", metavar="MODEL",
                     help="directory with *.safetensors files, or s3://bucket/prefix")
     ap.add_argument("--model-dir", help=argparse.SUPPRESS)  # the older spelling of MODEL
-    ap.add_argument("--nproc", type=int, help=f"ranks for {DIST}; without --tests, run only that test")
+    ap.add_argument("--nproc", type=int, help="run the distributed tests on this many ranks, one GPU each")
+    ap.add_argument("--device", choices=("cpu", "cuda"),
+                    help="single-process tests to this destination only (default: both)")
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
-    ap.add_argument("--vllm-args", default="", metavar="JSON",
-                    help='extra vLLM engine options for the vLLM tests, e.g. \'{"trust_remote_code": true}\'')
     ap.add_argument("--warm", action="store_true", help="load from the page cache instead of evicting first")
     ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation")
     ap.add_argument("--profile", help=f"machine profile from calibrate.py (default: {DEFAULT_PROFILE} here, "
@@ -59,12 +59,8 @@ def main():
         ap.error("MODEL is required")
     if a.nproc is not None and a.nproc < 1:
         ap.error("--nproc must be at least 1")
-    try:
-        a.vllm_args = json.loads(a.vllm_args) if a.vllm_args else {}
-    except ValueError as e:
-        ap.error(f"--vllm-args is not JSON: {e}")
-    if not isinstance(a.vllm_args, dict):
-        ap.error("--vllm-args must be a JSON object")
+    if a.nproc and a.device:
+        ap.error("--device is for the single-process tests; --nproc loads to the GPUs")
     if not sys.platform.startswith("linux"):
         sys.exit("bench.py needs Linux")
     if a.child:

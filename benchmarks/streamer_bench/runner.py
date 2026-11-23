@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from . import DIST, ENTRY, GIB, TESTS, TIMEOUT_S, VLLM, is_dist
+from . import ENTRY, GIB, TESTS, TIMEOUT_S, is_dist, loader_of
 from .files import evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
@@ -25,15 +25,10 @@ def gpu_count():
         return 0
 
 
-def vllm_unavailable(a, test):
-    """Why a vLLM test cannot run here, or None: it needs vllm in this Python, a model directory vLLM
-    can start from, and for vllm_instanttensor the instanttensor package."""
-    if importlib.util.find_spec("vllm") is None:
-        return f"vllm is not installed in this Python ({sys.executable}): pip install vllm"
-    if not os.path.exists(os.path.join(a.model_dir, "config.json")):
-        return f"the model's config.json is not in {a.model_dir}, next to the weights"
-    if "instanttensor" in test and importlib.util.find_spec("instanttensor") is None:
-        return "instanttensor is not installed: pip install 'vllm[instanttensor]'"
+def unavailable(test):
+    """Why a test cannot run in this Python, or None: its loader has to be installed."""
+    if loader_of(test) == "instanttensor" and importlib.util.find_spec("instanttensor") is None:
+        return f"instanttensor is not installed in this Python ({sys.executable}): pip install instanttensor"
     return None
 
 
@@ -50,26 +45,31 @@ def describe_machine(a, remote):
 
 
 def select_tests(a, remote):
-    """The tests to run: --tests, else the distributed ones with --nproc, else all single-process ones
-    that apply here. The vLLM tests are among those when they can run; when they cannot, they are left
-    out with a note unless --tests asked for them."""
+    """The tests to run: --tests, else the distributed ones with --nproc, else the single-process ones
+    that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). A
+    test whose loader is not installed is left out with a note unless --tests asked for it."""
     if a.tests:
         names = a.tests.split(",")
     else:
         gpu = gpu_count() > 0
         names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
+        if a.device and not a.nproc:
+            names = [n for n in names if TESTS[n]["device"] == a.device]
         if remote:
-            names = [n for n in names if n.startswith("streamer")]
-        for n in [n for n in names if n in VLLM]:
-            why = vllm_unavailable(a, n)
-            if why:
-                print(f"skipping {n}: {why}", file=sys.stderr)
+            names = [n for n in names if loader_of(n) == "streamer"]
+        for n in list(names):
+            if unavailable(n):
+                print(f"skipping {n}: {unavailable(n)}", file=sys.stderr)
                 names.remove(n)
     for n in names:
         if n not in TESTS:
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
-        if remote and not n.startswith("streamer"):
+        if remote and loader_of(n) != "streamer":
             sys.exit(f"{n} reads local files; only the streamer tests apply to an s3:// model")
+        if a.tests and unavailable(n):
+            sys.exit(f"{n} cannot run: {unavailable(n)}")
+    if not names:
+        sys.exit("no test applies here" + (f" with --device {a.device}: this machine has no GPU" if a.device else ""))
     dist = [n for n in names if is_dist(n)]
     if dist and not a.nproc:
         sys.exit(f"{dist[0]} needs --nproc N")
@@ -77,9 +77,6 @@ def select_tests(a, remote):
         sys.exit("--nproc is for the distributed tests, which --tests leaves out")
     if a.nproc and a.nproc > gpu_count():  # each rank loads onto its own GPU; NCCL does not share one
         sys.exit(f"--nproc {a.nproc} needs {a.nproc} GPUs, one per rank; this machine has {gpu_count()}")
-    for n in names:
-        if a.tests and n in VLLM and vllm_unavailable(a, n):
-            sys.exit(f"{n} cannot run: {vllm_unavailable(a, n)}")
     return names
 
 
@@ -131,8 +128,6 @@ def run_once(a, test, files, remote, env, tag):
     args = [ENTRY, a.model_dir, "--child", test]
     if a.ref_dir:
         args += ["--ref-dir", a.ref_dir]
-    if a.vllm_args and test in VLLM:
-        args += ["--vllm-args", json.dumps(a.vllm_args)]
     cmd = [sys.executable]
     if is_dist(test):
         cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]
@@ -145,28 +140,14 @@ def run_once(a, test, files, remote, env, tag):
         return {"failed": killed or (err or out)[-1500:]}, None
 
     raw = json.loads(line[7:])
-    if test in VLLM:
-        took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)
-        if not took:
-            return {"failed": "vLLM started but logged no 'Model loading took ... seconds'"}, None
-        took = took[-(a.nproc if is_dist(test) else 1):]  # one line per rank: all GPUs, the slowest rank
-        raw["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
-        raw["load_s"] = round(max(float(s) for _, s in took), 3)
-        if raw["gpu_gib"] < 0.9 * raw["gib"]:  # the weights did not all reach the GPU, or were converted
-            warnings.append(f"vLLM reports {raw['gpu_gib']} GiB on the GPU for {raw['gib']} GiB of weights")
-    ranks = raw if test == DIST else [raw]
+    ranks = raw if is_dist(test) else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
-    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2)}
-    if test in VLLM:
-        r["startup_s"] = raw["startup_s"]  # the engine's whole start; cpu and host memory are not measured
-        r["gpu_gib"] = raw["gpu_gib"]  # GPU memory the model took, as vLLM measured it
-    else:
-        r["cpu_s"] = round(sum(x["cpu_s"] for x in ranks), 2)
-        r["peak_rss_gib"] = max(x["peak_rss_gib"] for x in ranks)
-    if test == DIST:
+    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2),
+         "cpu_s": round(sum(x["cpu_s"] for x in ranks), 2), "peak_rss_gib": max(x["peak_rss_gib"] for x in ranks)}
+    if is_dist(test):
         r["rank_s"] = [x["rank_s"] for x in ranks]
         r["peak_gpu_gib"] = max(x["peak_gpu_gib"] for x in ranks)
-        if "[Distributed]" not in err + out:
+        if loader_of(test) == "streamer" and "[Distributed]" not in err + out:
             warnings.append("the streamer logged no [Distributed] line")
     errors = [e for x in ranks for e in x["errors"]]
     if errors:

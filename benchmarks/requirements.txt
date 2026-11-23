@@ -8,5 +8,5 @@
 runai-model-streamer
 safetensors
 
-# For the vLLM tests. Without these the vLLM tests are left out and the rest still runs.
-vllm[instanttensor]
+# For the InstantTensor tests. Without it they are left out and the rest still runs.
+instanttensor

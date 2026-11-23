@@ -1,14 +1,13 @@
 # Model Streamer Benchmarks
 
-`bench.py` measures how fast a model loads on your machine and compares it with
-what the hardware can do. It loads the model with the streamer, with a
-`safetensors` baseline and in vLLM, each run in a fresh process on a cold page
-cache, and checks the loaded tensors against `safetensors`. A run that returns wrong data
-fails.
+`bench.py` measures how fast a model loads on your machine with three loaders,
+`safetensors`, [InstantTensor](https://github.com/scitix/InstantTensor) and the
+streamer, and compares each with what the hardware can do. Every run is a
+fresh process on a cold page cache, and the loaded tensors are checked against
+`safetensors`. A run that returns wrong data fails.
 
-Each benchmark prints a summary table and writes `bench_results.json` and
-`bench_results.html`: the median load time and GiB/s per test, CPU time per
-GiB, peak memory, and the share of the machine's ceiling that was reached.
+`suite.py` is a harness on top of it: it runs `bench.py` on several models and
+puts the results in one table of load time, throughput and speedup.
 
 ## Requirements
 
@@ -17,9 +16,9 @@ GiB, peak memory, and the share of the machine's ceiling that was reached.
   `pip install -r benchmarks/requirements.txt`
   - `runai-model-streamer` (which brings `torch`) and `safetensors` are
     required; `bench.py` checks for them and says what is missing.
-  - `vllm[instanttensor]` is for the vLLM tests. Without it they are left out
-    and the rest still runs.
-- torch built with NCCL and one GPU per rank, for the distributed test
+  - `instanttensor` is for the InstantTensor tests. Without it they are left
+    out and the rest still runs.
+- torch built with NCCL and one GPU per rank, for the distributed tests
 - [`s5cmd`](https://github.com/peak/s5cmd) on `PATH`, only to calibrate S3
 
 The benchmark measures the `runai_model_streamer` that this Python imports and
@@ -30,25 +29,60 @@ directory first on `PYTHONPATH`.
 
 | Path | Purpose |
 |---|---|
-| `bench.py` | Command-line entry point |
+| `bench.py` | Command-line entry point: one model |
+| `suite.py` | Harness: several models through `bench.py`, one report |
 | `calibrate.py` | Command-line entry point for calibration |
+| `streamer_bench/__init__.py` | The loaders and the tests (`TESTS`) |
 | `streamer_bench/runner.py` | Selects the tests and starts one measured process per run |
 | `streamer_bench/worker.py` | The measured process: one load, timed and validated |
 | `streamer_bench/files.py` | The model's files and their state in the page cache |
 | `streamer_bench/profile.py` | Finds or makes the machine profile and scores a test against it |
 | `streamer_bench/report.py` | Summary per test, the table and the results file |
-| `streamer_bench/html.py` | The results as a self-contained HTML page |
+| `streamer_bench/html.py` | Results as a self-contained HTML page and a Markdown table |
 | `streamer_bench/calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
 | `requirements.txt` | The packages the benchmark loads with |
 | `tests/` | Unit tests of the runner, the report and the calibration helpers |
 
-## Running a benchmark
+## Running the suite
 
 ```bash
-# every single-process test that applies on this machine, including vLLM
+python3 benchmarks/suite.py \
+    --gpu /mnt/models/Qwen3-32B \
+    --multi-gpu /mnt/models/DeepSeek-R1 --nproc 8 \
+    --cpu /mnt/models/Kimi-K3
+```
+
+Each option is one case, and any of them can be left out:
+
+| Option | Case |
+|---|---|
+| `--gpu DIR` | The model loaded to one GPU |
+| `--multi-gpu DIR --nproc N` | The model loaded to the GPUs of N ranks |
+| `--cpu DIR` | The model loaded to host memory |
+
+Every case is one `bench.py` run with each loader that applies. `--repeats`,
+`--env`, `--profile` and `--no-calibrate` are passed on to it. The results go
+to `--out-dir` (default `bench_suite`): a results file, a page and the logs
+per case, and the combined `report.html` and `report.md`:
+
+| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
+|---|---|---|---|---|---|
+| Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.70 | 10.7 | 1.00x |
+| | | InstantTensor | 2.64 | 23.1 | 2.16x |
+| | | Model Streamer | 1.58 | 38.7 | 3.61x |
+
+Speedup is against Safetensors to the same destination.
+
+## Running one model
+
+```bash
+# to host memory and to one GPU, with each loader
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 
-# the distributed tests on 8 ranks of this node, one GPU each: the streamer, and vLLM with each loader
+# to one GPU only
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --device cuda
+
+# to the GPUs of 8 ranks of this node, one GPU each
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
 
 # one test, with a streamer setting
@@ -59,9 +93,9 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | Option | Default | Meaning |
 |---|---|---|
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
+| `--device cpu\|cuda` | both | Run the single-process tests to this destination only |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
-| `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
 | `--warm` | cold | Load from the page cache instead of evicting first |
 | `--ref-dir DIR` | none | Local copy of an S3 model, used for validation |
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
@@ -75,77 +109,36 @@ again), so drift in the machine or the storage affects all of them alike.
 
 ## Tests
 
-| Test | What it loads |
-|---|---|
-| `streamer_cpu` | Streamer to host memory |
-| `streamer_cuda` | Streamer to GPU |
-| `safeopen_to_cuda` | `safe_open` + `.to("cuda")`, the default loader's shape |
-| `streamer_dist` | Streamer with `is_distributed=True` on `--nproc` ranks |
-| `vllm_default` | A vLLM engine start with vLLM's default loader |
-| `vllm_streamer` | The same with `load_format="runai_streamer"` |
-| `vllm_streamer_gpu` | The same with the streamer loading straight to the GPU |
-| `vllm_instanttensor` | The same with `load_format="instanttensor"` |
-| `vllm_dist_default`, `vllm_dist_streamer`, `vllm_dist_instanttensor` | The three vLLM tests with tensor parallelism over `--nproc` ranks |
+A test is one loader bringing the whole model to one destination:
+
+| Destination | Safetensors | InstantTensor | Model Streamer |
+|---|---|---|---|
+| Host memory | `safetensors_cpu` | not supported by InstantTensor | `streamer_cpu` |
+| One GPU | `safetensors_cuda` | `instanttensor_cuda` | `streamer_cuda` |
+| The GPUs of `--nproc` ranks | `safetensors_dist` | `instanttensor_dist` | `streamer_dist` |
+
+| Loader | To host memory | To one GPU | To the ranks' GPUs |
+|---|---|---|---|
+| Safetensors | `safe_open`, then every page of each tensor is touched | `safe_open` + `.to("cuda")` per tensor | Every rank does the same load itself |
+| InstantTensor | | `instanttensor.safe_open(files, device=...)` | The same with the ranks' process group |
+| Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda")` | `stream_files(files, device="cuda", is_distributed=True)` |
 
 The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py)
-(`TESTS`), with a sentence on each one's setup, and each one's load is a function in
-[`streamer_bench/worker.py`](streamer_bench/worker.py):
-
-| Function in `worker.py` | Tests it runs |
-|---|---|
-| `run_streamer` | `streamer_cpu`, `streamer_cuda` |
-| `run_safeopen` | `safeopen_to_cuda` |
-| `distributed` | `streamer_dist` |
-| `vllm` | every `vllm_*` test; the loader and its options come from the test's entry in `TESTS` |
-
-`single` wraps `run_streamer` and `run_safeopen` with the timing and the
-validation (`check`).
+(`TESTS`), with a sentence on each one's setup. The loads themselves are the
+`load` function in [`streamer_bench/worker.py`](streamer_bench/worker.py);
+`single` and `distributed` wrap it with the timing and the validation
+(`check`).
 
 Without `--tests`, the GPU tests run when a GPU is present, and only the
-streamer tests run for a model on S3. A vLLM test is left out, with a note,
-when what it needs is not installed or the model has no `config.json`.
+streamer tests run for a model on S3. An InstantTensor test is left out, with
+a note, when `instanttensor` is not installed.
 
-In `streamer_dist` every rank streams all files and receives every tensor.
-Each rank keeps a 1/N share of the tensors on its GPU, so device memory is
-under real pressure, and drops the rest. The load time is measured from a
-barrier before the load to a barrier after the last tensor, which makes it the
-slowest rank's time. Each rank needs its own GPU, so `--nproc` cannot be more
-than the number of GPUs on the machine.
-
-### vLLM
-
-The vLLM tests load the model in vLLM itself, once per loader: its default
-loader, the streamer, and InstantTensor. Each is a fresh process on a cold
-page cache like every other test. They need a GPU, `vllm` installed
-(`pip install vllm`) and the model's `config.json` next to the weights;
-`vllm_instanttensor` also needs `pip install 'vllm[instanttensor]'`.
-
-With `--nproc N` the `vllm_dist_*` tests start vLLM with
-`tensor_parallel_size=N` under torchrun, using vLLM's external launcher, so
-every rank loads its share onto its own GPU. The streamer runs in its
-distributed mode there (`model_loader_extra_config={"distributed": true}`),
-which loads straight to the GPUs. The load time is the slowest rank's, and
-`gpu_gib` is the sum over the ranks. The model's attention head count has to
-be divisible by N.
-
-`vllm_streamer` is what `--load-format runai_streamer` gives on its own: the
-streamer loads to host memory and vLLM copies each tensor to the GPU.
-`vllm_streamer_gpu` adds `model_loader_extra_config={"distributed": true}`,
-which makes the GPU the streamer's destination, on one GPU as well.
-
-vLLM's default loader reads the weights in one thread unless its
-`enable_multithread_load` option is set, which this benchmark leaves off, as
-vLLM does.
-
-The load time is the one vLLM logs as "Model loading took", which covers
-building the model and loading its weights onto the GPU. The results also
-give `startup_s`, the whole engine start, and `vllm_speedup`, the default
-loader's time over the streamer's. The engine starts in eager mode and without
-a tokenizer to keep the start short; neither changes how the weights are
-loaded. CPU time and host memory are not measured for these tests, and the
-tensors are not compared with `safetensors`: a run is good when the engine
-came up. Each run records `gpu_gib`, the GPU memory vLLM says the model took,
-and carries a warning when that is well below the size of the weights.
+In a distributed test every rank receives every tensor on its GPU, as the
+ranks of a tensor-parallel engine do. Each rank keeps a 1/N share of the
+tensors, so device memory is under real pressure, and drops the rest. The
+load time is measured from a barrier before the load to a barrier after the
+last tensor, which makes it the slowest rank's time. Each rank needs its own
+GPU, so `--nproc` cannot be more than the number of GPUs on the machine.
 
 ## Machine ceilings
 
@@ -185,7 +178,7 @@ Each test is scored against one ceiling:
 
 | Test | Ceiling |
 |---|---|
-| Host tests and `streamer_dist` | `disk_direct_read_parallel` |
+| Host tests and the distributed tests | `disk_direct_read_parallel` |
 | Single-process GPU tests | The lower of that and `h2d_pinned` |
 | Any test with `--warm` | `host_memcpy_nt` in place of the disk |
 | Any test on S3 | `s3_get_parallel` in place of the disk |
@@ -215,17 +208,24 @@ cache between runs when you need server-cold numbers.
 The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
-`bench_results.html` shows the same results as a page: a bar per test, with
-its ceiling for the streamer tests, and a short table. Pointing at the
-"i" next to a test's name shows how that test is set up. Three folded sections below hold the rest:
-the runs with CPU and memory, what the numbers were measured on (the machine,
-the versions of the streamer, vLLM, torch and safetensors, the settings), and
-the calibration with every ceiling. It is one file with no
-external resources, so it can be copied off the machine and opened anywhere.
-To make it again from a results file:
+`bench_results.html` shows the same results as a page: per destination, a row
+per loader with its load time, throughput and speedup. Pointing at the "i"
+next to a loader shows how that test is set up. A folded section below holds
+the rest: the spread, CPU and memory per test, the runs, what the numbers were
+measured on (the machine, the versions of the streamer, InstantTensor,
+safetensors and torch, the settings), and the calibration with every ceiling.
+It is one file with no external resources, so it can be copied off the machine
+and opened anywhere. To make it again from a results file:
 
 ```bash
 cd benchmarks && python3 -m streamer_bench.html /path/to/bench_results.json
+```
+
+Several results files make one page, and the same table is printed as
+Markdown:
+
+```bash
+cd benchmarks && python3 -m streamer_bench.html a.json b.json --out report.html
 ```
 
 `bench_results.json` holds the same once at the top (`host`, `environment`,
@@ -235,6 +235,8 @@ machine profile without each stage's single runs), then one entry per test:
 ```json
 {
   "test": "streamer_cuda",
+  "loader": "streamer",
+  "group": "cuda",
   "ok": true,
   "load_s": 2.93,
   "gibps": 5.21,
@@ -243,6 +245,7 @@ machine profile without each stage's single runs), then one entry per test:
   "cpu_s_per_gib": 0.21,
   "peak_rss_gib": 3.4,
   "fs_strategy": ["io_uring"],
+  "speedup": 3.61,
   "ceiling": {"name": "h2d_pinned", "gibps": 6.0, "pct": 86.8, "nearest": "h2d_pinned"},
   "runs": [
     {"load_s": 2.931, "gibps": 5.21, "cpu_s": 3.2, "peak_rss_gib": 3.4}
@@ -254,11 +257,12 @@ machine profile without each stage's single runs), then one entry per test:
 - `load_s` and `gibps` are medians over the runs.
 - `ceiling` is absent, and `calibration` is null, when the benchmark ran
   without a profile.
-- A vLLM test has `startup_s` in place of `cpu_s_per_gib` and `peak_rss_gib`.
+- `group` is the destination: `cpu`, `cuda` or `dist`. `speedup` is against the
+  safetensors test of the same group, and is absent when that test did not run.
 - A run carries `errors` (wrong data) or `warnings` (for example a cache that
   was not cold) only when it has some. A run that gave no result is
   `{"failed": "..."}`.
-- A `streamer_dist` run adds `rank_s` (each rank's time) and `peak_gpu_gib`.
+- A distributed run adds `rank_s` (each rank's time) and `peak_gpu_gib`.
   Its `cpu_s` is summed over the ranks and `peak_rss_gib` is the largest
   rank's.
 
