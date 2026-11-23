@@ -14,7 +14,7 @@
 
 set -o errexit -o nounset -o pipefail
 
-usage() { sed -n '5,13p' "$0"; }
+usage() { sed -n '/^# Usage:/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
 
 engine='' image='' wheel_dir=''
 while [ $# -gt 0 ]; do

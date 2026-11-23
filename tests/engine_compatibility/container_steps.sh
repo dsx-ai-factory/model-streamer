@@ -23,7 +23,7 @@ echo "=== step 1: resolver check (pip install --dry-run, with dependencies) ==="
 # run passes by planning an upgrade of an engine pin; constraining every installed package trips on
 # the images' own intentional inconsistencies (e.g. vLLM overrides torch's NCCL pin).
 constraints=/tmp/engine-compatibility-constraints.txt
-python3 - "$WHEEL" > "$constraints" <<'PY'
+if ! python3 - "$WHEEL" > "$constraints" <<'PY'
 import re, subprocess, sys, zipfile
 
 def canonical(name):
@@ -38,17 +38,28 @@ with zipfile.ZipFile(sys.argv[1]) as wheel:
             if match:
                 names.add(canonical(match.group(1)))
 names.discard("runai-model-streamer")
-frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True).stdout
+frozen = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, check=True).stdout
+constrained = set()
 for line in frozen.splitlines():
     if "==" in line and canonical(line.split("==")[0].strip()) in names:
+        constrained.add(canonical(line.split("==")[0].strip()))
         print(line)
+for name in sorted(names - constrained):
+    # Not installed, or installed without an == pin (editable, name @ url): the dry run cannot
+    # hold the image's version of it.
+    print(f"unconstrained direct dependency: {name}", file=sys.stderr)
 PY
-echo "constraining to the image's versions of: $(tr '\n' ' ' < "$constraints")"
-if ! python3 -m pip install --dry-run --constraint "$constraints" "$WHEEL"; then
-  echo "ENGINE-COMPATIBILITY FAIL [resolver]: the wheel's dependencies conflict with the $ENGINE image's packages"
+then
+  echo "ENGINE-COMPATIBILITY FAIL [resolver]: could not derive the constraints from the wheel and the image"
   status=1
 else
-  echo "ENGINE-COMPATIBILITY OK [resolver]"
+  echo "constraining to the image's versions of: $(tr '\n' ' ' < "$constraints")"
+  if ! python3 -m pip install --dry-run --constraint "$constraints" "$WHEEL"; then
+    echo "ENGINE-COMPATIBILITY FAIL [resolver]: the wheel's dependencies conflict with the $ENGINE image's packages"
+    status=1
+  else
+    echo "ENGINE-COMPATIBILITY OK [resolver]"
+  fi
 fi
 
 echo "=== step 2: install the wheel over the engine's pinned streamer ==="

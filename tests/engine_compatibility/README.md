@@ -30,6 +30,16 @@ there. The steps, per engine image (details in [run.sh](run.sh)):
    engine's environment).
 
 A resolver conflict fails the run but the later steps still run, so one run reports every signal.
+For vLLM, the check also streams the generated file through vLLM's own
+`runai_safetensors_weights_iterator` - the engine's real integration, on CPU; SGLang has no public
+equivalent, so its leg covers the same call shape through the streamer's API directly.
+
+**Scope: the core streamer, local files only.** The engine images install
+`runai-model-streamer[s3,gcs,azure]`, and only the core package is replaced by the wheel under
+test: after the install, the dev core sits next to the released object-storage plugins - a
+combination the package's own extras pins forbid, and not one a user would have. That is harmless
+for the local-file stream this check runs, but it means the object-storage path is not covered.
+Building and installing all four wheels is a possible follow-up.
 
 ## Running it locally
 
