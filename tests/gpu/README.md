@@ -89,10 +89,11 @@ The README of the repository shows a badge with the result of the latest schedul
    says it could not verify and does not fail. If PyPI's answer has a shape the check does not know, it is blind and says
    so in a warning annotation (not a failure).
 
-3. **`engine-compatibility`**, one leg per engine on a CPU runner, installs the same wheel inside the official images of
-   the engines that consume the package (vLLM, SGLang) and streams through the native library there - the check that
-   catches a glibc/ABI mismatch or a dependency conflict of the wheel with an engine's environment. It lives in
-   [`tests/engine_compatibility/`](../engine_compatibility/README.md), not in this harness: no GPU, no compose, no suites.
+3. **`engine-compatibility`**, one leg per engine on an L40G runner, installs the same wheel inside the official images
+   of the engines that consume the package (vLLM, SGLang) and serves the pinned small real model through
+   `load_format=runai_streamer` for one completion - the check that catches a glibc/ABI mismatch or a dependency
+   conflict of the wheel with an engine's environment, and an engine whose serving no longer drives the streamer. It
+   lives in [`tests/engine_compatibility/`](../engine_compatibility/README.md), not in this harness: no compose, no suites.
 
 The NVKS GPU runners run each job in an ephemeral virtual machine (the runner groups' documentation), so nothing stays
 behind for the next job, and the scripts do not clean up after themselves. The log is written by the workflow

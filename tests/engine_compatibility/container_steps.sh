@@ -52,13 +52,17 @@ if [ "$installed" != "$wheel_version" ]; then
 fi
 echo "ENGINE-COMPATIBILITY OK [install]: runai-model-streamer $installed"
 
-echo "=== step 3: stream through the native library, then import $ENGINE ==="
-if ! python3 /workspace/tests/engine_compatibility/check.py "$ENGINE"; then
+echo "=== step 3: import $ENGINE ==="
+# Catches the install having replaced a dependency with a version the engine cannot use.
+if ! python3 -c "import $ENGINE as m; print('ENGINE-COMPATIBILITY OK [engine-import]:', '$ENGINE', getattr(m, '__version__', 'unknown'))"; then
+  echo "ENGINE-COMPATIBILITY FAIL [engine-import]: $ENGINE no longer imports after the install"
   status=1
 fi
 
-# A GPU run only (run.sh --serve). Not reached when the steps above already failed: a server
-# started over a broken install would blame the wrong step.
+# A GPU run only (run.sh --serve): the engine's own serve command loads real weights through the
+# installed streamer - what dlopens libstreamer.so, so a glibc/ABI mismatch of the wheel fails
+# here. Not reached when the steps above already failed: a server started over a broken install
+# would blame the wrong step.
 if [ "${SERVE:-0}" = 1 ] && [ "$status" = 0 ]; then
   echo "=== step 4: serve the model with load_format=runai_streamer ==="
   if ! python3 /workspace/tests/engine_compatibility/serve_check.py "$ENGINE"; then

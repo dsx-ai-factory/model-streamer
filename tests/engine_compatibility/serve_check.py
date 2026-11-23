@@ -102,11 +102,24 @@ def tail_log(lines: int = 150) -> None:
     say("--- end of the server log ---")
 
 
+def glibc_hint() -> None:
+    try:
+        with open(LOG_PATH, errors="replace") as handle:
+            if "GLIBC" in handle.read():
+                say(
+                    "ENGINE-COMPATIBILITY HINT: libstreamer.so needs glibc symbols newer than the "
+                    "engine image ships - the wheel's build toolchain is too new for this environment."
+                )
+    except OSError:
+        pass
+
+
 def wait_for_health(process: subprocess.Popen) -> None:
     deadline = time.monotonic() + HEALTH_DEADLINE_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
             tail_log()
+            glibc_hint()
             fail("serve", f"the server exited with status {process.returncode} before it was healthy")
         try:
             with urllib.request.urlopen(f"{BASE_URL}/health", timeout=5) as response:

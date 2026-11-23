@@ -323,81 +323,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang), on a
-  # CPU runner: catches a glibc/ABI mismatch of libstreamer.so, a dependency conflict, or a packaging mistake
-  # (tests/engine_compatibility/README.md).
+  # The wheel of the commit inside the official images of the engines that consume the package (vLLM, SGLang), on an
+  # L40G runner, one leg per engine: the install checks - a glibc/ABI mismatch of libstreamer.so, a dependency
+  # conflict, a packaging mistake - and then the engine's own serve command loading the pinned small real model with
+  # load_format=runai_streamer and answering one completion (tests/engine_compatibility/README.md). SGLang needs
+  # compute capability 8.0 or newer, which the L40G (sm89) has.
   engine-compatibility:
     name: Engine compatibility (${{ matrix.engine }})
-    needs: build-wheel
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - engine: vllm
-            image_input: vllm_image
-            default_image: vllm/vllm-openai:latest
-          - engine: sglang
-            image_input: sglang_image
-            default_image: lmsysorg/sglang:latest
-    env:
-      ENGINE_IMAGE: ${{ inputs[matrix.image_input] || matrix.default_image }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      # The engine images are 10-20 GB and the runner's disk mostly holds toolchains this job never uses.
-      - name: Free disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/ghc
-          df -h /
-
-      # The artifact may also hold the S3 plugin's wheel (the object_storage suite); run.sh picks the streamer's.
-      - name: Download the wheels
-        uses: actions/download-artifact@v4
-        with:
-          name: gpu-test-wheel
-          path: ${{ runner.temp }}/wheel
-
-      # bash with pipefail, so that the exit status is the script's and not that of tee (as in the gpu-tests job).
-      - name: Run the compatibility check
-        shell: bash
-        run: |
-          mkdir -p test-results/engine-compatibility
-          tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
-            --wheel-dir "$RUNNER_TEMP/wheel" 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
-
-      - name: Summarize
-        if: always()
-        run: |
-          log="test-results/engine-compatibility/${{ matrix.engine }}.log"
-          {
-            echo "### Engine compatibility (${{ matrix.engine }})"
-            echo '```'
-            grep -E '^ENGINE-COMPATIBILITY' "$log" 2>/dev/null \
-              || echo "the run ended before the checks could report (see the log)"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload the log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: engine-compatibility-${{ matrix.engine }}-${{ github.run_attempt }}
-          path: test-results/engine-compatibility/
-          if-no-files-found: warn
-          retention-days: 14
-
-  # The same checks plus the end-to-end serve (run.sh --serve) on an L40G runner: the engine's own serve command
-  # loads the pinned small real model with load_format=runai_streamer and answers one completion, and the server
-  # log must show the streamer's marker (tests/engine_compatibility/serve_check.py). SGLang needs compute
-  # capability 8.0 or newer, which the L40G (sm89) has.
-  engine-serve:
-    name: Engine serve (${{ matrix.engine }})
     needs: build-wheel
     runs-on:
       group: nv-gpu-amd64-l40g-1gpu
@@ -434,12 +366,12 @@ jobs:
           path: ${{ runner.temp }}/wheel
 
       # bash with pipefail, so that the exit status is the script's and not that of tee (as in the gpu-tests job).
-      - name: Run the serve check
+      - name: Run the compatibility and serve checks
         shell: bash
         run: |
-          mkdir -p test-results/engine-serve
+          mkdir -p test-results/engine-compatibility
           tests/engine_compatibility/run.sh --engine "${{ matrix.engine }}" --image "$ENGINE_IMAGE" \
-            --wheel-dir "$RUNNER_TEMP/wheel" --serve 2>&1 | tee "test-results/engine-serve/${{ matrix.engine }}.log"
+            --wheel-dir "$RUNNER_TEMP/wheel" --serve 2>&1 | tee "test-results/engine-compatibility/${{ matrix.engine }}.log"
 
       # A cancelled or timed-out job kills the docker client, not the container, and a serving container that goes
       # on holds the GPU (the name is set by run.sh --serve).
@@ -450,9 +382,9 @@ jobs:
       - name: Summarize
         if: always()
         run: |
-          log="test-results/engine-serve/${{ matrix.engine }}.log"
+          log="test-results/engine-compatibility/${{ matrix.engine }}.log"
           {
-            echo "### Engine serve (${{ matrix.engine }})"
+            echo "### Engine compatibility (${{ matrix.engine }})"
             echo '```'
             grep -E '^ENGINE-COMPATIBILITY' "$log" 2>/dev/null \
               || echo "the run ended before the checks could report (see the log)"
@@ -463,7 +395,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: engine-serve-${{ matrix.engine }}-${{ github.run_attempt }}
-          path: test-results/engine-serve/
+          name: engine-compatibility-${{ matrix.engine }}-${{ github.run_attempt }}
+          path: test-results/engine-compatibility/
           if-no-files-found: warn
           retention-days: 14
