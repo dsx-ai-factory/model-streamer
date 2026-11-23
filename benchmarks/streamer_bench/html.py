@@ -21,10 +21,14 @@ body { background:var(--bg); color:var(--ink); font:14px/1.5 system-ui,sans-seri
 h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:32px 0 8px; }
 .meta { color:var(--ink2); margin:0 0 8px; overflow-wrap:anywhere; } .note { color:var(--muted); font-size:12px; }
 .chart { display:grid; grid-template-columns:max-content 1fr max-content; gap:10px 12px; align-items:center; }
-.name { position:relative; cursor:help; border-bottom:1px dotted var(--muted); outline:none; }
+.name { position:relative; white-space:nowrap; }
+.info { display:inline-block; width:14px; height:14px; margin-left:6px; border:1px solid var(--muted); border-radius:50%;
+        color:var(--ink2); font:italic 600 10px/14px Georgia,serif; text-align:center; vertical-align:1px; cursor:help; }
+.info:hover, .info:focus { border-color:var(--ink); color:var(--ink); outline:none; }
 .tip { display:none; position:absolute; left:0; bottom:calc(100% + 6px); z-index:2; width:min(360px, 80vw);
-       padding:8px 10px; border-radius:6px; background:var(--ink); color:var(--bg); font-size:12px; line-height:1.4; }
-.name:hover .tip, .name:focus .tip { display:block; }
+       padding:8px 10px; border-radius:6px; background:var(--ink); color:var(--bg); font-size:12px; line-height:1.4;
+       white-space:normal; }
+.info:hover + .tip, .info:focus + .tip { display:block; }
 .track { position:relative; height:14px; border-bottom:1px solid var(--grid); }
 .bar { position:absolute; left:0; top:1px; height:12px; background:var(--bar); border-radius:0 4px 4px 0; }
 .tick { position:absolute; top:-4px; height:22px; width:2px; background:var(--ink); }
@@ -51,12 +55,13 @@ def _about(test):
 
 
 def _name(test):
-    """The test's name; pointing at it (or focusing it) shows the test's setup above it."""
+    """The test's name and a small "i" next to it; pointing at the "i" (or focusing it) shows the test's
+    setup above the name."""
     about = _about(test)
     if not about:
         return f"<div>{escape(test)}</div>"
-    return (f'<div><span class="name" tabindex="0">{escape(test)}'
-            f'<span class="tip" role="tooltip">{escape(about)}</span></span></div>')
+    return (f'<div class="name">{escape(test)}<span class="info" tabindex="0" aria-label="setup">i</span>'
+            f'<span class="tip" role="tooltip">{escape(about)}</span></div>')
 
 
 def _chart(results, ceilings=True):
@@ -229,7 +234,7 @@ def render(out):
 <h1>Load benchmark</h1>
 <p class="meta">{escape(m["path"])}{escape(size)}<br>
 {escape(out["host"])} &middot; {escape(out["created"])} &middot; {escape(", ".join(settings))}</p>
-<p class="note">Point at a test's name to see how it is set up.</p>
+<p class="note">Point at the <i>i</i> next to a test's name to see how it is set up.</p>
 {chart}
 {_vllm(out, False)}{_vllm(out, True)}
 <h2>Numbers</h2>

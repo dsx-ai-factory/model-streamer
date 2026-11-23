@@ -216,8 +216,8 @@ The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
 `bench_results.html` shows the same results as a page: a bar per test, with
-its ceiling for the streamer tests, and a short table. Pointing at a test's
-name shows how that test is set up. Three folded sections below hold the rest:
+its ceiling for the streamer tests, and a short table. Pointing at the
+"i" next to a test's name shows how that test is set up. Three folded sections below hold the rest:
 the runs with CPU and memory, what the numbers were measured on (the machine,
 the versions of the streamer, vLLM, torch and safetensors, the settings), and
 the calibration with every ceiling. It is one file with no
