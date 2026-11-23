@@ -151,6 +151,7 @@ def check_streamer_marker() -> None:
     with open(LOG_PATH, errors="replace") as handle:
         log = handle.read()
     if STREAMER_MARKER not in log:
+        tail_log()
         fail(
             "loader",
             f"the server log has no {STREAMER_MARKER!r} line: the engine did not load the weights "
