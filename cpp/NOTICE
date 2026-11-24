@@ -38,7 +38,7 @@ Dependencies
 | `bazel_skylib` | 1.9.0 | Apache-2.0 | https://github.com/bazelbuild/bazel-skylib/releases/download/1.9.0/bazel-skylib-1.9.0.tar.gz#LICENSE (and its Bazel modules) |
 | `liburing` | 2.14.bcr.2 | MIT | https://github.com/axboe/liburing/blob/liburing-2.14/LICENSE (and its Bazel modules) |
 | `libaio` | 0.3.113.bcr.1 | LGPL-2.1 | https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz#libaio-0.3.113/COPYING (and its Bazel modules) |
-| `github.com/openssl/openssl` | 3.5.0 | Apache-2.0 | https://github.com/openssl/openssl/blob/openssl-3.5.0/LICENSE.txt |
+| `github.com/openssl/openssl` | 3.6.5 | Apache-2.0 | https://github.com/openssl/openssl/blob/openssl-3.6.5/LICENSE.txt |
 | `github.com/curl/curl` | 8_13_0 | curl | https://github.com/curl/curl/blob/curl-8_13_0/COPYING |
 | `github.com/madler/zlib` | 1.3.1 | Zlib | https://github.com/madler/zlib/blob/v1.3.1/LICENSE |
 | `github.com/GNOME/libxml2` | 2.13.5 | MIT | https://github.com/GNOME/libxml2/blob/v2.13.5/Copyright |
