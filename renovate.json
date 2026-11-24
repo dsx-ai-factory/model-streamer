@@ -7,6 +7,7 @@
     "github>run-ai/repo-housekeeper//renovate/presets/copyright"
   ],
   "dependencyDashboard": false,
+  "commitBody": "Signed-off-by: {{{gitAuthor}}}",
   "includePaths": [
     "cpp/**",
     ".devcontainer/**",
