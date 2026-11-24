@@ -17,9 +17,12 @@ def _num(v, digits=1):
     return "n/a" if v is None else f"{v:.{digits}f}"
 
 
+def _on_s3(out):
+    return out["model"]["path"].startswith("s3://")
+
+
 def _model(out):
-    name = os.path.basename(out["model"]["path"].rstrip("/"))
-    return f"{name} on S3" if out["model"]["path"].startswith("s3://") else name
+    return os.path.basename(out["model"]["path"].rstrip("/"))
 
 
 def _loader(s):
@@ -81,19 +84,23 @@ def _gpus(out):
     return f"{len(gpus)} × {gpus[0]}" if gpus else None
 
 
+def _rate(out, ceiling):
+    return ((out.get("calibration") or {}).get("ceilings_gibps") or {}).get(ceiling)
+
+
 def _storage(out):
     storage = out.get("environment", {}).get("storage")
     if not storage:
         return None
-    rate = ((out.get("calibration") or {}).get("ceilings_gibps") or {}).get("disk_direct_read_parallel")
+    rate = _rate(out, "disk_direct_read_parallel")
     return f'{storage["type"]} on {storage["mount"]}' + (f", {rate:.0f} GiB/s parallel direct read" if rate else "")
 
 
 def _s3(out):
-    if not out["model"]["path"].startswith("s3://"):
+    if not _on_s3(out):
         return None
     cal = out.get("calibration") or {}
-    rate = (cal.get("ceilings_gibps") or {}).get("s3_get_parallel")
+    rate = _rate(out, "s3_get_parallel")
     endpoint = ((cal.get("host") or {}).get("s3") or {}).get("endpoint")
     return (endpoint or "S3") + (f", {rate:.0f} GiB/s parallel GET with s5cmd" if rate else "")
 
@@ -132,6 +139,21 @@ def setting(outs):
     return "\n".join(f"- {k}: {v}" for k, v in rows if v)
 
 
+def results(outs):
+    """The tables: one for the models read from local storage and one for those on S3, each under a
+    heading that names the storage and the rate measured for it."""
+    parts = []
+    for on_s3, what, ceiling, how in ((False, "local disk", "disk_direct_read_parallel", "parallel direct read"),
+                                      (True, "S3", "s3_get_parallel", "parallel GET with s5cmd")):
+        group = [o for o in outs if _on_s3(o) == on_s3]
+        if not group:
+            continue
+        rates = [r for r in (_rate(o, ceiling) for o in group) if r]
+        measured = f" ({min(rates):.0f} GiB/s {how})" if rates else ""
+        parts.append(f"## Test on {what}{measured}\n\n{table(group)}")
+    return "\n\n".join(parts)
+
+
 def loads(outs):
     """How each test that ran loads the model, a line per test."""
     seen = dict.fromkeys(s["test"] for out in outs for s in out["results"])
@@ -145,16 +167,15 @@ def render(outs):
 
 {setting(outs)}
 
-## Results
-
-{table(outs)}
+{results(outs)}
 
 - Throughput is the model's size over the load time.
 - Speedup is against Safetensors to the same destination.
 - With several GPUs, the load time is the time until the slowest GPU finishes.
 - InstantTensor loads to GPUs only, so it has no host memory entry.
 - Safetensors and InstantTensor read local files only. For a model on S3 their load time is the download
-  to local disk with s5cmd plus the load from there; the streamer reads from S3 directly.
+  to local disk with s5cmd plus the load from there, shown as the two parts; the streamer reads from S3
+  directly.
 
 ## How each loader is run
 

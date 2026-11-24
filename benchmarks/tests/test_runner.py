@@ -130,6 +130,7 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         self.assertIn("- Storage: ext4 on /mnt, 10 GiB/s parallel direct read", page)
+        self.assertIn("## Test on local disk (10 GiB/s parallel direct read)", page)
 
     def ran(self):
         return [c[c.index("--child") + 1] for c, _ in self.calls]
@@ -194,7 +195,8 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn("download_s", streamer)
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("| Qwen on S3 | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
+        self.assertIn("## Test on S3\n", page)
+        self.assertIn("| Qwen | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
         self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
 
     def test_without_a_scratch_dir_only_the_streamer_reads_s3(self):
