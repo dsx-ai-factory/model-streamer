@@ -19,7 +19,7 @@ import importlib.util
 import os
 import sys
 
-from bench import DEFAULT_PROFILE, LOADERS, SCRATCH, TESTS
+from benchmark import DEFAULT_PROFILE, LOADERS, SCRATCH, TESTS
 
 
 def check_installed():
@@ -72,11 +72,11 @@ def main():
     if not sys.platform.startswith("linux"):
         sys.exit("bench.py needs Linux")
     if a.child:
-        from bench import worker
+        from benchmark import worker
         worker.main(a)
     else:
         check_installed()
-        from bench import runner
+        from benchmark import runner
         runner.main(a)
 
 

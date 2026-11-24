@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from bench import markdown, profile, runner  # noqa: E402
+from benchmark import markdown, profile, runner  # noqa: E402
 
 DIST = "streamer_dist"
 

@@ -179,7 +179,7 @@ for name in ${names[@]+"${names[@]}"}; do
 done
 if [ ${#results[@]} -gt 0 ]; then
     echo
-    PYTHONPATH=$HERE${PYTHONPATH:+:$PYTHONPATH} "$PYTHON" -m bench.markdown "${results[@]}" \
+    PYTHONPATH=$HERE${PYTHONPATH:+:$PYTHONPATH} "$PYTHON" -m benchmark.markdown "${results[@]}" \
         --out "$OUT/report.md"
 fi
 if [ ${#failed[@]} -gt 0 ]; then

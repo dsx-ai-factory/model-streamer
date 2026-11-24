@@ -4,8 +4,8 @@
 loader for the models on local disk and one for those on S3. Several results files make one report, a
 block of rows per model.
 
-    python3 -m bench.markdown bench_results.json                 writes bench_results.md again
-    python3 -m bench.markdown a.json b.json --out report.md      one report for both
+    python3 -m benchmark.markdown bench_results.json                 writes bench_results.md again
+    python3 -m benchmark.markdown a.json b.json --out report.md      one report for both
 """
 import argparse
 import json
