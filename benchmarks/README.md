@@ -19,10 +19,10 @@ speedup.
     required; `bench.py` checks for them and says what is missing.
   - `instanttensor` is for the InstantTensor tests. Without it they are left
     out and the rest still runs.
-- torch built with NCCL and one GPU per rank, for the distributed tests
   - `s5cmd` is for a model on S3: it downloads the model for the loaders that
     read only local files, and calibrates S3.
   - `huggingface_hub` is for `suite.sh`, to download a model that is missing.
+- torch built with NCCL and one GPU per rank, for the distributed tests
 
 The benchmark measures the `runai_model_streamer` that this Python imports and
 prints where it came from. To measure another build, install it or put its
