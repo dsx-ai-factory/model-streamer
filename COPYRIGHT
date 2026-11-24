@@ -979,7 +979,7 @@ Public License instead of this License.
 Copyright Free Software Foundation, Inc - LGPL-2.1
 License Text(https://spdx.org/licenses/LGPL-2.1.html)
 Components:
-  libaio 0.3.113
+  libaio 0.3.113.bcr.1
 
 
                   GNU LESSER GENERAL PUBLIC LICENSE
@@ -1499,7 +1499,7 @@ That's all there is to it!
 Copyright Free Software Foundation, Inc, Jens Axboe - MIT
 License Text(https://spdx.org/licenses/MIT.html)
 Components:
-  github.com/axboe/liburing 2.14
+  liburing 2.14.bcr.2
 
 Copyright 2020 Jens Axboe
 
@@ -3512,7 +3512,7 @@ Components:
   github.com/awslabs/s2n v1.7.11
   opencensus-proto 0.4.1.bcr.2
   protoc-gen-validate 1.2.1.bcr.2
-  rules_cc 0.2.17
+  rules_cc 0.2.22
 
 
                                  Apache License

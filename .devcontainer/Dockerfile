@@ -124,16 +124,6 @@ RUN bash /build/scripts/build-gcs-sdk.sh "$TARGETARCH"
 FROM base AS devcontainer
 COPY --from=gcs-builder /opt/gcs-sdk /opt/gcs-sdk
 
-# Keep I/O libraries last so their changes can reuse the cloud SDK build layers.
-# attribution: shipped module=py/runai_model_streamer,cpp
-# renovate: datasource=github-tags depName=axboe/liburing extractVersion=^liburing-(?<version>.*)$
-ARG LIBURING_VERSION=2.14
-ARG LIBURING_SHA256=5f80964108981c6ad979c735f0b4877d5f49914c2a062f8e88282f26bf61de0c
-ARG LIBURING_URL=https://github.com/axboe/liburing/archive/refs/tags/liburing-${LIBURING_VERSION}.tar.gz
-COPY .devcontainer/scripts/build-io-libs.sh /tmp/build-io-libs.sh
-RUN LIBURING_VERSION="$LIBURING_VERSION" LIBURING_SHA256="$LIBURING_SHA256" LIBURING_URL="$LIBURING_URL" \
-    bash /tmp/build-io-libs.sh "$TARGETARCH"
-
 # Python 3.11 for builds and tests, compiled from source like this image's other
 # dependencies - the deadsnakes PPA publishes no arm64 binaries, and both architecture
 # images build from this one file. The base image stays Ubuntu 20.04 on purpose: the
