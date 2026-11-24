@@ -147,7 +147,8 @@ def setting(outs):
         ("S3", _each(outs, _s3)),
         ("Models", _each(outs, _model_size)),
         ("Runs", _each(outs, _runs)),
-        ("Settings", ", ".join(dict.fromkeys(f"{k}={v}" for o in outs for k, v in o["settings"].get("env", {}).items()))),
+        ("Settings", ", ".join(dict.fromkeys(
+            f"{k}={v}" for o in outs for k, v in o["settings"].get("env", {}).items()))),
         ("safetensors", versions.get("safetensors")),
         ("instanttensor", versions.get("instanttensor")),
         ("runai_model_streamer", _streamer(outs, versions)),
