@@ -158,6 +158,9 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("no test applies", self.run_bench(gpus=0, device="cuda")[0])
         self.run_bench(gpus=1, repeats=1, device="cuda", loaders=["safetensors", "streamer"])
         self.assertEqual(self.ran(), ["safetensors_cuda", "streamer_cuda"])
+        # the same filter applies to tests that are named
+        self.run_bench(gpus=1, repeats=1, loaders=["streamer"], tests="safetensors_cuda,streamer_cuda,streamer_cpu")
+        self.assertEqual(self.ran(), ["streamer_cuda", "streamer_cpu"])
 
     def test_speedup_is_against_safetensors_to_the_same_destination(self):
         code, out = self.run_bench(gpus=1, repeats=1, device="cuda")

@@ -32,13 +32,17 @@
 #     PYTHON       the Python that has the loaders installed        (default: python3)
 set -euo pipefail
 
-# case, Hugging Face repository, revision, *.safetensors files, their size in GiB.
-# The revision is pinned so that every run loads the same bytes.
+# One line per bench.py run: a name for it, the model's Hugging Face repository and revision, how many
+# *.safetensors files it has and their size in GiB, and then the options bench.py is run with. NPROC stands
+# for the number of ranks. The revision is pinned so that every run loads the same bytes.
+QWEN="Qwen/Qwen3-32B                     9216db5781bf21249d130ec9da846c4624c16137   17   62"
+DEEPSEEK="deepseek-ai/DeepSeek-R1        56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad  163  642"
+KIMI="runrunway/Kimi-K3-REAP-448experts  d2aff7364ad7c5e3cdcb7458d959aee2a2b079c9   96  780"
 CASES=(
-    "gpu        Qwen/Qwen3-32B                     9216db5781bf21249d130ec9da846c4624c16137   17   62"
-    "multi_gpu  deepseek-ai/DeepSeek-R1            56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad  163  642"
-    "multi_gpu  runrunway/Kimi-K3-REAP-448experts  d2aff7364ad7c5e3cdcb7458d959aee2a2b079c9   96  780"
-    "cpu        runrunway/Kimi-K3-REAP-448experts  d2aff7364ad7c5e3cdcb7458d959aee2a2b079c9   96  780"
+    "gpu        $QWEN      --tests safetensors_cuda,instanttensor_cuda,streamer_cuda"
+    "multi_gpu  $DEEPSEEK  --nproc NPROC --tests safetensors_dist,instanttensor_dist,streamer_dist"
+    "multi_gpu  $KIMI      --nproc NPROC --tests safetensors_dist,instanttensor_dist,streamer_dist"
+    "cpu        $KIMI      --tests safetensors_cpu,streamer_cpu"
 )
 
 usage() {
@@ -84,9 +88,9 @@ has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
 free=$(($(df --output=avail -B1 "$MODELS_DIR" | tail -1) / 1073741824))
 cases=() planned= noroom= absent=
 for entry in "${CASES[@]}"; do
-    read -r case repo revision files gib <<< "$entry"
+    read -r case repo revision files gib options <<< "$entry"
     name=${repo##*/}
-    if [ "$case" = multi_gpu ] && [ "$NPROC" -lt 2 ]; then
+    if [ "$options" != "${options#*--nproc}" ] && [ "$NPROC" -lt 2 ]; then
         echo "leaving $name to every GPU out: this machine has $NPROC"
         continue
     fi
@@ -104,7 +108,7 @@ for entry in "${CASES[@]}"; do
     cases+=("$entry")
 done
 for entry in ${cases[@]+"${cases[@]}"}; do
-    read -r case repo revision files gib <<< "$entry"
+    read -r case repo revision files gib options <<< "$entry"
     name=${repo##*/}
     [ -n "$S3_ROOT" ] && ! has "$absent" "$name" || continue
     if ! there "$name" "$files"; then
@@ -157,27 +161,20 @@ bench() {  # one bench.py run. Leaving 3 means the model does not fit there on t
     fi
 }
 
-how() {  # bench.py's options for a case
-    case $1 in
-        gpu) echo "--device cuda" ;;
-        cpu) echo "--device cpu" ;;
-        multi_gpu) echo "--nproc $NPROC" ;;
-    esac
-}
-
 for entry in ${cases[@]+"${cases[@]}"}; do
-    read -r case repo revision files gib <<< "$entry"
+    read -r case repo revision files gib options <<< "$entry"
     fetch "$repo" "$revision" "$files"
 done
 for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every case from S3
     for entry in ${cases[@]+"${cases[@]}"}; do
-        read -r case repo revision files gib <<< "$entry"
+        read -r case repo revision files gib options <<< "$entry"
         name=${repo##*/}
-        # shellcheck disable=SC2046  # the case's options are split on purpose
+        options=${options//NPROC/$NPROC}
+        # shellcheck disable=SC2086  # the case's options are split on purpose
         if [ "$source" = disk ]; then
-            bench "${name}_$case" "$MODELS_DIR/$name" $(how "$case") "$@"
+            bench "${name}_$case" "$MODELS_DIR/$name" $options "$@"
         elif ! has "$absent" "$name"; then
-            bench "${name}_${case}_s3" "$S3_ROOT/$name" $(how "$case") --ref-dir "$MODELS_DIR/$name" \
+            bench "${name}_${case}_s3" "$S3_ROOT/$name" $options --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi
     done

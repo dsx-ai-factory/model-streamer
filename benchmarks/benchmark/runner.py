@@ -141,7 +141,7 @@ def select_tests(a, remote, size_gib=0.0):
     that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). A
     test that cannot run here is left out with a note unless --tests asked for it."""
     if a.tests:
-        names = a.tests.split(",")
+        names = [n for n in a.tests.split(",") if n not in TESTS or not a.loaders or loader_of(n) in a.loaders]
     else:
         gpu = gpu_count() > 0
         names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
