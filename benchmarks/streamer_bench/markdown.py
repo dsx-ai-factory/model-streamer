@@ -90,6 +90,47 @@ def _streamer(outs, versions):
     return versions.get("runai-model-streamer") if any(o["streamer"] for o in outs) else None
 
 
+def _rate(out, ceiling):
+    return ((out.get("calibration") or {}).get("ceilings_gibps") or {}).get(ceiling)
+
+
+def _storage(out):
+    storage = out.get("environment", {}).get("storage")
+    if not storage:
+        return None
+    rate = _rate(out, "disk_direct_read_parallel")
+    return storage["type"] + (f", {rate:.0f} GiB/s parallel direct read" if rate else "")
+
+
+def _s3(out):
+    if not _on_s3(out):
+        return None
+    rate = _rate(out, "s3_get_parallel")
+    return f"{rate:.0f} GiB/s parallel GET with s5cmd" if rate else "not calibrated"
+
+
+def _cpus(out):
+    env = out.get("environment", {})
+    model = f'{env["cpu_sockets"]} × {env["cpu_model"]}, ' if env.get("cpu_model") else ""
+    return f'{model}{env.get("cpus")} CPUs'
+
+
+def _memory(out):
+    env = out.get("environment", {})
+    dimms = env.get("memory_dimms") or {}
+    kind = f' {dimms["type"]} ({dimms["count"]} × {dimms["gib"]:.0f} GiB)' if dimms else ""
+    return f'{env.get("mem_total_gib")} GiB{kind}'
+
+
+def _model_size(out):
+    return f'{_model(out)} ({out["model"]["gib"]} GiB)' if "gib" in out["model"] else _model(out)
+
+
+def _runs(out):
+    st = out["settings"]
+    return f'median of {st["repeats"]} per loader, {"warm" if st["warm"] else "cold"} page cache'
+
+
 def setting(outs):
     """What the numbers were measured on and with: the hardware, the storage's measured rates and the
     versions. Names that only mean something on the machine that ran it (host, mount point, endpoint,
@@ -99,8 +140,8 @@ def setting(outs):
         versions.update(out.get("versions", {}))
     rows = [
         ("GPUs", _each(outs, _gpus)),
-        ("CPUs, memory", _each(outs, lambda o: f'{o["environment"].get("cpus")} CPUs, '
-                                               f'{o["environment"].get("mem_total_gib")} GiB')),
+        ("CPUs", _each(outs, _cpus)),
+        ("Memory", _each(outs, _memory)),
         ("Kernel", _each(outs, lambda o: o["environment"].get("kernel"))),
         ("Storage", _each(outs, _storage)),
         ("S3", _each(outs, _s3)),

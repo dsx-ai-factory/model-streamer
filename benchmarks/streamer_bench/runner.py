@@ -67,11 +67,16 @@ def clear(scratch):
 
 def describe_machine(a, remote):
     """The machine the benchmark ran on, for the results: kernel, CPUs, memory and the model's storage."""
-    from .calibration.host import fs_type, read_text
+    from .calibration.host import cpu_model, fs_type, memory_dimms, read_text
     from .calibration.memory import meminfo_gib
     info = {"kernel": platform.release(), "python": platform.python_version(),
             "cpus": len(os.sched_getaffinity(0)), "mem_total_gib": round(meminfo_gib("MemTotal") or 0, 1),
             "thp": read_text("/sys/kernel/mm/transparent_hugepage/enabled")}
+    model, sockets = cpu_model()
+    if model:
+        info.update(cpu_model=model, cpu_sockets=sockets)
+    if memory_dimms():
+        info["memory_dimms"] = memory_dimms()
     if not remote:
         info["storage"] = fs_type(a.model_dir)
     return info

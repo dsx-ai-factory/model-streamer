@@ -44,3 +44,31 @@ def host_info(path):
     except ImportError:
         pass
     return info
+
+
+def cpu_model():
+    """(model name, sockets) from /proc/cpuinfo, or (None, None) where it does not say."""
+    text = read_text("/proc/cpuinfo") or ""
+    names = [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("model name")]
+    sockets = {line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("physical id")}
+    return (names[0], len(sockets) or 1) if names else (None, None)
+
+
+def memory_dimms(root="/sys/devices/system/edac/mc"):
+    """{"type": "DDR5", "count": 32, "gib": 64.0} for the populated DIMMs, as the kernel's memory
+    controller drivers report them, or None where they are not loaded. Needs no root, unlike the DMI
+    tables."""
+    import glob
+    import re
+    kinds, sizes = [], []
+    for dimm in glob.glob(os.path.join(root, "mc*", "dimm*")):
+        size = read_text(os.path.join(dimm, "size"))
+        if not size or not size.strip().isdigit() or int(size) == 0:
+            continue
+        sizes.append(int(size))
+        found = re.search(r"DDR\d?", read_text(os.path.join(dimm, "dimm_mem_type")) or "")
+        if found:
+            kinds.append(found.group(0))
+    if not sizes or not kinds:
+        return None
+    return {"type": max(set(kinds), key=kinds.count), "count": len(sizes), "gib": round(max(sizes) / 1024, 1)}

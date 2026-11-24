@@ -21,6 +21,7 @@ DIST = "streamer_dist"
 
 PKG = "/site/runai_model_streamer"
 MACHINE = {"kernel": "6.8", "python": "3.12", "cpus": 32, "mem_total_gib": 64.0, "thp": "always",
+           "cpu_model": "Xeon 8570", "cpu_sockets": 2, "memory_dimms": {"type": "DDR5", "count": 4, "gib": 16.0},
            "storage": {"mount": "/mnt", "type": "ext4"}}
 PROFILE = {"schema": 1, "created": "2026-11-18T00:00:00+00:00", "raw_gibps": {"h2d_pinned": [6.0]},
            "notes": ["a note"], "params": {"repeats": 3, "files": 8, "file_gib": 2.0, "mem_gib": 4, "threads": 32},
@@ -130,6 +131,8 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         self.assertIn("- Storage: ext4, 10 GiB/s parallel direct read", page)
+        self.assertIn("- CPUs: 2 × Xeon 8570, 32 CPUs", page)
+        self.assertIn("- Memory: 64.0 GiB DDR5 (4 × 16 GiB)", page)
         self.assertNotIn("/mnt", page)
         self.assertIn("## Test on local disk (10 GiB/s parallel direct read)", page)
 
