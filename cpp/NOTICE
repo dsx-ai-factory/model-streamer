@@ -35,7 +35,7 @@ Dependencies
 | `google_cloud_cpp` | 3.7.0 | Apache-2.0 | https://github.com/googleapis/google-cloud-cpp/blob/v3.7.0/LICENSE (and its Bazel modules and vendored code) |
 | `rules_cc` | 0.2.22 | Apache-2.0 | https://github.com/bazelbuild/rules_cc/releases/download/0.2.22/rules_cc-0.2.22.tar.gz#rules_cc-0.2.22/LICENSE (and its Bazel modules) |
 | `platforms` | 1.1.0 | Apache-2.0 | https://github.com/bazelbuild/platforms/releases/download/1.1.0/platforms-1.1.0.tar.gz#LICENSE (and its Bazel modules) |
-| `bazel_skylib` | 1.9.0 | Apache-2.0 | https://github.com/bazelbuild/bazel-skylib/releases/download/1.9.0/bazel-skylib-1.9.0.tar.gz#LICENSE (and its Bazel modules) |
+| `bazel_skylib` | 1.9.2 | Apache-2.0 | https://github.com/bazelbuild/bazel-skylib/releases/download/1.9.2/bazel-skylib-1.9.2.tar.gz#LICENSE (and its Bazel modules) |
 | `liburing` | 2.14.bcr.2 | MIT | https://github.com/axboe/liburing/blob/liburing-2.14/LICENSE (and its Bazel modules) |
 | `libaio` | 0.3.113.bcr.1 | LGPL-2.1 | https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz#libaio-0.3.113/COPYING (and its Bazel modules) |
 | `github.com/openssl/openssl` | 3.5.0 | Apache-2.0 | https://github.com/openssl/openssl/blob/openssl-3.5.0/LICENSE.txt |
