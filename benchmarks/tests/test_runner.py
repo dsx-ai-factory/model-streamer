@@ -215,13 +215,13 @@ class RunnerTest(unittest.TestCase):
                                        ref_dir=self.dir.name, scratch_dir=scratch)
         self.assertEqual(code, 0)
         self.assertEqual(download.call_count, 2)  # not for the streamer
-        self.assertEqual(clear.call_count, 3)
+        self.assertEqual(clear.call_count, 2)
         by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
         self.assertEqual(by["safetensors_cuda"][2], scratch)  # loads what was downloaded
         self.assertEqual(by["streamer_cuda"][2], "s3://b/Qwen")
         self.assertIn("--ref-dir", by["streamer_cuda"])
         self.assertNotIn("--ref-dir", by["safetensors_cuda"])
-        st, _, it, streamer = out["results"]
+        st, it, streamer = out["results"]
         self.assertEqual((st["load_s"], st["download_s"], st["runs"][0]["download_s"]), (35.0, 15.0, 15.0))
         self.assertEqual((it["load_s"], streamer["load_s"]), (20.0, 5.0))
         self.assertEqual((it["speedup"], streamer["speedup"]), (1.75, 7.0))
