@@ -31,8 +31,8 @@ Rebuild the devcontainer after changing SDK sources, settings or pins under
 `.devcontainer/gcs/`, or the `build-gcs-sdk.sh` script. The consumer checks these
 SDK-owned inputs (including `MODULE.bazel`, so a google-cloud-cpp bump is a mismatch)
 and the installed compiler version. Changing this directory's `.bazelversion`
-also requires updating the matching Linux AMD64 and ARM64 Bazel binary checksums
-in `build-gcs-sdk.sh`. The application's `cpp/.bazelversion` can change independently.
+needs no checksum edit: `build-gcs-sdk.sh` verifies the Bazel binary against the
+`.sha256` file published with that release. The application's `cpp/.bazelversion` can change independently.
 
 Normal application changes to warnings, optimization or debug symbols do not
 invalidate the SDK. The shared `compatibility.h`, compiled by both workspaces,
