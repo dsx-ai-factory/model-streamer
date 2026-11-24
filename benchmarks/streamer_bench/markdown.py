@@ -110,6 +110,11 @@ def _s3(out):
     return f"{rate:.0f} GiB/s parallel GET with s5cmd" if rate else "not calibrated"
 
 
+def _gpus_in_use(out):
+    busy = out.get("environment", {}).get("gpus_in_use")
+    return ", ".join(f"GPU {i} ({gib} GiB)" for i, gib in busy.items()) if busy else None
+
+
 def _cpus(out):
     env = out.get("environment", {})
     model = f'{env["cpu_sockets"]} × {env["cpu_model"]}, ' if env.get("cpu_model") else ""
@@ -181,6 +186,7 @@ def setting(outs):
     ran = {s["loader"] for out in outs for s in out["results"]}
     rows = [
         ("GPUs", _each(outs, _gpus)),
+        ("GPUs already in use by something else during the run", _each(outs, _gpus_in_use)),
         ("CPUs", _each(outs, _cpus)),
         ("Memory", _each(outs, _memory)),
         ("Kernel", _each(outs, lambda o: o["environment"].get("kernel"))),

@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 
-from . import ENTRY, GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, loader_of
+from . import ENTRY, GIB, GPU_IDLE_GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, loader_of
 from .files import describe, evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
@@ -32,17 +32,49 @@ def gpu_count():
     return len(gpu_memory_gib())
 
 
+def gpu_used_gib():
+    """The memory already in use on each GPU the tests can see, in GiB, as nvidia-smi reports it, or None
+    where that cannot be told. Asked of nvidia-smi and not of torch, so that this process does not
+    itself hold memory on the GPUs it is about to measure."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=60)
+        used = [float(x) / 1024 for x in out.stdout.split()]
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible is not None:  # nvidia-smi lists every GPU, the tests see only these
+            used = [used[int(i)] for i in visible.split(",") if i.strip()]
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return None
+    return used if used and len(used) == gpu_count() else None
+
+
+def gpus_of(group, nproc=None):
+    """The GPUs a destination loads to: the first one, or one per rank."""
+    return list(range(nproc or 0)) if group == "dist" else [0] if group == "cuda" else []
+
+
+def gpus_in_use(group, nproc=None):
+    """{GPU: GiB in use} for the GPUs a destination loads to that something else is already using.
+    A GPU nobody uses still shows a few MiB, so a little is not counted."""
+    used = gpu_used_gib() or []
+    return {i: round(used[i], 1) for i in gpus_of(group, nproc) if i < len(used) and used[i] > GPU_IDLE_GIB}
+
+
 def misfit(group, size_gib, nproc=None):
     """Why a model of this size cannot be loaded to a destination on this machine, or None when it can.
-    One GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it. Some room is
-    left for the loader's own buffers."""
+    One GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it. What counts is
+    the memory that is free now, and some room is left for the loader's own buffers."""
     gpus = gpu_memory_gib()
-    if group == "cuda" and gpus and size_gib > 0.95 * gpus[0]:
-        return f"the model is {size_gib:.0f} GiB and one GPU has {gpus[0]:.0f} GiB"
-    if group == "dist" and gpus and nproc and size_gib / nproc > 0.9 * min(gpus[:nproc]):
-        need = next((n for n in range(nproc + 1, len(gpus) + 1) if size_gib / n <= 0.9 * min(gpus[:n])), None)
+    used = gpu_used_gib() or [0.0] * len(gpus)
+    free = [total - taken for total, taken in zip(gpus, used)]
+    taken = lambda i: f", of which {used[i]:.0f} GiB is in use by something else" if used[i] > GPU_IDLE_GIB else ""
+    if group == "cuda" and gpus and size_gib > 0.95 * free[0]:
+        return f"the model is {size_gib:.0f} GiB and one GPU has {gpus[0]:.0f} GiB{taken(0)}"
+    if group == "dist" and gpus and nproc and size_gib / nproc > 0.9 * min(free[:nproc]):
+        tight = min(range(nproc), key=lambda i: free[i])
+        need = next((n for n in range(nproc + 1, len(gpus) + 1) if size_gib / n <= 0.9 * min(free[:n])), None)
         return (f"each of {nproc} ranks keeps {size_gib / nproc:.0f} GiB of the model and a GPU has "
-                f"{min(gpus[:nproc]):.0f} GiB" + (f"; it needs at least {need} ranks" if need else ""))
+                f"{gpus[tight]:.0f} GiB{taken(tight)}" + (f"; it needs at least {need} ranks" if need else ""))
     return None
 
 
@@ -300,6 +332,13 @@ def run(a, remote):
     runs_of = {n: [] for n in names}
     strategy_of = {n: set() for n in names}
     environment = describe_machine(a, remote)
+    busy = {}
+    for name in names:
+        busy.update(gpus_in_use(group_of(name), a.nproc))
+    if busy:  # the numbers are then not this machine's best, and the results have to say so
+        environment["gpus_in_use"] = {str(i): gib for i, gib in sorted(busy.items())}
+        print("warning: something else is using " + ", ".join(f"GPU {i} ({gib} GiB)" for i, gib in sorted(busy.items()))
+              + "; the GPU tests share it, and their times may be slower than on an idle GPU", file=sys.stderr)
     versions = {}
     model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir), **describe(ref)}
     pkgs = set()

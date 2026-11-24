@@ -41,6 +41,7 @@ VALIDATE_MAX_MIB = 128  # the largest tensor picked for that
 TIMEOUT_S = 3600  # allowed per run
 SCRATCH = "bench_scratch"  # where an s3:// model is downloaded to, unless --scratch-dir says otherwise
 S3_CALIBRATE_GIB = 64  # how much of an s3:// model an automatic calibration reads
+GPU_IDLE_GIB = 1.0  # a GPU with more than this in use before the run is taken to be used by something else
 SKIPPED = 3  # exit status of a run that measured nothing because the model does not fit where it was to go
 
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

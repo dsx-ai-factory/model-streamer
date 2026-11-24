@@ -248,6 +248,30 @@ class RunnerTest(unittest.TestCase):
         a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir="/local", scratch_dir=None)
         self.assertIsNone(runner.prepare_s3(a))
 
+    def test_gpus_used_by_something_else_are_counted_and_reported(self):
+        smi = lambda used: mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(stdout=used))
+        with mock.patch.object(runner, "gpu_memory_gib", return_value=[80.0, 80.0]):
+            with smi("4\n4\n"):  # idle: a few MiB each
+                self.assertEqual(runner.gpus_in_use("dist", 2), {})
+                self.assertIsNone(runner.misfit("cuda", 61.0))
+            with smi("40960\n4\n"):  # 40 GiB taken on GPU 0
+                self.assertEqual(runner.gpus_in_use("cuda"), {0: 40.0})
+                self.assertEqual(runner.gpus_in_use("cpu"), {})
+                self.assertIn("of which 40 GiB is in use by something else", runner.misfit("cuda", 61.0))
+                self.assertIsNone(runner.misfit("cuda", 20.0))
+                self.assertIn("in use by something else", runner.misfit("dist", 100.0, 2))
+            with smi("40960\n4\n"), mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}), \
+                    mock.patch.object(runner, "gpu_memory_gib", return_value=[80.0]):
+                self.assertEqual(runner.gpu_used_gib(), [4 / 1024])  # only the GPU the tests see
+            with mock.patch.object(runner.subprocess, "run", side_effect=OSError):  # no nvidia-smi: not told
+                self.assertIsNone(runner.gpu_used_gib())
+                self.assertIsNone(runner.misfit("cuda", 61.0))
+        with mock.patch.object(runner, "gpus_in_use", lambda group, nproc=None: {0: 40.0} if group == "cuda" else {}):
+            _, out = self.run_bench(gpus=1, repeats=1, tests="streamer_cuda")
+        self.assertEqual(out["environment"]["gpus_in_use"], {"0": 40.0})
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertIn("- GPUs already in use by something else during the run: GPU 0 (40.0 GiB)", f.read())
+
     def test_a_model_that_does_not_fit_the_gpus_is_not_run(self):
         with mock.patch.object(runner, "gpu_memory_gib", return_value=[80.0] * 8):
             self.assertIsNone(runner.misfit("cuda", 61.0))
