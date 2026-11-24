@@ -42,7 +42,7 @@ Dependencies
 | `github.com/curl/curl` | 8_13_0 | curl | https://github.com/curl/curl/blob/curl-8_13_0/COPYING |
 | `github.com/madler/zlib` | 1.3.1 | Zlib | https://github.com/madler/zlib/blob/v1.3.1/LICENSE |
 | `github.com/GNOME/libxml2` | 2.13.5 | MIT | https://github.com/GNOME/libxml2/blob/v2.13.5/Copyright |
-| `github.com/aws/aws-sdk-cpp` | 1.11.924 | Apache-2.0 | https://github.com/aws/aws-sdk-cpp/blob/1.11.924/LICENSE (and its submodules) |
+| `github.com/aws/aws-sdk-cpp` | 1.11.936 | Apache-2.0 | https://github.com/aws/aws-sdk-cpp/blob/1.11.936/LICENSE (and its submodules) |
 | `github.com/Azure/azure-sdk-for-cpp` | 12.15.0 | MIT | https://github.com/Azure/azure-sdk-for-cpp/blob/azure-storage-blobs_12.15.0/LICENSE.txt |
 | `gcc-runtime` | 9 | GPL-3.0-or-later WITH GCC-exception-3.1 | https://spdx.org/licenses/GPL-3.0-or-later.html |
 | `glibc-nonshared` | 2.31 | LGPL-2.1-or-later | https://spdx.org/licenses/LGPL-2.1-or-later.html |
@@ -60,7 +60,7 @@ Dependencies
 | `grpc/third_party/utf8_range` | 1.81.0 | MIT | https://github.com/grpc/grpc/blob/v1.81.0/third_party/utf8_range/LICENSE (via grpc 1.81.0) |
 | `grpc/third_party/xxhash` | 1.81.0 | BSD-2-Clause | https://github.com/grpc/grpc/blob/v1.81.0/third_party/xxhash/LICENSE (via grpc 1.81.0) |
 | `googleapis` | 0.0.0-20260623-b6f9ff05 | Apache-2.0 | https://github.com/googleapis/googleapis/blob/b6f9ff05aaec18070232a1ab36da98e684bc7909/LICENSE (via google_cloud_cpp 3.7.0) |
-| `github.com/awslabs/aws-crt-cpp` | v0.44.2 | Apache-2.0 | https://github.com/awslabs/aws-crt-cpp/blob/58bca57cbc8b242468414972a6a35f92676b164d/LICENSE (via github.com/aws/aws-sdk-cpp 1.11.924) |
+| `github.com/awslabs/aws-crt-cpp` | v0.44.4 | Apache-2.0 | https://github.com/awslabs/aws-crt-cpp/blob/07b1d9a9c0ba16551f6184739fd19f2d0f2f986d/LICENSE (via github.com/aws/aws-sdk-cpp 1.11.936) |
 | `zlib` | 1.3.1.bcr.5 | Zlib | https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz#zlib-1.3.1/LICENSE (via protobuf 33.6) |
 | `re2` | 2025-08-12.bcr.1 | BSD-3-Clause | https://github.com/google/re2/blob/2025-08-12/LICENSE (via protobuf 33.6) |
 | `mbedtls` | 3.6.0 | Apache-2.0 | https://github.com/Mbed-TLS/mbedtls/releases/download/v3.6.0/mbedtls-3.6.0.tar.bz2#mbedtls-3.6.0/LICENSE (via curl 8.8.0.bcr.3) |
@@ -69,22 +69,22 @@ Dependencies
 | `envoy_api` | 0.0.0-20260130-84e8436 | Apache-2.0 | https://github.com/envoyproxy/data-plane-api/blob/84e84367f2560cdb47b9bb78fd3e615feb80c3e4/LICENSE (via grpc 1.81.0) |
 | `protoc-gen-validate` | 1.2.1.bcr.2 | Apache-2.0 | https://github.com/bufbuild/protoc-gen-validate/blob/v1.2.1/LICENSE (via grpc 1.81.0) |
 | `xds` | 0.0.0-20251210-ee656c7 | Apache-2.0 | https://github.com/cncf/xds/blob/ee656c7534f5d7dc23d44dd611689568f72017a6/LICENSE (via grpc 1.81.0) |
-| `github.com/awslabs/aws-c-common` | v1.0.3 | Apache-2.0 | https://github.com/awslabs/aws-c-common/blob/2a29f7ea85397ff15e41ae086fb3662484fd305d/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-io` | v1.1.0 | Apache-2.0 | https://github.com/awslabs/aws-c-io/blob/1831a1943e4c4a034d42f954e8f154cf6b9b492f/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-compression` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-compression/blob/891312c058e69a4d55f569f79dde1ee221982532/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-cal` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-cal/blob/2441187f3bdbe0f0fe7fa5dd1736be98227ad556/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-auth` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-auth/blob/055e822f021d1cab11d608b94ac34de250986134/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-http` | v1.1.0 | Apache-2.0 | https://github.com/awslabs/aws-c-http/blob/afe6411dd17b2368d5262724c25a3b85670b4e06/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-mqtt` | v1.1.2 | Apache-2.0 | https://github.com/awslabs/aws-c-mqtt/blob/96af751fa58d4d6704881463a4d6895b107268ed/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/s2n` | v1.7.11 | Apache-2.0 | https://github.com/awslabs/s2n/blob/b170000016fb44fa4dfdd86ed0b75bd28241e707/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-checksums` | v1.0.1 | Apache-2.0 | https://github.com/awslabs/aws-checksums/blob/12cd22e81543b8547132762023076ab6afa25559/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-event-stream` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-event-stream/blob/d32600bfecc6616cab0c478f96ea5a779f03e05e/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-s3` | v1.3.1 | Apache-2.0 | https://github.com/awslabs/aws-c-s3/blob/eeb85f3e4ed89497a93952964bd8228d1f435e6e/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-lc` | v5.11.0 | Apache-2.0 | https://github.com/awslabs/aws-lc/blob/fa9bc8d6f7cfb2cf849b247fb06bbbfc41ecc9d6/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
-| `github.com/awslabs/aws-c-sdkutils` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-sdkutils/blob/de0fbe807a409158c3fa285bafb88120c8989609/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.2) |
+| `github.com/awslabs/aws-c-common` | v1.0.5 | Apache-2.0 | https://github.com/awslabs/aws-c-common/blob/45e9307382f196175f0dbb832a178570924bda96/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-io` | v1.1.2 | Apache-2.0 | https://github.com/awslabs/aws-c-io/blob/eac372568ea06c999cb26c4db996633c84b4e86d/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-compression` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-compression/blob/891312c058e69a4d55f569f79dde1ee221982532/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-cal` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-cal/blob/2441187f3bdbe0f0fe7fa5dd1736be98227ad556/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-auth` | v1.0.4 | Apache-2.0 | https://github.com/awslabs/aws-c-auth/blob/7d87eede281b4d096c6ad98d5bbdd92a8f5e9ac5/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-http` | v1.1.1 | Apache-2.0 | https://github.com/awslabs/aws-c-http/blob/d19eabf4c5dc78ee1e07033a5015e9d50d04ec31/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-mqtt` | v1.1.2 | Apache-2.0 | https://github.com/awslabs/aws-c-mqtt/blob/96af751fa58d4d6704881463a4d6895b107268ed/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/s2n` | v1.7.13 | Apache-2.0 | https://github.com/awslabs/s2n/blob/e7ce83a27fa9525515a621754a7183a51c80246b/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-checksums` | v1.0.1 | Apache-2.0 | https://github.com/awslabs/aws-checksums/blob/12cd22e81543b8547132762023076ab6afa25559/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-event-stream` | v1.0.0 | Apache-2.0 | https://github.com/awslabs/aws-c-event-stream/blob/d32600bfecc6616cab0c478f96ea5a779f03e05e/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-s3` | v1.5.2 | Apache-2.0 | https://github.com/awslabs/aws-c-s3/blob/bc923d67e7aa85fa715c46bd95c0c5711148873c/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-lc` | v5.12.0 | Apache-2.0 | https://github.com/awslabs/aws-lc/blob/cd481c207e38f06aeb5766f4a1cdfce10a4c0af8/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
+| `github.com/awslabs/aws-c-sdkutils` | v1.0.1 | Apache-2.0 | https://github.com/awslabs/aws-c-sdkutils/blob/66a79c011dbe057fcc6e9620f93a52c2c29843e8/LICENSE (via github.com/awslabs/aws-crt-cpp v0.44.4) |
 | `cel-spec` | 0.25.1 | Apache-2.0 | https://github.com/google/cel-spec/blob/v0.25.1/LICENSE (via envoy_api 0.0.0-20260130-84e8436) |
 | `opencensus-proto` | 0.4.1.bcr.2 | Apache-2.0 | https://github.com/census-instrumentation/opencensus-proto/blob/v0.4.1/LICENSE (via envoy_api 0.0.0-20260130-84e8436) |
-| `github.com/awslabs/aws-verification-model-for-libcrypto` | 4a6839e2a9cf | Apache-2.0 | https://github.com/awslabs/aws-verification-model-for-libcrypto/blob/4a6839e2a9cf5194a7789f63b1a3a45b5e86add1/LICENSE (via github.com/awslabs/s2n v1.7.11) |
+| `github.com/awslabs/aws-verification-model-for-libcrypto` | 4a6839e2a9cf | Apache-2.0 | https://github.com/awslabs/aws-verification-model-for-libcrypto/blob/4a6839e2a9cf5194a7789f63b1a3a45b5e86add1/LICENSE (via github.com/awslabs/s2n v1.7.13) |
 
 ================================================================================
 License texts
@@ -5179,7 +5179,7 @@ section 4(d) of the Apache License, Version 2.0 requires.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/aws/aws-sdk-cpp` 1.11.924
+  - `github.com/aws/aws-sdk-cpp` 1.11.936
 --------------------------------------------------------------------------------
 
 AWS SDK for C++
@@ -5201,7 +5201,7 @@ The licenses for these third party components are included in LICENSE.txt
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-c-auth` v1.0.0
+  - `github.com/awslabs/aws-c-auth` v1.0.4
 --------------------------------------------------------------------------------
 
 AWS C Auth
@@ -5219,7 +5219,7 @@ SPDX-License-Identifier: Apache-2.0.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-c-common` v1.0.3
+  - `github.com/awslabs/aws-c-common` v1.0.5
 --------------------------------------------------------------------------------
 
 AWS C Common
@@ -5245,7 +5245,7 @@ SPDX-License-Identifier: Apache-2.0.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-c-http` v1.1.0
+  - `github.com/awslabs/aws-c-http` v1.1.1
 --------------------------------------------------------------------------------
 
 AWS C Http
@@ -5254,7 +5254,7 @@ SPDX-License-Identifier: Apache-2.0.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-c-io` v1.1.0
+  - `github.com/awslabs/aws-c-io` v1.1.2
 --------------------------------------------------------------------------------
 
 AWS C Io
@@ -5274,8 +5274,8 @@ SPDX-License-Identifier: Apache-2.0.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-c-s3` v1.3.1
-  - `github.com/awslabs/aws-c-sdkutils` v1.0.0
+  - `github.com/awslabs/aws-c-s3` v1.5.2
+  - `github.com/awslabs/aws-c-sdkutils` v1.0.1
   - `github.com/awslabs/aws-verification-model-for-libcrypto` 4a6839e2a9cf
 --------------------------------------------------------------------------------
 
@@ -5283,7 +5283,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-crt-cpp` v0.44.2
+  - `github.com/awslabs/aws-crt-cpp` v0.44.4
 --------------------------------------------------------------------------------
 
 AWS Crt Cpp
@@ -5292,7 +5292,7 @@ SPDX-License-Identifier: Apache-2.0.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/aws-lc` v5.11.0
+  - `github.com/awslabs/aws-lc` v5.12.0
 --------------------------------------------------------------------------------
 
 AWS-LC
@@ -5300,7 +5300,7 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 --------------------------------------------------------------------------------
 Notice of:
-  - `github.com/awslabs/s2n` v1.7.11
+  - `github.com/awslabs/s2n` v1.7.13
 --------------------------------------------------------------------------------
 
 s2n

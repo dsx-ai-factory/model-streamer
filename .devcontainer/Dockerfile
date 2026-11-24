@@ -96,7 +96,7 @@ RUN OPENSSL_VERSION="$OPENSSL_VERSION" CURL_VERSION="$CURL_VERSION" ZLIB_VERSION
 # Cloned with its submodules (aws-crt-cpp and the aws-c-* libraries), which its tag pins.
 # attribution: shipped module=py/runai_model_streamer_s3,cpp submodules
 # renovate: datasource=github-tags depName=aws/aws-sdk-cpp
-ARG AWS_SDK_CPP_VERSION=1.11.924
+ARG AWS_SDK_CPP_VERSION=1.11.936
 COPY .devcontainer/scripts/build-aws-sdk.sh /tmp/build-aws-sdk.sh
 RUN AWS_SDK_CPP_VERSION="$AWS_SDK_CPP_VERSION" bash /tmp/build-aws-sdk.sh "$TARGETARCH"
 
