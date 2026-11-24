@@ -57,6 +57,14 @@ def measure(meter, a):
     objs = s3_objects(a.s3_uri)
     if not objs:
         sys.exit(f"no objects under {a.s3_uri}")
+    if getattr(a, "s3_max_gib", None):  # enough objects to measure the storage, not the whole of a large model
+        kept, size = [], 0
+        for obj in objs:
+            if kept and size + obj[1] > a.s3_max_gib * GIB:
+                break
+            kept.append(obj)
+            size += obj[1]
+        objs = kept
     total = sum(n for _, n in objs)
     endpoint = s3_endpoint()
     print(f"s3: {len(objs)} objects, {total / GIB:.2f} GiB under {a.s3_uri}"

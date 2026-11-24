@@ -8,6 +8,7 @@ Linux only. Needs torch, safetensors and runai_model_streamer (torch with NCCL f
     python3 bench.py /mnt/models/Qwen3-8B                  to host memory and to one GPU, with each loader
     python3 bench.py /mnt/models/Qwen3-8B --device cuda    to one GPU only
     python3 bench.py /mnt/models/Qwen3-8B --nproc 8        to the GPUs of 8 ranks on this node
+    python3 bench.py s3://bucket/Qwen3-8B                  the same from S3
 
 The loaders are safetensors, InstantTensor and the streamer. Every run is a fresh process on a cold page
 cache, and its tensors are checked against safetensors. suite.py runs several models and makes one report.
@@ -18,7 +19,7 @@ import importlib.util
 import os
 import sys
 
-from streamer_bench import DEFAULT_PROFILE, LOADERS, TESTS
+from streamer_bench import DEFAULT_PROFILE, LOADERS, SCRATCH, TESTS
 
 
 def check_installed():
@@ -43,9 +44,9 @@ def main():
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
     ap.add_argument("--warm", action="store_true", help="load from the page cache instead of evicting first")
-    ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation")
-    ap.add_argument("--scratch-dir", help="where the loaders that read only local files download an s3:// model "
-                                          "to; their load time then includes the download")
+    ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation "
+                                      "(default: downloaded once to the scratch directory)")
+    ap.add_argument("--scratch-dir", help=f"where an s3:// model is downloaded to (default: {SCRATCH} here)")
     ap.add_argument("--profile", help=f"machine profile from calibrate.py (default: {DEFAULT_PROFILE} here, "
                                       "made by calibrating first when it is missing)")
     ap.add_argument("--no-calibrate", action="store_true",

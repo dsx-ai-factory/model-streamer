@@ -13,30 +13,46 @@ import sys
 import tempfile
 import time
 
-from . import ENTRY, GIB, TESTS, TIMEOUT_S, is_dist, loader_of
+from . import ENTRY, GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, loader_of
 from .files import evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
 
 
-def gpu_count():
+def gpu_memory_gib():
+    """The memory of each GPU on this machine, in GiB; empty without a GPU or without torch."""
     try:
         import torch
-        return torch.cuda.device_count()
+        return [torch.cuda.get_device_properties(i).total_memory / GIB for i in range(torch.cuda.device_count())]
     except Exception:
-        return 0
+        return []
+
+
+def gpu_count():
+    return len(gpu_memory_gib())
+
+
+def misfit(group, size_gib, nproc=None):
+    """Why a model of this size cannot be loaded to a destination on this machine, or None when it can.
+    One GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it. Some room is
+    left for the loader's own buffers."""
+    gpus = gpu_memory_gib()
+    if group == "cuda" and gpus and size_gib > 0.95 * gpus[0]:
+        return f"the model is {size_gib:.0f} GiB and one GPU has {gpus[0]:.0f} GiB"
+    if group == "dist" and gpus and nproc and size_gib / nproc > 0.9 * min(gpus[:nproc]):
+        need = next((n for n in range(nproc + 1, len(gpus) + 1) if size_gib / n <= 0.9 * min(gpus[:n])), None)
+        return (f"each of {nproc} ranks keeps {size_gib / nproc:.0f} GiB of the model and a GPU has "
+                f"{min(gpus[:nproc]):.0f} GiB" + (f"; it needs at least {need} ranks" if need else ""))
+    return None
 
 
 def unavailable(a, test, remote=False):
     """Why a test cannot run here, or None. Its loader has to be installed, and a loader that reads only
-    local files needs somewhere to download an s3:// model to, and s5cmd to do it."""
+    local files needs s5cmd to download an s3:// model first."""
     if loader_of(test) == "instanttensor" and importlib.util.find_spec("instanttensor") is None:
         return f"instanttensor is not installed in this Python ({sys.executable}): pip install instanttensor"
-    if remote and loader_of(test) != "streamer":
-        if not a.scratch_dir:
-            return "it reads local files; give --scratch-dir DIR to download the s3:// model there first"
-        if not shutil.which("s5cmd"):
-            return "downloading the s3:// model needs s5cmd on PATH (pip install s5cmd)"
+    if remote and loader_of(test) != "streamer" and not shutil.which("s5cmd"):
+        return "it reads local files, and downloading the s3:// model needs s5cmd on PATH (pip install s5cmd)"
     return None
 
 
@@ -82,7 +98,13 @@ def describe_machine(a, remote):
     return info
 
 
-def select_tests(a, remote):
+def nothing_fits(why):
+    """Leave with the status that says no test ran because the model does not fit, not because one failed."""
+    print(f"nothing to run: {why}", file=sys.stderr)
+    sys.exit(SKIPPED)
+
+
+def select_tests(a, remote, size_gib=0.0):
     """The tests to run: --tests, else the distributed ones with --nproc, else the single-process ones
     that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). A
     test that cannot run here is left out with a note unless --tests asked for it."""
@@ -96,14 +118,20 @@ def select_tests(a, remote):
         if a.loaders:
             names = [n for n in names if loader_of(n) in a.loaders]
         for n in list(names):
-            if unavailable(a, n, remote):
-                print(f"skipping {n}: {unavailable(a, n, remote)}", file=sys.stderr)
+            why = unavailable(a, n, remote) or (None if is_dist(n) else misfit(group_of(n), size_gib))
+            if why:
+                print(f"skipping {n}: {why}", file=sys.stderr)
                 names.remove(n)
+        if a.nproc and misfit("dist", size_gib, a.nproc):
+            nothing_fits(misfit("dist", size_gib, a.nproc))
+        if not names and a.device and misfit(a.device, size_gib):
+            nothing_fits(misfit(a.device, size_gib))
     for n in names:
         if n not in TESTS:
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
-        if a.tests and unavailable(a, n, remote):
-            sys.exit(f"{n} cannot run: {unavailable(a, n, remote)}")
+        why = a.tests and (unavailable(a, n, remote) or misfit(group_of(n), size_gib, a.nproc))
+        if why:
+            sys.exit(f"{n} cannot run: {why}")
     if not names:
         sys.exit("no test applies here" + (f" with --device {a.device}: this machine has no GPU" if a.device else ""))
     dist = [n for n in names if is_dist(n)]
@@ -212,12 +240,48 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     return r, facts
 
 
+def prepare_s3(a):
+    """What an s3:// model needs on this machine: a scratch directory for the loaders that read only
+    local files, and a local copy of the files for the tensor names and for validation. Without
+    --ref-dir that copy is downloaded once, into the scratch directory, and removed after the run.
+    Returns the directory to remove, or None."""
+    a.scratch_dir = a.scratch_dir or SCRATCH
+    if a.ref_dir:
+        return None
+    if not shutil.which("s5cmd"):
+        sys.exit("an s3:// model needs s5cmd on PATH to fetch a reference copy (pip install s5cmd), "
+                 "or a local copy of the same files given with --ref-dir")
+    from .calibration.s3 import s3_objects
+    size = sum(n for _, n in s3_objects(a.model_dir))
+    os.makedirs(a.scratch_dir, exist_ok=True)
+    free = shutil.disk_usage(a.scratch_dir).free
+    if free < 2.1 * size:  # the reference copy, and the copy each download-then-load run makes
+        sys.exit(f"{a.scratch_dir} has {free / GIB:.0f} GiB free and this {size / GIB:.0f} GiB model needs twice its "
+                 "size there: give --scratch-dir on a larger disk, or --ref-dir with a local copy")
+    ref = os.path.join(a.scratch_dir, "ref")
+    print(f"downloading a reference copy of {a.model_dir} to {ref} (--ref-dir DIR uses a local one)", flush=True)
+    _, why = download(a.model_dir, ref, None)
+    if why:
+        sys.exit(why)
+    a.ref_dir = ref
+    return ref
+
+
 def main(a):
     remote = is_remote(a.model_dir)
     if remote and a.warm:
         sys.exit("--warm applies to local files only")
-    files, _ = model_files(a)
-    names = select_tests(a, remote)
+    fetched = prepare_s3(a) if remote else None
+    try:
+        run(a, remote)
+    finally:
+        if fetched:
+            clear(fetched)
+
+
+def run(a, remote):
+    files, ref = model_files(a)
+    names = select_tests(a, remote, sum(os.path.getsize(f) for f in ref) / GIB)
 
     extra = {}
     for kv in a.env:
@@ -238,8 +302,6 @@ def main(a):
     environment = describe_machine(a, remote)
     versions = {}
     model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir)}
-    if a.ref_dir:
-        model["ref_dir"] = a.ref_dir
     pkgs = set()
     for rep in range(a.repeats):  # interleaved across the tests, so drift hits all alike
         for name in names:

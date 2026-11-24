@@ -19,7 +19,8 @@ puts the results in one table of load time, throughput and speedup.
   - `instanttensor` is for the InstantTensor tests. Without it they are left
     out and the rest still runs.
 - torch built with NCCL and one GPU per rank, for the distributed tests
-- [`s5cmd`](https://github.com/peak/s5cmd) on `PATH`, only to calibrate S3
+  - `s5cmd` is for a model on S3: it downloads the model for the loaders that
+    read only local files, and calibrates S3.
 
 The benchmark measures the `runai_model_streamer` that this Python imports and
 prints where it came from. To measure another build, install it or put its
@@ -46,31 +47,41 @@ directory first on `PYTHONPATH`.
 ## Running the suite
 
 ```bash
-python3 benchmarks/suite.py \
-    --gpu /mnt/models/Qwen3-32B \
-    --multi-gpu /mnt/models/DeepSeek-R1 --nproc 8 \
-    --cpu /mnt/models/Kimi-K3
+python3 benchmarks/suite.py /mnt/models/Qwen3-32B /mnt/models/DeepSeek-R1
 ```
 
-Each option is one case, and any of them can be left out:
+Every model is loaded to each destination it fits on this machine: host
+memory, one GPU, and all the GPUs. A model that is too large for one GPU
+skips that case with a note. A model can be a directory or an
+`s3://bucket/prefix`.
+
+To choose the destination per model instead, name the cases. Each option can
+be repeated:
+
+```bash
+python3 benchmarks/suite.py \
+    --gpu /mnt/models/Qwen3-32B \
+    --multi-gpu /mnt/models/DeepSeek-R1 \
+    --cpu /mnt/models/Kimi-K3
+```
 
 | Option | Case |
 |---|---|
 | `--gpu DIR` | The model loaded to one GPU |
-| `--multi-gpu DIR --nproc N` | The model loaded to the GPUs of N ranks |
+| `--multi-gpu DIR` | The model loaded to the GPUs of `--nproc` ranks (default: every GPU) |
 | `--cpu DIR` | The model loaded to host memory |
 
 Every case is one `bench.py` run with each loader that applies. `--repeats`,
-`--loaders`, `--env`, `--profile` and `--no-calibrate` are passed on to it. The results go
-to `--out-dir` (default `bench_suite`): a results file, a report and the logs
-per case, and the combined `report.md`, which has the test setting and this
-table:
+`--loaders`, `--env`, `--profile`, `--scratch-dir` and `--no-calibrate` are
+passed on to it. The results go to `--out-dir` (default `bench_suite`): for
+each case `<model>_<case>.json`, its report and its logs, and the combined
+`report.md`, which has the test setting and this table:
 
 | Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
 |---|---|---|---|---|---|
-| Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.70 | 10.7 | 1.00x |
-| | | InstantTensor | 2.64 | 23.1 | 2.16x |
-| | | Model Streamer | 1.58 | 38.7 | 3.61x |
+| Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.67 | 10.8 | 1.00x |
+| | | InstantTensor | 2.48 | 24.6 | 2.29x |
+| | | Model Streamer | 1.60 | 38.1 | **3.54x** |
 
 Speedup is against Safetensors to the same destination.
 
@@ -99,8 +110,8 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |
-| `--ref-dir DIR` | none | Local copy of an S3 model, used for validation |
-| `--scratch-dir DIR` | none | Where Safetensors and InstantTensor download an S3 model to before loading it |
+| `--ref-dir DIR` | downloaded | Local copy of an S3 model, used for validation |
+| `--scratch-dir DIR` | `bench_scratch` | Where an S3 model is downloaded to |
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
 | `--no-calibrate` | off | Never calibrate; the ceiling columns are then empty |
 | `--repeats N` | 3 | Runs per test |
@@ -132,9 +143,10 @@ The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
 
-Without `--tests`, the GPU tests run when a GPU is present. For a model on S3,
-only the streamer tests run unless `--scratch-dir` is given. An InstantTensor test is left out, with
-a note, when `instanttensor` is not installed.
+Without `--tests`, the GPU tests run when a GPU is present and the model fits:
+one GPU has to hold the whole model, and with N ranks each GPU keeps a 1/N
+share of it. A test that cannot run is left out with a note, for example an
+InstantTensor test when `instanttensor` is not installed.
 
 In a distributed test every rank receives every tensor on its GPU, as the
 ranks of a tensor-parallel engine do. Each rank keeps a 1/N share of the
@@ -192,32 +204,37 @@ a proof.
 
 ## S3 and network filesystems
 
-For a model on S3, pass the `s3://bucket/prefix` and a local copy of the same
-files with `--ref-dir`, which gives the tensor names and the data to validate
-against. The endpoint and credentials are taken from the environment.
-
-The streamer reads the model from S3 directly. Safetensors and InstantTensor
-read local files only, so with `--scratch-dir DIR` their tests first download
-the model there with [`s5cmd`](https://github.com/peak/s5cmd) and then load
-it, as it was downloaded. Their load time is the two together, and
-`download_s` in the results says how much of it the download was. Without
-`--scratch-dir` only the streamer tests run. The directory is emptied of
-`*.safetensors` files before and after each run.
+For a model on S3, pass its `s3://bucket/prefix`. The endpoint and credentials
+are taken from the environment, and `s5cmd` (in `requirements.txt`) has to be
+on `PATH`:
 
 ```bash
-python3 benchmarks/bench.py s3://bucket/Qwen3-32B --ref-dir /mnt/models/Qwen3-32B \
-    --scratch-dir /mnt/scratch --profile machine_profile.json
+python3 benchmarks/bench.py s3://bucket/Qwen3-32B
 ```
 
-`suite.py` takes the same: `--scratch-dir DIR`, and `--ref-root DIR` in place
-of `--ref-dir`, where `DIR/<model name>` is each model's local copy.
+The streamer reads the model from S3 directly. Safetensors and InstantTensor
+read local files only, so their tests first download the model with
+[`s5cmd`](https://github.com/peak/s5cmd) and then load it, as it was
+downloaded. Their load time is the two together, and `download_s` in the
+results says how much of it the download was.
 
-S3 is not calibrated automatically, because the sweep reads the whole model
-many times. Calibrate it yourself and pass the profile; one profile serves
-every model in the same bucket:
+Two things are fetched for you, into the scratch directory (`bench_scratch`
+in the current directory, or `--scratch-dir DIR`), which needs free space of
+twice the model's size:
+
+- A reference copy of the model, for the tensor names and for validation. It
+  is downloaded once and removed after the run. `--ref-dir DIR` uses a local
+  copy you already have instead; for `suite.py`, `--ref-root DIR` does the
+  same with `DIR/<model name>` per model.
+- The copy each download-then-load run makes, removed after each run.
+
+On first use the machine is calibrated for S3 as well: a short sweep with
+`s5cmd` over the first 64 GiB of the model. The profile then serves every
+model in the same bucket. To calibrate more thoroughly, run it yourself and
+pass the profile:
 
 ```bash
-python3 benchmarks/calibrate.py --path /mnt/models/Qwen3-32B --s3-uri s3://bucket/Qwen3-32B --out machine_profile.json
+python3 benchmarks/calibrate.py --path /mnt/scratch --s3-uri s3://bucket/Qwen3-32B --out machine_profile.json
 ```
 
 A model on NFS or another network filesystem is benchmarked like a local one.

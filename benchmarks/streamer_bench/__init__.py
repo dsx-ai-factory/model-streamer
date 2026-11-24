@@ -39,6 +39,9 @@ DEFAULT_PROFILE = "machine_profile.json"
 VALIDATE = 20  # tensors compared byte for byte per run (across the ranks, for the distributed test)
 VALIDATE_MAX_MIB = 128  # the largest tensor picked for that
 TIMEOUT_S = 3600  # allowed per run
+SCRATCH = "bench_scratch"  # where an s3:// model is downloaded to, unless --scratch-dir says otherwise
+S3_CALIBRATE_GIB = 64  # how much of an s3:// model an automatic calibration reads
+SKIPPED = 3  # exit status of a run that measured nothing because the model does not fit where it was to go
 
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENTRY = os.path.join(BENCH_DIR, "bench.py")  # what a measured process is started with

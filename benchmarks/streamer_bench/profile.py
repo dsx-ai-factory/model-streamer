@@ -5,10 +5,11 @@ import json
 import math
 import os
 import platform
+import shutil
 import subprocess
 import sys
 
-from . import CALIBRATE, DEFAULT_PROFILE, TESTS, is_dist
+from . import CALIBRATE, DEFAULT_PROFILE, S3_CALIBRATE_GIB, TESTS, is_dist
 
 
 def load_json(path):
@@ -54,16 +55,21 @@ def get_profile(a, remote):
             return profile, os.path.abspath(DEFAULT_PROFILE)
         print(f"{DEFAULT_PROFILE} {why}")
     hint = "run calibrate.py yourself and pass --profile FILE. Continuing without ceilings."
+    where = a.scratch_dir if remote else a.model_dir  # the disk stage writes its test files here
+    cmd = [sys.executable, CALIBRATE, "--path", where, "--out", DEFAULT_PROFILE]
     if remote:
-        print(f"no machine profile for this S3 model, and S3 is not calibrated from here: {hint}", file=sys.stderr)
+        if not shutil.which("s5cmd"):
+            print(f"no machine profile for this S3 model, and calibrating S3 needs s5cmd: {hint}", file=sys.stderr)
+            return None, None
+        # a short sweep over part of the model: enough for a ceiling without reading a large model many times
+        cmd += ["--s3-uri", a.model_dir, "--s3-max-gib", str(S3_CALIBRATE_GIB), "--s3-concurrency", "4,8",
+                "--s3-part-mib", "8,32"]
+    if not os.access(where, os.W_OK):
+        print(f"no machine profile, and {where} cannot be written to calibrate on it: {hint}", file=sys.stderr)
         return None, None
-    if not os.access(a.model_dir, os.W_OK):
-        print(f"no machine profile, and {a.model_dir} cannot be written to calibrate on it: {hint}",
-              file=sys.stderr)
-        return None, None
-    print(f"calibrating this machine on {a.model_dir} first; the profile is kept in {DEFAULT_PROFILE} "
-          "(--profile FILE reuses one, --no-calibrate skips this)", flush=True)
-    if subprocess.run([sys.executable, CALIBRATE, "--path", a.model_dir, "--out", DEFAULT_PROFILE]).returncode:
+    print(f"calibrating this machine on {where}{' and ' + a.model_dir if remote else ''} first; the profile is "
+          f"kept in {DEFAULT_PROFILE} (--profile FILE reuses one, --no-calibrate skips this)", flush=True)
+    if subprocess.run(cmd).returncode:
         print("warning: calibration failed; continuing without ceilings", file=sys.stderr)
         return None, None
     return load_json(DEFAULT_PROFILE), os.path.abspath(DEFAULT_PROFILE)

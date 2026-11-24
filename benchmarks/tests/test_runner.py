@@ -209,11 +209,56 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
         self.assertIn("first downloaded to local disk with s5cmd, and then loaded", page)
 
-    def test_without_a_scratch_dir_only_the_streamer_reads_s3(self):
+    def test_without_s5cmd_only_the_streamer_reads_s3(self):
         a = argparse.Namespace(scratch_dir=None)
-        self.assertIn("--scratch-dir", runner.unavailable(a, "safetensors_cuda", remote=True))
-        self.assertIsNone(runner.unavailable(a, "streamer_cuda", remote=True))
-        self.assertIsNone(runner.unavailable(a, "safetensors_cuda"))
+        with mock.patch.object(runner.shutil, "which", return_value=None):
+            self.assertIn("s5cmd", runner.unavailable(a, "safetensors_cuda", remote=True))
+            self.assertIsNone(runner.unavailable(a, "streamer_cuda", remote=True))
+            self.assertIsNone(runner.unavailable(a, "safetensors_cuda"))
+
+    def test_an_s3_model_without_a_local_copy_gets_a_reference_download(self):
+        a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir=None, scratch_dir=None)
+        with mock.patch.object(runner.shutil, "which", return_value="/bin/s5cmd"), \
+                mock.patch("streamer_bench.calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 1 << 30)]), \
+                mock.patch.object(runner.os, "makedirs"), \
+                mock.patch.object(runner.shutil, "disk_usage", return_value=mock.Mock(free=10 << 30)), \
+                mock.patch.object(runner, "download", return_value=(1.0, None)) as download, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(runner.prepare_s3(a), os.path.join("bench_scratch", "ref"))
+        self.assertEqual((a.scratch_dir, a.ref_dir), ("bench_scratch", os.path.join("bench_scratch", "ref")))
+        download.assert_called_once_with("s3://b/Qwen", os.path.join("bench_scratch", "ref"), None)
+        # too little room for the reference copy and a download is said before anything is fetched
+        a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir=None, scratch_dir="/small")
+        with mock.patch.object(runner.shutil, "which", return_value="/bin/s5cmd"), \
+                mock.patch("streamer_bench.calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 8 << 30)]), \
+                mock.patch.object(runner.os, "makedirs"), \
+                mock.patch.object(runner.shutil, "disk_usage", return_value=mock.Mock(free=10 << 30)):
+            with self.assertRaises(SystemExit) as stop:
+                runner.prepare_s3(a)
+        self.assertIn("needs twice its size", str(stop.exception))
+        # a local copy given: nothing is downloaded
+        a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir="/local", scratch_dir=None)
+        self.assertIsNone(runner.prepare_s3(a))
+
+    def test_a_model_that_does_not_fit_the_gpus_is_not_run(self):
+        with mock.patch.object(runner, "gpu_memory_gib", return_value=[80.0] * 8):
+            self.assertIsNone(runner.misfit("cuda", 61.0))
+            self.assertIn("one GPU has 80 GiB", runner.misfit("cuda", 100.0))
+            self.assertIsNone(runner.misfit("cpu", 1000.0))
+            self.assertIsNone(runner.misfit("dist", 500.0, 8))
+            self.assertIn("needs at least 4 ranks", runner.misfit("dist", 280.0, 2))
+            self.assertNotIn("needs at least", runner.misfit("dist", 1000.0, 8))  # no rank count would do
+        big = os.path.join(self.dir.name, "m.safetensors")
+        with open(big, "wb") as f:
+            f.truncate(2 << 30)
+        with mock.patch.object(runner, "gpu_memory_gib", return_value=[1.0, 1.0]):
+            # asked for nothing in particular: the GPU tests are left out and the rest runs
+            code, out = self.run_bench(gpus=2, repeats=1)
+            self.assertEqual((code, self.ran()), (0, ["safetensors_cpu", "streamer_cpu"]))
+            # asked for the GPU: nothing to run, said with its own exit status
+            self.assertEqual(self.run_bench(gpus=2, repeats=1, device="cuda")[0], 3)
+            self.assertEqual(self.run_bench(gpus=2, repeats=1, nproc=2)[0], 3)
+            self.assertIn("cannot run", self.run_bench(gpus=2, tests="streamer_cuda")[0])
 
     def test_nproc_runs_the_distributed_tests(self):
         code, out = self.run_bench(gpus=8, nproc=2, repeats=1)

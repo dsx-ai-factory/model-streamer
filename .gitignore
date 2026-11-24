@@ -8,4 +8,5 @@ bench_results.json
 bench_results.md
 bench_report.md
 bench_suite/
+bench_scratch/
 machine_profile.json
