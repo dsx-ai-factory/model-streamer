@@ -54,7 +54,7 @@ class RunnerTest(unittest.TestCase):
 
     def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, **over):
         a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, tests="", env=[],
-                               warm=False,
+                               warm=False, scratch_dir=None,
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -66,7 +66,7 @@ class RunnerTest(unittest.TestCase):
         code = 0
         with mock.patch.object(runner, "launch", fake), \
                 mock.patch.object(runner, "unavailable",
-                                  lambda test: missing if "instanttensor" in test else None), \
+                                  lambda a, test, remote=False: missing if "instanttensor" in test else None), \
                 mock.patch.object(runner, "gpu_count", return_value=gpus), \
                 mock.patch.object(runner, "describe_machine", return_value=dict(MACHINE)), \
                 mock.patch.object(runner, "get_profile", return_value=(prof, "p.json" if prof else None)), \
@@ -172,6 +172,36 @@ class RunnerTest(unittest.TestCase):
         # asked for by name, it is an error instead
         self.assertIn("cannot run",
                       self.run_bench(tests="instanttensor_cuda", missing="instanttensor is not installed")[0])
+
+    def test_an_s3_model_is_downloaded_for_the_loaders_that_read_local_files(self):
+        scratch = os.path.join(self.dir.name, "scratch")
+        with mock.patch.object(runner, "download", return_value=(15.0, None)) as download, \
+                mock.patch.object(runner, "clear") as clear:
+            code, out = self.run_bench(gpus=1, repeats=1, device="cuda", model_dir="s3://b/Qwen",
+                                       ref_dir=self.dir.name, scratch_dir=scratch)
+        self.assertEqual(code, 0)
+        self.assertEqual(download.call_count, 2)  # not for the streamer
+        self.assertEqual(clear.call_count, 2)
+        by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
+        self.assertEqual(by["safetensors_cuda"][2], scratch)  # loads what was downloaded
+        self.assertEqual(by["streamer_cuda"][2], "s3://b/Qwen")
+        self.assertIn("--ref-dir", by["streamer_cuda"])
+        self.assertNotIn("--ref-dir", by["safetensors_cuda"])
+        st, it, streamer = out["results"]
+        self.assertEqual((st["load_s"], st["download_s"], st["runs"][0]["download_s"]), (35.0, 15.0, 15.0))
+        self.assertEqual((it["load_s"], streamer["load_s"]), (20.0, 5.0))
+        self.assertEqual((it["speedup"], streamer["speedup"]), (1.75, 7.0))
+        self.assertNotIn("download_s", streamer)
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            page = f.read()
+        self.assertIn("| Qwen on S3 | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
+        self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
+
+    def test_without_a_scratch_dir_only_the_streamer_reads_s3(self):
+        a = argparse.Namespace(scratch_dir=None)
+        self.assertIn("--scratch-dir", runner.unavailable(a, "safetensors_cuda", remote=True))
+        self.assertIsNone(runner.unavailable(a, "streamer_cuda", remote=True))
+        self.assertIsNone(runner.unavailable(a, "safetensors_cuda"))
 
     def test_nproc_runs_the_distributed_tests(self):
         code, out = self.run_bench(gpus=8, nproc=2, repeats=1)

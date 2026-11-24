@@ -24,8 +24,9 @@ def profile_mismatch(profile, a, remote):
     if remote:
         if not profile.get("ceilings_gibps", {}).get("s3_get_parallel"):
             return "has no S3 ceilings"
-        if (host.get("s3") or {}).get("uri", "").rstrip("/") != a.model_dir.rstrip("/"):
-            return "was measured against another S3 prefix"
+        bucket = lambda uri: uri[len("s3://"):].split("/")[0]  # one bucket is one storage, whatever the prefix
+        if bucket((host.get("s3") or {}).get("uri", "")) != bucket(a.model_dir):
+            return "was measured against another S3 bucket"
         return None
     from .calibration.host import fs_type
     mount = fs_type(a.model_dir)["mount"]

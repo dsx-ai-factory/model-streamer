@@ -43,6 +43,8 @@ def main():
                     help="set for every measured process (repeatable)")
     ap.add_argument("--warm", action="store_true", help="load from the page cache instead of evicting first")
     ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation")
+    ap.add_argument("--scratch-dir", help="where the loaders that read only local files download an s3:// model "
+                                          "to; their load time then includes the download")
     ap.add_argument("--profile", help=f"machine profile from calibrate.py (default: {DEFAULT_PROFILE} here, "
                                       "made by calibrating first when it is missing)")
     ap.add_argument("--no-calibrate", action="store_true",

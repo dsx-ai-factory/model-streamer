@@ -23,6 +23,8 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
         if all("cpu_s" in r for r in good):
             s.update(cpu_s_per_gib=round(statistics.median(r["cpu_s"] for r in good) / model["gib"], 2),
                      peak_rss_gib=max(r["peak_rss_gib"] for r in good))
+        if all("download_s" in r for r in good):
+            s["download_s"] = round(statistics.median(r["download_s"] for r in good), 2)
         if strategies:
             s["fs_strategy"] = sorted(strategies)
         scored, candidates = ceilings_for(name, profile, remote, warm)

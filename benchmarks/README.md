@@ -99,6 +99,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |
 | `--ref-dir DIR` | none | Local copy of an S3 model, used for validation |
+| `--scratch-dir DIR` | none | Where Safetensors and InstantTensor download an S3 model to before loading it |
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
 | `--no-calibrate` | off | Never calibrate; the ceiling columns are then empty |
 | `--repeats N` | 3 | Runs per test |
@@ -130,8 +131,8 @@ The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
 
-Without `--tests`, the GPU tests run when a GPU is present, and only the
-streamer tests run for a model on S3. An InstantTensor test is left out, with
+Without `--tests`, the GPU tests run when a GPU is present. For a model on S3,
+only the streamer tests run unless `--scratch-dir` is given. An InstantTensor test is left out, with
 a note, when `instanttensor` is not installed.
 
 In a distributed test every rank receives every tensor on its GPU, as the
@@ -191,12 +192,31 @@ a proof.
 ## S3 and network filesystems
 
 For a model on S3, pass the `s3://bucket/prefix` and a local copy of the same
-files with `--ref-dir`. The endpoint and credentials are taken from the
-environment. S3 is not calibrated automatically, because the sweep reads the
-whole model many times. Calibrate it yourself and pass the profile:
+files with `--ref-dir`, which gives the tensor names and the data to validate
+against. The endpoint and credentials are taken from the environment.
+
+The streamer reads the model from S3 directly. Safetensors and InstantTensor
+read local files only, so with `--scratch-dir DIR` their tests first download
+the model there with [`s5cmd`](https://github.com/peak/s5cmd) and then load
+it, as it was downloaded. Their load time is the two together, and
+`download_s` in the results says how much of it the download was. Without
+`--scratch-dir` only the streamer tests run. The directory is emptied of
+`*.safetensors` files before and after each run.
 
 ```bash
-python3 benchmarks/calibrate.py --skip disk --s3-uri s3://bucket/prefix --out machine_profile.json
+python3 benchmarks/bench.py s3://bucket/Qwen3-32B --ref-dir /mnt/models/Qwen3-32B \
+    --scratch-dir /mnt/scratch --profile machine_profile.json
+```
+
+`suite.py` takes the same: `--scratch-dir DIR`, and `--ref-root DIR` in place
+of `--ref-dir`, where `DIR/<model name>` is each model's local copy.
+
+S3 is not calibrated automatically, because the sweep reads the whole model
+many times. Calibrate it yourself and pass the profile; one profile serves
+every model in the same bucket:
+
+```bash
+python3 benchmarks/calibrate.py --path /mnt/models/Qwen3-32B --s3-uri s3://bucket/Qwen3-32B --out machine_profile.json
 ```
 
 A model on NFS or another network filesystem is benchmarked like a local one.

@@ -18,11 +18,21 @@ def _num(v, digits=1):
 
 
 def _model(out):
-    return os.path.basename(out["model"]["path"].rstrip("/"))
+    name = os.path.basename(out["model"]["path"].rstrip("/"))
+    return f"{name} on S3" if out["model"]["path"].startswith("s3://") else name
 
 
 def _loader(s):
-    return LOADERS.get(s.get("loader"), s["test"])
+    """The loader's name; "download + ..." when the model was first downloaded from S3 to local disk."""
+    name = LOADERS.get(s.get("loader"), s["test"])
+    return f"download + {name}" if "download_s" in s else name
+
+
+def _load_time(s):
+    time = _num(s["load_s"], 2)
+    if "download_s" in s:
+        time += f' ({_num(s["download_s"], 2)} download + {_num(s["load_s"] - s["download_s"], 2)} load)'
+    return time
 
 
 def _destination(out, group):
@@ -57,7 +67,7 @@ def table(outs):
             if best > 1 and s.get("speedup") == best:
                 speedup = f"**{speedup}**"
             invalid = "" if s["ok"] else " (invalid data)"
-            lines.append(f'{first}| {_loader(s)} | {_num(s["load_s"], 2)}{invalid} | {_num(s["gibps"])} | {speedup} |')
+            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |')
     return "\n".join(lines)
 
 
@@ -77,6 +87,15 @@ def _storage(out):
         return None
     rate = ((out.get("calibration") or {}).get("ceilings_gibps") or {}).get("disk_direct_read_parallel")
     return f'{storage["type"]} on {storage["mount"]}' + (f", {rate:.0f} GiB/s parallel direct read" if rate else "")
+
+
+def _s3(out):
+    if not out["model"]["path"].startswith("s3://"):
+        return None
+    cal = out.get("calibration") or {}
+    rate = (cal.get("ceilings_gibps") or {}).get("s3_get_parallel")
+    endpoint = ((cal.get("host") or {}).get("s3") or {}).get("endpoint")
+    return (endpoint or "S3") + (f", {rate:.0f} GiB/s parallel GET with s5cmd" if rate else "")
 
 
 def _model_size(out):
@@ -101,6 +120,7 @@ def setting(outs):
                                                f'{o["environment"].get("mem_total_gib")} GiB')),
         ("Kernel", _each(outs, lambda o: o["environment"].get("kernel"))),
         ("Storage", _each(outs, _storage)),
+        ("S3", _each(outs, _s3)),
         ("Models", _each(outs, _model_size)),
         ("Runs", _each(outs, _runs)),
         ("Settings", _each(outs, lambda o: " ".join(f"{k}={v}" for k, v in o["settings"].get("env", {}).items()))),
@@ -133,6 +153,8 @@ def render(outs):
 - Speedup is against Safetensors to the same destination.
 - With several GPUs, the load time is the time until the slowest GPU finishes.
 - InstantTensor loads to GPUs only, so it has no host memory entry.
+- Safetensors and InstantTensor read local files only. For a model on S3 their load time is the download
+  to local disk with s5cmd plus the load from there; the streamer reads from S3 directly.
 
 ## How each loader is run
 

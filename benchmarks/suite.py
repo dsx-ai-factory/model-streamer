@@ -35,6 +35,10 @@ def main():
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
     ap.add_argument("--profile", help="machine profile from calibrate.py, as for bench.py")
+    ap.add_argument("--ref-root", metavar="DIR", help="for s3:// models: DIR/<model name> is the local copy used "
+                                                      "for tensor names and validation")
+    ap.add_argument("--scratch-dir", metavar="DIR", help="for s3:// models: where the loaders that read only local "
+                                                         "files download the model to")
     ap.add_argument("--no-calibrate", action="store_true", help="never calibrate")
     a = ap.parse_args()
     if a.multi_gpu and not a.nproc:
@@ -52,13 +56,20 @@ def main():
         common += ["--profile", a.profile]
     if a.no_calibrate:
         common.append("--no-calibrate")
+    if a.scratch_dir:
+        common += ["--scratch-dir", a.scratch_dir]
     written, failed = [], []
     for name, model, how in cases:
         out = os.path.join(a.out_dir, f"{name}.json")
         print(f"\n=== {name}: {model}", flush=True)
         if os.path.exists(out):
             os.remove(out)  # a case that gives no results must not report an older run's
-        code = subprocess.run([sys.executable, BENCH, model, *how, *common, "--out", out,
+        ref = []
+        if model.startswith("s3://"):
+            if not a.ref_root:
+                ap.error("an s3:// model needs --ref-root DIR, with a local copy in DIR/<model name>")
+            ref = ["--ref-dir", os.path.join(a.ref_root, os.path.basename(model.rstrip("/")))]
+        code = subprocess.run([sys.executable, BENCH, model, *how, *common, *ref, "--out", out,
                                "--log-dir", os.path.join(a.out_dir, f"logs_{name}")]).returncode
         if os.path.exists(out):
             written.append(out)

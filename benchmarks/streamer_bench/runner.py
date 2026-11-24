@@ -6,10 +6,12 @@ import json
 import os
 import platform
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 from . import ENTRY, GIB, TESTS, TIMEOUT_S, is_dist, loader_of
 from .files import evict, is_remote, model_files, prime
@@ -25,11 +27,41 @@ def gpu_count():
         return 0
 
 
-def unavailable(test):
-    """Why a test cannot run in this Python, or None: its loader has to be installed."""
+def unavailable(a, test, remote=False):
+    """Why a test cannot run here, or None. Its loader has to be installed, and a loader that reads only
+    local files needs somewhere to download an s3:// model to, and s5cmd to do it."""
     if loader_of(test) == "instanttensor" and importlib.util.find_spec("instanttensor") is None:
         return f"instanttensor is not installed in this Python ({sys.executable}): pip install instanttensor"
+    if remote and loader_of(test) != "streamer":
+        if not a.scratch_dir:
+            return "it reads local files; give --scratch-dir DIR to download the s3:// model there first"
+        if not shutil.which("s5cmd"):
+            return "downloading the s3:// model needs s5cmd on PATH (pip install s5cmd)"
     return None
+
+
+def download(uri, scratch, profile):
+    """Download an s3:// model's *.safetensors files into the emptied scratch directory with s5cmd:
+    (seconds, None), or (None, why it failed). The parts in flight per file and the part size are the
+    profile's best S3 setting when it has one."""
+    from .calibration.s3 import s5cmd
+    best = ((profile or {}).get("params") or {}).get("s3_best") or {}
+    clear(scratch)
+    cmd = s5cmd("cp", "-c", str(best.get("concurrency_per_object", 8)), "-p", str(best.get("part_mib", 8)),
+                f"{uri.rstrip('/')}/*.safetensors", scratch.rstrip("/") + "/")
+    t0 = time.perf_counter()
+    p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if p.returncode:
+        return None, f"s5cmd could not download {uri}: {p.stderr[-800:]}"
+    return time.perf_counter() - t0, None
+
+
+def clear(scratch):
+    """Empty the scratch directory of model files, and make it when it is missing."""
+    os.makedirs(scratch, exist_ok=True)
+    for name in os.listdir(scratch):
+        if name.endswith(".safetensors"):
+            os.remove(os.path.join(scratch, name))
 
 
 def describe_machine(a, remote):
@@ -47,7 +79,7 @@ def describe_machine(a, remote):
 def select_tests(a, remote):
     """The tests to run: --tests, else the distributed ones with --nproc, else the single-process ones
     that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). A
-    test whose loader is not installed is left out with a note unless --tests asked for it."""
+    test that cannot run here is left out with a note unless --tests asked for it."""
     if a.tests:
         names = a.tests.split(",")
     else:
@@ -55,19 +87,15 @@ def select_tests(a, remote):
         names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
         if a.device and not a.nproc:
             names = [n for n in names if TESTS[n]["device"] == a.device]
-        if remote:
-            names = [n for n in names if loader_of(n) == "streamer"]
         for n in list(names):
-            if unavailable(n):
-                print(f"skipping {n}: {unavailable(n)}", file=sys.stderr)
+            if unavailable(a, n, remote):
+                print(f"skipping {n}: {unavailable(a, n, remote)}", file=sys.stderr)
                 names.remove(n)
     for n in names:
         if n not in TESTS:
             sys.exit(f"unknown test {n}; choose from {', '.join(TESTS)}")
-        if remote and loader_of(n) != "streamer":
-            sys.exit(f"{n} reads local files; only the streamer tests apply to an s3:// model")
-        if a.tests and unavailable(n):
-            sys.exit(f"{n} cannot run: {unavailable(n)}")
+        if a.tests and unavailable(a, n, remote):
+            sys.exit(f"{n} cannot run: {unavailable(a, n, remote)}")
     if not names:
         sys.exit("no test applies here" + (f" with --device {a.device}: this machine has no GPU" if a.device else ""))
     dist = [n for n in names if is_dist(n)]
@@ -114,24 +142,36 @@ def launch(cmd, env, timeout):
             raise
 
 
-def run_once(a, test, files, remote, env, tag):
+def run_once(a, test, files, remote, env, tag, profile=None):
     """One measured process: (the run's record, facts about the model and the streamer). A run that gave
     no result is ({"failed": why}, None). The record holds what differs from run to run; the measured
-    process's full record is in the log under --log-dir."""
+    process's full record is in the log under --log-dir.
+
+    An s3:// model is read from S3 by the streamer. The other loaders read local files only, so for them
+    the run is the download to --scratch-dir followed by the load from there, as it is downloaded: its
+    load time is the two together, and download_s says how much of it the download was."""
     warnings = []
+    model_dir, download_s = a.model_dir, None
+    if remote and loader_of(test) != "streamer":
+        download_s, why = download(a.model_dir, a.scratch_dir, profile)
+        if why:
+            return {"failed": why}, None
+        model_dir = a.scratch_dir
     if not remote:
         left = prime(files) if a.warm else evict(files)
         if a.warm and left < sum(os.path.getsize(f) for f in files):
             warnings.append(f"only {left / GIB:.1f} GiB in the page cache after priming")
         if left and not a.warm:
             warnings.append(f"{left / GIB:.1f} GiB still in the page cache before the run")
-    args = [ENTRY, a.model_dir, "--child", test]
-    if a.ref_dir:
+    args = [ENTRY, model_dir, "--child", test]
+    if a.ref_dir and model_dir == a.model_dir:
         args += ["--ref-dir", a.ref_dir]
     cmd = [sys.executable]
     if is_dist(test):
         cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]
     out, err, killed = launch(cmd + args, env, TIMEOUT_S)
+    if download_s is not None:
+        clear(a.scratch_dir)
     if a.log_dir:
         with open(os.path.join(a.log_dir, f"{tag.replace(' ', '-')}.log"), "w") as f:
             f.write(out + "\n--- stderr ---\n" + err)
@@ -142,8 +182,12 @@ def run_once(a, test, files, remote, env, tag):
     raw = json.loads(line[7:])
     ranks = raw if is_dist(test) else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
+    if download_s is not None:
+        load_s = round(download_s + load_s, 3)
     r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2),
          "cpu_s": round(sum(x["cpu_s"] for x in ranks), 2), "peak_rss_gib": max(x["peak_rss_gib"] for x in ranks)}
+    if download_s is not None:
+        r["download_s"] = round(download_s, 3)
     if is_dist(test):
         r["rank_s"] = [x["rank_s"] for x in ranks]
         r["peak_gpu_gib"] = max(x["peak_gpu_gib"] for x in ranks)
@@ -192,7 +236,7 @@ def main(a):
     for rep in range(a.repeats):  # interleaved across the tests, so drift hits all alike
         for name in names:
             tag = f"{name} run {rep}"
-            r, facts = run_once(a, name, files, remote, env, tag)
+            r, facts = run_once(a, name, files, remote, env, tag, profile)
             runs_of[name].append(r)
             if facts is None:
                 print(f"  {tag}: FAILED\n{r['failed']}", file=sys.stderr, flush=True)
@@ -206,6 +250,7 @@ def main(a):
             if facts["gpus"]:
                 environment["gpus"] = facts["gpus"]
             print(f"  {tag}: {r['load_s']}s {r['gibps']} GiB/s"
+                  + (f" (download {r['download_s']}s)" if "download_s" in r else "")
                   + (f" [{','.join(facts['fs_strategy'])}]" if facts["fs_strategy"] else "")
                   + (f"  INVALID: {r['errors'][0]}" if "errors" in r else ""), flush=True)
             for w in r.get("warnings", []):
