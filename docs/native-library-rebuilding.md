@@ -218,8 +218,9 @@ Before distributing a binary release, maintainers must provide recipients with:
   binary, with its license and notices. A license-text download alone is not source.
 - The dependency versions, checksums and build instructions needed to rebuild
   the core with a modified library: `cpp/MODULE.bazel`, the registry's
-  `source.json` and `BUILD.bazel` overlay for each module version, and the patches
-  under `cpp/third_party`.
+  `source.json` and every overlay file for each module version (`MODULE.bazel`,
+  `BUILD.bazel`, and helpers such as liburing's `liburing_configure.bzl`), and the
+  patches under `cpp/third_party`.
 
 Publish those source materials alongside the downloadable binaries and link them
 from the release notes. Check that recipients can download them without employee
