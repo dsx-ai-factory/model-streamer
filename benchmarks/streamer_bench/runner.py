@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from . import ENTRY, GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, loader_of
-from .files import evict, is_remote, model_files, prime
+from .files import describe, evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
 
@@ -301,7 +301,7 @@ def run(a, remote):
     strategy_of = {n: set() for n in names}
     environment = describe_machine(a, remote)
     versions = {}
-    model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir)}
+    model = {"path": a.model_dir if remote else os.path.abspath(a.model_dir), **describe(ref)}
     pkgs = set()
     for rep in range(a.repeats):  # interleaved across the tests, so drift hits all alike
         for name in names:

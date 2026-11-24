@@ -30,6 +30,22 @@ def model_files(a):
     return [f"{a.model_dir.rstrip('/')}/{os.path.basename(f)}" for f in ref], ref
 
 
+def describe(files):
+    """What a model's files hold, from their headers: how many files and tensors, the tensors' median and
+    largest size in bytes, and each data type's share of the bytes."""
+    import statistics
+    sizes, by_dtype = [], {}
+    for path in files:
+        for meta in read_header(path).values():
+            lo, hi = meta["data_offsets"]
+            sizes.append(hi - lo)
+            by_dtype[meta["dtype"]] = by_dtype.get(meta["dtype"], 0) + hi - lo
+    total = sum(sizes) or 1
+    shares = {k: round(v / total, 4) for k, v in sorted(by_dtype.items(), key=lambda kv: -kv[1])}
+    return {"files": len(files), "tensors": len(sizes), "tensor_bytes_median": int(statistics.median(sizes or [0])),
+            "tensor_bytes_largest": max(sizes or [0]), "dtypes": shares}
+
+
 def read_header(path):
     with open(path, "rb") as f:
         (n,) = struct.unpack("<Q", f.read(8))

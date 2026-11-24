@@ -46,7 +46,10 @@ class RunnerTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        open(os.path.join(self.dir.name, "m.safetensors"), "w").close()
+        header = json.dumps({"a": {"dtype": "BF16", "shape": [6], "data_offsets": [0, 12]},
+                             "b": {"dtype": "F32", "shape": [1], "data_offsets": [12, 16]}}).encode()
+        with open(os.path.join(self.dir.name, "m.safetensors"), "wb") as f:
+            f.write(len(header).to_bytes(8, "little") + header + bytes(16))
         self.out = os.path.join(self.dir.name, "results.json")
         for name in ("evict", "prime"):  # the page cache calls are Linux only
             p = mock.patch.object(runner, name, return_value=0)
@@ -86,6 +89,8 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out["streamer"], [PKG])
         self.assertEqual(out["model"]["gib"], 40.0)
+        self.assertEqual((out["model"]["files"], out["model"]["tensor_bytes_largest"], out["model"]["dtypes"]),
+                         (1, 12, {"BF16": 0.75, "F32": 0.25}))
         cpu, cuda, base = out["results"]
         self.assertEqual((cpu["gibps"], cpu["load_s"], cpu["cpu_s_per_gib"]), (8.0, 5.0, 0.2))
         self.assertEqual(cpu["ceiling"], {"name": "disk_direct_read_parallel", "gibps": 10.0, "pct": 80.0,
@@ -131,6 +136,7 @@ class RunnerTest(unittest.TestCase):
             page = f.read()
         self.assertIn("- Storage: ext4, 10 GiB/s parallel direct read", page)
         self.assertIn("- CPUs: 2 × Xeon 8570, 32 CPUs", page)
+        self.assertIn(f"| {os.path.basename(self.dir.name)} | 40.0 GiB | 1 | 2 | 8 B | 12 B | BF16 75%, F32 25% |", page)
         self.assertIn("- Memory: 64.0 GiB DDR5 (4 × 16 GiB)", page)
         self.assertNotIn("/mnt", page)
         self.assertIn("## Test on local disk (10 GiB/s parallel direct read)", page)
@@ -250,7 +256,7 @@ class RunnerTest(unittest.TestCase):
             self.assertIn("needs at least 4 ranks", runner.misfit("dist", 280.0, 2))
             self.assertNotIn("needs at least", runner.misfit("dist", 1000.0, 8))  # no rank count would do
         big = os.path.join(self.dir.name, "m.safetensors")
-        with open(big, "wb") as f:
+        with open(big, "r+b") as f:  # a sparse 2 GiB file with the same header
             f.truncate(2 << 30)
         with mock.patch.object(runner, "gpu_memory_gib", return_value=[1.0, 1.0]):
             # asked for nothing in particular: the GPU tests are left out and the rest runs

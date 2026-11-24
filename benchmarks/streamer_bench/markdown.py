@@ -123,8 +123,32 @@ def _memory(out):
     return f'{env.get("mem_total_gib")} GiB{kind}'
 
 
-def _model_size(out):
-    return f'{_model(out)} ({out["model"]["gib"]} GiB)' if "gib" in out["model"] else _model(out)
+def _bytes(n):
+    """A size in the unit that reads best, for tensors from a few bytes to gigabytes."""
+    for unit, scale in (("GiB", 2**30), ("MiB", 2**20), ("KiB", 2**10)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} B"
+
+
+def _dtypes(shares):
+    """The data types that hold at least 1% of the bytes, with their share when there are several."""
+    main = {k: v for k, v in shares.items() if v >= 0.01} or shares
+    return ", ".join(k if len(main) == 1 else f"{k} {100 * v:.0f}%" for k, v in main.items())
+
+
+def models(outs):
+    """A row per model: its size, files and tensors, the tensors' median and largest size, and data types."""
+    rows = {}
+    for out in outs:
+        m = out["model"]
+        rows.setdefault(_model(out), "| {} | {} | {} | {} | {} | {} | {} |".format(
+            _model(out), f'{m["gib"]} GiB' if "gib" in m else "n/a", m.get("files", "n/a"), m.get("tensors", "n/a"),
+            _bytes(m["tensor_bytes_median"]) if "tensor_bytes_median" in m else "n/a",
+            _bytes(m["tensor_bytes_largest"]) if "tensor_bytes_largest" in m else "n/a",
+            _dtypes(m["dtypes"]) if m.get("dtypes") else "n/a"))
+    return "\n".join(["| Model | Size | Files | Tensors | Median tensor | Largest tensor | Data type |",
+                      "|---|---|---|---|---|---|---|", *rows.values()])
 
 
 def _runs(out):
@@ -162,7 +186,6 @@ def setting(outs):
         ("Kernel", _each(outs, lambda o: o["environment"].get("kernel"))),
         ("Storage", _each(outs, _storage)),
         ("S3", _each(outs, _s3)),
-        ("Models", _each(outs, _model_size)),
         ("Runs", _each(outs, _runs)),
         ("Settings", _settings(outs)),
         ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
@@ -205,6 +228,10 @@ def results(outs):
 
 def render(outs):
     return f"""# Load benchmark
+
+## Models
+
+{models(outs)}
 
 ## Test setting
 
