@@ -28,7 +28,7 @@ Dependencies
 | Package | Version | License | License source |
 |---------|---------|---------|----------------|
 | `liburing` | 2.14.bcr.2 | MIT | https://github.com/axboe/liburing/blob/liburing-2.14/LICENSE (and its Bazel modules) |
-| `libaio` | 0.3.113.bcr.1 | LGPL-2.1 | https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz#libaio-0.3.113/COPYING (and its Bazel modules) |
+| `libaio` | 0.3.113.bcr.2 | LGPL-2.1 | https://codeberg.org/jmoyer/libaio/releases/download/libaio-0.3.113/libaio-0.3.113.tar.gz#libaio-0.3.113/COPYING (and its Bazel modules) |
 | `gcc-runtime` | 9 | GPL-3.0-or-later WITH GCC-exception-3.1 | https://spdx.org/licenses/GPL-3.0-or-later.html |
 | `glibc-nonshared` | 2.31 | LGPL-2.1-or-later | https://spdx.org/licenses/LGPL-2.1-or-later.html |
 | `nvidia-cuda-headers` | 12.8.57 | LicenseRef-NVIDIA-CUDA-Header-Notice | https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/linux-x86_64/cuda_cudart-linux-x86_64-12.8.57-archive.tar.xz#cuda_cudart-linux-x86_64-12.8.57-archive/include/cuda.h |

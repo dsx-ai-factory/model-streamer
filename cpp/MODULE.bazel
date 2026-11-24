@@ -17,7 +17,7 @@ bazel_dep(name = "googletest", version = "1.16.0", dev_dependency = True, repo_n
 # attribution: shipped module=py/runai_model_streamer,cpp
 bazel_dep(name = "liburing", version = "2.14.bcr.2")
 # attribution: shipped module=py/runai_model_streamer,cpp
-bazel_dep(name = "libaio", version = "0.3.113.bcr.1")
+bazel_dep(name = "libaio", version = "0.3.113.bcr.2")
 
 # liburing's registry build runs its configure with --use-libc, as the devcontainer build did; the
 # patch keeps the stack protector that build had (see the patch).
