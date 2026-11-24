@@ -130,8 +130,10 @@ def load(loader, files, device, distributed=False):
     import torch
     if loader == "streamer":
         from runai_model_streamer import SafetensorsStreamer
+        # The GPU by its index, as vLLM's loader passes it, not left for the streamer to resolve.
+        target = f"cuda:{torch.cuda.current_device()}" if device == "cuda" else device
         with SafetensorsStreamer() as s:
-            s.stream_files(files, device=device, is_distributed=distributed)
+            s.stream_files(files, device=target, is_distributed=distributed)
             yield from s.get_tensors()
     elif loader == "instanttensor":
         import torch.distributed as dist
@@ -200,7 +202,11 @@ def distributed(a):
     Every rank receives every tensor on its GPU, as a tensor-parallel engine's ranks do. Rank r keeps the
     tensors whose name hashes (crc32) to r mod world (a 1/world share, so device memory is under real
     pressure) and drops the rest. load_s is from a barrier before the load to a barrier after the last
-    tensor, i.e. the slowest rank."""
+    tensor, i.e. the slowest rank.
+
+    The barriers run on a gloo group of their own. A barrier on the job's NCCL group would set up its
+    communicator before the clock starts, and a loader that sends on that group would then skip a cost
+    it pays in an engine: vLLM runs no collective before it loads the weights."""
     import torch
     import torch.distributed as dist
 
@@ -218,7 +224,8 @@ def distributed(a):
 
     kept, seen, nbytes = {}, {}, 0
     torch.zeros(1, device="cuda")
-    dist.barrier()
+    lineup = dist.new_group(backend="gloo")
+    dist.barrier(group=lineup)
     torch.cuda.synchronize()
     ru0 = resource.getrusage(resource.RUSAGE_SELF)
     t0 = time.perf_counter()
@@ -228,8 +235,9 @@ def distributed(a):
         seen[name] = (tuple(t.shape), n)
         if name in keep:
             kept[name] = t
+    torch.cuda.synchronize()  # the gloo barrier does not wait for the GPU
     t_rank = time.perf_counter() - t0
-    dist.barrier()
+    dist.barrier(group=lineup)
     wall = time.perf_counter() - t0
     ru1 = resource.getrusage(resource.RUSAGE_SELF)
 

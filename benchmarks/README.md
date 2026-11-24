@@ -84,7 +84,7 @@ A test is one loader bringing the whole model to one destination:
 | Safetensors | `safe_open`, then every page of each tensor is touched | `safe_open` + `.to("cuda")` per tensor | Every rank does the same load itself |
 | Safetensors + prefetch | The same, while threads read the files into the page cache ahead of it | The same | The same; the ranks split the files to prefetch |
 | InstantTensor | | `instanttensor.safe_open(files, device=...)` | The same with the ranks' process group |
-| Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda")` | `stream_files(files, device="cuda", is_distributed=True)` |
+| Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda:0")` | `stream_files(files, device="cuda:N", is_distributed=True)`, N being the rank's GPU |
 
 The prefetch is what vLLM does with `--safetensors-load-strategy=prefetch`:
 8 threads read the files in 16 MiB blocks into the page cache, in the
@@ -108,6 +108,11 @@ tensors, so device memory is under real pressure, and drops the rest. The
 load time is measured from a barrier before the load to a barrier after the
 last tensor, which makes it the slowest rank's time. Each rank needs its own
 GPU, so `--nproc` cannot be more than the number of GPUs on the machine.
+
+The job's NCCL group has carried no collective when the clock starts, as in
+vLLM, which runs none before it loads the weights. The barriers therefore run
+on a separate gloo group, and a loader that sends on the job's group pays for
+setting up its communicator inside the measured time.
 
 ### vLLM tests
 
