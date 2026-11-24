@@ -158,6 +158,18 @@ def setting(outs):
     return "\n".join(f"- {k}: {v}" for k, v in rows if v)
 
 
+def _download_note(group):
+    """How the loaders that read only local files got an S3 model, when any of them ran."""
+    if not any("download_s" in s for out in group for s in out["results"]):
+        return ""
+    best = next((b for b in (((o.get("calibration") or {}).get("params") or {}).get("s3_best") for o in group)
+                 if b), None)
+    how = (f', with the settings the calibration measured as fastest ({best["objects"]} files at once, '
+           f'{best["concurrency_per_object"]} parts of {best["part_mib"]} MiB each)') if best else ""
+    return ("\n\nSafetensors and InstantTensor read local files only. For them the model is first downloaded "
+            f"to local disk with s5cmd{how}, and then loaded; the load time is the two together.")
+
+
 def results(outs):
     """The tables: one for the models read from local storage and one for those on S3, each under a
     heading that names the storage and the rate measured for it."""
@@ -169,7 +181,7 @@ def results(outs):
             continue
         rates = [r for r in (_rate(o, ceiling) for o in group) if r]
         measured = f" ({min(rates):.0f} GiB/s {how})" if rates else ""
-        parts.append(f"## Test on {what}{measured}\n\n{table(group)}")
+        parts.append(f"## Test on {what}{measured}\n\n{table(group)}" + (_download_note(group) if on_s3 else ""))
     return "\n\n".join(parts)
 
 

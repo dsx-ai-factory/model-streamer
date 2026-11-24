@@ -168,6 +168,7 @@ class RunnerTest(unittest.TestCase):
                      "- Runs: median of 1 per loader, cold page cache"):
             self.assertIn(text.replace("Qwen", os.path.basename(self.dir.name)), page)
         self.assertTrue(page.rstrip().endswith("|"))  # the report ends with its table
+        self.assertNotIn("s5cmd", page)
         # without the safetensors test there is nothing to compare with
         _, out = self.run_bench(tests="streamer_cuda", repeats=1)
         self.assertNotIn("speedup", out["results"][0])
@@ -206,6 +207,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("## Test on S3\n", page)
         self.assertIn("| Qwen | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
         self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
+        self.assertIn("first downloaded to local disk with s5cmd, and then loaded", page)
 
     def test_without_a_scratch_dir_only_the_streamer_reads_s3(self):
         a = argparse.Namespace(scratch_dir=None)
