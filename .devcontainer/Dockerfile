@@ -86,7 +86,7 @@ ARG CURL_VERSION=8_13_0
 ARG ZLIB_VERSION=1.3.1
 # attribution: shipped module=py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-tags depName=GNOME/libxml2 extractVersion=^v(?<version>.*)$
-ARG LIBXML2_VERSION=2.13.5
+ARG LIBXML2_VERSION=2.15.4
 COPY .devcontainer/scripts/build-basic-libs.sh /tmp/build-basic-libs.sh
 RUN OPENSSL_VERSION="$OPENSSL_VERSION" CURL_VERSION="$CURL_VERSION" ZLIB_VERSION="$ZLIB_VERSION" \
     LIBXML2_VERSION="$LIBXML2_VERSION" bash /tmp/build-basic-libs.sh "$TARGETARCH"

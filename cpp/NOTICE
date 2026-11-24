@@ -41,7 +41,7 @@ Dependencies
 | `github.com/openssl/openssl` | 3.5.0 | Apache-2.0 | https://github.com/openssl/openssl/blob/openssl-3.5.0/LICENSE.txt |
 | `github.com/curl/curl` | 8_13_0 | curl | https://github.com/curl/curl/blob/curl-8_13_0/COPYING |
 | `github.com/madler/zlib` | 1.3.1 | Zlib | https://github.com/madler/zlib/blob/v1.3.1/LICENSE |
-| `github.com/GNOME/libxml2` | 2.13.5 | MIT | https://github.com/GNOME/libxml2/blob/v2.13.5/Copyright |
+| `github.com/GNOME/libxml2` | 2.15.4 | MIT | https://github.com/GNOME/libxml2/blob/v2.15.4/Copyright |
 | `github.com/aws/aws-sdk-cpp` | 1.11.924 | Apache-2.0 | https://github.com/aws/aws-sdk-cpp/blob/1.11.924/LICENSE (and its submodules) |
 | `github.com/Azure/azure-sdk-for-cpp` | 12.15.0 | MIT | https://github.com/Azure/azure-sdk-for-cpp/blob/azure-storage-blobs_12.15.0/LICENSE.txt |
 | `gcc-runtime` | 9 | GPL-3.0-or-later WITH GCC-exception-3.1 | https://spdx.org/licenses/GPL-3.0-or-later.html |
@@ -900,6 +900,7 @@ list.c, which are covered by a similar licence but with different Copyright
 notices) all the files are:
 
  Copyright (C) 1998-2012 Daniel Veillard.  All Rights Reserved.
+ Copyright (C) The Libxml2 Contributors.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
