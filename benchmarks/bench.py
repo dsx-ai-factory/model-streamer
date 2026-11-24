@@ -11,7 +11,7 @@ Linux only. Needs torch, safetensors and runai_model_streamer (torch with NCCL f
     python3 bench.py s3://bucket/Qwen3-8B                  the same from S3
 
 The loaders are safetensors, InstantTensor and the streamer. Every run is a fresh process on a cold page
-cache, and its tensors are checked against safetensors. suite.py runs several models and makes one report.
+cache, and its tensors are checked against safetensors. suite.sh is the daily run of three models, with one report.
 The tests, the machine profile and the results file are described in README.md next to this script.
 """
 import argparse

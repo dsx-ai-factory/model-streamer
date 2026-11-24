@@ -13,3 +13,6 @@ instanttensor
 
 # For a model on S3: downloads it for the loaders that read only local files, and calibrates S3.
 s5cmd
+
+# For suite.sh: downloads a model that is not there yet.
+huggingface_hub

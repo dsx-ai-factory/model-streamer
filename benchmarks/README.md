@@ -6,8 +6,9 @@ streamer, and compares each with what the hardware can do. Every run is a
 fresh process on a cold page cache, and the loaded tensors are checked against
 `safetensors`. A run that returns wrong data fails.
 
-`suite.py` is a harness on top of it: it runs `bench.py` on several models and
-puts the results in one table of load time, throughput and speedup.
+`suite.sh` is the daily run on top of it: the same three models every time,
+from local disk and from S3, in one report of load time, throughput and
+speedup.
 
 ## Requirements
 
@@ -21,6 +22,7 @@ puts the results in one table of load time, throughput and speedup.
 - torch built with NCCL and one GPU per rank, for the distributed tests
   - `s5cmd` is for a model on S3: it downloads the model for the loaders that
     read only local files, and calibrates S3.
+  - `huggingface_hub` is for `suite.sh`, to download a model that is missing.
 
 The benchmark measures the `runai_model_streamer` that this Python imports and
 prints where it came from. To measure another build, install it or put its
@@ -31,7 +33,7 @@ directory first on `PYTHONPATH`.
 | Path | Purpose |
 |---|---|
 | `bench.py` | Command-line entry point: one model |
-| `suite.py` | Harness: several models through `bench.py`, one report |
+| `suite.sh` | The daily run: three models through `bench.py`, from disk and from S3, one report |
 | `calibrate.py` | Command-line entry point for calibration |
 | `streamer_bench/__init__.py` | The loaders and the tests (`TESTS`) |
 | `streamer_bench/runner.py` | Selects the tests and starts one measured process per run |
@@ -47,28 +49,53 @@ directory first on `PYTHONPATH`.
 ## Running the suite
 
 ```bash
-python3 benchmarks/suite.py \
-    --gpu /mnt/models/Qwen3-32B \
-    --multi-gpu /mnt/models/DeepSeek-R1 \
-    --cpu /mnt/models/Kimi-K3
+benchmarks/suite.sh /mnt/models s3://bench
 ```
 
-Each option is one case: which model, and where it is loaded to. Any of them
-can be left out, and each can be given more than once. A model is a directory
-or an `s3://bucket/prefix`. Before anything is loaded, the benchmark checks
-that the model fits the destination and says so if it does not.
+It runs the same cases every time, each with every loader, first from local
+disk and then from S3:
 
-| Option | Case |
+| Model | Loaded to |
 |---|---|
-| `--gpu MODEL` | The model loaded to one GPU |
-| `--multi-gpu MODEL` | The model loaded to the GPUs of `--nproc` ranks (default: every GPU) |
-| `--cpu MODEL` | The model loaded to host memory |
+| [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) (61 GiB) | One GPU |
+| [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) (641 GiB) | Every GPU, one rank each |
+| [Kimi-K3-REAP](https://huggingface.co/runrunway/Kimi-K3-REAP-448experts) (780 GiB) | Every GPU, and host memory |
 
-Every case is one `bench.py` run with each loader that applies. `--repeats`,
-`--loaders`, `--env`, `--profile`, `--scratch-dir` and `--no-calibrate` are
-passed on to it. The results go to `--out-dir` (default `bench_suite`): for
-each case `<model>_<case>.json`, its report and its logs, and the combined
-`report.md`, which has the test setting and this table:
+The first argument is the directory the models are in. The second, optional,
+is where they are on S3; without it only the local disk is used. Nothing has
+to be there beforehand:
+
+- **A model missing from the directory** is downloaded: from the bucket when
+  it has the model, and from Hugging Face otherwise, at a pinned revision.
+  Before anything is downloaded, the script checks that the directory has room
+  for what is missing, and stops with what it needs when it has not.
+- **A model missing from the bucket** is uploaded from the directory, and the
+  bucket is made when it does not exist. The endpoint and credentials come
+  from the environment (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, ...).
+- **Calibration** happens on first use, for the disk and for S3, as with
+  `bench.py`.
+
+On a machine with one GPU the multi-GPU cases are left out with a note.
+
+Anything after the directory and the bucket is passed on to every `bench.py`
+run:
+
+```bash
+benchmarks/suite.sh /mnt/models s3://bench --repeats 1 --loaders safetensors,streamer
+```
+
+A few things can be set through the environment:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NPROC` | every GPU | Ranks for the multi-GPU cases |
+| `OUT_DIR` | `bench_suite` | A directory named after the date is made in it |
+| `SCRATCH_DIR` | `MODELS_DIR/bench_scratch` | Where an S3 model is downloaded to for the loaders that read only local files |
+| `PYTHON` | `python3` | The Python that has the loaders installed |
+
+The results go to `OUT_DIR/<date>/`: for each case `<model>_<case>.json`
+(`..._s3.json` for the S3 run), its report and its logs, and the combined
+`report.md` with the test setting, a table for local disk and a table for S3:
 
 | Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
 |---|---|---|---|---|---|
@@ -217,8 +244,7 @@ twice the model's size:
 
 - A reference copy of the model, for the tensor names and for validation. It
   is downloaded once and removed after the run. `--ref-dir DIR` uses a local
-  copy you already have instead; for `suite.py`, `--ref-root DIR` does the
-  same with `DIR/<model name>` per model.
+  copy you already have instead, which is what `suite.sh` does.
 - The copy each download-then-load run makes, removed after each run.
 
 On first use the machine is calibrated for S3 as well: a short sweep with
