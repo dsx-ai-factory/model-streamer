@@ -83,7 +83,7 @@ ARG OPENSSL_VERSION=3.5.0
 ARG CURL_VERSION=8_13_0
 # attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-releases depName=madler/zlib extractVersion=^v(?<version>.*)$
-ARG ZLIB_VERSION=1.3.1
+ARG ZLIB_VERSION=1.4
 # attribution: shipped module=py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-tags depName=GNOME/libxml2 extractVersion=^v(?<version>.*)$
 ARG LIBXML2_VERSION=2.13.5
