@@ -13,12 +13,10 @@ case "$1" in
     amd64)
         arch=x86_64
         bazel_arch=x86_64
-        bazel_sha256=ac6249d1192aea9feaf49dfee2ab50c38cee2454b00cf29bbec985a11795c025
         ;;
     arm64)
         arch=aarch64
         bazel_arch=arm64
-        bazel_sha256=2d86d36db0c9af15747ff02a80e6db11a45d68f868ea8f62f489505c474f0099
         ;;
     *)
         echo "Unsupported SDK architecture: $1" >&2
@@ -30,8 +28,14 @@ cd /build/gcs
 
 # Install the SDK's pinned Bazel binary for the native image architecture.
 bazel_version=$(cat .bazelversion)
-curl -fsSL -o /usr/local/bin/bazel \
-    "https://github.com/bazelbuild/bazel/releases/download/${bazel_version}/bazel-${bazel_version}-linux-${bazel_arch}"
+bazel_url="https://github.com/bazelbuild/bazel/releases/download/${bazel_version}/bazel-${bazel_version}-linux-${bazel_arch}"
+curl -fsSL -o /usr/local/bin/bazel "${bazel_url}"
+# The checksum comes from the same release, so it detects a corrupt download, not a tampered release.
+bazel_sha256=$(curl -fsSL "${bazel_url}.sha256" | awk '{print $1; exit}')
+if [[ ! "${bazel_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Cannot read the Bazel ${bazel_version} checksum from ${bazel_url}.sha256" >&2
+    exit 1
+fi
 echo "${bazel_sha256}  /usr/local/bin/bazel" | sha256sum -c -
 chmod +x /usr/local/bin/bazel
 
