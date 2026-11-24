@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Results as a Markdown report: the test setting, then a table of load time, throughput and speedup per
-loader. Several results files make one report, a block of rows per model.
+loader for the models on local disk and one for those on S3. Several results files make one report, a
+block of rows per model.
 
     python3 -m streamer_bench.markdown bench_results.json                 writes bench_results.md again
     python3 -m streamer_bench.markdown a.json b.json --out report.md      one report for both
@@ -10,7 +11,7 @@ import argparse
 import json
 import os
 
-from . import LOADERS, TESTS
+from . import LOADERS
 
 
 def _num(v, digits=1):
@@ -172,30 +173,6 @@ def results(outs):
     return "\n\n".join(parts)
 
 
-def notes(outs):
-    """What a reader needs to read the tables, for the cases that are in them."""
-    tests = [s for out in outs for s in out["results"]]
-    groups = {s["group"] for s in tests}
-    lines = ["Throughput is the model's size over the load time."]
-    if any("speedup" in s for s in tests):
-        lines.append("Speedup is against Safetensors to the same destination.")
-    if "dist" in groups:
-        lines.append("With several GPUs, the load time is the time until the slowest GPU finishes.")
-    if "cpu" in groups:
-        lines.append("InstantTensor loads to GPUs only, so it has no host memory entry.")
-    if any(_on_s3(out) for out in outs):
-        lines.append("Safetensors and InstantTensor read local files only. For a model on S3 their load time is the "
-                     "download to local disk with s5cmd plus the load from there, shown as the two parts; the "
-                     "streamer reads from S3 directly.")
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def loads(outs):
-    """How each test that ran loads the model, a line per test."""
-    seen = dict.fromkeys(s["test"] for out in outs for s in out["results"])
-    return "\n".join(f'- `{t}`: {TESTS[t]["about"]}' for t in seen if t in TESTS)
-
-
 def render(outs):
     return f"""# Load benchmark
 
@@ -204,12 +181,6 @@ def render(outs):
 {setting(outs)}
 
 {results(outs)}
-
-{notes(outs)}
-
-## How each loader is run
-
-{loads(outs)}
 """
 
 

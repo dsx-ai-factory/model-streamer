@@ -95,7 +95,6 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(base["fs_strategy"], ["io_uring"])
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("`streamer_cuda`: The streamer reads every file and delivers the tensors on one GPU", page)
         # interleaved: every test once, then every test again
         order = [c[c.index("--child") + 1] for c, _ in self.calls]
         self.assertEqual(order, ["streamer_cpu", "streamer_cuda", "safetensors_cuda"] * 2)
@@ -166,16 +165,14 @@ class RunnerTest(unittest.TestCase):
                      "| | | InstantTensor | 5.00 | 8.0 | **4.00x** |",
                      "| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", "- instanttensor: 0.2.3",
                      "- runai_model_streamer: 0.17.1", "- GPUs: 1 × H200",
-                     "- Speedup is against Safetensors",
                      "- Runs: median of 1 per loader, cold page cache"):
             self.assertIn(text.replace("Qwen", os.path.basename(self.dir.name)), page)
-        for text in ("several GPUs", "host memory entry", "on S3"):  # notes for cases that did not run
-            self.assertNotIn(text, page)
+        self.assertTrue(page.rstrip().endswith("|"))  # the report ends with its table
         # without the safetensors test there is nothing to compare with
         _, out = self.run_bench(tests="streamer_cuda", repeats=1)
         self.assertNotIn("speedup", out["results"][0])
         with open(os.path.splitext(self.out)[0] + ".md") as f:
-            self.assertNotIn("Speedup is against", f.read())
+            self.assertIn("| Model Streamer | 5.00 | 8.0 | n/a |", f.read())
 
     def test_a_missing_loader_leaves_out_only_its_tests(self):
         code, _ = self.run_bench(gpus=1, repeats=1, device="cuda", missing="instanttensor is not installed")
@@ -225,7 +222,6 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         self.assertIn("| 2 × H200 | Safetensors |", page)
-        self.assertIn("the time until the slowest GPU finishes", page)
 
     def test_several_results_make_one_page_and_one_table(self):
         self.run_bench(gpus=1, repeats=1, device="cuda")

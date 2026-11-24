@@ -127,7 +127,7 @@ A test is one loader bringing the whole model to one destination:
 | Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda")` | `stream_files(files, device="cuda", is_distributed=True)` |
 
 The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py)
-(`TESTS`), with a sentence on each one's setup. The loads themselves are the
+(`TESTS`). The loads themselves are the
 `load` function in [`streamer_bench/worker.py`](streamer_bench/worker.py);
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
@@ -232,8 +232,9 @@ benchmark from. Their default names are in `.gitignore`.
 
 `bench_results.md` is the report: the test setting (the hardware, the storage's
 measured read rate, the versions of each loader), a table with a row per
-loader giving its load time, throughput and speedup, and how each loader
-was run. To make it again from a results file, or one report from several:
+loader giving its load time, throughput and speedup. Speedup is against
+Safetensors to the same destination, and with several GPUs the load time is
+the slowest rank's. To make it again from a results file, or one report from several:
 
 ```bash
 cd benchmarks && python3 -m streamer_bench.markdown /path/to/bench_results.json
