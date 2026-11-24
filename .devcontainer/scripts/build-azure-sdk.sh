@@ -23,7 +23,7 @@ export AZURE_SDK_DISABLE_AUTO_VCPKG=1
 
 git clone --recurse-submodules https://github.com/Azure/azure-sdk-for-cpp /opt/azure-sdk-cpp
 cd /opt/azure-sdk-cpp
-git checkout azure-storage-blobs_12.15.0
+git checkout "azure-storage-blobs_${AZURE_STORAGE_BLOBS_VERSION:?}"
 
 # Helper function to build Azure SDK components
 build_azure_sdk_components() {

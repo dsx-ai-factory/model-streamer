@@ -5,6 +5,7 @@
 
 #include "gcs/client_configuration/client_configuration.h"
 
+#include "google/cloud/credentials.h"
 #include "google/cloud/storage/client.h"
 #include "google/cloud/storage/grpc_plugin.h"
 
@@ -16,6 +17,7 @@
 #include "google/cloud/log.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -33,6 +35,17 @@ namespace
 constexpr char kKeyFileEnv[] = "RUNAI_STREAMER_GCS_CREDENTIAL_FILE";
 constexpr char kAdcFileEnv[] = "GOOGLE_APPLICATION_CREDENTIALS";
 constexpr char kSdkTracingEnv[] = "GOOGLE_CLOUD_CPP_ENABLE_TRACING";
+constexpr char kAnonymousEnv[] = "RUNAI_STREAMER_GCS_USE_ANONYMOUS_CREDENTIALS";
+
+// The same variable, values and precedence as the Python package's credentials module, which
+// already documents it ("true"/"1", case-insensitive, and it wins over a key file).
+// utils::getenv<bool> reads only integers, so it would miss the "True" callers set.
+bool anonymous_credentials_requested()
+{
+    auto value = utils::getenv<std::string>(kAnonymousEnv, "");
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return std::tolower(c); });
+    return value == "true" || value == "1";
+}
 
 // Tracing components only produce messages; the SDK prints them through its log sink, whose
 // default backend passes FATAL and above unless GOOGLE_CLOUD_CPP_ENABLE_CLOG is set. Without this,
@@ -62,6 +75,11 @@ void print_sdk_logs()
 
 std::string credentials_source()
 {
+    if (anonymous_credentials_requested())
+    {
+        return std::string("anonymous credentials (") + kAnonymousEnv + ")";
+    }
+
     const auto key_file = utils::getenv<std::string>(kKeyFileEnv, "");
     if (!key_file.empty())
     {
@@ -143,7 +161,15 @@ ClientConfiguration::ClientConfiguration(unsigned concurrent_readers)
     LOG(DEBUG) << "GCS credentials: " << credentials;
 
     const auto sa_key_file_name = utils::getenv<std::string>(kKeyFileEnv, "");
-    if (!sa_key_file_name.empty()) {
+    if (anonymous_credentials_requested()) {
+        // Set explicitly, because google-cloud-cpp 3.x applies no credentials of its own here:
+        // DefaultOptionsWithCredentials maps the ones it builds through a DefaultOptions overload
+        // that drops its credentials argument (google/cloud/storage/client.cc, still on upstream
+        // main), falls back to application default credentials, and a client without reachable
+        // metadata then spends its whole retry window asking for a token.
+        options.set<google::cloud::UnifiedCredentialsOption>(
+            google::cloud::MakeInsecureCredentials());
+    } else if (!sa_key_file_name.empty()) {
         try {
             // Open the file stream.
             auto is = std::ifstream(sa_key_file_name);

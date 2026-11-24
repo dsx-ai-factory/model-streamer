@@ -16,7 +16,7 @@ the file depends on the architecture).
 
 | Category | Meaning |
 |---|---|
-| `ship` | Code linked into a native library we distribute. These are the components of `third_party_notices/components.json`. |
+| `ship` | Code linked into a native library we distribute: what the `NOTICE` files list (`# attribution:` comments in `.devcontainer/Dockerfile`). |
 | `run` | Installed by the user's pip next to our wheels (`install_requires`). Not distributed by us. |
 | `build` | Needed to build the deliverables. |
 | `test` | Needed only to run the tests. |
@@ -51,12 +51,12 @@ The collector reads these files, so a new dependency is picked up when it is add
 | `py/*/pyproject.toml` | build requirements (`build`) |
 | `py/runai_model_streamer/requirements.dev` and the `pip download` line of `py/runai_model_streamer/Makefile` | test requirements and the torch index (`test`) |
 | `cpp/.bazelversion` | the Bazel release |
-| `cpp/WORKSPACE` and what it loads | the Bazel repositories, as Bazel resolves them |
+| `cpp/MODULE.bazel` and `.devcontainer/gcs/MODULE.bazel` | the Bazel modules, as Bzlmod resolves them |
 | `.github/workflows/*` | GitHub actions |
 
 `categories.json` holds the judgment calls the files cannot tell: which packages are only for tests,
-and which dependencies are linked into a native library (`ship`, mapped to the ids of
-`third_party_notices/components.json`). Edit it when a dependency is added.
+and which dependencies are linked into a native library (`ship`, mapped to component ids). Edit it
+when a dependency is added.
 
 ### Finding what the collector does not read
 
@@ -103,12 +103,11 @@ so one run of the image covers the build and the tests for both.
    python3 .github/scripts/dependencies/collect.py check
    python3 .github/scripts/dependencies/test_collect.py
    ```
-   `check` fails on an unknown category, an entry with nothing to download, a component of
-   `third_party_notices/components.json` that `categories.json` does not map to a `ship` dependency,
-   or a file or command the collector does not read (see above).
+   `check` fails on an unknown category, an entry with nothing to download, or a file or command
+   the collector does not read (see above).
 5. **Review the list.** Compare it with the previous one you generated. New entries mean a new dependency; if one is linked
-   into a native library, add it to `ship` in `categories.json`, and to
-   `third_party_notices/components.json`. A package that is only for tests belongs in `categories.json`
+   into a native library, add it to `ship` in `categories.json`, and mark it
+   `# attribution: shipped` where it is pinned so the `NOTICE` files list it. A package that is only for tests belongs in `categories.json`
    under its ecosystem. `collect` stops if a `ship` key matches nothing.
 
 ### Base images
@@ -135,8 +134,8 @@ What else to check after the change:
   `container_sources.py` for its package manager.
 - The `ship` entries in `categories.json` name apt packages that depend on the distribution release
   (`libstdc++-9-dev`, `libgcc-9-dev`, `libc6-dev` for Ubuntu 20.04, GCC 9). `collect` stops if a key
-  no longer matches a package, so update them to the new names, and update the toolchain entries
-  (`gcc-runtime`, `glibc-nonshared`) of `third_party_notices/components.json`.
+  no longer matches a package, so update them to the new names, and update the toolchain
+  `# attribution: shipped component=` lines (`gcc-runtime`, `glibc-nonshared`) in `.devcontainer/Dockerfile`.
 - The Python version of the image (3.11 now) decides what pip resolves; see the limits below.
 
 `collect` does this:
@@ -155,8 +154,10 @@ What else to check after the change:
      Python (3.11) and architecture. The `run` group is also resolved for aarch64, because users
      install our aarch64 wheel. Test requirements use the PyTorch CPU index, as `make install_dev_dep` does.
    - **npm:** a lock file written without installing (`--package-lock-only`).
-   - **bazel:** `bazel fetch //...` for both architectures, then every repository in the output base
-     with the URL and hash of its repository rule.
+   - **bazel:** `bazel fetch //...` in the application (`cpp/`) and the SDK builder
+     (`.devcontainer/gcs/`), then every fetched module of the resolved graphs (`bazel mod graph`)
+     with the URL and hash `bazel mod show_repo` records for it. Module resolution does not depend
+     on the architecture, so the native configuration covers the set.
    - **tools:** the bazelisk and buildifier versions the devcontainer feature installed.
 3. The two sets are merged: one entry per ecosystem, name and version, categories united.
 

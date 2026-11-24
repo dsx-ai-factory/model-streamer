@@ -73,25 +73,46 @@ RUN bash /tmp/install-test-services.sh "$TARGETARCH"
 COPY .devcontainer/scripts/install-cuda-headers.sh /tmp/install-cuda-headers.sh
 RUN bash /tmp/install-cuda-headers.sh "$TARGETARCH"
 
-# Build all shared SDK prerequisites before the cloud SDKs.
+# Build all shared SDK prerequisites before the cloud SDKs. Renovate keeps each annotated version
+# current; the script reads the versions from these ARGs.
+# attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
+# renovate: datasource=github-tags depName=openssl/openssl extractVersion=^openssl-(?<version>\d+\.\d+\.\d+)$
+ARG OPENSSL_VERSION=3.5.0
+# attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
+# renovate: datasource=github-releases depName=curl/curl versioning=regex:^(?<major>\d+)_(?<minor>\d+)_(?<patch>\d+)$ extractVersion=^curl-(?<version>\d+_\d+_\d+)$
+ARG CURL_VERSION=8_13_0
+# attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
+# renovate: datasource=github-releases depName=madler/zlib extractVersion=^v(?<version>.*)$
+ARG ZLIB_VERSION=1.3.1
+# attribution: shipped module=py/runai_model_streamer_azure,cpp
+# renovate: datasource=github-tags depName=GNOME/libxml2 extractVersion=^v(?<version>.*)$
+ARG LIBXML2_VERSION=2.13.5
 COPY .devcontainer/scripts/build-basic-libs.sh /tmp/build-basic-libs.sh
-RUN bash /tmp/build-basic-libs.sh "$TARGETARCH"
+RUN OPENSSL_VERSION="$OPENSSL_VERSION" CURL_VERSION="$CURL_VERSION" ZLIB_VERSION="$ZLIB_VERSION" \
+    LIBXML2_VERSION="$LIBXML2_VERSION" bash /tmp/build-basic-libs.sh "$TARGETARCH"
 
 # Keep AWS in the final image's layer chain so CI can reuse its build layer
 # through the published image cache when later dependencies change.
+# Cloned with its submodules (aws-crt-cpp and the aws-c-* libraries), which its tag pins.
+# attribution: shipped module=py/runai_model_streamer_s3,cpp submodules
+# renovate: datasource=github-tags depName=aws/aws-sdk-cpp
+ARG AWS_SDK_CPP_VERSION=1.11.924
 COPY .devcontainer/scripts/build-aws-sdk.sh /tmp/build-aws-sdk.sh
-RUN bash /tmp/build-aws-sdk.sh "$TARGETARCH"
+RUN AWS_SDK_CPP_VERSION="$AWS_SDK_CPP_VERSION" bash /tmp/build-aws-sdk.sh "$TARGETARCH"
 
 # Build Azure SDK for C++ (optimized with shared CMake options)
 SHELL ["/bin/bash", "-c"]
+# attribution: shipped module=py/runai_model_streamer_azure,cpp
+# renovate: datasource=github-tags depName=Azure/azure-sdk-for-cpp extractVersion=^azure-storage-blobs_(?<version>.*)$
+ARG AZURE_STORAGE_BLOBS_VERSION=12.15.0
 COPY .devcontainer/scripts/build-azure-sdk.sh /tmp/build-azure-sdk.sh
-RUN bash /tmp/build-azure-sdk.sh "$TARGETARCH"
+RUN AZURE_STORAGE_BLOBS_VERSION="$AZURE_STORAGE_BLOBS_VERSION" bash /tmp/build-azure-sdk.sh "$TARGETARCH"
 
 # Compile the pinned Google SDK once per image architecture. Only the installed
 # archives and headers enter the final image, not sources or the Bazel cache.
 FROM base AS gcs-builder
 COPY .devcontainer/gcs/.bazelversion /build/gcs/
-COPY .devcontainer/gcs/.bazelrc .devcontainer/gcs/WORKSPACE .devcontainer/gcs/BUILD.bazel \
+COPY .devcontainer/gcs/.bazelrc .devcontainer/gcs/MODULE.bazel .devcontainer/gcs/BUILD.bazel \
     .devcontainer/gcs/abi_check.cc .devcontainer/gcs/export.bzl .devcontainer/gcs/install.py \
     .devcontainer/gcs/test_install.py /build/gcs/
 COPY .devcontainer/gcs/config/ /build/gcs/config/
@@ -102,10 +123,6 @@ RUN bash /build/scripts/build-gcs-sdk.sh "$TARGETARCH"
 
 FROM base AS devcontainer
 COPY --from=gcs-builder /opt/gcs-sdk /opt/gcs-sdk
-
-# Keep I/O libraries last so their changes can reuse the cloud SDK build layers.
-COPY .devcontainer/scripts/build-io-libs.sh /tmp/build-io-libs.sh
-RUN bash /tmp/build-io-libs.sh "$TARGETARCH"
 
 # Python 3.11 for builds and tests, compiled from source like this image's other
 # dependencies - the deadsnakes PPA publishes no arm64 binaries, and both architecture

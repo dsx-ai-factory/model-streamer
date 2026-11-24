@@ -69,6 +69,9 @@ class FsAsyncRouter
         // Whether each group's reads may use registered buffers. Per mount, because it pays on some
         // file systems and costs on others.
         std::vector<bool> registers;
+
+        // Whether each group's direct reads go to io-wq. See AsyncIoConfig::async_direct.
+        std::vector<bool> async_direct;
     };
 
     // Answers, for a file system type, whether its reads may use registered buffers. A PREDICATE
@@ -87,12 +90,15 @@ class FsAsyncRouter
     // `device` is where the submission's bytes are going. NO DEFAULT, for the reason Batch gives for
     // the same parameter: defaulting to the host would quietly treat a device destination as host
     // memory, and here that decides which reader serves the file.
+    //
+    // `direct_async` false keeps all direct reads inline (RUNAI_STREAMER_FS_DIRECT_ASYNC=0).
     Groups groups(const std::vector<FileRanges> & request, const FsQueueDepth & depth,
-                  common::Device destination, const RegisterPolicy & registers = nullptr);
+                  common::Device destination, const RegisterPolicy & registers = nullptr,
+                  bool direct_async = true);
 
     // Captures the shared state by value and never `this`, so the workers it builds outlive this
     // object whatever the destruction order.
-    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool)>;
+    using WorkerFactory = std::function<std::unique_ptr<utils::Worker<Workload>>(dev_t, size_t, unsigned, bool, bool)>;
 
     // `writer` is the streamer's copy path onto a device, shared by every worker it builds. Captured
     // by value like everything else here, so a worker outlives this object whatever the order.

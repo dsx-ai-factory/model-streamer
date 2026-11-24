@@ -18,7 +18,7 @@ case "$1" in
         ;;
 esac
 
-git clone --recurse-submodules --depth 1 --branch "1.11.924" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp
+git clone --recurse-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION:?}" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp
 cd /opt/aws-sdk-cpp
 
 cmake -DBUILD_ONLY="s3-crt" \

@@ -33,7 +33,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 path = directory / f"{package}-{VERSION}-py3-none-manylinux_2_28_{arch}.whl"
                 path.write_bytes(b"fixture wheel content")
                 self.paths.append(path)
-        self.notices = self.root / "third_party_notices" / "sdk.txt"
+        self.notices = self.root / "cpp" / "NOTICE"
         self.notices.parent.mkdir()
         self.notices.write_text("fixture third-party notices\n")
         self.cpp = self.root / "cpp-artifacts"
@@ -235,6 +235,13 @@ class ReleaseBundleTests(unittest.TestCase):
         """Reject packaging when the third-party notice input is missing."""
         self.notices.unlink()
         self.assertNotEqual(self.collect().returncode, 0)
+
+    def test_empty_third_party_notices_rejected(self):
+        """Reject packaging, before any archive is written, when the third-party notice input is empty."""
+        self.notices.write_text("")
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing or empty third-party notices", result.stderr + result.stdout)
 
     def test_sdk_without_third_party_notices_rejected(self):
         self.collect_ok()

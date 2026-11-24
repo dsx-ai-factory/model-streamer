@@ -1,5 +1,9 @@
 # SDK-only settings. Application flags in cpp/.bazelrc do not invalidate this build.
-build --noenable_bzlmod
+# Dependencies come from MODULE.bazel (Bzlmod) only. Versions are fixed by MODULE.bazel and the
+# registry, which the application checks the prebuilt SDK against; no lockfile is kept.
+common --enable_bzlmod
+common --noenable_workspace
+common --lockfile_mode=off
 build --cxxopt=-std=c++17
 build --force_pic
 build --compilation_mode=opt

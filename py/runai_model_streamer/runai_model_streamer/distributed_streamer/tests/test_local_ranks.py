@@ -27,10 +27,21 @@ class TestDiscoverRanks(unittest.TestCase):
         dist.is_initialized.return_value = True
         dist.get_world_size.return_value = 8
         dist.get_rank.return_value = 3
+
+        # The fake honors the real contract: find_local_ranks fills the module topology cache, and
+        # discover_local_ranks rediscovers whenever that cache is empty - so a fake that left it
+        # empty would be rediscovered on every read and count collectives the real code never runs.
+        def discovered():
+            distributed_streamer._topology_cache = (8, 3, [list(range(8))])
+            return 8, 3, [list(range(8))]
+
         patches = [
             patch.object(distributed_streamer, "dist", dist),
-            patch.object(_distributedStreamerParams, "find_local_ranks", return_value=(8, 3, [list(range(8))])),
+            patch.object(_distributedStreamerParams, "find_local_ranks", side_effect=discovered),
             patch.dict(os.environ, {}, clear=True),
+            patch.object(distributed_streamer, "_topology_cache", None),
+            patch.object(distributed_streamer, "_cache_job", None),
+            patch.object(distributed_streamer, "_group_cache", {}),
         ]
         self.find_local_ranks = [p.start() for p in patches][1]
         for p in patches:

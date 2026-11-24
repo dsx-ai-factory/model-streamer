@@ -181,6 +181,25 @@ class ScriptTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"x\.sh line 1: cannot work out the URL"):
             dockerfile.downloads('curl -fsSL -o a.tar.gz "https://h/${UNKNOWN}/a.tar.gz"\n', self.PATH)
 
+    def test_required_and_default_forms_are_expanded(self):
+        self.assertEqual(dockerfile._expand("a-${V:?}-${W:-9}-${X:-d}", {"V": "1", "W": "2"}), "a-1-2-d")
+
+    def test_a_url_held_in_a_variable_is_read_with_its_pin(self):
+        script = ('V=2.14\nU=https://example.org/lib-${V}.tar.gz\nH=' + "6" * 64 + '\n'
+                  'curl -fsSL -o lib-${V:?}.tar.gz "${U:?}"\n'
+                  'echo "${H:?}  lib-${V}.tar.gz" | sha256sum -c -\n')
+        (lib,) = dockerfile.downloads(script, self.PATH)
+        self.assertEqual((lib["filename"], lib["urls"], lib["sha256"]),
+                         ("lib-2.14.tar.gz", {"any": "https://example.org/lib-2.14.tar.gz"}, {"any": "6" * 64}))
+        self.assertEqual(static_sources._download_name(lib), ("lib", "2.14"))
+
+    def test_a_clone_branch_or_checkout_held_in_a_variable_is_expanded(self):
+        script = ('V=1.2\ngit clone --branch "${V:?}" https://example.org/org/a /opt/a\n'
+                  'git clone https://example.org/org/b /opt/b\ncd /opt/b\ngit checkout "b_${V:?}"\n')
+        clones = dockerfile.git_clones(script, self.PATH)
+        self.assertEqual([(c["url"], c["ref"]) for c in clones],
+                         [("https://example.org/org/a", "1.2"), ("https://example.org/org/b", "b_1.2")])
+
     def test_the_redistributable_archive_is_named_after_its_component(self):
         self.assertEqual(static_sources._download_name(self.downloads()[1]), ("cuda_cudart", "12.8.57"))
 
@@ -294,60 +313,119 @@ class InputsTest(unittest.TestCase):
             self.assertTrue(workflows)
 
 
-BAZEL_QUERY = """\
-# /work/cpp/WORKSPACE:7:20
+# `bazel mod show_repo <module>...`, as Bazel 7.6 prints it.
+BAZEL_SHOW_REPO = """\
+## google_cloud_cpp@3.7.0:
+# <builtin>
 http_archive(
-  name = "com_google_protobuf",
-  url = "https://example.org/protobuf-27.0.tar.gz",
+  name = "google_cloud_cpp~",
+  urls = ["https://github.com/googleapis/google-cloud-cpp/archive/refs/tags/v3.7.0.tar.gz"],
+  integrity = "sha256-ghNn8h7FNkMb9PtdxwmkJ5RGVQbX0/i+QNUtSTvP3QY=",
+  strip_prefix = "google-cloud-cpp-3.7.0",
+  remote_file_urls = {},
+  remote_file_integrity = {},
+  remote_patches = {"https://bcr.bazel.build/modules/google_cloud_cpp/3.7.0/patches/copyright.patch": "sha256-qITPA+QfNNAlErCIuUMoQeZ4e9sCEEAWmeTehRfLO+I="},
+  remote_patch_strip = 0,
 )
-# Rule com_google_protobuf instantiated at (most recent call last):
-#   /work/cpp/WORKSPACE:7:20           in <toplevel>
-#   /work/cpp/toolchain/deps.bzl:11:17 in load_toolchain_deps
+# Rule google_cloud_cpp~ instantiated at (most recent call last):
+#   <builtin> in <toplevel>
 # Rule http_archive defined at (most recent call last):
 #   /root/.cache/bazel/external/bazel_tools/tools/build_defs/repo/http.bzl:387:31 in <toplevel>
 
-# /work/cpp/WORKSPACE:51:18
-http_archive(
-  name = "com_googlesource_code_re2",
-  url = "https://example.org/re2.tar.gz",
+## gcs_sdk_config@_:
+# <builtin>
+local_repository(
+  name = "gcs_sdk_config~",
+  path = "config",
 )
-# Rule com_googlesource_code_re2 instantiated at (most recent call last):
-#   /work/cpp/WORKSPACE:51:18 in <toplevel>
-# Rule http_archive defined at (most recent call last):
-#   /root/.cache/bazel/external/bazel_tools/tools/build_defs/repo/http.bzl:387:31 in <toplevel>
 
-# /work/cpp/WORKSPACE:47:18
+## curl@8.8.0.bcr.3:
+# <builtin>
 http_archive(
-  name = "boringssl",
-  url = "https://example.org/boringssl.tar.gz",
+  name = "curl~",
+  urls = ["https://github.com/curl/curl/releases/download/curl-8_8_0/curl-8.8.0.tar.gz"],
+  integrity = "sha256-d8DhzTWrW0W2WWRak7RtZgIk0AJPEYXoqVzbJ649eH0=",
+  strip_prefix = "curl-8.8.0",
 )
-# Rule boringssl instantiated at (most recent call last):
-#   /work/cpp/WORKSPACE:47:18                                       in <toplevel>
-#   /root/.cache/bazel/external/google_cloud_cpp/bazel/workspace0.bzl:157:10 in gl_cpp_workspace0
-#   /root/.cache/bazel/external/bazel_tools/tools/build_defs/repo/utils.bzl:268:18 in maybe
-# Rule http_archive defined at (most recent call last):
-#   /root/.cache/bazel/external/bazel_tools/tools/build_defs/repo/http.bzl:387:31 in <toplevel>
+"""
+
+# `bazel mod graph --output json`, cut down: the first occurrence of a module is expanded,
+# repeats are marked `unexpanded`.
+BAZEL_MOD_GRAPH = """\
+{
+  "key": "<root>",
+  "name": "model_streamer_gcs_sdk",
+  "version": "",
+  "dependencies": [
+    {
+      "key": "gcs_sdk_config@_",
+      "name": "gcs_sdk_config",
+      "version": "",
+      "dependencies": [
+        {"key": "rules_cc@0.2.17", "name": "rules_cc", "version": "0.2.17", "unexpanded": true}
+      ]
+    },
+    {
+      "key": "google_cloud_cpp@3.7.0",
+      "name": "google_cloud_cpp",
+      "version": "3.7.0",
+      "dependencies": [
+        {"key": "rules_cc@0.2.17", "name": "rules_cc", "version": "0.2.17", "unexpanded": true},
+        {
+          "key": "curl@8.8.0.bcr.3",
+          "name": "curl",
+          "version": "8.8.0.bcr.3",
+          "dependencies": []
+        }
+      ]
+    },
+    {"key": "rules_cc@0.2.17", "name": "rules_cc", "version": "0.2.17", "dependencies": []}
+  ]
+}
 """
 
 
 class BazelTest(unittest.TestCase):
-    def declared(self):
-        return {container_sources._attributes(m.group(2))["name"]: container_sources.defined_at(BAZEL_QUERY, m, "/work")
-                for m in container_sources.RULE.finditer(BAZEL_QUERY)}
+    def test_module_sections_carry_each_rule(self):
+        sections = dict(container_sources._module_sections(BAZEL_SHOW_REPO))
+        self.assertEqual(set(sections), {"google_cloud_cpp", "gcs_sdk_config", "curl"})
+        rule = container_sources.RULE.search(sections["google_cloud_cpp"])
+        self.assertEqual(rule.group(1), "http_archive")
+        attributes = container_sources._attributes(rule.group(2))
+        self.assertEqual(attributes["name"], "google_cloud_cpp~")
+        self.assertEqual(attributes["urls"], ["https://github.com/googleapis/google-cloud-cpp/archive/refs/tags/v3.7.0.tar.gz"])
+        self.assertEqual(container_sources.RULE.search(sections["gcs_sdk_config"]).group(1), "local_repository")
 
-    def test_a_macro_in_a_bzl_file_is_the_declaring_file(self):
-        self.assertEqual(self.declared()["com_google_protobuf"], "cpp/toolchain/deps.bzl:11")
+    def test_registry_integrity_becomes_a_sha256(self):
+        rule = container_sources.RULE.search(dict(container_sources._module_sections(BAZEL_SHOW_REPO))["curl"])
+        digest = container_sources._module_digest(container_sources._attributes(rule.group(2)))
+        self.assertEqual(digest, ("sha256", "77c0e1cd35ab5b45b659645a93b46d660224d0024f1185e8a95cdb27ae3d787d",
+                                  "Bazel module registry (integrity)"))
+        self.assertEqual(container_sources._module_digest({"sha256": "ff"}), ("sha256", "ff", "Bazel module registry"))
+        self.assertIsNone(container_sources._module_digest({}))
 
-    def test_a_rule_written_in_the_workspace_is_declared_there(self):
-        self.assertEqual(self.declared()["com_googlesource_code_re2"], "cpp/WORKSPACE:51")
+    def test_module_graph_takes_the_first_requiring_module(self):
+        original = container_sources._bazel
+        container_sources._bazel = lambda directory, *args: BAZEL_MOD_GRAPH
+        try:
+            modules = container_sources._module_graph("/work")
+        finally:
+            container_sources._bazel = original
+        # Local override modules (no version) are not dependencies, and their children answer to their parent.
+        self.assertEqual(modules, {"rules_cc": ("0.2.17", None),
+                                   "google_cloud_cpp": ("3.7.0", None),
+                                   "curl": ("8.8.0.bcr.3", "google_cloud_cpp")})
 
-    def test_a_macro_of_a_fetched_repository_is_declared_by_the_workspace_line_that_calls_it(self):
-        self.assertEqual(self.declared()["boringssl"], "cpp/WORKSPACE:47")
-
-    def test_no_comment_falls_back_to_the_workspace(self):
-        text = 'http_archive(\n  name = "x",\n  url = "https://example.org/x.tar.gz",\n)\n'
-        match = container_sources.RULE.search(text)
-        self.assertEqual(container_sources.defined_at(text, match, "/work"), "cpp/WORKSPACE")
+    def test_module_declarations_name_the_line(self):
+        with tempfile.TemporaryDirectory() as work:
+            path = os.path.join(work, "MODULE.bazel")
+            with open(path, "w") as f:
+                f.write('module(name = "example")\n'
+                        'bazel_dep(name = "google_cloud_cpp", version = "3.7.0")\n'
+                        'bazel_dep(name = "rules_cc", version = "0.2.17")\n'
+                        'single_version_override(module_name = "envoy_api", version = "0.0.0-20260130-84e8436")\n')
+            self.assertEqual(container_sources._module_declarations(path),
+                             {"google_cloud_cpp": 2, "rules_cc": 3, "envoy_api": 4})
 
 
 class NamesTest(unittest.TestCase):

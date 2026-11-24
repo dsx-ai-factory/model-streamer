@@ -33,6 +33,7 @@
 #include "common/exception/exception.h"
 #include "utils/fd/fd.h"
 #include "utils/random/random.h"
+#include "utils/scope_guard/scope_guard.h"
 #include "utils/temp/file/file.h"
 
 namespace runai::llm::streamer::posix_io
@@ -168,6 +169,63 @@ TEST(MountCapabilities, Tmpfs_Is_Memory_Backed)
     ::unlink(path.c_str());
 
     EXPECT_TRUE(capability.memory_backed);
+}
+
+// Against a fake sysfs: listed means block device. Lustre's made-up 3965:x is not listed, and a
+// missing sysfs reads as "no".
+TEST(MountCapabilities, Is_Block_Device_Asks_Sysfs)
+{
+    char root_template[] = "/tmp/runai_sysfs_XXXXXX";
+    const char * root = ::mkdtemp(root_template);
+    ASSERT_NE(root, nullptr) << std::strerror(errno);
+
+    const std::string sysfs(root);
+    const std::string listed = sysfs + "/dev/block/9:1";
+    // Removes whatever was made, also when an ASSERT below returns early.
+    utils::ScopeGuard remove_tree([&]()
+    {
+        ::unlink(listed.c_str());
+        ::rmdir((sysfs + "/dev/block").c_str());
+        ::rmdir((sysfs + "/dev").c_str());
+        ::rmdir(sysfs.c_str());
+    });
+
+    ASSERT_EQ(::mkdir((sysfs + "/dev").c_str(), 0700), 0);
+    ASSERT_EQ(::mkdir((sysfs + "/dev/block").c_str(), 0700), 0);
+    {
+        const utils::Fd created(::open(listed.c_str(), O_CREAT | O_RDWR, 0600));
+        ASSERT_GE(created.fd(), 0);
+    }
+
+    EXPECT_TRUE(is_block_device(makedev(9, 1), sysfs)) << "md RAID, listed";
+    EXPECT_FALSE(is_block_device(makedev(3965, 7), sysfs)) << "Lustre's made-up number is not listed";
+    EXPECT_FALSE(is_block_device(makedev(0, 42), sysfs)) << "an anonymous device (NFS, tmpfs) is not listed";
+    EXPECT_FALSE(is_block_device(makedev(9, 1), sysfs + "/missing")) << "no sysfs reads as file storage";
+}
+
+// Checked against sysfs rather than assumed: bazel's sandbox may be on a disk, an overlay or a tmpfs.
+TEST(MountCapabilities, Block_Backed_Agrees_With_Sysfs)
+{
+    utils::temp::File file(utils::random::buffer(64));
+    MountCapabilities mounts;
+
+    const auto capability = mounts.of_path(file.path);
+    const auto listed = "/sys/dev/block/" + std::to_string(major(capability.dev)) + ":"
+                      + std::to_string(minor(capability.dev));
+
+    EXPECT_EQ(capability.block_backed, ::access(listed.c_str(), F_OK) == 0) << capability;
+}
+
+// tmpfs has an anonymous device number, like every network file system.
+TEST(MountCapabilities, Tmpfs_Has_No_Block_Device)
+{
+    if (!is_tmpfs("/dev/shm"))
+    {
+        GTEST_SKIP() << "/dev/shm is not tmpfs here";
+    }
+
+    MountCapabilities mounts;
+    EXPECT_FALSE(mounts.of_path("/dev/shm").block_backed);
 }
 
 // The point of the class: a model's shards share a mount, so only the first costs a probe.

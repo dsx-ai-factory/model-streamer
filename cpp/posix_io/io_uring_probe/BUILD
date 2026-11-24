@@ -8,7 +8,7 @@ runai_cc_auto_library(
     deps = [
         "//common/response_code",
         "//utils/logging",
-        "@uring//:uring",
+        "//third_party:uring",
     ],
 )
 

@@ -192,6 +192,8 @@ class TestSafetensorsStreamer(unittest.TestCase):
                 streamer, "set_is_distributed",
                 side_effect=lambda *_a: setattr(streamer, "is_distributed", True),
             ), patch.object(
+                streamer.distributed_streamer, "create_group"
+            ), patch.object(
                 streamer.distributed_streamer, "stream_files", side_effect=empty_partition
             ):
                 streamer.stream_files(requests, None, "cpu", True)
