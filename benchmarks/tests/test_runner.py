@@ -136,7 +136,8 @@ class RunnerTest(unittest.TestCase):
             page = f.read()
         self.assertIn("- Storage: ext4, 10 GiB/s parallel direct read", page)
         self.assertIn("- CPUs: 2 × Xeon 8570, 32 CPUs", page)
-        self.assertIn(f"| {os.path.basename(self.dir.name)} | 40.0 GiB | 1 | 2 | 8 B | 12 B | BF16 75%, F32 25% |", page)
+        self.assertIn(f"| {os.path.basename(self.dir.name)} | 40.0 GiB | 1 | 2 | 8 B | 12 B | BF16 75%, F32 25% |",
+                      page)
         self.assertIn("- Memory: 64.0 GiB DDR5 (4 × 16 GiB)", page)
         self.assertNotIn("/mnt", page)
         self.assertIn("## Test on local disk (10 GiB/s parallel direct read)", page)
