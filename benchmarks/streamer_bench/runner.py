@@ -42,13 +42,14 @@ def unavailable(a, test, remote=False):
 
 def download(uri, scratch, profile):
     """Download an s3:// model's *.safetensors files into the emptied scratch directory with s5cmd:
-    (seconds, None), or (None, why it failed). The parts in flight per file and the part size are the
-    profile's best S3 setting when it has one."""
+    (seconds, None), or (None, why it failed). The files in flight, the parts in flight per file and
+    the part size are the profile's best S3 setting when it has one, so that the download asks of the
+    storage what the calibration found it serves fastest."""
     from .calibration.s3 import s5cmd
     best = ((profile or {}).get("params") or {}).get("s3_best") or {}
     clear(scratch)
-    cmd = s5cmd("cp", "-c", str(best.get("concurrency_per_object", 8)), "-p", str(best.get("part_mib", 8)),
-                f"{uri.rstrip('/')}/*.safetensors", scratch.rstrip("/") + "/")
+    cmd = s5cmd("--numworkers", str(best.get("objects", 16)), "cp", "-c", str(best.get("concurrency_per_object", 8)),
+                "-p", str(best.get("part_mib", 8)), f"{uri.rstrip('/')}/*.safetensors", scratch.rstrip("/") + "/")
     t0 = time.perf_counter()
     p = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if p.returncode:
