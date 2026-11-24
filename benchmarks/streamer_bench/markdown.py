@@ -154,6 +154,7 @@ def setting(outs):
     versions = {}
     for out in outs:
         versions.update(out.get("versions", {}))
+    ran = {s["loader"] for out in outs for s in out["results"]}
     rows = [
         ("GPUs", _each(outs, _gpus)),
         ("CPUs", _each(outs, _cpus)),
@@ -164,8 +165,8 @@ def setting(outs):
         ("Models", _each(outs, _model_size)),
         ("Runs", _each(outs, _runs)),
         ("Settings", _settings(outs)),
-        ("safetensors", versions.get("safetensors")),
-        ("instanttensor", versions.get("instanttensor")),
+        ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
+        ("instanttensor", versions.get("instanttensor") if "instanttensor" in ran else None),
         ("runai_model_streamer", _streamer(outs, versions)),
         ("torch", versions.get("torch")),
     ]
@@ -174,14 +175,17 @@ def setting(outs):
 
 def _download_note(group):
     """How the loaders that read only local files got an S3 model, when any of them ran."""
-    if not any("download_s" in s for out in group for s in out["results"]):
+    names = list(dict.fromkeys(LOADERS[s["loader"]] for out in group for s in out["results"] if "download_s" in s))
+    if not names:
         return ""
+    who = " and ".join(names) + (" read" if len(names) > 1 else " reads")
+    them = "them" if len(names) > 1 else "it"
     best = next((b for b in (((o.get("calibration") or {}).get("params") or {}).get("s3_best") for o in group)
                  if b), None)
     how = (f', with the settings the calibration measured as fastest ({best["objects"]} files at once, '
            f'{best["concurrency_per_object"]} parts of {best["part_mib"]} MiB each)') if best else ""
-    return ("\n\nSafetensors and InstantTensor read local files only. For them the model is first downloaded "
-            f"to local disk with s5cmd{how}, and then loaded; the load time is the two together.")
+    return (f"\n\n{who} local files only. For {them} the model is first downloaded to local disk with "
+            f"s5cmd{how}, and then loaded; the load time is the two together.")
 
 
 def results(outs):

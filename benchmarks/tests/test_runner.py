@@ -207,7 +207,8 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("## Test on S3\n", page)
         self.assertIn("| Qwen | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
         self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
-        self.assertIn("first downloaded to local disk with s5cmd, and then loaded", page)
+        self.assertIn("Safetensors and InstantTensor read local files only. For them the model is first "
+                      "downloaded to local disk with s5cmd, and then loaded", page)
 
     def test_without_s5cmd_only_the_streamer_reads_s3(self):
         a = argparse.Namespace(scratch_dir=None)
