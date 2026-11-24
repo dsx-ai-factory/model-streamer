@@ -80,8 +80,18 @@ def _each(outs, value):
 
 
 def _gpus(out):
-    gpus = out.get("environment", {}).get("gpus")
-    return f"{len(gpus)} × {gpus[0]}" if gpus else None
+    """The GPUs the tests loaded to: none for a run to host memory only."""
+    used = dict.fromkeys(_destination(out, s["group"]) for s in out["results"] if s["group"] != "cpu")
+    return ", ".join(used) or None
+
+
+def _streamer(outs, versions):
+    """The streamer's version, and where it was imported from when that is not the installed package."""
+    version = versions.get("runai-model-streamer")
+    pkgs = _each(outs, lambda o: ", ".join(o["streamer"]))
+    if not pkgs:
+        return None
+    return f"{version} (imported from {pkgs})" if version in (None, "local build") else version
 
 
 def _rate(out, ceiling):
@@ -119,7 +129,6 @@ def setting(outs):
     versions = {}
     for out in outs:
         versions.update(out.get("versions", {}))
-    pkgs = _each(outs, lambda o: ", ".join(o["streamer"]))
     rows = [
         ("Host", _each(outs, lambda o: o["host"])),
         ("GPUs", _each(outs, _gpus)),
@@ -133,7 +142,7 @@ def setting(outs):
         ("Settings", _each(outs, lambda o: " ".join(f"{k}={v}" for k, v in o["settings"].get("env", {}).items()))),
         ("safetensors", versions.get("safetensors")),
         ("instanttensor", versions.get("instanttensor")),
-        ("runai_model_streamer", pkgs and f'{versions.get("runai-model-streamer", "")} (imported from {pkgs})'),
+        ("runai_model_streamer", _streamer(outs, versions)),
         ("torch", versions.get("torch")),
     ]
     return "\n".join(f"- {k}: {v}" for k, v in rows if v)
@@ -154,6 +163,24 @@ def results(outs):
     return "\n\n".join(parts)
 
 
+def notes(outs):
+    """What a reader needs to read the tables, for the cases that are in them."""
+    tests = [s for out in outs for s in out["results"]]
+    groups = {s["group"] for s in tests}
+    lines = ["Throughput is the model's size over the load time."]
+    if any("speedup" in s for s in tests):
+        lines.append("Speedup is against Safetensors to the same destination.")
+    if "dist" in groups:
+        lines.append("With several GPUs, the load time is the time until the slowest GPU finishes.")
+    if "cpu" in groups:
+        lines.append("InstantTensor loads to GPUs only, so it has no host memory entry.")
+    if any(_on_s3(out) for out in outs):
+        lines.append("Safetensors and InstantTensor read local files only. For a model on S3 their load time is the "
+                     "download to local disk with s5cmd plus the load from there, shown as the two parts; the "
+                     "streamer reads from S3 directly.")
+    return "\n".join(f"- {line}" for line in lines)
+
+
 def loads(outs):
     """How each test that ran loads the model, a line per test."""
     seen = dict.fromkeys(s["test"] for out in outs for s in out["results"])
@@ -169,13 +196,7 @@ def render(outs):
 
 {results(outs)}
 
-- Throughput is the model's size over the load time.
-- Speedup is against Safetensors to the same destination.
-- With several GPUs, the load time is the time until the slowest GPU finishes.
-- InstantTensor loads to GPUs only, so it has no host memory entry.
-- Safetensors and InstantTensor read local files only. For a model on S3 their load time is the download
-  to local disk with s5cmd plus the load from there, shown as the two parts; the streamer reads from S3
-  directly.
+{notes(outs)}
 
 ## How each loader is run
 

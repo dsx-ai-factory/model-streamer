@@ -70,14 +70,25 @@ def check(seen, kept, expected, where):
 
 
 def versions():
-    """Installed versions of the packages a load goes through, as pip knows them."""
-    from importlib.metadata import PackageNotFoundError, version
+    """Versions of the packages a load goes through. A package that is imported from somewhere other than
+    where pip installed it, such as a build put first on PYTHONPATH, is not the version pip knows:
+    it is reported as "local build"."""
+    import importlib.util
+    from importlib.metadata import PackageNotFoundError, distribution
     found = {}
-    for dist in ("runai-model-streamer", "instanttensor", "safetensors", "torch"):
+    for dist, module in (("runai-model-streamer", "runai_model_streamer"), ("instanttensor", "instanttensor"),
+                         ("safetensors", "safetensors"), ("torch", "torch")):
+        spec = importlib.util.find_spec(module)
+        if spec is None or not spec.origin:
+            continue
+        imported = os.path.realpath(os.path.dirname(spec.origin))
         try:
-            found[dist] = version(dist)
+            installed = distribution(dist)
         except PackageNotFoundError:
-            pass
+            found[dist] = "local build"
+            continue
+        same = imported == os.path.realpath(str(installed.locate_file(module)))
+        found[dist] = installed.version if same else "local build"
     return found
 
 

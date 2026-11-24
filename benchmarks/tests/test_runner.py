@@ -53,8 +53,8 @@ class RunnerTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, **over):
-        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="", env=[],
-                               warm=False, scratch_dir=None,
+        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="",
+                               env=[], warm=False, scratch_dir=None,
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -161,12 +161,17 @@ class RunnerTest(unittest.TestCase):
         for text in ("| Qwen | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |",
                      "| | | InstantTensor | 5.00 | 8.0 | **4.00x** |",
                      "| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", "- instanttensor: 0.2.3",
-                     f"- runai_model_streamer: 0.17.1 (imported from {PKG})", "- GPUs: 1 × H200",
+                     "- runai_model_streamer: 0.17.1", "- GPUs: 1 × H200",
+                     "- Speedup is against Safetensors",
                      "- Runs: median of 1 per loader, cold page cache"):
             self.assertIn(text.replace("Qwen", os.path.basename(self.dir.name)), page)
+        for text in ("several GPUs", "host memory entry", "on S3"):  # notes for cases that did not run
+            self.assertNotIn(text, page)
         # without the safetensors test there is nothing to compare with
         _, out = self.run_bench(tests="streamer_cuda", repeats=1)
         self.assertNotIn("speedup", out["results"][0])
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertNotIn("Speedup is against", f.read())
 
     def test_a_missing_loader_leaves_out_only_its_tests(self):
         code, _ = self.run_bench(gpus=1, repeats=1, device="cuda", missing="instanttensor is not installed")
@@ -214,7 +219,9 @@ class RunnerTest(unittest.TestCase):
         self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
         self.assertEqual([s["group"] for s in out["results"]], ["dist"] * 3)
         with open(os.path.splitext(self.out)[0] + ".md") as f:
-            self.assertIn("| 2 × H200 | Safetensors |", f.read())
+            page = f.read()
+        self.assertIn("| 2 × H200 | Safetensors |", page)
+        self.assertIn("the time until the slowest GPU finishes", page)
 
     def test_several_results_make_one_page_and_one_table(self):
         self.run_bench(gpus=1, repeats=1, device="cuda")
