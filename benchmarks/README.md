@@ -130,6 +130,11 @@ time is the time vLLM spends in its weight loading step, on the slowest rank.
 The results also keep vLLM's own "Model loading took" time and the whole
 start-up time.
 
+The report adds the KV cache vLLM then fits on each GPU (`kv_cache_gib`, the
+smallest over the ranks). Whatever a loader leaves on the GPU comes out of it:
+a loader that sends on vLLM's process group leaves that group's NCCL
+communicator allocated, about 0.6 GiB per GPU on a B200.
+
 - They need `vllm` installed and the model's `config.json`, and a model on
   local disk. Otherwise they are left out with a note.
 - The vLLM used is the one installed in this Python; its version is in the

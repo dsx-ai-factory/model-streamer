@@ -25,7 +25,7 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
                      peak_rss_gib=max(r["peak_rss_gib"] for r in good))
         if all("download_s" in r for r in good):
             s["download_s"] = round(statistics.median(r["download_s"] for r in good), 2)
-        for key in ("startup_s", "model_load_s"):
+        for key in ("startup_s", "model_load_s", "kv_cache_gib"):
             if all(key in r for r in good):
                 s[key] = round(statistics.median(r[key] for r in good), 2)
         if strategies:

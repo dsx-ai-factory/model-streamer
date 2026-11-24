@@ -294,7 +294,8 @@ def run_once(a, test, files, remote, env, tag, profile=None):
 def vllm_record(a, test, raw, out, err, warnings):
     """A vLLM run's record. Its load time is the weight loading step, which every rank times itself and
     prints: the slowest rank's counts. vLLM's own "Model loading took" line, which also covers building
-    the model, is kept as model_load_s, with the GPU memory it reports."""
+    the model, is kept as model_load_s, with the GPU memory it reports. kv_cache_gib is the KV cache vLLM
+    then fits on one GPU, the smallest over the ranks: what a loader leaves on the GPU comes out of it."""
     ranks = a.nproc if is_dist(test) else 1
     weights = [float(s) for s in re.findall(r"^WEIGHTS ([\d.]+)", out, re.M)]
     if len(weights) < ranks or not max(weights):
@@ -307,6 +308,10 @@ def vllm_record(a, test, raw, out, err, warnings):
         r["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
         if r["gpu_gib"] < 0.9 * raw["gib"]:  # the weights did not all reach the GPU, or were converted
             warnings.append(f"vLLM reports {r['gpu_gib']} GiB on the GPU for {raw['gib']} GiB of weights")
+    kv = re.findall(r"Extended KV cache to \d+ blocks \(([\d.]+) GiB\)|Available KV cache memory: ([\d.]+) GiB",
+                    out + err)[-ranks:]
+    if kv:
+        r["kv_cache_gib"] = round(min(float(a or b) for a, b in kv), 2)
     if warnings:
         r["warnings"] = warnings
     facts = {"gib": raw["gib"], "tensors": raw["tensors"], "pkg": raw["pkg"], "versions": raw.get("versions", {}),

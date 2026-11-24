@@ -45,7 +45,9 @@ def child_output(cmd, load_s=None, errors=()):
                "versions": {"vllm": "0.34.0", "runai-model-streamer": "0.17.1"},
                "pkg": PKG if "streamer" in test else None}
         out = "\n".join([f"WEIGHTS {weights + i:.3f}" for i in range(ranks)] + ["RESULT " + json.dumps(one)])
-        return out, "\n".join(f"Model loading took {40.2 / ranks} GiB memory and {weights + 2 + i:.6f} seconds"
+        cache = 99.4 if "instanttensor" in test else 100.0  # its communicator stays on the GPU
+        return out, "\n".join(f"Model loading took {40.2 / ranks} GiB memory and {weights + 2 + i:.6f} seconds\n"
+                              f"Extended KV cache to {700 + i} blocks ({cache + i} GiB)."
                               for i in range(ranks)), None
     if test.endswith("_dist"):
         one = [dict(one, rank=i, rank_s=load_s - 1, peak_gpu_gib=6.0) for i in range(2)]
@@ -324,7 +326,9 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 0)
         _, st, it, streamer = out["results"]
         self.assertEqual(st["runs"], [{"load_s": 40.0, "gibps": 1.0, "startup_s": 60.0, "model_load_s": 42.0,
-                                       "gpu_gib": 40.2}])
+                                       "gpu_gib": 40.2, "kv_cache_gib": 100.0}])
+        # the KV cache vLLM fits afterwards: smaller where a loader left something on the GPU
+        self.assertEqual((it["kv_cache_gib"], streamer["kv_cache_gib"]), (99.4, 100.0))
         self.assertEqual((streamer["load_s"], streamer["model_load_s"], streamer["group"]), (8.0, 10.0, "vllm"))
         # compared with safetensors + prefetch, the safetensors that ran in this group
         self.assertEqual([s["speedup"] for s in (st, it, streamer)], [1.0, 4.0, 5.0])
@@ -335,12 +339,13 @@ class RunnerTest(unittest.TestCase):
                          {"trust_remote_code": True})
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("| vLLM on 1 × H200 | Safetensors + prefetch | 40.00 | 1.0 | 1.00x |", page)
+        self.assertIn("| vLLM on 1 × H200 | Safetensors + prefetch | 40.00 | 1.0 | 1.00x | 100.00 |", page)
+        self.assertIn("| Model Streamer | 5.00 | 8.0 | n/a | |", page)  # not a vLLM test: no KV cache
         self.assertIn("- vllm: 0.34.0", page)
         # with tensor parallelism: the slowest rank's weight loading, and the GPU memory of all ranks
         code, out = self.run_bench(gpus=8, nproc=2, repeats=1, vllm=True, tests="vllm_dist_streamer")
         self.assertEqual(out["results"][0]["runs"], [{"load_s": 9.0, "gibps": 4.44, "startup_s": 28.0,
-                                                      "model_load_s": 11.0, "gpu_gib": 40.2}])
+                                                      "model_load_s": 11.0, "gpu_gib": 40.2, "kv_cache_gib": 100.0}])
         self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
         # a rank that reported no time fails the run
         code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '

@@ -59,20 +59,23 @@ def cases(outs):
 
 
 def table(outs):
-    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |",
-             "|---|---|---|---|---|---|"]
+    kv = any("kv_cache_gib" in s for out in outs for s in out["results"])  # a column for vLLM's KV cache
+    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |"
+             + (" KV cache per GPU (GiB) |" if kv else ""),
+             "|---|---|---|---|---|---|" + ("---|" if kv else "")]
     for out, group, tests in cases(outs):
         best = max([s.get("speedup", 0) for s in tests] + [0])
         for i, s in enumerate(tests):
             first = f"| {_model(out)} | {_destination(out, group)} " if i == 0 else "| | "
             if "gibps" not in s:
-                lines.append(f"{first}| {_loader(s)} | failed | | |")
+                lines.append(f"{first}| {_loader(s)} | failed | | |" + (" |" if kv else ""))
                 continue
             speedup = f'{s["speedup"]:.2f}x' if "speedup" in s else "n/a"
             if best > 1 and s.get("speedup") == best:
                 speedup = f"**{speedup}**"
             invalid = "" if s["ok"] else " (invalid data)"
-            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |')
+            cache = f' {s["kv_cache_gib"]:.2f} |' if "kv_cache_gib" in s else " |" if kv else ""
+            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |{cache}')
     return "\n".join(lines)
 
 
