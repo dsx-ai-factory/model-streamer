@@ -53,7 +53,7 @@ class RunnerTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, **over):
-        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, tests="", env=[],
+        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="", env=[],
                                warm=False, scratch_dir=None,
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
@@ -146,6 +146,8 @@ class RunnerTest(unittest.TestCase):
         self.run_bench(gpus=1, repeats=1, device="cuda")
         self.assertEqual(self.ran(), ["safetensors_cuda", "instanttensor_cuda", "streamer_cuda"])
         self.assertIn("no test applies", self.run_bench(gpus=0, device="cuda")[0])
+        self.run_bench(gpus=1, repeats=1, device="cuda", loaders=["safetensors", "streamer"])
+        self.assertEqual(self.ran(), ["safetensors_cuda", "streamer_cuda"])
 
     def test_speedup_is_against_safetensors_to_the_same_destination(self):
         code, out = self.run_bench(gpus=1, repeats=1, device="cuda")

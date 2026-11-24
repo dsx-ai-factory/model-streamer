@@ -61,7 +61,7 @@ Each option is one case, and any of them can be left out:
 | `--cpu DIR` | The model loaded to host memory |
 
 Every case is one `bench.py` run with each loader that applies. `--repeats`,
-`--env`, `--profile` and `--no-calibrate` are passed on to it. The results go
+`--loaders`, `--env`, `--profile` and `--no-calibrate` are passed on to it. The results go
 to `--out-dir` (default `bench_suite`): a results file, a report and the logs
 per case, and the combined `report.md`, which has the test setting and this
 table:
@@ -95,6 +95,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 |---|---|---|
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--device cpu\|cuda` | both | Run the single-process tests to this destination only |
+| `--loaders a,b` | all | Run only these loaders: `safetensors`, `instanttensor`, `streamer` |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--warm` | cold | Load from the page cache instead of evicting first |

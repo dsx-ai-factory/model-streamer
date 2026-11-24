@@ -88,6 +88,8 @@ def select_tests(a, remote):
         names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
         if a.device and not a.nproc:
             names = [n for n in names if TESTS[n]["device"] == a.device]
+        if a.loaders:
+            names = [n for n in names if loader_of(n) in a.loaders]
         for n in list(names):
             if unavailable(a, n, remote):
                 print(f"skipping {n}: {unavailable(a, n, remote)}", file=sys.stderr)

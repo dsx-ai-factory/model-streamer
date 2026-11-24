@@ -18,7 +18,7 @@ import importlib.util
 import os
 import sys
 
-from streamer_bench import DEFAULT_PROFILE, TESTS
+from streamer_bench import DEFAULT_PROFILE, LOADERS, TESTS
 
 
 def check_installed():
@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--nproc", type=int, help="run the distributed tests on this many ranks, one GPU each")
     ap.add_argument("--device", choices=("cpu", "cuda"),
                     help="single-process tests to this destination only (default: both)")
+    ap.add_argument("--loaders", default="", help=f"only these loaders, a comma list of: {', '.join(LOADERS)}")
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
@@ -61,6 +62,10 @@ def main():
         ap.error("MODEL is required")
     if a.nproc is not None and a.nproc < 1:
         ap.error("--nproc must be at least 1")
+    a.loaders = [x for x in a.loaders.split(",") if x]
+    for name in a.loaders:
+        if name not in LOADERS:
+            ap.error(f"unknown loader {name}; choose from {', '.join(LOADERS)}")
     if a.nproc and a.device:
         ap.error("--device is for the single-process tests; --nproc loads to the GPUs")
     if not sys.platform.startswith("linux"):

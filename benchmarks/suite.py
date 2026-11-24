@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--cpu", metavar="DIR", help="model to load to host memory")
     ap.add_argument("--out-dir", default="bench_suite", help="where the results and the report go")
     ap.add_argument("--repeats", type=int, default=3, help="runs per loader")
+    ap.add_argument("--loaders", help="only these loaders, a comma list as for bench.py (default: all)")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
     ap.add_argument("--profile", help="machine profile from calibrate.py, as for bench.py")
@@ -58,6 +59,8 @@ def main():
         common.append("--no-calibrate")
     if a.scratch_dir:
         common += ["--scratch-dir", a.scratch_dir]
+    if a.loaders:
+        common += ["--loaders", a.loaders]
     written, failed = [], []
     for name, model, how in cases:
         out = os.path.join(a.out_dir, f"{name}.json")
