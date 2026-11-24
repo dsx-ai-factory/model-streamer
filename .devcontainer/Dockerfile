@@ -104,7 +104,7 @@ RUN AWS_SDK_CPP_VERSION="$AWS_SDK_CPP_VERSION" bash /tmp/build-aws-sdk.sh "$TARG
 SHELL ["/bin/bash", "-c"]
 # attribution: shipped module=py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-tags depName=Azure/azure-sdk-for-cpp extractVersion=^azure-storage-blobs_(?<version>.*)$
-ARG AZURE_STORAGE_BLOBS_VERSION=12.15.0
+ARG AZURE_STORAGE_BLOBS_VERSION=12.19.1
 COPY .devcontainer/scripts/build-azure-sdk.sh /tmp/build-azure-sdk.sh
 RUN AZURE_STORAGE_BLOBS_VERSION="$AZURE_STORAGE_BLOBS_VERSION" bash /tmp/build-azure-sdk.sh "$TARGETARCH"
 

@@ -32,7 +32,7 @@ Dependencies
 | `github.com/curl/curl` | 8_13_0 | curl | https://github.com/curl/curl/blob/curl-8_13_0/COPYING |
 | `github.com/madler/zlib` | 1.3.1 | Zlib | https://github.com/madler/zlib/blob/v1.3.1/LICENSE |
 | `github.com/GNOME/libxml2` | 2.13.5 | MIT | https://github.com/GNOME/libxml2/blob/v2.13.5/Copyright |
-| `github.com/Azure/azure-sdk-for-cpp` | 12.15.0 | MIT | https://github.com/Azure/azure-sdk-for-cpp/blob/azure-storage-blobs_12.15.0/LICENSE.txt |
+| `github.com/Azure/azure-sdk-for-cpp` | 12.19.1 | MIT | https://github.com/Azure/azure-sdk-for-cpp/blob/azure-storage-blobs_12.19.1/LICENSE.txt |
 | `gcc-runtime` | 9 | GPL-3.0-or-later WITH GCC-exception-3.1 | https://spdx.org/licenses/GPL-3.0-or-later.html |
 | `glibc-nonshared` | 2.31 | LGPL-2.1-or-later | https://spdx.org/licenses/LGPL-2.1-or-later.html |
 
