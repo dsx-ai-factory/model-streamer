@@ -13,7 +13,8 @@ import sys
 import tempfile
 import time
 
-from . import ENTRY, GIB, GPU_IDLE_GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, loader_of
+from . import (ENTRY, GIB, GPU_IDLE_GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, is_vllm,
+               loader_of)
 from .files import describe, evict, is_remote, model_files, prime
 from .profile import get_profile
 from .report import report
@@ -48,8 +49,14 @@ def gpu_used_gib():
     return used if used and len(used) == gpu_count() else None
 
 
+def place_of(group):
+    """The destination behind a group: a vLLM test loads to one GPU or to the ranks' GPUs like the others."""
+    return {"vllm": "cuda", "vllm_dist": "dist"}.get(group, group)
+
+
 def gpus_of(group, nproc=None):
     """The GPUs a destination loads to: the first one, or one per rank."""
+    group = place_of(group)
     return list(range(nproc or 0)) if group == "dist" else [0] if group == "cuda" else []
 
 
@@ -64,6 +71,7 @@ def misfit(group, size_gib, nproc=None):
     """Why a model of this size cannot be loaded to a destination on this machine, or None when it can.
     One GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it. What counts is
     the memory that is free now, and some room is left for the loader's own buffers."""
+    group = place_of(group)
     gpus = gpu_memory_gib()
     used = gpu_used_gib() or [0.0] * len(gpus)
     free = [total - taken for total, taken in zip(gpus, used)]
@@ -83,6 +91,13 @@ def unavailable(a, test, remote=False):
     local files needs s5cmd to download an s3:// model first."""
     if loader_of(test) == "instanttensor" and importlib.util.find_spec("instanttensor") is None:
         return f"instanttensor is not installed in this Python ({sys.executable}): pip install instanttensor"
+    if is_vllm(test):
+        if importlib.util.find_spec("vllm") is None:
+            return f"vllm is not installed in this Python ({sys.executable}): pip install vllm"
+        if remote:
+            return "the vLLM tests load a model from a local directory"
+        if not os.path.exists(os.path.join(a.model_dir, "config.json")):
+            return f"the model's config.json is not in {a.model_dir}, next to the weights"
     if remote and loader_of(test) != "streamer" and not shutil.which("s5cmd"):
         return "it reads local files, and downloading the s3:// model needs s5cmd on PATH (pip install s5cmd)"
     return None
@@ -234,6 +249,8 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     args = [ENTRY, model_dir, "--child", test]
     if a.ref_dir and model_dir == a.model_dir:
         args += ["--ref-dir", a.ref_dir]
+    if a.vllm_args and is_vllm(test):
+        args += ["--vllm-args", json.dumps(a.vllm_args)]
     cmd = [sys.executable]
     if is_dist(test):
         cmd += ["-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={a.nproc}"]
@@ -248,6 +265,8 @@ def run_once(a, test, files, remote, env, tag, profile=None):
         return {"failed": killed or (err or out)[-1500:]}, None
 
     raw = json.loads(line[7:])
+    if is_vllm(test):
+        return vllm_record(a, test, raw, out, err, warnings)
     ranks = raw if is_dist(test) else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
     if download_s is not None:
@@ -268,6 +287,30 @@ def run_once(a, test, files, remote, env, tag, profile=None):
         r["warnings"] = warnings
     facts = {"gib": ranks[0]["gib"], "tensors": ranks[0]["tensors"], "pkg": ranks[0]["pkg"],
              "versions": ranks[0].get("versions", {}), "gpus": ranks[0].get("gpus"),
+             "fs_strategy": sorted(set(re.findall(r"Filesystem strategy: (\S+)", out + err)))}
+    return r, facts
+
+
+def vllm_record(a, test, raw, out, err, warnings):
+    """A vLLM run's record. Its load time is the weight loading step, which every rank times itself and
+    prints: the slowest rank's counts. vLLM's own "Model loading took" line, which also covers building
+    the model, is kept as model_load_s, with the GPU memory it reports."""
+    ranks = a.nproc if is_dist(test) else 1
+    weights = [float(s) for s in re.findall(r"^WEIGHTS ([\d.]+)", out, re.M)]
+    if len(weights) < ranks or not max(weights):
+        return {"failed": f"{len(weights)} of {ranks} ranks reported a weight loading time"}, None
+    took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)[-ranks:]
+    load_s = round(max(weights), 3)
+    r = {"load_s": load_s, "gibps": round(raw["gib"] / load_s, 2), "startup_s": raw["startup_s"]}
+    if took:
+        r["model_load_s"] = round(max(float(s) for _, s in took), 3)
+        r["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
+        if r["gpu_gib"] < 0.9 * raw["gib"]:  # the weights did not all reach the GPU, or were converted
+            warnings.append(f"vLLM reports {r['gpu_gib']} GiB on the GPU for {raw['gib']} GiB of weights")
+    if warnings:
+        r["warnings"] = warnings
+    facts = {"gib": raw["gib"], "tensors": raw["tensors"], "pkg": raw["pkg"], "versions": raw.get("versions", {}),
+             "gpus": raw.get("gpus"),
              "fs_strategy": sorted(set(re.findall(r"Filesystem strategy: (\S+)", out + err)))}
     return r, facts
 

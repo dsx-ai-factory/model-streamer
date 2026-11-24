@@ -8,7 +8,8 @@ import sys
 import time
 import zlib
 
-from . import GIB, PREFETCH_BLOCK, PREFETCH_THREADS, TESTS, VALIDATE, VALIDATE_MAX_MIB, is_dist, loader_of
+from . import (GIB, PREFETCH_BLOCK, PREFETCH_THREADS, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM_OPTIONS, is_dist,
+               is_vllm, loader_of)
 from .files import is_remote, model_files, read_header, resident
 
 
@@ -77,7 +78,7 @@ def versions():
     from importlib.metadata import PackageNotFoundError, distribution
     found = {}
     for dist, module in (("runai-model-streamer", "runai_model_streamer"), ("instanttensor", "instanttensor"),
-                         ("safetensors", "safetensors"), ("torch", "torch")):
+                         ("safetensors", "safetensors"), ("torch", "torch"), ("vllm", "vllm")):
         spec = importlib.util.find_spec(module)
         if spec is None or not spec.origin:
             continue
@@ -249,8 +250,80 @@ def distributed(a):
     os._exit(0)  # skip NCCL teardown, which can hang where processes are not allowed to signal each other
 
 
-def main(a):
+def time_weight_loading():
+    """Make every vLLM model loader time its load_weights step, to the point where the weights are on the
+    GPU, and return the list the times are appended to. This is the loading itself, without building
+    the model before it or the engine's warm-up after it."""
+    import torch
+    from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+    took = []
+
+    def timed(load_weights):
+        def wrapper(self, model, model_config):
+            t0 = time.perf_counter()
+            try:
+                return load_weights(self, model, model_config)
+            finally:
+                torch.cuda.synchronize()
+                took.append(time.perf_counter() - t0)
+        return wrapper
+
+    def subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from subclasses(sub)
+
+    import vllm.model_executor.model_loader  # noqa: F401 - defines the loaders
+    for cls in set(subclasses(BaseModelLoader)):
+        if "load_weights" in vars(cls):
+            cls.load_weights = timed(cls.load_weights)
+    return took
+
+
+def vllm(a):
+    """A vLLM engine start with one of the loaders. The time reported is vLLM's weight loading step, taken
+    around its loader's load_weights. The tensors are not validated; a run is good when the engine came
+    up and its weights reached the GPU.
+
+    Eager mode and no tokenizer keep the start short and need only config.json next to the weights;
+    neither changes how the weights are loaded. The engine runs in this process, so that leaving with
+    os._exit frees the GPU without a child engine to shut down. A distributed test is one rank of
+    torchrun: tensor parallelism over the ranks with vLLM's external launcher."""
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    import inspect
+    from vllm import LLM
+    from vllm.engine.arg_utils import EngineArgs
+    _, ref = model_files(a)
+    expected, _ = expected_tensors(ref)
+    nbytes = sum(n for _, n in expected.values())
+
+    options = dict(model=a.model_dir, enforce_eager=True, skip_tokenizer_init=True, **VLLM_OPTIONS[loader_of(a.child)])
     if is_dist(a.child):
+        options.update(tensor_parallel_size=int(os.environ["WORLD_SIZE"]),
+                       distributed_executor_backend="external_launcher")
+    if "kernel_config" in inspect.signature(EngineArgs).parameters:
+        options["kernel_config"] = {"enable_flashinfer_autotune": False}  # minutes of tuning after the load
+    options.update(a.vllm_args)  # --vllm-args: what this model needs, e.g. trust_remote_code
+
+    took = time_weight_loading()
+    t0 = time.perf_counter()
+    llm = LLM(**options)  # noqa: F841 - kept alive until the result is out
+    startup = time.perf_counter() - t0
+    print(f"WEIGHTS {sum(took):.3f}", flush=True)  # one line per rank
+    if int(os.environ.get("RANK", "0")) == 0:
+        result = {"startup_s": round(startup, 3), "gib": round(nbytes / GIB, 2), "tensors": len(expected),
+                  "pkg": streamer_pkg() if loader_of(a.child) == "streamer" else None, "versions": versions(),
+                  "gpus": gpu_names(), "errors": []}
+        print("RESULT " + json.dumps(result), flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)  # skip the engine's teardown, which can hang where processes are not allowed to signal each other
+
+
+def main(a):
+    if is_vllm(a.child):
+        vllm(a)
+    elif is_dist(a.child):
         distributed(a)
     else:
         single(a)

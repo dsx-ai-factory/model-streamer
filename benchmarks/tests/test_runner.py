@@ -37,9 +37,19 @@ def child_output(cmd, load_s=None, errors=()):
     one = {"load_s": load_s, "gib": 40.0, "tensors": 7, "cpu_s": 8.0, "peak_rss_gib": 4.0, "gpus": ["H200"],
            "versions": {"runai-model-streamer": "0.17.1", "instanttensor": "0.2.3"},
            "pkg": PKG if test.startswith("streamer") else None, "errors": list(errors)}
+    log = "Filesystem strategy: io_uring\n[RunAI Streamer][Distributed] x"
+    if test.startswith("vllm"):  # a vLLM run: each rank prints its weight loading time, vLLM logs its own line
+        ranks = 2 if "_dist_" in test else 1
+        weights = 8.0 if "streamer" in test else 10.0 if "instanttensor" in test else 40.0
+        one = {"startup_s": weights + 20, "gib": 40.0, "tensors": 7, "errors": [], "gpus": ["H200"],
+               "versions": {"vllm": "0.34.0", "runai-model-streamer": "0.17.1"},
+               "pkg": PKG if "streamer" in test else None}
+        out = "\n".join([f"WEIGHTS {weights + i:.3f}" for i in range(ranks)] + ["RESULT " + json.dumps(one)])
+        return out, "\n".join(f"Model loading took {40.2 / ranks} GiB memory and {weights + 2 + i:.6f} seconds"
+                              for i in range(ranks)), None
     if test.endswith("_dist"):
         one = [dict(one, rank=i, rank_s=load_s - 1, peak_gpu_gib=6.0) for i in range(2)]
-    return "RESULT " + json.dumps(one), "Filesystem strategy: io_uring\n[RunAI Streamer][Distributed] x", None
+    return "RESULT " + json.dumps(one), log, None
 
 
 class RunnerTest(unittest.TestCase):
@@ -56,9 +66,9 @@ class RunnerTest(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, **over):
+    def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, vllm=False, **over):
         a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="",
-                               env=[], warm=False, scratch_dir=None,
+                               env=[], warm=False, scratch_dir=None, vllm_args={},
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -70,7 +80,9 @@ class RunnerTest(unittest.TestCase):
         code = 0
         with mock.patch.object(runner, "launch", fake), \
                 mock.patch.object(runner, "unavailable",
-                                  lambda a, test, remote=False: missing if "instanttensor" in test else None), \
+                                  lambda a, test, remote=False: "vllm is not installed"
+                                  if test.startswith("vllm") and not vllm
+                                  else missing if "instanttensor" in test else None), \
                 mock.patch.object(runner, "gpu_count", return_value=gpus), \
                 mock.patch.object(runner, "describe_machine", return_value=dict(MACHINE)), \
                 mock.patch.object(runner, "get_profile", return_value=(prof, "p.json" if prof else None)), \
@@ -305,6 +317,49 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         self.assertIn("| 2 × H200 | Safetensors |", page)
+
+    def test_vllm_tests_time_the_weight_loading(self):
+        code, out = self.run_bench(gpus=1, repeats=1, vllm=True, vllm_args={"trust_remote_code": True},
+                                   tests="streamer_cuda,vllm_safetensors_prefetch,vllm_instanttensor,vllm_streamer")
+        self.assertEqual(code, 0)
+        _, st, it, streamer = out["results"]
+        self.assertEqual(st["runs"], [{"load_s": 40.0, "gibps": 1.0, "startup_s": 60.0, "model_load_s": 42.0,
+                                       "gpu_gib": 40.2}])
+        self.assertEqual((streamer["load_s"], streamer["model_load_s"], streamer["group"]), (8.0, 10.0, "vllm"))
+        # compared with safetensors + prefetch, the safetensors that ran in this group
+        self.assertEqual([s["speedup"] for s in (st, it, streamer)], [1.0, 4.0, 5.0])
+        self.assertNotIn("cpu_s_per_gib", streamer)
+        by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
+        self.assertNotIn("--vllm-args", by["streamer_cuda"])
+        self.assertEqual(json.loads(by["vllm_streamer"][by["vllm_streamer"].index("--vllm-args") + 1]),
+                         {"trust_remote_code": True})
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            page = f.read()
+        self.assertIn("| vLLM on 1 × H200 | Safetensors + prefetch | 40.00 | 1.0 | 1.00x |", page)
+        self.assertIn("- vllm: 0.34.0", page)
+        # with tensor parallelism: the slowest rank's weight loading, and the GPU memory of all ranks
+        code, out = self.run_bench(gpus=8, nproc=2, repeats=1, vllm=True, tests="vllm_dist_streamer")
+        self.assertEqual(out["results"][0]["runs"], [{"load_s": 9.0, "gibps": 4.44, "startup_s": 28.0,
+                                                      "model_load_s": 11.0, "gpu_gib": 40.2}])
+        self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
+        # a rank that reported no time fails the run
+        code, out = self.run_bench(launch=lambda cmd: ('RESULT {"startup_s": 1, "gib": 1, "tensors": 1, '
+                                                       '"pkg": null, "errors": []}', "", None),
+                                   gpus=1, repeats=1, vllm=True, tests="vllm_streamer")
+        self.assertEqual(code, 1)
+        self.assertIn("reported a weight loading time", out["results"][0]["runs"][0]["failed"])
+
+    def test_vllm_tests_are_left_out_where_they_cannot_run(self):
+        self.run_bench(gpus=1, repeats=1, device="cuda")  # vllm is not installed here
+        self.assertFalse([t for t in self.ran() if t.startswith("vllm")])
+        self.run_bench(gpus=1, repeats=1, device="cuda", vllm=True)
+        self.assertEqual(self.ran()[-3:], ["vllm_safetensors_prefetch", "vllm_instanttensor", "vllm_streamer"])
+        a = argparse.Namespace(model_dir=self.dir.name)
+        with mock.patch.object(runner.importlib.util, "find_spec", return_value=object()):
+            self.assertIn("config.json", runner.unavailable(a, "vllm_streamer"))
+            open(os.path.join(self.dir.name, "config.json"), "w").close()
+            self.assertIsNone(runner.unavailable(a, "vllm_streamer"))
+            self.assertIn("local directory", runner.unavailable(a, "vllm_streamer", remote=True))
 
     def test_several_results_make_one_page_and_one_table(self):
         self.run_bench(gpus=1, repeats=1, device="cuda")

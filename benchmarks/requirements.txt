@@ -11,6 +11,9 @@ safetensors
 # For the InstantTensor tests. Without it they are left out and the rest still runs.
 instanttensor
 
+# For the vLLM tests. Without it they are left out and the rest still runs. It pins its own torch.
+vllm
+
 # For a model on S3: downloads it for the loaders that read only local files, and calibrates S3.
 s5cmd
 

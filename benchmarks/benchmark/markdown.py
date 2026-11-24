@@ -44,8 +44,9 @@ def _destination(out, group):
     if group == "cpu":
         return "host memory"
     gpus = out.get("environment", {}).get("gpus") or []
-    count = out["settings"].get("nproc", 1) if group == "dist" else 1
-    return f"{count} × {gpus[0] if gpus else 'GPU'}"
+    count = out["settings"].get("nproc", 1) if group in ("dist", "vllm_dist") else 1
+    place = f"{count} × {gpus[0] if gpus else 'GPU'}"
+    return f"vLLM on {place}" if group.startswith("vllm") else place
 
 
 def cases(outs):
@@ -82,7 +83,8 @@ def _each(outs, value):
 
 def _gpus(out):
     """The GPUs the tests loaded to: none for a run to host memory only."""
-    used = dict.fromkeys(_destination(out, s["group"]) for s in out["results"] if s["group"] != "cpu")
+    used = dict.fromkeys(_destination(out, s["group"]).removeprefix("vLLM on ")
+                         for s in out["results"] if s["group"] != "cpu")
     return ", ".join(used) or None
 
 
@@ -194,9 +196,11 @@ def setting(outs):
         ("S3", _each(outs, _s3)),
         ("Runs", _each(outs, _runs)),
         ("Settings", _settings(outs)),
-        ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
+        ("safetensors", versions.get("safetensors") if ran & {"safetensors", "safetensors_prefetch"} else None),
         ("instanttensor", versions.get("instanttensor") if "instanttensor" in ran else None),
         ("runai_model_streamer", _streamer(outs, versions)),
+        ("vllm", versions.get("vllm") if any(s["group"].startswith("vllm") for o in outs for s in o["results"])
+         else None),
         ("torch", versions.get("torch")),
     ]
     return "\n".join(f"- {k}: {v}" for k, v in rows if v)

@@ -25,6 +25,9 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
                      peak_rss_gib=max(r["peak_rss_gib"] for r in good))
         if all("download_s" in r for r in good):
             s["download_s"] = round(statistics.median(r["download_s"] for r in good), 2)
+        for key in ("startup_s", "model_load_s"):
+            if all(key in r for r in good):
+                s[key] = round(statistics.median(r[key] for r in good), 2)
         if strategies:
             s["fs_strategy"] = sorted(strategies)
         scored, candidates = ceilings_for(name, profile, remote, warm)
@@ -36,8 +39,10 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
 
 
 def add_speedups(results):
-    """Give each test its speedup over safetensors to the same destination, when both gave a result."""
-    base = {s["group"]: s["load_s"] for s in results if s["loader"] == "safetensors" and "load_s" in s}
+    """Give each test its speedup over safetensors in the same group, when both gave a result."""
+    base = {}
+    for loader in ("safetensors_prefetch", "safetensors"):  # plain safetensors where it ran, else with prefetch
+        base.update({s["group"]: s["load_s"] for s in results if s["loader"] == loader and "load_s" in s})
     for s in results:
         if "load_s" in s and s["load_s"] and s["group"] in base:
             s["speedup"] = round(base[s["group"]] / s["load_s"], 2)
@@ -45,14 +50,14 @@ def add_speedups(results):
 
 def print_table(results, pkgs):
     print(f"\nstreamer: {', '.join(pkgs) or 'not loaded'}")
-    print(f"{'test':26s} {'loader':22s} {'load s':>8s} {'GiB/s':>7s} {'speedup':>8s} {'% ceil':>7s} "
+    print(f"{'test':31s} {'loader':22s} {'load s':>8s} {'GiB/s':>7s} {'speedup':>8s} {'% ceil':>7s} "
           f"{'cpu s/GiB':>10s} {'rss GiB':>8s}  valid")
     for s in results:
         if "gibps" not in s:
-            print(f"{s['test']:26s} {LOADERS[s['loader']]:22s} FAILED")
+            print(f"{s['test']:31s} {LOADERS[s['loader']]:22s} FAILED")
             continue
         c = s.get("ceiling")
-        print(f"{s['test']:26s} {LOADERS[s['loader']]:22s} {s['load_s']:8.2f} {s['gibps']:7.1f} "
+        print(f"{s['test']:31s} {LOADERS[s['loader']]:22s} {s['load_s']:8.2f} {s['gibps']:7.1f} "
               f"{(str(s['speedup']) + 'x') if 'speedup' in s else 'n/a':>8s} "
               f"{(str(round(c['pct'])) + '%') if c else 'n/a':>7s} "
               f"{_cell(s.get('cpu_s_per_gib'), '10.2f')} {_cell(s.get('peak_rss_gib'), '8.1f')}  "
@@ -81,6 +86,8 @@ def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, pro
         settings["nproc"] = a.nproc
     if env:
         settings["env"] = env
+    if a.vllm_args:
+        settings["vllm_args"] = a.vllm_args
     out = {"schema": 3, "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "host": platform.node(),
            "streamer": pkgs, "versions": versions, "environment": environment, "model": model,
            "settings": settings, "calibration": calibration_of(profile, profile_path), "results": results}

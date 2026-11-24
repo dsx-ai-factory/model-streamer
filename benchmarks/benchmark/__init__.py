@@ -22,6 +22,21 @@ TESTS = {
     "safetensors_prefetch_dist": {"loader": "safetensors_prefetch", "device": "cuda", "dist": True},
     "instanttensor_dist": {"loader": "instanttensor", "device": "cuda", "dist": True},
     "streamer_dist": {"loader": "streamer", "device": "cuda", "dist": True},
+    # The same loaders inside a vLLM engine start, on one GPU and with tensor parallelism over --nproc ranks.
+    # What is timed is vLLM's weight loading step. They need vllm installed and the model's config.json.
+    "vllm_safetensors_prefetch": {"loader": "safetensors_prefetch", "device": "cuda", "vllm": True},
+    "vllm_instanttensor": {"loader": "instanttensor", "device": "cuda", "vllm": True},
+    "vllm_streamer": {"loader": "streamer", "device": "cuda", "vllm": True},
+    "vllm_dist_safetensors_prefetch": {"loader": "safetensors_prefetch", "device": "cuda", "vllm": True, "dist": True},
+    "vllm_dist_instanttensor": {"loader": "instanttensor", "device": "cuda", "vllm": True, "dist": True},
+    "vllm_dist_streamer": {"loader": "streamer", "device": "cuda", "vllm": True, "dist": True},
+}
+# How vLLM is told to load with each loader. The streamer gets vLLM's "distributed" loader option, which
+# makes the GPU its destination; without it the streamer loads to host memory and vLLM copies from there.
+VLLM_OPTIONS = {
+    "safetensors_prefetch": {"load_format": "safetensors", "safetensors_load_strategy": "prefetch"},
+    "instanttensor": {"load_format": "instanttensor"},
+    "streamer": {"load_format": "runai_streamer", "model_loader_extra_config": {"distributed": True}},
 }
 
 
@@ -30,8 +45,15 @@ def loader_of(test):
 
 
 def group_of(test):
-    """Where a test's tensors end up: "cpu", "cuda" or "dist". Tests of one group are compared with each other."""
-    return "dist" if TESTS[test].get("dist") else TESTS[test]["device"]
+    """What a test is compared within: its destination ("cpu", "cuda" or "dist"), and for a vLLM test
+    "vllm" or "vllm_dist"."""
+    place = "dist" if TESTS[test].get("dist") else TESTS[test]["device"]
+    return {"cuda": "vllm", "dist": "vllm_dist"}[place] if is_vllm(test) else place
+
+
+def is_vllm(test):
+    """A test that starts a vLLM engine."""
+    return bool(TESTS[test].get("vllm"))
 
 
 def is_dist(test):

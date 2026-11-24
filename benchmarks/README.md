@@ -2,13 +2,10 @@
 
 `bench.py` measures how fast a model loads on your machine with three loaders,
 `safetensors`, [InstantTensor](https://github.com/scitix/InstantTensor) and the
-streamer, and compares each with what the hardware can do. Every run is a
-fresh process on a cold page cache, and the loaded tensors are checked against
-`safetensors`. A run that returns wrong data fails.
-
-`suite.sh` is the daily run on top of it: the same three models every time,
-from local disk and from S3, in one report of load time, throughput and
-speedup.
+streamer, on their own and inside vLLM, and compares each with what the
+hardware can do. Every run is a fresh process on a cold page cache, and the
+loaded tensors are checked against `safetensors`. A run that returns wrong
+data fails.
 
 ## Requirements
 
@@ -21,6 +18,9 @@ speedup.
     out and the rest still runs.
   - `s5cmd` is for a model on S3: it downloads the model for the loaders that
     read only local files, and calibrates S3.
+  - `vllm` is for the vLLM tests. Without it they are left out and the rest
+    still runs. It pins its own `torch`, so installing it can change the
+    `torch` of that environment.
   - `huggingface_hub` is for `suite.sh`, to download a model that is missing.
 - torch built with NCCL and one GPU per rank, for the distributed tests
 
@@ -28,95 +28,16 @@ The benchmark measures the `runai_model_streamer` that this Python imports and
 prints where it came from. To measure another build, install it or put its
 directory first on `PYTHONPATH`.
 
-## Layout
-
-| Path | Purpose |
-|---|---|
-| `bench.py` | Command-line entry point: one model |
-| `suite.sh` | The daily run: three models through `bench.py`, from disk and from S3, one report |
-| `calibrate.py` | Command-line entry point for calibration |
-| `benchmark/__init__.py` | The loaders and the tests (`TESTS`) |
-| `benchmark/runner.py` | Selects the tests and starts one measured process per run |
-| `benchmark/worker.py` | The measured process: one load, timed and validated |
-| `benchmark/files.py` | The model's files and their state in the page cache |
-| `benchmark/profile.py` | Finds or makes the machine profile and scores a test against it |
-| `benchmark/report.py` | Summary per test, the table and the results file |
-| `benchmark/markdown.py` | Results as a Markdown report |
-| `calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
-| `requirements.txt` | The packages the benchmark loads with |
-| `tests/` | Unit tests of the runner, the report and the calibration helpers |
-
-## Running the suite
+## Running the benchmark
 
 ```bash
-benchmarks/suite.sh /mnt/models s3://bench
-```
-
-It runs the same cases every time, each with every loader, first from local
-disk and then from S3:
-
-| Model | Loaded to |
-|---|---|
-| [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) (61 GiB) | One GPU |
-| [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) (641 GiB) | Every GPU, one rank each |
-| [Kimi-K3-REAP](https://huggingface.co/runrunway/Kimi-K3-REAP-448experts) (780 GiB) | Every GPU, and host memory |
-
-The first argument is the directory the models are in. The second, optional,
-is where they are on S3; without it only the local disk is used:
-
-- **A model missing from the directory** is downloaded: from the bucket when
-  it has the model, and from Hugging Face otherwise, at a pinned revision.
-  A model that the directory has no room for is left out with a note, and the
-  others still run.
-- **The bucket is only read.** The S3 half runs for the models the bucket
-  holds, each under its name (`s3://bench/Qwen3-32B/`). Nothing is uploaded: a
-  model that is not there is left out of the S3 half with a note. The endpoint
-  and credentials come from the environment (`AWS_ENDPOINT_URL`,
-  `AWS_ACCESS_KEY_ID`, ...).
-- **Calibration** happens on first use, for the disk and for S3, as with
-  `bench.py`.
-
-On a machine with one GPU the cases that load to every GPU are left out with a
-note.
-
-Anything after the directory and the bucket is passed on to every `bench.py`
-run:
-
-```bash
-benchmarks/suite.sh /mnt/models s3://bench --repeats 1 --loaders safetensors,streamer
-```
-
-A few things can be set through the environment:
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `NPROC` | every GPU | Ranks for the multi-GPU cases |
-| `OUT_DIR` | `bench_suite` | A directory named after the date is made in it |
-| `SCRATCH_DIR` | `MODELS_DIR/bench_scratch` | Where an S3 model is downloaded to for the loaders that read only local files |
-| `PYTHON` | `python3` | The Python that has the loaders installed |
-
-The results go to `OUT_DIR/<date>/`: for each case `<model>_<case>.json`
-(`..._s3.json` for the S3 run), its report and its logs, and the combined
-`report.md` with the test setting, a table for local disk and a table for S3:
-
-| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
-|---|---|---|---|---|---|
-| Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.67 | 10.8 | 1.00x |
-| | | InstantTensor | 2.48 | 24.6 | 2.29x |
-| | | Model Streamer | 1.60 | 38.1 | **3.54x** |
-
-Speedup is against Safetensors to the same destination.
-
-## Running one model
-
-```bash
-# to host memory and to one GPU, with each loader
+# to host memory and to one GPU, with each loader, and in vLLM on one GPU
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 
 # to one GPU only
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --device cuda
 
-# to the GPUs of 8 ranks of this node, one GPU each
+# to the GPUs of 8 ranks of this node, one GPU each, and in vLLM with tensor parallel 8
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
 
 # one test, with a streamer setting
@@ -128,9 +49,10 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 |---|---|---|
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--device cpu\|cuda` | both | Run the single-process tests to this destination only |
-| `--loaders a,b` | all | Run only these loaders: `safetensors`, `instanttensor`, `streamer` |
+| `--loaders a,b` | all | Run only these loaders: `safetensors`, `safetensors_prefetch`, `instanttensor`, `streamer` |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
+| `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
 | `--warm` | cold | Load from the page cache instead of evicting first |
 | `--ref-dir DIR` | downloaded | Local copy of an S3 model, used for validation |
 | `--scratch-dir DIR` | `bench_scratch` | Where an S3 model is downloaded to |
@@ -142,6 +64,10 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 
 Runs are interleaved across the tests (every test once, then every test
 again), so drift in the machine or the storage affects all of them alike.
+
+When another process already holds memory on a GPU the tests load to, the
+benchmark warns before it starts and records it in the results, because the
+numbers are then not those of an idle machine.
 
 ## Tests
 
@@ -182,6 +108,32 @@ tensors, so device memory is under real pressure, and drops the rest. The
 load time is measured from a barrier before the load to a barrier after the
 last tensor, which makes it the slowest rank's time. Each rank needs its own
 GPU, so `--nproc` cannot be more than the number of GPUs on the machine.
+
+### vLLM tests
+
+The same loaders are also timed inside vLLM, which shows what a server start
+gains from each:
+
+| Destination | Safetensors + prefetch | InstantTensor | Model Streamer |
+|---|---|---|---|
+| One GPU | `vllm_safetensors_prefetch` | `vllm_instanttensor` | `vllm_streamer` |
+| `--nproc` GPUs, tensor parallel | `vllm_dist_safetensors_prefetch` | `vllm_dist_instanttensor` | `vllm_dist_streamer` |
+
+Each test starts a vLLM engine on the model with the loader selected
+(`--load-format` and `--safetensors-load-strategy=prefetch`), and the load
+time is the time vLLM spends in its weight loading step, on the slowest rank.
+The results also keep vLLM's own "Model loading took" time and the whole
+start-up time.
+
+- They need `vllm` installed and the model's `config.json`, and a model on
+  local disk. Otherwise they are left out with a note.
+- The vLLM used is the one installed in this Python; its version is in the
+  report. A streamer build on `PYTHONPATH` is used in place of the one vLLM
+  was installed with.
+- The timer wraps vLLM's model loader classes. If a later vLLM renames them,
+  these tests fail with "ranks reported no weight loading time" and the other
+  tests are not affected.
+- A model that needs engine options gets them through `--vllm-args`.
 
 ## Machine ceilings
 
@@ -327,6 +279,24 @@ comes one entry per test:
 With `--log-dir`, each run's log also holds the measured process's full
 record, including page faults and per-thread system time.
 
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `bench.py` | Command-line entry point: one model |
+| `suite.sh` | Our fixed run of three models through `bench.py` (see the end of this page) |
+| `calibrate.py` | Command-line entry point for calibration |
+| `benchmark/__init__.py` | The loaders and the tests (`TESTS`) |
+| `benchmark/runner.py` | Selects the tests and starts one measured process per run |
+| `benchmark/worker.py` | The measured process: one load, timed and validated |
+| `benchmark/files.py` | The model's files and their state in the page cache |
+| `benchmark/profile.py` | Finds or makes the machine profile and scores a test against it |
+| `benchmark/report.py` | Summary per test, the table and the results file |
+| `benchmark/markdown.py` | Results as a Markdown report |
+| `calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
+| `requirements.txt` | The packages the benchmark loads with |
+| `tests/` | Unit tests of the runner, the report and the calibration helpers |
+
 ## Local checks
 
 ```bash
@@ -334,3 +304,68 @@ python3 -m unittest discover -s benchmarks/tests
 ```
 
 The tests stub the measured processes, so they need no GPU, torch or Linux.
+
+## The suite script
+
+`suite.sh` is the fixed run we repeat ourselves: the same three models every
+time through `bench.py`, from local disk and from S3, in one report. It is a
+convenience around the commands above, not another way to measure.
+
+```bash
+benchmarks/suite.sh /mnt/models s3://bench
+```
+
+The cases, each with every loader and in vLLM, first from local disk and then
+from S3 (the vLLM tests run from local disk only):
+
+| Model | Loaded to |
+|---|---|
+| [Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) (61 GiB) | One GPU |
+| [DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) (641 GiB) | Every GPU, one rank each |
+| [Kimi-K3-REAP](https://huggingface.co/runrunway/Kimi-K3-REAP-448experts) (780 GiB) | Every GPU, and host memory |
+
+The first argument is the directory the models are in. The second, optional,
+is where they are on S3; without it only the local disk is used:
+
+- **A model missing from the directory** is downloaded: from the bucket when
+  it has the model, and from Hugging Face otherwise, at a pinned revision.
+  A model that the directory has no room for is left out with a note, and the
+  others still run.
+- **The bucket is only read.** The S3 half runs for the models the bucket
+  holds, each under its name (`s3://bench/Qwen3-32B/`). Nothing is uploaded: a
+  model that is not there is left out of the S3 half with a note. The endpoint
+  and credentials come from the environment (`AWS_ENDPOINT_URL`,
+  `AWS_ACCESS_KEY_ID`, ...).
+- **Calibration** happens on first use, for the disk and for S3, as with
+  `bench.py`.
+
+On a machine with one GPU the cases that load to every GPU are left out with a
+note.
+
+Anything after the directory and the bucket is passed on to every `bench.py`
+run:
+
+```bash
+benchmarks/suite.sh /mnt/models s3://bench --repeats 1 --loaders safetensors,streamer
+```
+
+A few things can be set through the environment:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NPROC` | every GPU | Ranks for the multi-GPU cases |
+| `OUT_DIR` | `bench_suite` | A directory named after the date is made in it |
+| `SCRATCH_DIR` | `MODELS_DIR/bench_scratch` | Where an S3 model is downloaded to for the loaders that read only local files |
+| `PYTHON` | `python3` | The Python that has the loaders installed |
+
+The results go to `OUT_DIR/<date>/`: for each case `<model>_<case>.json`
+(`..._s3.json` for the S3 run), its report and its logs, and the combined
+`report.md` with the test setting, a table for local disk and a table for S3:
+
+| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |
+|---|---|---|---|---|---|
+| Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.67 | 10.8 | 1.00x |
+| | | InstantTensor | 2.48 | 24.6 | 2.29x |
+| | | Model Streamer | 1.60 | 38.1 | **3.54x** |
+
+Speedup is against Safetensors to the same destination.

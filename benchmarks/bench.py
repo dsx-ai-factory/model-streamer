@@ -16,6 +16,7 @@ The tests, the machine profile and the results file are described in README.md n
 """
 import argparse
 import importlib.util
+import json
 import os
 import sys
 
@@ -43,6 +44,8 @@ def main():
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
+    ap.add_argument("--vllm-args", default="", metavar="JSON",
+                    help='extra vLLM engine options for the vLLM tests, e.g. \'{"trust_remote_code": true}\'')
     ap.add_argument("--warm", action="store_true", help="load from the page cache instead of evicting first")
     ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation "
                                       "(default: downloaded once to the scratch directory)")
@@ -67,6 +70,12 @@ def main():
     for name in a.loaders:
         if name not in LOADERS:
             ap.error(f"unknown loader {name}; choose from {', '.join(LOADERS)}")
+    try:
+        a.vllm_args = json.loads(a.vllm_args) if a.vllm_args else {}
+    except ValueError as e:
+        ap.error(f"--vllm-args is not JSON: {e}")
+    if not isinstance(a.vllm_args, dict):
+        ap.error("--vllm-args must be a JSON object")
     if a.nproc and a.device:
         ap.error("--device is for the single-process tests; --nproc loads to the GPUs")
     if not sys.platform.startswith("linux"):

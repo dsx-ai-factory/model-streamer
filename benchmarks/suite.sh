@@ -39,10 +39,14 @@ QWEN="Qwen/Qwen3-32B                     9216db5781bf21249d130ec9da846c4624c1613
 DEEPSEEK="deepseek-ai/DeepSeek-R1        56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad  163  642"
 KIMI="runrunway/Kimi-K3-REAP-448experts  d2aff7364ad7c5e3cdcb7458d959aee2a2b079c9   96  780"
 DIST=safetensors_dist,safetensors_prefetch_dist,instanttensor_dist,streamer_dist
+VLLM=vllm_safetensors_prefetch,vllm_instanttensor,vllm_streamer
+VLLM_DIST=vllm_dist_safetensors_prefetch,vllm_dist_instanttensor,vllm_dist_streamer
+# What vLLM needs to start these models; none of it changes how the weights are loaded.
+KIMI_VLLM='--vllm-args {"trust_remote_code":true,"limit_mm_per_prompt":{"image":0,"video":0},"max_model_len":4096}'
 CASES=(
-    "gpu        $QWEN      --tests safetensors_cuda,safetensors_prefetch_cuda,instanttensor_cuda,streamer_cuda"
-    "multi_gpu  $DEEPSEEK  --nproc NPROC --tests $DIST"
-    "multi_gpu  $KIMI      --nproc NPROC --tests $DIST"
+    "gpu        $QWEN      --tests safetensors_cuda,safetensors_prefetch_cuda,instanttensor_cuda,streamer_cuda,$VLLM"
+    "multi_gpu  $DEEPSEEK  --nproc NPROC --tests $DIST,$VLLM_DIST"
+    "multi_gpu  $KIMI      --nproc NPROC --tests $DIST,$VLLM_DIST $KIMI_VLLM"
     "cpu        $KIMI      --tests safetensors_cpu,safetensors_prefetch_cpu,streamer_cpu"
 )
 
@@ -175,6 +179,7 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
         if [ "$source" = disk ]; then
             bench "${name}_$case" "$MODELS_DIR/$name" $options "$@"
         elif ! has "$absent" "$name"; then
+            options=$(echo "$options" | sed -E 's/,?vllm_[a-z_]+//g; s/ --vllm-args [^ ]+//')  # vLLM loads local models
             bench "${name}_${case}_s3" "$S3_ROOT/$name" $options --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi
