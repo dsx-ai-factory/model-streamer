@@ -45,14 +45,14 @@ def add_speedups(results):
 
 def print_table(results, pkgs):
     print(f"\nstreamer: {', '.join(pkgs) or 'not loaded'}")
-    print(f"{'test':20s} {'loader':15s} {'load s':>8s} {'GiB/s':>7s} {'speedup':>8s} {'% ceil':>7s} "
+    print(f"{'test':26s} {'loader':22s} {'load s':>8s} {'GiB/s':>7s} {'speedup':>8s} {'% ceil':>7s} "
           f"{'cpu s/GiB':>10s} {'rss GiB':>8s}  valid")
     for s in results:
         if "gibps" not in s:
-            print(f"{s['test']:20s} {LOADERS[s['loader']]:15s} FAILED")
+            print(f"{s['test']:26s} {LOADERS[s['loader']]:22s} FAILED")
             continue
         c = s.get("ceiling")
-        print(f"{s['test']:20s} {LOADERS[s['loader']]:15s} {s['load_s']:8.2f} {s['gibps']:7.1f} "
+        print(f"{s['test']:26s} {LOADERS[s['loader']]:22s} {s['load_s']:8.2f} {s['gibps']:7.1f} "
               f"{(str(s['speedup']) + 'x') if 'speedup' in s else 'n/a':>8s} "
               f"{(str(round(c['pct'])) + '%') if c else 'n/a':>7s} "
               f"{_cell(s.get('cpu_s_per_gib'), '10.2f')} {_cell(s.get('peak_rss_gib'), '8.1f')}  "

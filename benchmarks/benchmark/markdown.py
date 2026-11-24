@@ -204,7 +204,8 @@ def setting(outs):
 
 def _download_note(group):
     """How the loaders that read only local files got an S3 model, when any of them ran."""
-    names = list(dict.fromkeys(LOADERS[s["loader"]] for out in group for s in out["results"] if "download_s" in s))
+    names = list(dict.fromkeys(LOADERS["safetensors" if s["loader"].startswith("safetensors") else s["loader"]]
+                               for out in group for s in out["results"] if "download_s" in s))
     if not names:
         return ""
     who = " and ".join(names) + (" read" if len(names) > 1 else " reads")

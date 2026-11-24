@@ -147,17 +147,23 @@ again), so drift in the machine or the storage affects all of them alike.
 
 A test is one loader bringing the whole model to one destination:
 
-| Destination | Safetensors | InstantTensor | Model Streamer |
-|---|---|---|---|
-| Host memory | `safetensors_cpu` | not supported by InstantTensor | `streamer_cpu` |
-| One GPU | `safetensors_cuda` | `instanttensor_cuda` | `streamer_cuda` |
-| The GPUs of `--nproc` ranks | `safetensors_dist` | `instanttensor_dist` | `streamer_dist` |
+| Destination | Safetensors | Safetensors + prefetch | InstantTensor | Model Streamer |
+|---|---|---|---|---|
+| Host memory | `safetensors_cpu` | `safetensors_prefetch_cpu` | not supported | `streamer_cpu` |
+| One GPU | `safetensors_cuda` | `safetensors_prefetch_cuda` | `instanttensor_cuda` | `streamer_cuda` |
+| The GPUs of `--nproc` ranks | `safetensors_dist` | `safetensors_prefetch_dist` | `instanttensor_dist` | `streamer_dist` |
 
 | Loader | To host memory | To one GPU | To the ranks' GPUs |
 |---|---|---|---|
 | Safetensors | `safe_open`, then every page of each tensor is touched | `safe_open` + `.to("cuda")` per tensor | Every rank does the same load itself |
+| Safetensors + prefetch | The same, while threads read the files into the page cache ahead of it | The same | The same; the ranks split the files to prefetch |
 | InstantTensor | | `instanttensor.safe_open(files, device=...)` | The same with the ranks' process group |
 | Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda")` | `stream_files(files, device="cuda", is_distributed=True)` |
+
+The prefetch is what vLLM does with `--safetensors-load-strategy=prefetch`:
+8 threads read the files in 16 MiB blocks into the page cache, in the
+background, so the pages are there when `safetensors` maps them. vLLM turns
+it on by itself only on NFS and Lustre.
 
 The tests are named in [`benchmark/__init__.py`](benchmark/__init__.py)
 (`TESTS`). The loads themselves are the
