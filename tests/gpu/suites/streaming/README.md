@@ -79,7 +79,7 @@ Each model is written to `<out>/<name>/` with a manifest `<out>/<name>.manifest.
 `--models mixed,many_files` to build only some of them.
 
 Every dtype, every rank from 0 to 5 and every edge size is forced into the models; the rest is drawn from the
-seed. The generator knows 18 dtypes: `F64`, `F32`, `F16`, `BF16`, the float8 types `F8_E4M3`, `F8_E5M2` and `F8_E8M0`,
+seed. The generator knows 20 dtypes: `F64`, `F32`, `F16`, `BF16`, the float8 types `F8_E4M3`, `F8_E5M2`, `F8_E4M3FNUZ`, `F8_E5M2FNUZ` and `F8_E8M0`,
 `F4`, `C64`, the signed integers `I64` to `I8`, the unsigned `U64` to `U8`, and `BOOL`.
 `--dtypes` narrows them; the test run passes the ones the streamer accepts with the installed PyTorch (a torch
 before 2.8 has no `F4`, before 2.7 or so no `F8_E8M0`, before 2.3 no unsigned 16/32/64 bit types, before 2.1 no float8).
