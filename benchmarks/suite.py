@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run bench.py on one or more models and make one report: load time, throughput and speedup per loader.
-
-    python3 suite.py /models/Qwen3-32B /models/DeepSeek-R1
-
-Every model is loaded to each destination it fits on this machine: host memory, one GPU, and all the
-GPUs. A model can be a directory or an s3://bucket/prefix. To choose the destination per model instead:
+"""Run bench.py on several models and make one report: load time, throughput and speedup per loader.
 
     python3 suite.py --gpu /models/Qwen3-32B --multi-gpu /models/DeepSeek-R1 --cpu /models/Kimi-K3
 
-    --gpu DIR          the model loaded to one GPU
-    --multi-gpu DIR    the model loaded to the GPUs of --nproc ranks (default: every GPU)
-    --cpu DIR          the model loaded to host memory
+Each option is one case. Any of them can be left out, and each can be given more than once:
 
-Every case is one bench.py run, so the loaders, the cold page cache, the validation and the machine profile
-are bench.py's. The results of each case and the combined report.md go to --out-dir.
+    --gpu MODEL          the model loaded to one GPU
+    --multi-gpu MODEL    the model loaded to the GPUs of --nproc ranks (default: every GPU)
+    --cpu MODEL          the model loaded to host memory
+
+A model is a directory or an s3://bucket/prefix. Every case is one bench.py run, so the loaders, the cold
+page cache, the validation and the machine profile are bench.py's. The results of each case and the
+combined report.md go to --out-dir.
 """
 import argparse
 import os
@@ -29,13 +27,11 @@ BENCH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench.py")
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("models", nargs="*", metavar="MODEL",
-                    help="models to load to every destination they fit: directories or s3://bucket/prefix")
-    ap.add_argument("--gpu", metavar="DIR", action="append", default=[], help="model to load to one GPU")
-    ap.add_argument("--multi-gpu", metavar="DIR", action="append", default=[],
+    ap.add_argument("--gpu", metavar="MODEL", action="append", default=[], help="model to load to one GPU")
+    ap.add_argument("--multi-gpu", metavar="MODEL", action="append", default=[],
                     help="model to load to the GPUs of --nproc ranks")
     ap.add_argument("--nproc", type=int, help="ranks for the multi-GPU case, one GPU each (default: every GPU)")
-    ap.add_argument("--cpu", metavar="DIR", action="append", default=[], help="model to load to host memory")
+    ap.add_argument("--cpu", metavar="MODEL", action="append", default=[], help="model to load to host memory")
     ap.add_argument("--out-dir", default="bench_suite", help="where the results and the report go")
     ap.add_argument("--repeats", type=int, default=3, help="runs per loader")
     ap.add_argument("--loaders", help="only these loaders, a comma list as for bench.py (default: all)")
@@ -48,20 +44,12 @@ def main():
     ap.add_argument("--no-calibrate", action="store_true", help="never calibrate")
     a = ap.parse_args()
 
-    gpus = runner.gpu_count()
-    nproc = a.nproc or gpus
-    cases = []  # (destination, model, bench.py options); chosen ones must run, the others only where they fit
-    for model in a.models:
-        cases.append(("cpu", model, ["--device", "cpu"], False))
-        if gpus:
-            cases.append(("gpu", model, ["--device", "cuda"], False))
-        if nproc > 1:
-            cases.append(("multi_gpu", model, ["--nproc", str(nproc)], False))
-    cases += [("gpu", m, ["--device", "cuda"], True) for m in a.gpu]
-    cases += [("multi_gpu", m, ["--nproc", str(nproc)], True) for m in a.multi_gpu]
-    cases += [("cpu", m, ["--device", "cpu"], True) for m in a.cpu]
+    nproc = a.nproc or runner.gpu_count()
+    cases = ([("gpu", m, ["--device", "cuda"]) for m in a.gpu]
+             + [("multi_gpu", m, ["--nproc", str(nproc)]) for m in a.multi_gpu]
+             + [("cpu", m, ["--device", "cpu"]) for m in a.cpu])
     if not cases:
-        ap.error("give a MODEL, or at least one of --gpu, --multi-gpu and --cpu")
+        ap.error("give at least one of --gpu, --multi-gpu and --cpu")
     if a.multi_gpu and nproc < 1:
         ap.error("--multi-gpu needs a GPU: this machine has none")
 
@@ -73,7 +61,7 @@ def main():
     if a.no_calibrate:
         common.append("--no-calibrate")
     written, failed = [], []
-    for case, model, how, chosen in cases:
+    for case, model, how in cases:
         name = f"{os.path.basename(model.rstrip('/'))}_{case}"
         out = os.path.join(a.out_dir, f"{name}.json")
         print(f"\n=== {name}: {model}", flush=True)
@@ -86,10 +74,8 @@ def main():
                                "--log-dir", os.path.join(a.out_dir, f"logs_{name}")]).returncode
         if os.path.exists(out):
             written.append(out)
-        if code == SKIPPED and not chosen:
-            print(f"skipped {name}: the model does not fit there")
-        elif code:
-            failed.append(name)
+        if code:
+            failed.append(name + (" (the model does not fit there)" if code == SKIPPED else ""))
 
     if written:
         report = os.path.join(a.out_dir, "report.md")

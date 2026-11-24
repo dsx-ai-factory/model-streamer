@@ -47,29 +47,22 @@ directory first on `PYTHONPATH`.
 ## Running the suite
 
 ```bash
-python3 benchmarks/suite.py /mnt/models/Qwen3-32B /mnt/models/DeepSeek-R1
-```
-
-Every model is loaded to each destination it fits on this machine: host
-memory, one GPU, and all the GPUs. A model that is too large for one GPU
-skips that case with a note. A model can be a directory or an
-`s3://bucket/prefix`.
-
-To choose the destination per model instead, name the cases. Each option can
-be repeated:
-
-```bash
 python3 benchmarks/suite.py \
     --gpu /mnt/models/Qwen3-32B \
     --multi-gpu /mnt/models/DeepSeek-R1 \
     --cpu /mnt/models/Kimi-K3
 ```
 
+Each option is one case: which model, and where it is loaded to. Any of them
+can be left out, and each can be given more than once. A model is a directory
+or an `s3://bucket/prefix`. Before anything is loaded, the benchmark checks
+that the model fits the destination and says so if it does not.
+
 | Option | Case |
 |---|---|
-| `--gpu DIR` | The model loaded to one GPU |
-| `--multi-gpu DIR` | The model loaded to the GPUs of `--nproc` ranks (default: every GPU) |
-| `--cpu DIR` | The model loaded to host memory |
+| `--gpu MODEL` | The model loaded to one GPU |
+| `--multi-gpu MODEL` | The model loaded to the GPUs of `--nproc` ranks (default: every GPU) |
+| `--cpu MODEL` | The model loaded to host memory |
 
 Every case is one `bench.py` run with each loader that applies. `--repeats`,
 `--loaders`, `--env`, `--profile`, `--scratch-dir` and `--no-calibrate` are
