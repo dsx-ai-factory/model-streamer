@@ -10,7 +10,7 @@ module(name = "model_streamer_gcs_sdk")
 # and the code they vendor.
 # attribution: shipped module=py/runai_model_streamer_gcs,cpp vendored
 bazel_dep(name = "google_cloud_cpp", version = "3.7.0")
-bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_cc", version = "0.2.28")
 
 # The ABI compatibility header shared with the application build (cpp/MODULE.bazel).
 bazel_dep(name = "gcs_sdk_config")
