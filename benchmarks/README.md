@@ -230,9 +230,9 @@ cache between runs when you need server-cold numbers.
 The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
-`bench_results.md` is the report: the test setting (the machine, the storage
-and its measured read rate, the versions of each loader), a table with a row
-per loader giving its load time, throughput and speedup, and how each loader
+`bench_results.md` is the report: the test setting (the hardware, the storage's
+measured read rate, the versions of each loader), a table with a row per
+loader giving its load time, throughput and speedup, and how each loader
 was run. To make it again from a results file, or one report from several:
 
 ```bash

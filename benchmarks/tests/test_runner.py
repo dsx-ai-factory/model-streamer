@@ -129,7 +129,8 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn("raw_gibps", cal)
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("- Storage: ext4 on /mnt, 10 GiB/s parallel direct read", page)
+        self.assertIn("- Storage: ext4, 10 GiB/s parallel direct read", page)
+        self.assertNotIn("/mnt", page)
         self.assertIn("## Test on local disk (10 GiB/s parallel direct read)", page)
 
     def ran(self):

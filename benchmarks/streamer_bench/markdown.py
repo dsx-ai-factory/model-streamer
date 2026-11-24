@@ -86,51 +86,18 @@ def _gpus(out):
 
 
 def _streamer(outs, versions):
-    """The streamer's version, and where it was imported from when that is not the installed package."""
-    version = versions.get("runai-model-streamer")
-    pkgs = _each(outs, lambda o: ", ".join(o["streamer"]))
-    if not pkgs:
-        return None
-    return f"{version} (imported from {pkgs})" if version in (None, "local build") else version
-
-
-def _rate(out, ceiling):
-    return ((out.get("calibration") or {}).get("ceilings_gibps") or {}).get(ceiling)
-
-
-def _storage(out):
-    storage = out.get("environment", {}).get("storage")
-    if not storage:
-        return None
-    rate = _rate(out, "disk_direct_read_parallel")
-    return f'{storage["type"]} on {storage["mount"]}' + (f", {rate:.0f} GiB/s parallel direct read" if rate else "")
-
-
-def _s3(out):
-    if not _on_s3(out):
-        return None
-    cal = out.get("calibration") or {}
-    rate = _rate(out, "s3_get_parallel")
-    endpoint = ((cal.get("host") or {}).get("s3") or {}).get("endpoint")
-    return (endpoint or "S3") + (f", {rate:.0f} GiB/s parallel GET with s5cmd" if rate else "")
-
-
-def _model_size(out):
-    return f'{_model(out)} ({out["model"]["gib"]} GiB)' if "gib" in out["model"] else _model(out)
-
-
-def _runs(out):
-    st = out["settings"]
-    return f'median of {st["repeats"]} per loader, {"warm" if st["warm"] else "cold"} page cache'
+    """The streamer's version: "local build" when it was not the installed package."""
+    return versions.get("runai-model-streamer") if any(o["streamer"] for o in outs) else None
 
 
 def setting(outs):
-    """What the numbers were measured on and with."""
+    """What the numbers were measured on and with: the hardware, the storage's measured rates and the
+    versions. Names that only mean something on the machine that ran it (host, mount point, endpoint,
+    paths) are left to the results file."""
     versions = {}
     for out in outs:
         versions.update(out.get("versions", {}))
     rows = [
-        ("Host", _each(outs, lambda o: o["host"])),
         ("GPUs", _each(outs, _gpus)),
         ("CPUs, memory", _each(outs, lambda o: f'{o["environment"].get("cpus")} CPUs, '
                                                f'{o["environment"].get("mem_total_gib")} GiB')),
