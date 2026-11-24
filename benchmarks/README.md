@@ -66,8 +66,8 @@ is where they are on S3; without it only the local disk is used:
 
 - **A model missing from the directory** is downloaded: from the bucket when
   it has the model, and from Hugging Face otherwise, at a pinned revision.
-  Before anything is downloaded, the script checks that the directory has room
-  for what is missing, and stops with what it needs when it has not.
+  A model that the directory has no room for is left out with a note, and the
+  others still run.
 - **The bucket is only read.** The S3 half runs for the models the bucket
   holds, each under its name (`s3://bench/Qwen3-32B/`). Nothing is uploaded: a
   model that is not there is left out of the S3 half with a note. The endpoint
@@ -76,7 +76,8 @@ is where they are on S3; without it only the local disk is used:
 - **Calibration** happens on first use, for the disk and for S3, as with
   `bench.py`.
 
-On a machine with one GPU the multi-GPU cases are left out with a note.
+On a machine with one GPU the cases that load to every GPU are left out with a
+note.
 
 Anything after the directory and the bucket is passed on to every `bench.py`
 run:

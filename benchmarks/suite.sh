@@ -11,8 +11,8 @@
 #     Kimi-K3-REAP    to every GPU, and to host memory
 #
 # MODELS_DIR is where the models are. One that is missing there is downloaded, from the bucket when it has
-# the model and from Hugging Face otherwise. Before anything is downloaded the script checks that the
-# directory has room for what is missing, and stops with what it needs when it has not.
+# the model and from Hugging Face otherwise. A model that the directory has no room for is left out with a
+# note, and the others still run.
 #
 # With a bucket, the cases are also run from S3, for the models the bucket holds, each under its name
 # (s3://BUCKET/Qwen3-32B/...). Nothing is uploaded: a model that is not there is left out of the S3 half
@@ -77,34 +77,46 @@ there() {  # whether the bucket has all of a model's files
     [ -n "$S3_ROOT" ] && [ "$(s5 ls "$S3_ROOT/$1/*.safetensors" 2> /dev/null | wc -l)" -eq "$2" ]
 }
 
-# What this machine will run, and whether MODELS_DIR has room for what has to be fetched first.
-cases=() need=0 scratch=0 missing= absent=
+# What this machine will run. A model that is not in MODELS_DIR has to be downloaded, and one that there is
+# no room for is left out; so is a model's S3 half when there is no room for the copy the loaders that read
+# only local files download during the run.
+has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
+free=$(($(df --output=avail -B1 "$MODELS_DIR" | tail -1) / 1073741824))
+cases=() planned= noroom= absent=
 for entry in "${CASES[@]}"; do
     read -r case repo revision files gib <<< "$entry"
+    name=${repo##*/}
     if [ "$case" = multi_gpu ] && [ "$NPROC" -lt 2 ]; then
-        echo "leaving ${repo##*/} out: it is loaded to several GPUs and this machine has $NPROC"
+        echo "leaving $name to every GPU out: this machine has $NPROC"
         continue
+    fi
+    if has "$noroom" "$name"; then
+        continue
+    elif ! here "$name" "$files" && ! has "$planned" "$name"; then
+        if [ "$gib" -gt "$free" ]; then
+            echo "leaving $name out: it is not in $MODELS_DIR, and its $gib GiB do not fit the $free GiB free there"
+            noroom+=" $name"
+            continue
+        fi
+        free=$((free - gib))
+        planned+=" $name"
     fi
     cases+=("$entry")
-    if ! here "${repo##*/}" "$files" && [ "${missing#* "${repo##*/}" }" = "$missing" ]; then
-        need=$((need + gib))
-        missing+=" ${repo##*/} (${gib} GiB)"
-    fi
-    [ -n "$S3_ROOT" ] || continue
-    if [ "${absent#* "${repo##*/} "}" != "$absent" ]; then
-        continue
-    elif ! there "${repo##*/}" "$files"; then
-        absent+=" ${repo##*/} "
-        echo "leaving ${repo##*/} out of the S3 half: $S3_ROOT/${repo##*/} does not hold its $files files"
-    elif [ "$gib" -gt "$scratch" ]; then
-        scratch=$gib  # the loaders that read only local files download a model from S3 before loading it
+done
+for entry in ${cases[@]+"${cases[@]}"}; do
+    read -r case repo revision files gib <<< "$entry"
+    name=${repo##*/}
+    [ -n "$S3_ROOT" ] && ! has "$absent" "$name" || continue
+    if ! there "$name" "$files"; then
+        echo "leaving $name out of the S3 half: $S3_ROOT/$name does not hold its $files files"
+        absent+=" $name"
+    elif [ "$gib" -gt "$free" ]; then
+        echo "leaving $name out of the S3 half: downloading it during the run needs $gib GiB and $free GiB are free"
+        absent+=" $name"
     fi
 done
-free=$(($(df --output=avail -B1 "$MODELS_DIR" | tail -1) / 1073741824))
-if [ $((need + scratch)) -gt "$free" ]; then
-    echo "not enough room in $MODELS_DIR: $free GiB free, $((need + scratch)) GiB needed" >&2
-    [ -z "$missing" ] || echo "    to download:$missing" >&2
-    [ "$scratch" = 0 ] || echo "    for downloads from S3 during the run: $scratch GiB" >&2
+if [ ${#cases[@]} -eq 0 ]; then
+    echo "nothing to run on this machine" >&2
     exit 1
 fi
 
@@ -164,7 +176,7 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
         # shellcheck disable=SC2046  # the case's options are split on purpose
         if [ "$source" = disk ]; then
             bench "${name}_$case" "$MODELS_DIR/$name" $(how "$case") "$@"
-        elif [ "${absent#* "$name" }" = "$absent" ]; then
+        elif ! has "$absent" "$name"; then
             bench "${name}_${case}_s3" "$S3_ROOT/$name" $(how "$case") --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi
