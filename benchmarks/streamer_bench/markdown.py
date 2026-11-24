@@ -132,6 +132,21 @@ def _runs(out):
     return f'median of {st["repeats"]} per loader, {"warm" if st["warm"] else "cold"} page cache'
 
 
+def _settings(outs):
+    """The variables set for the measured processes. One that had different values names the models each
+    value was used for."""
+    values = {}  # variable -> {value: [models]}
+    for out in outs:
+        for k, v in out["settings"].get("env", {}).items():
+            models = values.setdefault(k, {}).setdefault(v, [])
+            if _model(out) not in models:
+                models.append(_model(out))
+    return ", ".join(
+        f"{k}={next(iter(by))}" if len(by) == 1 else
+        f"{k}=" + ", ".join(f"{v} ({' and '.join(models)})" for v, models in by.items())
+        for k, by in values.items())
+
+
 def setting(outs):
     """What the numbers were measured on and with: the hardware, the storage's measured rates and the
     versions. Names that only mean something on the machine that ran it (host, mount point, endpoint,
@@ -148,8 +163,7 @@ def setting(outs):
         ("S3", _each(outs, _s3)),
         ("Models", _each(outs, _model_size)),
         ("Runs", _each(outs, _runs)),
-        ("Settings", ", ".join(dict.fromkeys(
-            f"{k}={v}" for o in outs for k, v in o["settings"].get("env", {}).items()))),
+        ("Settings", _settings(outs)),
         ("safetensors", versions.get("safetensors")),
         ("instanttensor", versions.get("instanttensor")),
         ("runai_model_streamer", _streamer(outs, versions)),

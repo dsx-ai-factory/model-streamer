@@ -284,6 +284,11 @@ class RunnerTest(unittest.TestCase):
         with open(page) as f:
             self.assertIn(table, f.read())
 
+    def test_a_setting_with_several_values_names_the_models(self):
+        out = lambda model, env: {"model": {"path": model}, "settings": {"env": env}}
+        self.assertEqual(markdown._settings([out("/m/A", {"X": "4", "Y": "1"}), out("/m/B", {"X": "4", "Y": "2"}),
+                                             out("s3://b/A", {"Y": "1"})]), "X=4, Y=1 (A), 2 (B)")
+
     def test_more_ranks_than_gpus_is_refused(self):
         self.assertIn("needs 8 GPUs, one per rank; this machine has 1", self.run_bench(gpus=1, nproc=8)[0])
 
