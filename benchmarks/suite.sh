@@ -30,6 +30,9 @@
 #     SCRATCH_DIR  where an S3 model is downloaded to for the loaders that read only local files
 #                                                                   (default: MODELS_DIR/bench_scratch)
 #     PYTHON       the Python that has the loaders installed        (default: python3)
+#     S3_OPTIONS        bench.py options for the S3 runs in one process, for example the number of S3
+#                       clients that suits the bucket: --env RUNAI_STREAMER_OBJ_CONCURRENCY=4
+#     S3_MULTI_OPTIONS  the same for the S3 runs to every GPU, where the setting is per rank
 set -euo pipefail
 
 # One line per bench.py run: a name for it, the model's Hugging Face repository and revision, how many
@@ -180,7 +183,9 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
             bench "${name}_$case" "$MODELS_DIR/$name" $options "$@"
         elif ! has "$absent" "$name"; then
             options=$(echo "$options" | sed -E 's/,?vllm_[a-z_]+//g; s/ --vllm-args [^ ]+//')  # vLLM loads local models
-            bench "${name}_${case}_s3" "$S3_ROOT/$name" $options --ref-dir "$MODELS_DIR/$name" \
+            tuned=${S3_OPTIONS:-}
+            [ "$case" = multi_gpu ] && tuned=${S3_MULTI_OPTIONS:-}
+            bench "${name}_${case}_s3" "$S3_ROOT/$name" $options $tuned --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi
     done

@@ -361,6 +361,8 @@ A few things can be set through the environment:
 | `OUT_DIR` | `bench_suite` | A directory named after the date is made in it |
 | `SCRATCH_DIR` | `MODELS_DIR/bench_scratch` | Where an S3 model is downloaded to for the loaders that read only local files |
 | `PYTHON` | `python3` | The Python that has the loaders installed |
+| `S3_OPTIONS` | none | `bench.py` options for the S3 runs in one process, for example `--env RUNAI_STREAMER_OBJ_CONCURRENCY=4` |
+| `S3_MULTI_OPTIONS` | none | The same for the S3 runs to every GPU, where the setting is per rank |
 
 The results go to `OUT_DIR/<date>/`: for each case `<model>_<case>.json`
 (`..._s3.json` for the S3 run), its report and its logs, and the combined
