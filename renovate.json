@@ -1,13 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "cpp-common is not on run-ai/repo-housekeeper main yet: until it is, a trial passes it with the workflow's presets input. Add github>run-ai/repo-housekeeper//renovate/presets/cpp-common to extends once it is.",
   "extends": [
     "config:recommended",
-    "github>run-ai/repo-housekeeper//renovate/presets/custom_annotation",
+    "github>run-ai/repo-housekeeper//renovate/presets/cpp-common",
     "github>run-ai/repo-housekeeper//renovate/presets/notice",
     "github>run-ai/repo-housekeeper//renovate/presets/copyright"
   ],
   "dependencyDashboard": false,
+  "commitBody": "Signed-off-by: {{{gitAuthor}}}",
   "includePaths": [
     "cpp/**",
     ".devcontainer/**",
