@@ -49,7 +49,7 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 |---|---|---|
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--device cpu\|cuda` | both | Run the single-process tests to this destination only |
-| `--loaders a,b` | all | Run only these loaders: `safetensors`, `safetensors_prefetch`, `instanttensor`, `streamer` |
+| `--loaders a,b` | all | Run only these loaders: `safetensors`, `instanttensor`, `streamer` |
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
@@ -73,23 +73,17 @@ numbers are then not those of an idle machine.
 
 A test is one loader bringing the whole model to one destination:
 
-| Destination | Safetensors | Safetensors + prefetch | InstantTensor | Model Streamer |
-|---|---|---|---|---|
-| Host memory | `safetensors_cpu` | `safetensors_prefetch_cpu` | not supported | `streamer_cpu` |
-| One GPU | `safetensors_cuda` | `safetensors_prefetch_cuda` | `instanttensor_cuda` | `streamer_cuda` |
-| The GPUs of `--nproc` ranks | `safetensors_dist` | `safetensors_prefetch_dist` | `instanttensor_dist` | `streamer_dist` |
+| Destination | Safetensors | InstantTensor | Model Streamer |
+|---|---|---|---|
+| Host memory | `safetensors_cpu` | not supported | `streamer_cpu` |
+| One GPU | `safetensors_cuda` | `instanttensor_cuda` | `streamer_cuda` |
+| The GPUs of `--nproc` ranks | `safetensors_dist` | `instanttensor_dist` | `streamer_dist` |
 
 | Loader | To host memory | To one GPU | To the ranks' GPUs |
 |---|---|---|---|
 | Safetensors | `safe_open`, then every page of each tensor is touched | `safe_open` + `.to("cuda")` per tensor | Every rank does the same load itself |
-| Safetensors + prefetch | The same, while threads read the files into the page cache ahead of it | The same | The same; the ranks split the files to prefetch |
 | InstantTensor | | `instanttensor.safe_open(files, device=...)` | The same with the ranks' process group |
 | Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda:0")` | `stream_files(files, device="cuda:N", is_distributed=True)`, N being the rank's GPU |
-
-The prefetch is what vLLM does with `--safetensors-load-strategy=prefetch`:
-8 threads read the files in 16 MiB blocks into the page cache, in the
-background, so the pages are there when `safetensors` maps them. vLLM turns
-it on by itself only on NFS and Lustre.
 
 The tests are named in [`benchmark/__init__.py`](benchmark/__init__.py)
 (`TESTS`). The loads themselves are the
@@ -119,13 +113,13 @@ setting up its communicator inside the measured time.
 The same loaders are also timed inside vLLM, which shows what a server start
 gains from each:
 
-| Destination | Safetensors + prefetch | InstantTensor | Model Streamer |
+| Destination | Safetensors | InstantTensor | Model Streamer |
 |---|---|---|---|
-| One GPU | `vllm_safetensors_prefetch` | `vllm_instanttensor` | `vllm_streamer` |
-| `--nproc` GPUs, tensor parallel | `vllm_dist_safetensors_prefetch` | `vllm_dist_instanttensor` | `vllm_dist_streamer` |
+| One GPU | `vllm_safetensors` | `vllm_instanttensor` | `vllm_streamer` |
+| `--nproc` GPUs, tensor parallel | `vllm_dist_safetensors` | `vllm_dist_instanttensor` | `vllm_dist_streamer` |
 
 Each test starts a vLLM engine on the model with the loader selected
-(`--load-format` and `--safetensors-load-strategy=prefetch`), and the load
+(vLLM's `--load-format`), and the load
 time is the time vLLM spends in its weight loading step, on the slowest rank.
 The results also keep vLLM's own "Model loading took" time and the whole
 start-up time.

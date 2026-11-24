@@ -199,7 +199,7 @@ def setting(outs):
         ("S3", _each(outs, _s3)),
         ("Runs", _each(outs, _runs)),
         ("Settings", _settings(outs)),
-        ("safetensors", versions.get("safetensors") if ran & {"safetensors", "safetensors_prefetch"} else None),
+        ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
         ("instanttensor", versions.get("instanttensor") if "instanttensor" in ran else None),
         ("runai_model_streamer", _streamer(outs, versions)),
         ("vllm", versions.get("vllm") if any(s["group"].startswith("vllm") for o in outs for s in o["results"])

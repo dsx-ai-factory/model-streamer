@@ -8,7 +8,7 @@ import sys
 import time
 import zlib
 
-from . import (GIB, PREFETCH_BLOCK, PREFETCH_THREADS, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM_OPTIONS, is_dist,
+from . import (GIB, TESTS, VALIDATE, VALIDATE_MAX_MIB, VLLM_OPTIONS, is_dist,
                is_vllm, loader_of)
 from .files import is_remote, model_files, read_header, resident
 
@@ -103,27 +103,6 @@ def streamer_pkg():
     return os.path.dirname(os.path.abspath(runai_model_streamer.__file__))
 
 
-def prefetch(files, distributed):
-    """Start reading the files into the page cache in the background, so that the pages are there when
-    safetensors maps them: what vLLM does with --safetensors-load-strategy=prefetch. Every rank reads
-    every file and the page cache is the node's, so the ranks split the files between them."""
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-    if distributed:
-        files = files[int(os.environ["LOCAL_RANK"])::int(os.environ["WORLD_SIZE"])]
-
-    def read(path):
-        with open(path, "rb") as f:
-            while f.read(PREFETCH_BLOCK):
-                pass
-
-    def read_all():
-        with ThreadPoolExecutor(PREFETCH_THREADS) as pool:
-            list(pool.map(read, files))
-
-    threading.Thread(target=read_all, daemon=True).start()
-
-
 def load(loader, files, device, distributed=False):
     """Yield (name, tensor) for every tensor of the model, loaded by `loader` to `device`. With distributed,
     this is one rank of a torch.distributed job and its GPU is the current device."""
@@ -143,8 +122,6 @@ def load(loader, files, device, distributed=False):
             yield from f.tensors()
     else:
         from safetensors import safe_open
-        if loader == "safetensors_prefetch":
-            prefetch(files, distributed)
         for path in files:
             with safe_open(path, framework="pt", device="cpu") as f:
                 for name in f.keys():

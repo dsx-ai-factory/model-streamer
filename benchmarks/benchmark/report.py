@@ -40,9 +40,7 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
 
 def add_speedups(results):
     """Give each test its speedup over safetensors in the same group, when both gave a result."""
-    base = {}
-    for loader in ("safetensors_prefetch", "safetensors"):  # plain safetensors where it ran, else with prefetch
-        base.update({s["group"]: s["load_s"] for s in results if s["loader"] == loader and "load_s" in s})
+    base = {s["group"]: s["load_s"] for s in results if s["loader"] == "safetensors" and "load_s" in s}
     for s in results:
         if "load_s" in s and s["load_s"] and s["group"] in base:
             s["speedup"] = round(base[s["group"]] / s["load_s"], 2)

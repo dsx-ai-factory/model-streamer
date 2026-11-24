@@ -162,14 +162,13 @@ class RunnerTest(unittest.TestCase):
     def test_every_loader_runs_to_each_destination_by_default(self):
         code, out = self.run_bench(gpus=1, repeats=1)
         self.assertEqual(code, 0)
-        self.assertEqual(self.ran(), ["safetensors_cpu", "safetensors_prefetch_cpu", "streamer_cpu", "safetensors_cuda",
-                                      "safetensors_prefetch_cuda", "instanttensor_cuda", "streamer_cuda"])
+        self.assertEqual(self.ran(), ["safetensors_cpu", "streamer_cpu", "safetensors_cuda",
+                                      "instanttensor_cuda", "streamer_cuda"])
         self.assertFalse(any("torch.distributed.run" in c for c, _ in self.calls))
         self.run_bench(gpus=0, repeats=1)  # without a GPU, to host memory only
-        self.assertEqual(self.ran(), ["safetensors_cpu", "safetensors_prefetch_cpu", "streamer_cpu"])
+        self.assertEqual(self.ran(), ["safetensors_cpu", "streamer_cpu"])
         self.run_bench(gpus=1, repeats=1, device="cuda")
-        self.assertEqual(self.ran(), ["safetensors_cuda", "safetensors_prefetch_cuda", "instanttensor_cuda",
-                                      "streamer_cuda"])
+        self.assertEqual(self.ran(), ["safetensors_cuda", "instanttensor_cuda", "streamer_cuda"])
         self.assertIn("no test applies", self.run_bench(gpus=0, device="cuda")[0])
         self.run_bench(gpus=1, repeats=1, device="cuda", loaders=["safetensors", "streamer"])
         self.assertEqual(self.ran(), ["safetensors_cuda", "streamer_cuda"])
@@ -203,7 +202,7 @@ class RunnerTest(unittest.TestCase):
     def test_a_missing_loader_leaves_out_only_its_tests(self):
         code, _ = self.run_bench(gpus=1, repeats=1, device="cuda", missing="instanttensor is not installed")
         self.assertEqual(code, 0)
-        self.assertEqual(self.ran(), ["safetensors_cuda", "safetensors_prefetch_cuda", "streamer_cuda"])
+        self.assertEqual(self.ran(), ["safetensors_cuda", "streamer_cuda"])
         # asked for by name, it is an error instead
         self.assertIn("cannot run",
                       self.run_bench(tests="instanttensor_cuda", missing="instanttensor is not installed")[0])
@@ -215,7 +214,7 @@ class RunnerTest(unittest.TestCase):
             code, out = self.run_bench(gpus=1, repeats=1, device="cuda", model_dir="s3://b/Qwen",
                                        ref_dir=self.dir.name, scratch_dir=scratch)
         self.assertEqual(code, 0)
-        self.assertEqual(download.call_count, 3)  # not for the streamer
+        self.assertEqual(download.call_count, 2)  # not for the streamer
         self.assertEqual(clear.call_count, 3)
         by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
         self.assertEqual(by["safetensors_cuda"][2], scratch)  # loads what was downloaded
@@ -304,7 +303,7 @@ class RunnerTest(unittest.TestCase):
         with mock.patch.object(runner, "gpu_memory_gib", return_value=[1.0, 1.0]):
             # asked for nothing in particular: the GPU tests are left out and the rest runs
             code, out = self.run_bench(gpus=2, repeats=1)
-            self.assertEqual((code, self.ran()), (0, ["safetensors_cpu", "safetensors_prefetch_cpu", "streamer_cpu"]))
+            self.assertEqual((code, self.ran()), (0, ["safetensors_cpu", "streamer_cpu"]))
             # asked for the GPU: nothing to run, said with its own exit status
             self.assertEqual(self.run_bench(gpus=2, repeats=1, device="cuda")[0], 3)
             self.assertEqual(self.run_bench(gpus=2, repeats=1, nproc=2)[0], 3)
@@ -313,16 +312,16 @@ class RunnerTest(unittest.TestCase):
     def test_nproc_runs_the_distributed_tests(self):
         code, out = self.run_bench(gpus=8, nproc=2, repeats=1)
         self.assertEqual(code, 0)
-        self.assertEqual(self.ran(), ["safetensors_dist", "safetensors_prefetch_dist", "instanttensor_dist", DIST])
+        self.assertEqual(self.ran(), ["safetensors_dist", "instanttensor_dist", DIST])
         self.assertTrue(all("torch.distributed.run" in c for c, _ in self.calls))
-        self.assertEqual([s["group"] for s in out["results"]], ["dist"] * 4)
+        self.assertEqual([s["group"] for s in out["results"]], ["dist"] * 3)
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         self.assertIn("| 2 × H200 | Safetensors |", page)
 
     def test_vllm_tests_time_the_weight_loading(self):
         code, out = self.run_bench(gpus=1, repeats=1, vllm=True, vllm_args={"trust_remote_code": True},
-                                   tests="streamer_cuda,vllm_safetensors_prefetch,vllm_instanttensor,vllm_streamer")
+                                   tests="streamer_cuda,vllm_safetensors,vllm_instanttensor,vllm_streamer")
         self.assertEqual(code, 0)
         _, st, it, streamer = out["results"]
         self.assertEqual(st["runs"], [{"load_s": 40.0, "gibps": 1.0, "startup_s": 60.0, "model_load_s": 42.0,
@@ -330,7 +329,7 @@ class RunnerTest(unittest.TestCase):
         # the KV cache vLLM fits afterwards: smaller where a loader left something on the GPU
         self.assertEqual((it["kv_cache_gib"], streamer["kv_cache_gib"]), (99.4, 100.0))
         self.assertEqual((streamer["load_s"], streamer["model_load_s"], streamer["group"]), (8.0, 10.0, "vllm"))
-        # compared with safetensors + prefetch, the safetensors that ran in this group
+        # compared with safetensors in vLLM, not with the standalone safetensors test
         self.assertEqual([s["speedup"] for s in (st, it, streamer)], [1.0, 4.0, 5.0])
         self.assertNotIn("cpu_s_per_gib", streamer)
         by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
@@ -339,7 +338,7 @@ class RunnerTest(unittest.TestCase):
                          {"trust_remote_code": True})
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("| vLLM on 1 × H200 | Safetensors + prefetch | 40.00 | 1.0 | 1.00x | 100.00 |", page)
+        self.assertIn("| vLLM on 1 × H200 | Safetensors | 40.00 | 1.0 | 1.00x | 100.00 |", page)
         self.assertIn("| Model Streamer | 5.00 | 8.0 | n/a | |", page)  # not a vLLM test: no KV cache
         self.assertIn("- vllm: 0.34.0", page)
         # with tensor parallelism: the slowest rank's weight loading, and the GPU memory of all ranks
@@ -358,7 +357,7 @@ class RunnerTest(unittest.TestCase):
         self.run_bench(gpus=1, repeats=1, device="cuda")  # vllm is not installed here
         self.assertFalse([t for t in self.ran() if t.startswith("vllm")])
         self.run_bench(gpus=1, repeats=1, device="cuda", vllm=True)
-        self.assertEqual(self.ran()[-3:], ["vllm_safetensors_prefetch", "vllm_instanttensor", "vllm_streamer"])
+        self.assertEqual(self.ran()[-3:], ["vllm_safetensors", "vllm_instanttensor", "vllm_streamer"])
         a = argparse.Namespace(model_dir=self.dir.name)
         with mock.patch.object(runner.importlib.util, "find_spec", return_value=object()):
             self.assertIn("config.json", runner.unavailable(a, "vllm_streamer"))
