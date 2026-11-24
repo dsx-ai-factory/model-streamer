@@ -68,6 +68,11 @@ s5() {  # s5cmd against the endpoint the environment names, as the streamer and 
     s5cmd ${endpoint:+--endpoint-url "$endpoint"} "$@"
 }
 
+seaweedfs() {  # whether the endpoint is a SeaweedFS S3 gateway, which says so in its Server header
+    local endpoint=${AWS_ENDPOINT_URL_S3:-${AWS_ENDPOINT_URL:-${S3_ENDPOINT_URL:-}}}
+    [ -n "$endpoint" ] && curl -s -m 10 -D - -o /dev/null "$endpoint" 2> /dev/null | grep -qi '^server: *seaweedfs'
+}
+
 here() {  # whether MODELS_DIR has all of a model's files
     [ "$(find "$MODELS_DIR/$1" -maxdepth 1 -name '*.safetensors' 2> /dev/null | wc -l)" -eq "$2" ]
 }
@@ -131,7 +136,15 @@ upload() {  # make the bucket hold a model, from MODELS_DIR; the bucket is made 
         s5 mb "$bucket" > /dev/null
     fi
     echo "uploading $name to $S3_ROOT/$name"
-    s5 --numworkers 8 cp -c 8 -p 64 "$MODELS_DIR/$name/*.safetensors" "$S3_ROOT/$name/" > /dev/null
+    if seaweedfs; then
+        # SeaweedFS compresses the parts of a multipart upload when they shrink, and then has to
+        # decompress them on every read. A file sent in one request, with a content type it takes for
+        # already compressed, is stored as it is.
+        s5 --numworkers 16 cp -p 20000 --content-type application/zstd "$MODELS_DIR/$name/*.safetensors" \
+            "$S3_ROOT/$name/" > /dev/null
+    else
+        s5 cp "$MODELS_DIR/$name/*.safetensors" "$S3_ROOT/$name/" > /dev/null
+    fi
 }
 
 failed=() names=()
