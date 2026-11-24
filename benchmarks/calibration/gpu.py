@@ -3,7 +3,7 @@
 """Host to GPU 0 copy, from pinned and from pageable memory. Needs torch; skipped with a note without it."""
 import time
 
-from .. import GIB
+from . import GIB
 
 
 def h2d(pinned, gib=1, reps=8):

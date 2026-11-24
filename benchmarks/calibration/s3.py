@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from .. import GIB
+from . import GIB
 
 
 def s3_endpoint():

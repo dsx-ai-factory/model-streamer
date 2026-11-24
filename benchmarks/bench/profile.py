@@ -29,7 +29,7 @@ def profile_mismatch(profile, a, remote):
         if bucket((host.get("s3") or {}).get("uri", "")) != bucket(a.model_dir):
             return "was measured against another S3 bucket"
         return None
-    from .calibration.host import fs_type
+    from calibration.host import fs_type
     mount = fs_type(a.model_dir)["mount"]
     measured = (host.get("storage") or {}).get("mount")
     if measured != mount:

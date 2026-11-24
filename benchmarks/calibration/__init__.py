@@ -10,8 +10,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from .. import GIB
-from . import disk, gpu, host, memory, s3
+GIB = 2**30
+
+from . import disk, gpu, host, memory, s3  # noqa: E402 - the stages take GIB from here
 
 SCHEMA = 1
 CEILINGS = ["disk_direct_read_parallel", "disk_direct_read_fresh_dest", "disk_direct_read_single",

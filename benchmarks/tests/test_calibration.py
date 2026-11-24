@@ -8,8 +8,8 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from streamer_bench import calibration  # noqa: E402
-from streamer_bench.calibration import memory  # noqa: E402
+import calibration  # noqa: E402
+from calibration import memory  # noqa: E402
 
 
 class CalibrationTest(unittest.TestCase):

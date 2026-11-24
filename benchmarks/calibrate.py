@@ -15,7 +15,7 @@ described in README.md next to this script.
 import argparse
 import os
 
-from streamer_bench import calibration
+import calibration
 
 
 def main():

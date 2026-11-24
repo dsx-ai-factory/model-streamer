@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from streamer_bench import markdown, profile, runner  # noqa: E402
+from bench import markdown, profile, runner  # noqa: E402
 
 DIST = "streamer_dist"
 
@@ -227,7 +227,7 @@ class RunnerTest(unittest.TestCase):
     def test_an_s3_model_without_a_local_copy_gets_a_reference_download(self):
         a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir=None, scratch_dir=None)
         with mock.patch.object(runner.shutil, "which", return_value="/bin/s5cmd"), \
-                mock.patch("streamer_bench.calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 1 << 30)]), \
+                mock.patch("calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 1 << 30)]), \
                 mock.patch.object(runner.os, "makedirs"), \
                 mock.patch.object(runner.shutil, "disk_usage", return_value=mock.Mock(free=10 << 30)), \
                 mock.patch.object(runner, "download", return_value=(1.0, None)) as download, \
@@ -238,7 +238,7 @@ class RunnerTest(unittest.TestCase):
         # too little room for the reference copy and a download is said before anything is fetched
         a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir=None, scratch_dir="/small")
         with mock.patch.object(runner.shutil, "which", return_value="/bin/s5cmd"), \
-                mock.patch("streamer_bench.calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 8 << 30)]), \
+                mock.patch("calibration.s3.s3_objects", return_value=[("s3://b/Qwen/m", 8 << 30)]), \
                 mock.patch.object(runner.os, "makedirs"), \
                 mock.patch.object(runner.shutil, "disk_usage", return_value=mock.Mock(free=10 << 30)):
             with self.assertRaises(SystemExit) as stop:

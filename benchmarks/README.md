@@ -35,14 +35,14 @@ directory first on `PYTHONPATH`.
 | `bench.py` | Command-line entry point: one model |
 | `suite.sh` | The daily run: three models through `bench.py`, from disk and from S3, one report |
 | `calibrate.py` | Command-line entry point for calibration |
-| `streamer_bench/__init__.py` | The loaders and the tests (`TESTS`) |
-| `streamer_bench/runner.py` | Selects the tests and starts one measured process per run |
-| `streamer_bench/worker.py` | The measured process: one load, timed and validated |
-| `streamer_bench/files.py` | The model's files and their state in the page cache |
-| `streamer_bench/profile.py` | Finds or makes the machine profile and scores a test against it |
-| `streamer_bench/report.py` | Summary per test, the table and the results file |
-| `streamer_bench/markdown.py` | Results as a Markdown report |
-| `streamer_bench/calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
+| `bench/__init__.py` | The loaders and the tests (`TESTS`) |
+| `bench/runner.py` | Selects the tests and starts one measured process per run |
+| `bench/worker.py` | The measured process: one load, timed and validated |
+| `bench/files.py` | The model's files and their state in the page cache |
+| `bench/profile.py` | Finds or makes the machine profile and scores a test against it |
+| `bench/report.py` | Summary per test, the table and the results file |
+| `bench/markdown.py` | Results as a Markdown report |
+| `calibration/` | Measures the machine's ceilings, one module per stage: `memory`, `disk`, `gpu`, `s3`, and `host` for the machine's description |
 | `requirements.txt` | The packages the benchmark loads with |
 | `tests/` | Unit tests of the runner, the report and the calibration helpers |
 
@@ -158,9 +158,9 @@ A test is one loader bringing the whole model to one destination:
 | InstantTensor | | `instanttensor.safe_open(files, device=...)` | The same with the ranks' process group |
 | Model Streamer | `stream_files(files, device="cpu")` | `stream_files(files, device="cuda")` | `stream_files(files, device="cuda", is_distributed=True)` |
 
-The tests are named in [`streamer_bench/__init__.py`](streamer_bench/__init__.py)
+The tests are named in [`bench/__init__.py`](bench/__init__.py)
 (`TESTS`). The loads themselves are the
-`load` function in [`streamer_bench/worker.py`](streamer_bench/worker.py);
+`load` function in [`bench/worker.py`](bench/worker.py);
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
 
@@ -274,8 +274,8 @@ Safetensors to the same destination, and with several GPUs the load time is
 the slowest rank's. To make it again from a results file, or one report from several:
 
 ```bash
-cd benchmarks && python3 -m streamer_bench.markdown /path/to/bench_results.json
-cd benchmarks && python3 -m streamer_bench.markdown a.json b.json --out report.md
+cd benchmarks && python3 -m bench.markdown /path/to/bench_results.json
+cd benchmarks && python3 -m bench.markdown a.json b.json --out report.md
 ```
 
 `bench_results.json` holds everything that was measured. At the top are

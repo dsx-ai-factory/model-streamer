@@ -5,7 +5,7 @@ import ctypes
 import mmap
 from concurrent.futures import ThreadPoolExecutor
 
-from .. import GIB
+from . import GIB
 
 MADV_POPULATE_WRITE = 23
 

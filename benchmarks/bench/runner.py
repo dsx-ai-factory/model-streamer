@@ -93,7 +93,7 @@ def download(uri, scratch, profile):
     (seconds, None), or (None, why it failed). The files in flight, the parts in flight per file and
     the part size are the profile's best S3 setting when it has one, so that the download asks of the
     storage what the calibration found it serves fastest."""
-    from .calibration.s3 import s5cmd
+    from calibration.s3 import s5cmd
     best = ((profile or {}).get("params") or {}).get("s3_best") or {}
     clear(scratch)
     cmd = s5cmd("--numworkers", str(best.get("objects", 16)), "cp", "-c", str(best.get("concurrency_per_object", 8)),
@@ -115,8 +115,8 @@ def clear(scratch):
 
 def describe_machine(a, remote):
     """The machine the benchmark ran on, for the results: kernel, CPUs, memory and the model's storage."""
-    from .calibration.host import cpu_model, fs_type, memory_dimms, read_text
-    from .calibration.memory import meminfo_gib
+    from calibration.host import cpu_model, fs_type, memory_dimms, read_text
+    from calibration.memory import meminfo_gib
     info = {"kernel": platform.release(), "python": platform.python_version(),
             "cpus": len(os.sched_getaffinity(0)), "mem_total_gib": round(meminfo_gib("MemTotal") or 0, 1),
             "thp": read_text("/sys/kernel/mm/transparent_hugepage/enabled")}
@@ -283,7 +283,7 @@ def prepare_s3(a):
     if not shutil.which("s5cmd"):
         sys.exit("an s3:// model needs s5cmd on PATH to fetch a reference copy (pip install s5cmd), "
                  "or a local copy of the same files given with --ref-dir")
-    from .calibration.s3 import s3_objects
+    from calibration.s3 import s3_objects
     size = sum(n for _, n in s3_objects(a.model_dir))
     os.makedirs(a.scratch_dir, exist_ok=True)
     free = shutil.disk_usage(a.scratch_dir).free

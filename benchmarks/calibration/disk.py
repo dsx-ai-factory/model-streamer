@@ -4,8 +4,8 @@
 import os
 import shutil
 
-from .. import GIB
-from ..files import evict
+from . import GIB
+from bench.files import evict
 from .memory import Region, first_touch, run_threads
 
 CHUNK = 16 << 20
