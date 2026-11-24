@@ -28,7 +28,7 @@ Dependencies
 | Package | Version | License | License source |
 |---------|---------|---------|----------------|
 | `github.com/openssl/openssl` | 3.5.0 | Apache-2.0 | https://github.com/openssl/openssl/blob/openssl-3.5.0/LICENSE.txt |
-| `github.com/curl/curl` | 8_13_0 | curl | https://github.com/curl/curl/blob/curl-8_13_0/COPYING |
+| `github.com/curl/curl` | 8_23_0 | curl | https://github.com/curl/curl/blob/curl-8_23_0/COPYING |
 | `github.com/madler/zlib` | 1.3.1 | Zlib | https://github.com/madler/zlib/blob/v1.3.1/LICENSE |
 | `github.com/aws/aws-sdk-cpp` | 1.11.924 | Apache-2.0 | https://github.com/aws/aws-sdk-cpp/blob/1.11.924/LICENSE (and its submodules) |
 | `gcc-runtime` | 9 | GPL-3.0-or-later WITH GCC-exception-3.1 | https://spdx.org/licenses/GPL-3.0-or-later.html |
@@ -1522,7 +1522,7 @@ Applies to:
 
 COPYRIGHT AND PERMISSION NOTICE
 
-Copyright (c) 1996 - 2025, Daniel Stenberg, <daniel@haxx.se>, and many
+Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many
 contributors, see the THANKS file.
 
 All rights reserved.

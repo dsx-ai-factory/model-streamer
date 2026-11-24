@@ -80,7 +80,7 @@ RUN bash /tmp/install-cuda-headers.sh "$TARGETARCH"
 ARG OPENSSL_VERSION=3.5.0
 # attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-releases depName=curl/curl versioning=regex:^(?<major>\d+)_(?<minor>\d+)_(?<patch>\d+)$ extractVersion=^curl-(?<version>\d+_\d+_\d+)$
-ARG CURL_VERSION=8_13_0
+ARG CURL_VERSION=8_23_0
 # attribution: shipped module=py/runai_model_streamer_s3,py/runai_model_streamer_azure,cpp
 # renovate: datasource=github-releases depName=madler/zlib extractVersion=^v(?<version>.*)$
 ARG ZLIB_VERSION=1.3.1
