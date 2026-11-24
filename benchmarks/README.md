@@ -62,16 +62,17 @@ disk and then from S3:
 | [Kimi-K3-REAP](https://huggingface.co/runrunway/Kimi-K3-REAP-448experts) (780 GiB) | Every GPU, and host memory |
 
 The first argument is the directory the models are in. The second, optional,
-is where they are on S3; without it only the local disk is used. Nothing has
-to be there beforehand:
+is where they are on S3; without it only the local disk is used:
 
 - **A model missing from the directory** is downloaded: from the bucket when
   it has the model, and from Hugging Face otherwise, at a pinned revision.
   Before anything is downloaded, the script checks that the directory has room
   for what is missing, and stops with what it needs when it has not.
-- **A model missing from the bucket** is uploaded from the directory, and the
-  bucket is made when it does not exist. The endpoint and credentials come
-  from the environment (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, ...).
+- **The bucket is only read.** The S3 half runs for the models the bucket
+  holds, each under its name (`s3://bench/Qwen3-32B/`). Nothing is uploaded: a
+  model that is not there is left out of the S3 half with a note. The endpoint
+  and credentials come from the environment (`AWS_ENDPOINT_URL`,
+  `AWS_ACCESS_KEY_ID`, ...).
 - **Calibration** happens on first use, for the disk and for S3, as with
   `bench.py`.
 

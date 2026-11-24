@@ -14,9 +14,10 @@
 # the model and from Hugging Face otherwise. Before anything is downloaded the script checks that the
 # directory has room for what is missing, and stops with what it needs when it has not.
 #
-# With a bucket, every case is also run from S3. A model that is missing there is uploaded from MODELS_DIR,
-# and the bucket is made when it does not exist. The endpoint and credentials come from the environment
-# (AWS_ENDPOINT_URL, AWS_ACCESS_KEY_ID, ...). Without a bucket only the local disk is used.
+# With a bucket, the cases are also run from S3, for the models the bucket holds, each under its name
+# (s3://BUCKET/Qwen3-32B/...). Nothing is uploaded: a model that is not there is left out of the S3 half
+# with a note. The endpoint and credentials come from the environment (AWS_ENDPOINT_URL,
+# AWS_ACCESS_KEY_ID, ...). Without a bucket only the local disk is used.
 #
 # Anything after that is passed on to every bench.py run:
 #
@@ -41,7 +42,7 @@ CASES=(
 )
 
 usage() {
-    sed -n '5,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,25p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 [ $# -ge 1 ] && [ "${1#-}" = "$1" ] || usage
@@ -68,11 +69,6 @@ s5() {  # s5cmd against the endpoint the environment names, as the streamer and 
     s5cmd ${endpoint:+--endpoint-url "$endpoint"} "$@"
 }
 
-seaweedfs() {  # whether the endpoint is a SeaweedFS S3 gateway, which says so in its Server header
-    local endpoint=${AWS_ENDPOINT_URL_S3:-${AWS_ENDPOINT_URL:-${S3_ENDPOINT_URL:-}}}
-    [ -n "$endpoint" ] && curl -s -m 10 -D - -o /dev/null "$endpoint" 2> /dev/null | grep -qi '^server: *seaweedfs'
-}
-
 here() {  # whether MODELS_DIR has all of a model's files
     [ "$(find "$MODELS_DIR/$1" -maxdepth 1 -name '*.safetensors' 2> /dev/null | wc -l)" -eq "$2" ]
 }
@@ -82,7 +78,7 @@ there() {  # whether the bucket has all of a model's files
 }
 
 # What this machine will run, and whether MODELS_DIR has room for what has to be fetched first.
-cases=() need=0 scratch=0 missing=
+cases=() need=0 scratch=0 missing= absent=
 for entry in "${CASES[@]}"; do
     read -r case repo revision files gib <<< "$entry"
     if [ "$case" = multi_gpu ] && [ "$NPROC" -lt 2 ]; then
@@ -94,7 +90,13 @@ for entry in "${CASES[@]}"; do
         need=$((need + gib))
         missing+=" ${repo##*/} (${gib} GiB)"
     fi
-    if [ -n "$S3_ROOT" ] && [ "$gib" -gt "$scratch" ]; then
+    [ -n "$S3_ROOT" ] || continue
+    if [ "${absent#* "${repo##*/} "}" != "$absent" ]; then
+        continue
+    elif ! there "${repo##*/}" "$files"; then
+        absent+=" ${repo##*/} "
+        echo "leaving ${repo##*/} out of the S3 half: $S3_ROOT/${repo##*/} does not hold its $files files"
+    elif [ "$gib" -gt "$scratch" ]; then
         scratch=$gib  # the loaders that read only local files download a model from S3 before loading it
     fi
 done
@@ -127,26 +129,6 @@ fetch() {  # make MODELS_DIR hold a model: from the bucket when it is there, fro
     rm -rf "$dir.partial"
 }
 
-upload() {  # make the bucket hold a model, from MODELS_DIR; the bucket is made when it does not exist
-    local name=$1 files=$2 bucket
-    there "$name" "$files" && return
-    bucket=$(echo "$S3_ROOT" | cut -d/ -f1-3)
-    if ! s5 ls "$bucket" > /dev/null 2>&1; then
-        echo "making $bucket"
-        s5 mb "$bucket" > /dev/null
-    fi
-    echo "uploading $name to $S3_ROOT/$name"
-    if seaweedfs; then
-        # SeaweedFS compresses the parts of a multipart upload when they shrink, and then has to
-        # decompress them on every read. A file sent in one request, with a content type it takes for
-        # already compressed, is stored as it is.
-        s5 --numworkers 16 cp -p 20000 --content-type application/zstd "$MODELS_DIR/$name/*.safetensors" \
-            "$S3_ROOT/$name/" > /dev/null
-    else
-        s5 cp "$MODELS_DIR/$name/*.safetensors" "$S3_ROOT/$name/" > /dev/null
-    fi
-}
-
 failed=() names=()
 bench() {  # one bench.py run. Leaving 3 means the model does not fit there on this machine: not a failure.
     local name=$1 status=0
@@ -174,7 +156,6 @@ how() {  # bench.py's options for a case
 for entry in ${cases[@]+"${cases[@]}"}; do
     read -r case repo revision files gib <<< "$entry"
     fetch "$repo" "$revision" "$files"
-    [ -z "$S3_ROOT" ] || upload "${repo##*/}" "$files"
 done
 for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every case from S3
     for entry in ${cases[@]+"${cases[@]}"}; do
@@ -183,7 +164,7 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
         # shellcheck disable=SC2046  # the case's options are split on purpose
         if [ "$source" = disk ]; then
             bench "${name}_$case" "$MODELS_DIR/$name" $(how "$case") "$@"
-        else
+        elif [ "${absent#* "$name" }" = "$absent" ]; then
             bench "${name}_${case}_s3" "$S3_ROOT/$name" $(how "$case") --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi
