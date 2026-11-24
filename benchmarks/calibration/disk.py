@@ -17,10 +17,9 @@ def make_files(directory, count, size):
     paths = []
     for i in range(count):
         p = os.path.join(directory, f"calib_{i}.bin")
-        block = os.urandom(BLOCK)
         with open(p, "wb", buffering=0) as f:
             for _ in range(size // BLOCK):
-                f.write(block)
+                f.write(os.urandom(BLOCK))  # new data for every block: a repeated one can be deduplicated
             os.fsync(f.fileno())
         paths.append(p)
     return paths
@@ -74,11 +73,10 @@ def measure(meter, path, files, file_size, threads):
             meter.rate("disk_direct_read_single", lambda: read_file(paths[0], warm.view[:file_size], True), file_size)
             meter.rate("disk_direct_read_fresh_dest", lambda: read_files(paths, Region(total), True), total)
 
-        def buffered():
+        def cold():
             if evict(paths):
                 meter.notes.append("page cache could not be fully evicted before a buffered read")
-            return read_files(paths, warm, False)
 
-        meter.rate("disk_buffered_read_cold", buffered, total)
+        meter.rate("disk_buffered_read_cold", lambda: read_files(paths, warm, False), total, before=cold)
     finally:
         shutil.rmtree(directory, ignore_errors=True)

@@ -28,6 +28,9 @@ def profile_mismatch(profile, a, remote):
         bucket = lambda uri: uri[len("s3://"):].split("/")[0]  # one bucket is one storage, whatever the prefix
         if bucket((host.get("s3") or {}).get("uri", "")) != bucket(a.model_dir):
             return "was measured against another S3 bucket"
+        from calibration.s3 import s3_endpoint
+        if (host.get("s3") or {}).get("endpoint") != s3_endpoint():  # the same bucket name on another service
+            return "was measured against another S3 endpoint"
         return None
     from calibration.host import fs_type
     mount = fs_type(a.model_dir)["mount"]
@@ -94,4 +97,6 @@ def ceilings_for(test, profile, remote=False, warm=False):
 
 def nearest(achieved, ceilings):
     """The ceiling closest to what was achieved: a hint at what limited the run, not a proof."""
-    return min(ceilings, key=lambda k: abs(math.log(ceilings[k] / achieved))) if ceilings else None
+    if not ceilings or achieved <= 0:  # a rate that rounds to zero is near nothing
+        return None
+    return min(ceilings, key=lambda k: abs(math.log(ceilings[k] / achieved)))

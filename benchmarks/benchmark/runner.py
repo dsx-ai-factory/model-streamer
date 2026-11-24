@@ -327,6 +327,9 @@ def prepare_s3(a):
     Returns the directory to remove, or None."""
     a.scratch_dir = a.scratch_dir or SCRATCH
     if a.ref_dir:
+        if os.path.realpath(a.ref_dir) == os.path.realpath(a.scratch_dir):
+            sys.exit("--ref-dir and --scratch-dir are the same directory: the scratch directory is emptied "
+                     "before each download, which would delete the reference copy")
         return None
     if not shutil.which("s5cmd"):
         sys.exit("an s3:// model needs s5cmd on PATH to fetch a reference copy (pip install s5cmd), "
@@ -369,7 +372,8 @@ def run(a, remote):
         if not sep:
             sys.exit(f"--env {kv}: expected K=V")
         extra[k] = v
-    env = dict(os.environ, RUNAI_STREAMER_LOG_LEVEL="INFO", RUNAI_STREAMER_LOG_TO_STDERR="1", **extra)
+    env = dict(os.environ, RUNAI_STREAMER_LOG_LEVEL="INFO", RUNAI_STREAMER_LOG_TO_STDERR="1")
+    env.update(extra)  # --env wins over these defaults
     if a.log_dir:
         os.makedirs(a.log_dir, exist_ok=True)
 

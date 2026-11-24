@@ -5,6 +5,7 @@ import contextlib
 import io
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +38,25 @@ class CalibrationTest(unittest.TestCase):
         self.assertEqual(calibration.median_of(meter.raw["h2d_pinned"]), 5.0)
         self.assertEqual(len(meter.raw["host_memcpy_1t"]), 3)
         self.assertIsNone(calibration.median_of([]))
+
+    def test_before_runs_ahead_of_every_timed_repeat(self):
+        meter, order = calibration.Meter(repeats=2), []
+        with contextlib.redirect_stdout(io.StringIO()):
+            meter.rate("disk_buffered_read_cold", lambda: order.append("read"), 1 << 30,
+                       before=lambda: order.append("evict"))
+        self.assertEqual(order, ["evict", "read"] * 2)
+
+    def test_the_budget_is_what_is_left_of_the_cgroup_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = [os.path.join(d, n) for n in ("max", "current", "stat")]
+            for path, text in zip(paths, ("8000\n", "6000\n", "anon 1000\nfile 4500\n")):
+                with open(path, "w") as f:
+                    f.write(text)
+            self.assertEqual(memory.cgroup_left(*paths, ("file",)), 6500)  # the page cache is given back
+            with open(paths[0], "w") as f:
+                f.write("max\n")
+            self.assertIsNone(memory.cgroup_left(*paths, ("file",)))
+        self.assertIsNone(memory.cgroup_left("/no/limit", "/no/usage", "/no/stat", ("file",)))
 
 
 if __name__ == "__main__":

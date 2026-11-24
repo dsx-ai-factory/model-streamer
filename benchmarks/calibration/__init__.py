@@ -37,10 +37,12 @@ class Meter:
         self.raw[name] = [round(v, 2) for v in values]
         print(f"  {name:32s} {median_of(values):8.2f} GiB/s   {suffix or 'runs ' + str(self.raw[name])}", flush=True)
 
-    def rate(self, name, fn, nbytes):
-        """Time fn, which moves nbytes, `repeats` times."""
+    def rate(self, name, fn, nbytes, before=None):
+        """Time fn, which moves nbytes, `repeats` times. `before` runs ahead of each, outside the timer."""
         values = []
         for _ in range(self.repeats):
+            if before:
+                before()
             t0 = time.perf_counter()
             fn()
             values.append(nbytes / GIB / (time.perf_counter() - t0))

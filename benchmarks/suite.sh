@@ -115,6 +115,15 @@ for entry in "${CASES[@]}"; do
     fi
     cases+=("$entry")
 done
+# The copy made during an S3 run goes to SCRATCH_DIR. On the models' filesystem it shares what is left
+# after the downloads planned above; on another one it has that filesystem's free space.
+room=$free
+if [ -n "$S3_ROOT" ]; then
+    mkdir -p "$SCRATCH_DIR"
+    if [ "$(df --output=target "$SCRATCH_DIR" | tail -1)" != "$(df --output=target "$MODELS_DIR" | tail -1)" ]; then
+        room=$(($(df --output=avail -B1 "$SCRATCH_DIR" | tail -1) / 1073741824))
+    fi
+fi
 for entry in ${cases[@]+"${cases[@]}"}; do
     read -r case repo revision files gib options <<< "$entry"
     name=${repo##*/}
@@ -122,8 +131,8 @@ for entry in ${cases[@]+"${cases[@]}"}; do
     if ! there "$name" "$files"; then
         echo "leaving $name out of the S3 half: $S3_ROOT/$name does not hold its $files files"
         absent+=" $name"
-    elif [ "$gib" -gt "$free" ]; then
-        echo "leaving $name out of the S3 half: downloading it during the run needs $gib GiB and $free GiB are free"
+    elif [ "$gib" -gt "$room" ]; then
+        echo "leaving $name out of the S3 half: downloading it during the run needs $gib GiB and $SCRATCH_DIR has $room GiB free"
         absent+=" $name"
     fi
 done
@@ -142,14 +151,15 @@ fetch() {  # make MODELS_DIR hold a model: from the bucket when it is there, fro
     if there "$name" "$files"; then
         echo "downloading $name from $S3_ROOT to $dir"
         s5 cp "$S3_ROOT/$name/*.safetensors" "$dir.partial/" > /dev/null
+        s5 cp "$S3_ROOT/$name/*.json" "$dir.partial/" > /dev/null 2>&1 || true  # config.json, for the vLLM tests
     else
         echo "downloading $repo from Hugging Face to $dir"
-        HF_HUB_OFFLINE=0 hf download "$repo" --revision "$revision" --include '*.safetensors' \
+        HF_HUB_OFFLINE=0 hf download "$repo" --revision "$revision" --include '*.safetensors' '*.json' \
             --local-dir "$dir.partial" > /dev/null
         rm -rf "$dir.partial/.cache"
     fi
     mkdir -p "$dir"
-    mv "$dir.partial"/*.safetensors "$dir/"
+    mv "$dir.partial"/* "$dir/"
     rm -rf "$dir.partial"
 }
 

@@ -30,7 +30,7 @@ def main():
     ap.add_argument("--threads", type=int, default=min(32, cpus))
     ap.add_argument("--skip", default="", help="comma list of: disk,host,gpu")
     ap.add_argument("--s3-uri", help="s3://bucket/prefix whose objects are read for the S3 ceilings")
-    ap.add_argument("--s3-max-gib", type=float, help="read at most this much of the prefix (default: all of it)")
+    ap.add_argument("--s3-max-gib", type=float, help="read at most this much of the prefix, and at least one object (default: all of it)")
     ap.add_argument("--s3-concurrency", default="4,8,16,32", help="parts in flight per object, swept")
     ap.add_argument("--s3-part-mib", default="8,32", help="part sizes in MiB, swept")
     calibration.run(ap.parse_args())

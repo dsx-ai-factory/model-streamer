@@ -264,6 +264,37 @@ class RunnerTest(unittest.TestCase):
         # a local copy given: nothing is downloaded
         a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir="/local", scratch_dir=None)
         self.assertIsNone(runner.prepare_s3(a))
+        # the scratch directory is emptied before each download: it must not be the local copy
+        a = argparse.Namespace(model_dir="s3://b/Qwen", ref_dir="/local/", scratch_dir="/local")
+        with self.assertRaises(SystemExit) as stop:
+            runner.prepare_s3(a)
+        self.assertIn("same directory", str(stop.exception))
+
+    def test_env_overrides_the_logging_defaults(self):
+        code, _ = self.run_bench(tests="streamer_cpu", env=["RUNAI_STREAMER_LOG_LEVEL=DEBUG"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls[0][1]["RUNAI_STREAMER_LOG_LEVEL"], "DEBUG")
+        self.assertEqual(self.calls[0][1]["RUNAI_STREAMER_LOG_TO_STDERR"], "1")
+
+    def test_a_profile_from_another_s3_endpoint_is_not_reused(self):
+        a = argparse.Namespace(model_dir="s3://b/Qwen")
+        prof = {"host": {"hostname": profile.platform.node(), "s3": {"uri": "s3://b/x", "endpoint": "http://one"}},
+                "ceilings_gibps": {"s3_get_parallel": 5.0}}
+        with mock.patch("calibration.s3.s3_endpoint", return_value="http://one"):
+            self.assertIsNone(profile.profile_mismatch(prof, a, True))
+        with mock.patch("calibration.s3.s3_endpoint", return_value="http://two"):
+            self.assertIn("endpoint", profile.profile_mismatch(prof, a, True))
+
+    def test_a_rate_of_zero_is_near_no_ceiling(self):
+        self.assertIsNone(profile.nearest(0.0, {"disk_direct_read_parallel": 10.0}))
+        self.assertEqual(profile.nearest(8.0, {"a": 10.0, "b": 100.0}), "a")
+
+    def test_dtype_is_compared_where_the_header_names_one(self):
+        from benchmark import worker
+        self.assertFalse(worker.differs(((2, 3), 12, "bfloat16"), ((2, 3), 12, "bfloat16")))
+        self.assertTrue(worker.differs(((2, 3), 12, "float16"), ((2, 3), 12, "bfloat16")))
+        self.assertTrue(worker.differs(((3, 2), 12, "bfloat16"), ((2, 3), 12, "bfloat16")))
+        self.assertFalse(worker.differs(((2, 3), 12, "float16"), ((2, 3), 12, None)))
 
     def test_gpus_used_by_something_else_are_counted_and_reported(self):
         smi = lambda used: mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(stdout=used))

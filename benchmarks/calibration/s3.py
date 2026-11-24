@@ -29,7 +29,7 @@ def s3_objects(uri):
     out = subprocess.run(s5cmd("ls", prefix + "/*"), capture_output=True, text=True, check=True).stdout
     objs = []
     for line in out.splitlines():
-        parts = line.split()
+        parts = line.split(None, 3)  # the key is the rest of the line, spaces and all
         if len(parts) >= 4 and parts[2].isdigit():
             objs.append((f"{prefix}/{parts[3]}", int(parts[2])))
     st = [o for o in objs if o[0].endswith(".safetensors")]
@@ -38,12 +38,24 @@ def s3_objects(uri):
 
 def s3_read(objs, concurrency, part_mib):
     """Read every object at once, `concurrency` parts in flight each, into /dev/null."""
-    procs = [subprocess.Popen(s5cmd("cat", "-c", str(concurrency), "-p", str(part_mib), u),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) for u, _ in objs]
-    for p in procs:
-        _, err = p.communicate()
-        if p.returncode:
-            raise RuntimeError(f"s5cmd failed: {err.decode()[-400:]}")
+    procs = []
+    try:
+        for u, _ in objs:
+            procs.append(subprocess.Popen(s5cmd("cat", "-c", str(concurrency), "-p", str(part_mib), u),
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE))
+        for p in procs:
+            _, err = p.communicate()
+            if p.returncode:
+                raise RuntimeError(f"s5cmd failed: {err.decode()[-400:]}")
+    finally:  # a failure must not leave the other readers downloading
+        for p in procs:
+            if p.poll() is None:
+                try:
+                    p.kill()
+                except OSError:
+                    continue
+                p.wait()
+                p.stderr.close()
     return sum(n for _, n in objs)
 
 

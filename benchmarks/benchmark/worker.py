@@ -27,13 +27,19 @@ def thread_cpu():
     return out
 
 
+# safetensors dtype names as torch names. A dtype that is not here is not compared.
+DTYPES = {"BOOL": "bool", "U8": "uint8", "I8": "int8", "I16": "int16", "U16": "uint16", "I32": "int32",
+          "U32": "uint32", "I64": "int64", "U64": "uint64", "F16": "float16", "BF16": "bfloat16",
+          "F32": "float32", "F64": "float64", "F8_E4M3": "float8_e4m3fn", "F8_E5M2": "float8_e5m2"}
+
+
 def expected_tensors(ref):
-    """({name: (shape, nbytes)}, {name: file}) from the headers of the local files."""
+    """({name: (shape, nbytes, dtype)}, {name: file}) from the headers of the local files."""
     expected, where = {}, {}
     for f in ref:
         for name, meta in read_header(f).items():
             lo, hi = meta["data_offsets"]
-            expected[name] = (tuple(meta["shape"]), hi - lo)
+            expected[name] = (tuple(meta["shape"]), hi - lo, DTYPES.get(meta["dtype"]))
             where[name] = f
     return expected, where
 
@@ -45,14 +51,23 @@ def pick(names, expected, count, max_mib):
     return set(small[::step][:count])
 
 
+def facts(t):
+    """A loaded tensor as expected_tensors describes it."""
+    return tuple(t.shape), t.numel() * t.element_size(), str(t.dtype).rpartition(".")[2]
+
+
+def differs(got, want):
+    return got[:2] != want[:2] or (want[2] is not None and got[2] != want[2])
+
+
 def check(seen, kept, expected, where):
-    """Names, shapes and sizes of every tensor seen, and the bytes of the kept ones."""
+    """Names, shapes, sizes and dtypes of every tensor seen, and the bytes of the kept ones."""
     import torch
     from safetensors import safe_open
     errors = []
     if set(seen) != set(expected):
         errors.append(f"tensor names differ: {len(set(expected) ^ set(seen))} missing or extra")
-    bad = [n for n, v in seen.items() if n in expected and v != expected[n]]
+    bad = [n for n, v in seen.items() if n in expected and differs(v, expected[n])]
     if bad:
         errors.append(f"{bad[0]}: got {seen[bad[0]]}, header says {expected[bad[0]]} ({len(bad)} bad)")
     by_file = {}
@@ -145,13 +160,13 @@ def single(a):
     if device == "cuda":
         torch.zeros(1, device="cuda")
 
-    kept, seen, nbytes = {}, {}, 0
+    held, kept, seen, nbytes = [], {}, {}, 0
     ru0, th0 = resource.getrusage(resource.RUSAGE_SELF), thread_cpu()
     t0 = time.perf_counter()
     for tensor_name, t in load(loader_of(name), files, device):
-        n = t.numel() * t.element_size()
-        nbytes += n
-        seen[tensor_name] = (tuple(t.shape), n)
+        seen[tensor_name] = facts(t)
+        nbytes += seen[tensor_name][1]
+        held.append(t)  # the destination holds the whole model, as an engine's does
         if tensor_name in keep:
             kept[tensor_name] = t
     wall = time.perf_counter() - t0
@@ -207,9 +222,8 @@ def distributed(a):
     ru0 = resource.getrusage(resource.RUSAGE_SELF)
     t0 = time.perf_counter()
     for name, t in load(loader, files, "cuda", distributed=True):
-        n = t.numel() * t.element_size()
-        nbytes += n
-        seen[name] = (tuple(t.shape), n)
+        seen[name] = facts(t)
+        nbytes += seen[name][1]
         if name in keep:
             kept[name] = t
     torch.cuda.synchronize()  # the gloo barrier does not wait for the GPU
