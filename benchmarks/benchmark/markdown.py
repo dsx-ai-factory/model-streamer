@@ -143,16 +143,16 @@ def _dtypes(shares):
 
 
 def models(outs):
-    """A row per model: its size, files and tensors, the tensors' median and largest size, and data types."""
+    """A row per model: its size, files and tensors, the tensors' average and largest size, and data types."""
     rows = {}
     for out in outs:
         m = out["model"]
         rows.setdefault(_model(out), "| {} | {} | {} | {} | {} | {} | {} |".format(
             _model(out), f'{m["gib"]} GiB' if "gib" in m else "n/a", m.get("files", "n/a"), m.get("tensors", "n/a"),
-            _bytes(m["tensor_bytes_median"]) if "tensor_bytes_median" in m else "n/a",
+            _bytes(m["tensor_bytes_average"]) if "tensor_bytes_average" in m else "n/a",
             _bytes(m["tensor_bytes_largest"]) if "tensor_bytes_largest" in m else "n/a",
             _dtypes(m["dtypes"]) if m.get("dtypes") else "n/a"))
-    return "\n".join(["| Model | Size | Files | Tensors | Median tensor | Largest tensor | Data type |",
+    return "\n".join(["| Model | Size | Files | Tensors | Average tensor | Largest tensor | Data type |",
                       "|---|---|---|---|---|---|---|", *rows.values()])
 
 

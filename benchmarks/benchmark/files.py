@@ -31,9 +31,8 @@ def model_files(a):
 
 
 def describe(files):
-    """What a model's files hold, from their headers: how many files and tensors, the tensors' median and
+    """What a model's files hold, from their headers: how many files and tensors, the tensors' average and
     largest size in bytes, and each data type's share of the bytes."""
-    import statistics
     sizes, by_dtype = [], {}
     for path in files:
         for meta in read_header(path).values():
@@ -42,7 +41,7 @@ def describe(files):
             by_dtype[meta["dtype"]] = by_dtype.get(meta["dtype"], 0) + hi - lo
     total = sum(sizes) or 1
     shares = {k: round(v / total, 4) for k, v in sorted(by_dtype.items(), key=lambda kv: -kv[1])}
-    return {"files": len(files), "tensors": len(sizes), "tensor_bytes_median": int(statistics.median(sizes or [0])),
+    return {"files": len(files), "tensors": len(sizes), "tensor_bytes_average": sum(sizes) // max(1, len(sizes)),
             "tensor_bytes_largest": max(sizes or [0]), "dtypes": shares}
 
 
