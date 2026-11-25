@@ -446,6 +446,10 @@ class RunnerTest(unittest.TestCase):
             code, out = self.run_bench(tests="streamer_cpu", repeats=1)
         self.assertEqual(code, 0)
         self.assertEqual(out["results"][0]["runs"][0]["warnings"], ["2.0 GiB still in the page cache before the run"])
+        # and the report does not call that run cold
+        self.assertEqual(markdown._runs(out), "median of 1 per loader, page cache not fully evicted before 1 run")
+        out["results"][0]["runs"][0].pop("warnings")
+        self.assertEqual(markdown._runs(out), "median of 1 per loader, cold page cache")
 
     def test_test_selection_errors(self):
         self.assertIn("needs --nproc", self.run_bench(tests=DIST)[0])

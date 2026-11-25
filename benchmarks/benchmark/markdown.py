@@ -162,8 +162,12 @@ def models(outs):
 
 
 def _runs(out):
-    st = out["settings"]
-    return f'median of {st["repeats"]} per loader, cold page cache'
+    """How the runs were made. A run that started with part of the model still in the page cache is said:
+    the page must not call it cold."""
+    left = sum(any("still in the page cache" in w for w in run.get("warnings", []))
+               for s in out["results"] for run in s["runs"])
+    cache = f'page cache not fully evicted before {left} run{"s" if left > 1 else ""}' if left else "cold page cache"
+    return f'median of {out["settings"]["repeats"]} per loader, {cache}'
 
 
 def _settings(outs):
