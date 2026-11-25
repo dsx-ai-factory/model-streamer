@@ -295,7 +295,7 @@ def vllm(a):
     from vllm.engine.arg_utils import EngineArgs
     _, ref = model_files(a)
     expected, _ = expected_tensors(ref)
-    nbytes = sum(n for _, n in expected.values())
+    nbytes = sum(v[1] for v in expected.values())
 
     options = dict(model=a.model_dir, enforce_eager=True, skip_tokenizer_init=True, **VLLM_OPTIONS[loader_of(a.child)])
     if is_dist(a.child):
