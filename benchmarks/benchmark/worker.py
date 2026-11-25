@@ -289,7 +289,7 @@ def vllm(a):
     neither changes how the weights are loaded. The engine runs in this process, so that leaving with
     os._exit frees the GPU without a child engine to shut down. A distributed test is one rank of
     torchrun: tensor parallelism over the ranks with vLLM's external launcher."""
-    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"  # whatever was inherited: the timer is in this process
     import inspect
     from vllm import LLM
     from vllm.engine.arg_utils import EngineArgs
