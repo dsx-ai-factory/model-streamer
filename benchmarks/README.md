@@ -112,11 +112,18 @@ load time is measured from a barrier before the load to a barrier after the
 last tensor, which makes it the slowest rank's time. Each rank needs its own
 GPU, so `--nproc` cannot be more than the number of GPUs on the machine.
 
-The job's NCCL group has no communicator when the clock starts, as in vLLM,
-which creates its group without a `device_id` and runs no collective before
-it loads the weights. The barriers therefore run on a separate gloo group, and
-a loader that sends on the job's group pays for setting up its communicator
-inside the measured time.
+The clock starts where it does for a loader inside an engine:
+
+- The job's NCCL group has no communicator yet, as in vLLM, which creates its
+  group without a `device_id` and runs no collective before it loads the
+  weights. A loader that sends on the job's group pays for setting up its
+  communicator inside the measured time.
+- NCCL itself has already started in every rank, as in vLLM, which builds a
+  communicator for inference before it loads the weights. The test builds one
+  on a group of its own before the clock. Without it each loader would also
+  pay about 2 s for NCCL's first start in the process.
+
+The barriers that line the ranks up run on a separate gloo group.
 
 ### vLLM tests
 

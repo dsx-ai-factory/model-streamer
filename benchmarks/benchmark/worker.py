@@ -196,10 +196,12 @@ def distributed(a):
     pressure) and drops the rest. load_s is from a barrier before the load to a barrier after the last
     tensor, i.e. the slowest rank.
 
-    The job's NCCL group is created as vLLM creates its own: without a device_id, which would build the
-    communicator at once, and with no collective before the load. The barriers therefore run on a gloo
-    group of their own, and a loader that sends on the job's group sets up its communicator inside the
-    measured time, as it does in an engine."""
+    The clock starts where it does for a loader inside an engine. The job's NCCL group is created as
+    vLLM creates its own: without a device_id, which would build the communicator at once, and with no
+    collective before the load, so a loader that sends on it sets its communicator up inside the measured
+    time. NCCL itself has started in every rank, as in vLLM, which builds a communicator for inference
+    before it loads the weights: one is built here on a group of its own and kept. The barriers run on
+    a gloo group."""
     import torch
     import torch.distributed as dist
 
@@ -218,6 +220,8 @@ def distributed(a):
     kept, seen, nbytes = {}, {}, 0
     torch.zeros(1, device="cuda")
     lineup = dist.new_group(backend="gloo")
+    engine = dist.new_group(backend="nccl")  # stands for the engine's own communicator; never the loader's
+    dist.barrier(group=engine)
     dist.barrier(group=lineup)
     torch.cuda.synchronize()
     ru0 = resource.getrusage(resource.RUSAGE_SELF)
