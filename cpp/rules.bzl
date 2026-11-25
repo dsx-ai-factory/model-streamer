@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 Google LLC
 # SPDX-License-Identifier: Apache-2.0
 
 def _runai_cc_binary(rule, linkopts=[], rpath_origin=False, **kwargs):
