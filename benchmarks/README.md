@@ -396,6 +396,6 @@ The results go to `OUT_DIR/<date>/`: for each case `<model>_<case>.json`
 |---|---|---|---|---|---|
 | Qwen3-32B | 1 × NVIDIA B200 | Safetensors | 5.67 | 10.8 | 1.00x |
 | | | InstantTensor | 2.48 | 24.6 | 2.29x |
-| | | Model Streamer | 1.60 | 38.1 | **3.54x** |
+| | | **Model Streamer** | **1.60** | **38.1** | **3.54x** |
 
 Speedup is against Safetensors to the same destination.

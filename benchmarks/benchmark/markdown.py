@@ -75,11 +75,11 @@ def table(outs, vllm=False):
                 lines.append(f"{first}| {_loader(s)} | failed | |" + (" |" if versus else ""))
                 continue
             speedup = f'{s["speedup"]:.2f}x' if "speedup" in s else "n/a"
-            if best > 1 and s.get("speedup") == best:
-                speedup = f"**{speedup}**"
             invalid = "" if s["ok"] else " (invalid data)"
-            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} |'
-                         + (f" {speedup} |" if versus else ""))
+            cells = [_loader(s), _load_time(s) + invalid, _num(s["gibps"])] + ([speedup] if versus else [])
+            if best > 1 and s.get("speedup") == best:  # the fastest loader's whole line stands out
+                cells = [f"**{c}**" for c in cells]
+            lines.append(first + "| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

@@ -189,8 +189,8 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
         for text in ("| Qwen | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |",
-                     "| | | InstantTensor | 5.00 | 8.0 | **4.00x** |",
-                     "| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", "- instanttensor: 0.2.3",
+                     "| | | **InstantTensor** | **5.00** | **8.0** | **4.00x** |",
+                     "| | | **Model Streamer** | **5.00** | **8.0** | **4.00x** |", "- instanttensor: 0.2.3",
                      "- runai_model_streamer: 0.17.1", "- GPUs: 1 × H200",
                      "- Runs: median of 1 per loader\n",
                      "- Page cache, for the models on local disk: cold before every run"):
@@ -236,7 +236,7 @@ class RunnerTest(unittest.TestCase):
             page = f.read()
         self.assertIn("## Test on S3\n", page)
         self.assertIn("| Qwen | 1 × H200 | download + Safetensors | 35.00 (15.00 download + 20.00 load) |", page)
-        self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **7.00x** |", page)
+        self.assertIn("| | | **Model Streamer** | **5.00** | **8.0** | **7.00x** |", page)
         self.assertIn("Safetensors and InstantTensor read local files only. For them the model is first "
                       "downloaded to local disk with s5cmd, and then loaded", page)
 
@@ -399,7 +399,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("| 1 × H200 | Model Streamer | 5.00 | 8.0 |\n", alone)
         self.assertNotIn("| Safetensors |", alone)
         self.assertIn("| 1 × H200 | Safetensors | 40.00 | 1.0 | 1.00x |", inside)
-        self.assertIn("| | | Model Streamer | 8.00 | 5.0 | **5.00x** |", inside)
+        self.assertIn("| | | **Model Streamer** | **8.00** | **5.0** | **5.00x** |", inside)
         self.assertNotIn("KV cache", page)  # kept in the results file only
         self.assertIn("- vllm: 0.34.0", page)
         # with tensor parallelism: the slowest rank's weight loading, and the GPU memory of all ranks
@@ -464,7 +464,7 @@ class RunnerTest(unittest.TestCase):
         table = markdown.combine([first, self.out], page)
         name = os.path.basename(self.dir.name)
         self.assertIn(f"| {name} | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |", table)
-        self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", table)
+        self.assertIn("| | | **Model Streamer** | **5.00** | **8.0** | **4.00x** |", table)
         self.assertIn(f"| {name} | host memory | Safetensors | 20.00 | 2.0 | 1.00x |", table)
         self.assertTrue(table.startswith("## Test on local disk"))  # every table of the page, under its heading
         with open(page) as f:
