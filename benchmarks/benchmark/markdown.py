@@ -165,12 +165,20 @@ def models(outs):
 
 
 def _runs(out):
-    """How the runs were made. A run that started with part of the model still in the page cache is said:
-    the page must not call it cold."""
+    return f'median of {out["settings"]["repeats"]} per loader'
+
+
+def _page_cache(outs):
+    """The page cache before the runs from local disk: evicted and checked before each. The runs that
+    started with part of the model still in it are counted, over every results file: the page must not
+    call them cold. An S3 model has no such check and no entry: the streamer does not read files, and the
+    other loaders load what they have just downloaded."""
+    local = [out for out in outs if not _on_s3(out)]
+    if not local:
+        return None
     left = sum(any("still in the page cache" in w for w in run.get("warnings", []))
-               for s in out["results"] for run in s["runs"])
-    cache = f'page cache not fully evicted before {left} run{"s" if left > 1 else ""}' if left else "cold page cache"
-    return f'median of {out["settings"]["repeats"]} per loader, {cache}'
+               for out in local for s in out["results"] for run in s["runs"])
+    return f'not fully evicted before {left} run{"s" if left > 1 else ""}' if left else "cold before every run"
 
 
 def _settings(outs):
@@ -205,6 +213,7 @@ def setting(outs):
         ("Storage", _each(outs, _storage)),
         ("S3", _each(outs, _s3)),
         ("Runs", _each(outs, _runs)),
+        ("Page cache, for the models on local disk", _page_cache(outs)),
         ("Settings", _settings(outs)),
         ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
         ("instanttensor", versions.get("instanttensor") if "instanttensor" in ran else None),
@@ -229,7 +238,8 @@ def _download_note(group):
     how = (f', with the settings the calibration measured as fastest ({best["objects"]} files at once, '
            f'{best["concurrency_per_object"]} parts of {best["part_mib"]} MiB each)') if best else ""
     return (f"\n\n{who} local files only. For {them} the model is first downloaded to local disk with "
-            f"s5cmd{how}, and then loaded; the load time is the two together.")
+            f"s5cmd{how}, and then loaded as the download leaves it, in the page cache or not; the load time is the "
+            "two together.")
 
 
 def results(outs):
@@ -275,14 +285,14 @@ def write(out, json_path):
 
 
 def combine(json_paths, md_path):
-    """One report for several results files. Returns its table."""
+    """One report for several results files. Returns its tables, each under its heading."""
     outs = []
     for p in json_paths:
         with open(p) as f:
             outs.append(json.load(f))
     with open(md_path, "w") as f:
         f.write(render(outs))
-    return table(outs)
+    return results(outs)
 
 
 if __name__ == "__main__":

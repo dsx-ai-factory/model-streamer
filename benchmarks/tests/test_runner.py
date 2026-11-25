@@ -192,7 +192,8 @@ class RunnerTest(unittest.TestCase):
                      "| | | InstantTensor | 5.00 | 8.0 | **4.00x** |",
                      "| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", "- instanttensor: 0.2.3",
                      "- runai_model_streamer: 0.17.1", "- GPUs: 1 × H200",
-                     "- Runs: median of 1 per loader, cold page cache"):
+                     "- Runs: median of 1 per loader\n",
+                     "- Page cache, for the models on local disk: cold before every run"):
             self.assertIn(text.replace("Qwen", os.path.basename(self.dir.name)), page)
         self.assertTrue(page.rstrip().endswith("|"))  # the report ends with its table
         self.assertNotIn("s5cmd", page)
@@ -436,6 +437,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(f"| {name} | 1 × H200 | Safetensors | 20.00 | 2.0 | 1.00x |", table)
         self.assertIn("| | | Model Streamer | 5.00 | 8.0 | **4.00x** |", table)
         self.assertIn(f"| {name} | host memory | Safetensors | 20.00 | 2.0 | 1.00x |", table)
+        self.assertTrue(table.startswith("## Test on local disk"))  # every table of the page, under its heading
         with open(page) as f:
             self.assertIn(table, f.read())
 
@@ -472,9 +474,12 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out["results"][0]["runs"][0]["warnings"], ["2.0 GiB still in the page cache before the run"])
         # and the report does not call that run cold
-        self.assertEqual(markdown._runs(out), "median of 1 per loader, page cache not fully evicted before 1 run")
+        self.assertEqual(markdown._page_cache([out]), "not fully evicted before 1 run")
+        self.assertEqual(markdown._page_cache([out, out]), "not fully evicted before 2 runs")  # counted, not merged
         out["results"][0]["runs"][0].pop("warnings")
-        self.assertEqual(markdown._runs(out), "median of 1 per loader, cold page cache")
+        self.assertEqual(markdown._page_cache([out]), "cold before every run")
+        out["model"]["path"] = "s3://b/Qwen"  # nothing is evicted or checked for an S3 model
+        self.assertIsNone(markdown._page_cache([out]))
 
     def test_test_selection_errors(self):
         self.assertIn("needs --nproc", self.run_bench(tests=DIST)[0])
