@@ -1,9 +1,10 @@
 # Model Streamer Benchmarks
 
-`bench.py` measures how fast a model loads on your machine with three loaders,
-`safetensors`, [InstantTensor](https://github.com/scitix/InstantTensor) and the
-streamer, on their own and inside vLLM, and compares each with what the
-hardware can do. Every run is a fresh process on a cold page cache, and the
+`bench.py` measures how fast the streamer loads a model on your machine and
+compares it with what the hardware can do. On request it measures two other
+loaders the same way, `safetensors` and
+[InstantTensor](https://github.com/scitix/InstantTensor), and the same loads
+inside vLLM. Every run is a fresh process on a cold page cache, and the
 loaded tensors are checked against `safetensors`. A run that returns wrong
 data fails.
 
@@ -31,14 +32,20 @@ directory first on `PYTHONPATH`.
 ## Running the benchmark
 
 ```bash
-# to host memory and to one GPU, with each loader, and in vLLM on one GPU
+# the streamer, to host memory and to one GPU
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B
 
 # to one GPU only
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --device cuda
 
-# to the GPUs of 8 ranks of this node, one GPU each, and in vLLM with tensor parallel 8
+# to the GPUs of 8 ranks of this node, one GPU each
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --nproc 8
+
+# compared with safetensors and InstantTensor (or name them: --loaders safetensors,streamer)
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --loaders all
+
+# and the same loads inside vLLM: on one GPU, or with --nproc 8 in tensor parallel 8
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B --loaders all --vllm
 
 # one test, with a streamer setting
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
@@ -49,8 +56,9 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 |---|---|---|
 | `--nproc N` | off | Run the distributed tests on N ranks, one GPU each, in place of the single-process ones |
 | `--device cpu\|cuda` | both | Run the single-process tests to this destination only |
-| `--loaders a,b` | all | Run only these loaders: `safetensors`, `instanttensor`, `streamer` |
-| `--tests a,b` | all that apply | Run only the named tests |
+| `--loaders a,b` | `streamer` | The loaders to measure: `safetensors`, `instanttensor`, `streamer`, or `all` |
+| `--vllm` | off | Also time the same loads inside vLLM |
+| `--tests a,b` | chosen by the options above | Run exactly the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
 | `--ref-dir DIR` | downloaded | Local copy of an S3 model, used for validation |
@@ -90,6 +98,8 @@ The tests are named in [`benchmark/__init__.py`](benchmark/__init__.py)
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
 
+By default only the streamer's tests run. `--loaders` adds the other loaders,
+`--vllm` adds the vLLM tests below, and `--tests` names tests one by one.
 Without `--tests`, a test runs when the model fits where it goes: host memory
 or one GPU has to hold the whole model, and with N ranks each GPU keeps a 1/N
 share of it. The GPU tests also need a GPU. A test that cannot run is left out with a note, for example an
@@ -110,8 +120,8 @@ inside the measured time.
 
 ### vLLM tests
 
-The same loaders are also timed inside vLLM, which shows what a server start
-gains from each:
+With `--vllm` the same loaders are also timed inside vLLM, which shows what a
+server start gains from each:
 
 | Destination | Safetensors | InstantTensor | Model Streamer |
 |---|---|---|---|
@@ -233,7 +243,8 @@ benchmark from. Their default names are in `.gitignore`.
 `bench_results.md` is the report: the test setting (the hardware, the storage's
 measured read rate, the versions of each loader), and tables with a row per
 loader giving its load time, throughput and speedup: one for local disk, one
-for the loads inside vLLM and one for S3. Speedup is against
+for the loads inside vLLM and one for S3. Speedup, shown when Safetensors was
+one of the loaders, is against
 Safetensors to the same destination, and with several GPUs the load time is
 the slowest rank's. To make it again from a results file, or one report from several:
 

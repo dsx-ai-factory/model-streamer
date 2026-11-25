@@ -85,9 +85,9 @@ with SafetensorsStreamer() as streamer:
 
 ## Benchmarking
 
-[`benchmarks/bench.py`](benchmarks/bench.py) measures how fast a model loads on
-your machine with `safetensors`, InstantTensor and the streamer, and reports
-each as a share of what the hardware can do:
+[`benchmarks/bench.py`](benchmarks/bench.py) measures how fast the streamer loads
+a model on your machine, as a share of what the hardware can do. It can measure
+`safetensors` and InstantTensor the same way, and the same loads inside vLLM:
 
 ```bash
 python3 benchmarks/bench.py /mnt/models/Qwen3-8B

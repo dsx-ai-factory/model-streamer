@@ -167,8 +167,10 @@ def nothing_fits(why):
 
 def select_tests(a, remote, size_gib=0.0):
     """The tests to run: --tests, else the distributed ones with --nproc, else the single-process ones
-    that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). A
-    test that cannot run here is left out with a note unless --tests asked for it."""
+    that apply here (to host memory and, with a GPU, to one GPU; --device keeps one of the two). Unless
+    --tests names them, they are the streamer's alone: --loaders adds the other loaders and --vllm the
+    same loads inside vLLM. A test that cannot run here is left out with a note unless --tests asked
+    for it."""
     if a.tests:
         names = [n for n in a.tests.split(",") if n not in TESTS or not a.loaders or loader_of(n) in a.loaders]
     else:
@@ -176,8 +178,7 @@ def select_tests(a, remote, size_gib=0.0):
         names = [t for t in TESTS if is_dist(t) == bool(a.nproc) and (gpu or TESTS[t]["device"] == "cpu")]
         if a.device and not a.nproc:
             names = [n for n in names if TESTS[n]["device"] == a.device]
-        if a.loaders:
-            names = [n for n in names if loader_of(n) in a.loaders]
+        names = [n for n in names if loader_of(n) in (a.loaders or ["streamer"]) and (a.in_vllm or not is_vllm(n))]
         for n in list(names):
             why = unavailable(a, n, remote) or (None if is_dist(n) else misfit(group_of(n), size_gib))
             if why:

@@ -63,20 +63,23 @@ def cases(outs, vllm=False):
 
 
 def table(outs, vllm=False):
-    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |",
-             "|---|---|---|---|---|---|"]
-    for out, group, tests in cases(outs, vllm):
+    found = cases(outs, vllm)
+    versus = any("speedup" in s for _, _, tests in found for s in tests)  # nothing to compare with: no column
+    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) |" + (" Speedup |" if versus else ""),
+             "|---|---|---|---|---|" + ("---|" if versus else "")]
+    for out, group, tests in found:
         best = max([s.get("speedup", 0) for s in tests] + [0])
         for i, s in enumerate(tests):
             first = f"| {_model(out)} | {_destination(out, group)} " if i == 0 else "| | "
             if "gibps" not in s:
-                lines.append(f"{first}| {_loader(s)} | failed | | |")
+                lines.append(f"{first}| {_loader(s)} | failed | |" + (" |" if versus else ""))
                 continue
             speedup = f'{s["speedup"]:.2f}x' if "speedup" in s else "n/a"
             if best > 1 and s.get("speedup") == best:
                 speedup = f"**{speedup}**"
             invalid = "" if s["ok"] else " (invalid data)"
-            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |')
+            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} |'
+                         + (f" {speedup} |" if versus else ""))
     return "\n".join(lines)
 
 

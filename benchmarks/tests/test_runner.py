@@ -15,7 +15,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from benchmark import markdown, profile, runner  # noqa: E402
+from benchmark import LOADERS, markdown, profile, runner  # noqa: E402
 
 DIST = "streamer_dist"
 
@@ -70,7 +70,9 @@ class RunnerTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, vllm=False, **over):
-        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="",
+        # every loader and the vLLM tests, as --loaders all --vllm: most tests here are about all of them
+        a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=list(LOADERS),
+                               in_vllm=True, tests="",
                                env=[], scratch_dir=None, vllm_args={},
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
@@ -198,7 +200,9 @@ class RunnerTest(unittest.TestCase):
         _, out = self.run_bench(tests="streamer_cuda", repeats=1)
         self.assertNotIn("speedup", out["results"][0])
         with open(os.path.splitext(self.out)[0] + ".md") as f:
-            self.assertIn("| Model Streamer | 5.00 | 8.0 | n/a |", f.read())
+            page = f.read()
+        self.assertIn("| Model Streamer | 5.00 | 8.0 |\n", page)  # and no speedup column
+        self.assertNotIn("Speedup", page)
 
     def test_a_missing_loader_leaves_out_only_its_tests(self):
         code, _ = self.run_bench(gpus=1, repeats=1, device="cuda", missing="instanttensor is not installed")
@@ -270,6 +274,22 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as stop:
             runner.prepare_s3(a)
         self.assertIn("same directory", str(stop.exception))
+
+    def test_only_the_streamer_runs_by_default(self):
+        self.run_bench(gpus=1, repeats=1, vllm=True, loaders=[], in_vllm=False)
+        self.assertEqual(self.ran(), ["streamer_cpu", "streamer_cuda"])
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            self.assertNotIn("Speedup", f.read())  # nothing to compare with
+        self.run_bench(gpus=8, nproc=2, repeats=1, vllm=True, loaders=[], in_vllm=False)
+        self.assertEqual(self.ran(), ["streamer_dist"])
+        # --vllm adds the same loads inside vLLM, --loaders the other loaders
+        self.run_bench(gpus=1, repeats=1, vllm=True, loaders=[], in_vllm=True, device="cuda")
+        self.assertEqual(self.ran(), ["streamer_cuda", "vllm_streamer"])
+        self.run_bench(gpus=1, repeats=1, vllm=True, loaders=["safetensors", "streamer"], in_vllm=False, device="cuda")
+        self.assertEqual(self.ran(), ["safetensors_cuda", "streamer_cuda"])
+        # --tests names its tests whatever the defaults
+        self.run_bench(gpus=1, repeats=1, loaders=[], in_vllm=False, tests="safetensors_cuda")
+        self.assertEqual(self.ran(), ["safetensors_cuda"])
 
     def test_env_overrides_the_logging_defaults(self):
         code, _ = self.run_bench(tests="streamer_cpu", env=["RUNAI_STREAMER_LOG_LEVEL=DEBUG"])
@@ -375,7 +395,7 @@ class RunnerTest(unittest.TestCase):
             page = f.read()
         # the loads inside vLLM have a table of their own, after the standalone ones
         alone, _, inside = page.partition("## Test in vLLM, from local disk")
-        self.assertIn("| 1 × H200 | Model Streamer | 5.00 | 8.0 | n/a |", alone)
+        self.assertIn("| 1 × H200 | Model Streamer | 5.00 | 8.0 |\n", alone)
         self.assertNotIn("| Safetensors |", alone)
         self.assertIn("| 1 × H200 | Safetensors | 40.00 | 1.0 | 1.00x |", inside)
         self.assertIn("| | | Model Streamer | 8.00 | 5.0 | **5.00x** |", inside)
@@ -444,7 +464,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(out["results"][0], {"test": "streamer_cpu", "loader": "streamer", "group": "cpu", "ok": False,
                                              "runs": [{"failed": "timed out after 3600 s"}] * 2})
         with open(os.path.splitext(self.out)[0] + ".md") as f:
-            self.assertIn("| Model Streamer | failed | | |", f.read())
+            self.assertIn("| Model Streamer | failed | |\n", f.read())
 
     def test_cache_left_before_a_cold_run_is_a_warning(self):
         with mock.patch.object(runner, "evict", return_value=2 << 30):

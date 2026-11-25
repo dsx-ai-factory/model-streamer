@@ -5,12 +5,14 @@
 
 Linux only. Needs torch, safetensors and runai_model_streamer (torch with NCCL for --nproc).
 
-    python3 bench.py /mnt/models/Qwen3-8B                  to host memory and to one GPU, with each loader
+    python3 bench.py /mnt/models/Qwen3-8B                  the streamer, to host memory and to one GPU
     python3 bench.py /mnt/models/Qwen3-8B --device cuda    to one GPU only
     python3 bench.py /mnt/models/Qwen3-8B --nproc 8        to the GPUs of 8 ranks on this node
+    python3 bench.py /mnt/models/Qwen3-8B --loaders all    compared with safetensors and InstantTensor
+    python3 bench.py /mnt/models/Qwen3-8B --vllm           and the same loads inside vLLM
     python3 bench.py s3://bucket/Qwen3-8B                  the same from S3
 
-The loaders are safetensors, InstantTensor and the streamer. Every run is a fresh process on a cold page
+By default only the streamer is measured, on its own. Every run is a fresh process on a cold page
 cache, and its tensors are checked against safetensors. suite.sh is the daily run of three models, with one report.
 The tests, the machine profile and the results file are described in README.md next to this script.
 """
@@ -40,7 +42,10 @@ def main():
     ap.add_argument("--nproc", type=int, help="run the distributed tests on this many ranks, one GPU each")
     ap.add_argument("--device", choices=("cpu", "cuda"),
                     help="single-process tests to this destination only (default: both)")
-    ap.add_argument("--loaders", default="", help=f"only these loaders, a comma list of: {', '.join(LOADERS)}")
+    ap.add_argument("--loaders", default="",
+                    help=f"the loaders to measure, a comma list of: {', '.join(LOADERS)}; or all (default: streamer)")
+    ap.add_argument("--vllm", dest="in_vllm", action="store_true",
+                    help="also time the same loads inside vLLM (needs vllm installed)")
     ap.add_argument("--tests", default="", help=f"comma list of: {', '.join(TESTS)}")
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="set for every measured process (repeatable)")
@@ -65,10 +70,10 @@ def main():
         ap.error("MODEL is required")
     if a.nproc is not None and a.nproc < 1:
         ap.error("--nproc must be at least 1")
-    a.loaders = [x for x in a.loaders.split(",") if x]
+    a.loaders = list(LOADERS) if a.loaders == "all" else [x for x in a.loaders.split(",") if x]
     for name in a.loaders:
         if name not in LOADERS:
-            ap.error(f"unknown loader {name}; choose from {', '.join(LOADERS)}")
+            ap.error(f"unknown loader {name}; choose from {', '.join(LOADERS)}, or all")
     try:
         a.vllm_args = json.loads(a.vllm_args) if a.vllm_args else {}
     except ValueError as e:
