@@ -11,11 +11,12 @@ import os
 import re
 
 import dockerfile
-from util import HERE, read_json
+from util import HERE, read_json, requirement_lines
 
 DOCKERFILE = dockerfile.DOCKERFILE
 SCRIPTS = ".devcontainer/scripts"
 DEVCONTAINER = ".devcontainer/devcontainer.json"
+REQUIREMENTS = "requirements.txt"  # the runtime requirements of a wheel; setup.py reads them as install_requires
 
 
 def config():
@@ -65,15 +66,31 @@ def devcontainer_features(repo):
 
 
 def setup_requirements(path):
-    """The install_requires list of a setup.py, read without running it."""
+    """The install_requires of a setup.py, read without running it, as (specs, declaring file): the
+    setup.py itself for a literal list, or the requirements file that `read_requirements(...)` names
+    (requirements.txt unless an argument says otherwise). Any other shape stops the collector."""
     with open(path) as f:
         tree = ast.parse(f.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "setup":
             for keyword in node.keywords:
                 if keyword.arg == "install_requires":
-                    return list(ast.literal_eval(keyword.value))
-    return []
+                    if isinstance(keyword.value, ast.Call):
+                        call = keyword.value
+                        if getattr(call.func, "id", getattr(call.func, "attr", "")) != "read_requirements":
+                            raise ValueError("%s: install_requires is a call the collector does not read; "
+                                             "use read_requirements() or a literal list" % path)
+                        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+                        if set(keywords) - {"name"}:
+                            raise ValueError("%s: read_requirements() got keywords the collector does not "
+                                             "read: %s" % (path, ", ".join(sorted(set(keywords) - {"name"}))))
+                        source = call.args[0] if call.args else keywords.get("name")
+                        name = ast.literal_eval(source) if source is not None else REQUIREMENTS
+                        declaring = os.path.join(os.path.dirname(path), name)
+                        with open(declaring) as f:
+                            return requirement_lines(f.read()), declaring
+                    return list(ast.literal_eval(keyword.value)), path
+    return [], path
 
 
 def spec_name(spec):
@@ -96,18 +113,18 @@ def pip_groups(repo):
             files.append(declared_by)
 
     for setup in sorted(glob.glob(os.path.join(repo, "py", "*", "setup.py"))):
-        for spec in setup_requirements(setup):
-            add("run", spec, os.path.relpath(setup, repo))
+        specs, declaring = setup_requirements(setup)
+        for spec in specs:
+            add("run", spec, os.path.relpath(declaring, repo))
     for path in build_files(repo):
-        for line, requirements in dockerfile.pip_packages(read(repo, path), path):
+        for line, requirements in dockerfile.pip_packages(read(repo, path), path, repo):
             for spec in requirements:
                 name = re.split(r"[<>=!~\[; ]", spec, 1)[0]
                 for category in categories_for("pip", name):
                     add(category, spec, "%s:%d" % (path, line))
     for requirements in sorted(glob.glob(os.path.join(repo, "py", "*", "requirements*"))):
-        for line in read(repo, requirements).splitlines():
-            spec = line.split("#")[0].strip()
-            if spec:
+        if os.path.basename(requirements) != REQUIREMENTS:  # requirements.txt is `run`, read above
+            for spec in requirement_lines(read(repo, requirements)):
                 add("test", spec, os.path.relpath(requirements, repo))
     for makefile in sorted(glob.glob(os.path.join(repo, "py", "*", "Makefile"))):
         # The requirement may be quoted: `pip download "torch>=2.6"` keeps the shell from
@@ -117,10 +134,14 @@ def pip_groups(repo):
             if index not in groups["test"]["extra_index_urls"]:
                 groups["test"]["extra_index_urls"].append(index)
         for command in re.findall(r"pip3? install\s+([^&\\\n]*)", read(repo, makefile)):
-            skip = False
-            for token in command.split():
-                if skip or token.startswith("-r"):
-                    skip = token == "-r"  # the name after -r is a requirements file, listed elsewhere
+            tokens = command.split()
+            for i, token in enumerate(tokens):
+                if token == "-r" and i + 1 < len(tokens):  # a requirements file, next to the Makefile
+                    requirements = os.path.join(os.path.dirname(makefile), tokens[i + 1])
+                    for spec in requirement_lines(read(repo, requirements)):
+                        add("test", spec, os.path.relpath(requirements, repo))
+                elif i and tokens[i - 1] == "-r":
+                    continue
                 elif not token.startswith(("-", ".", "$")) and "/" not in token:  # a package name, not a path or a wheel of ours
                     add("test", token, os.path.relpath(makefile, repo))
     for pyproject in sorted(glob.glob(os.path.join(repo, "py", "*", "pyproject.toml"))):

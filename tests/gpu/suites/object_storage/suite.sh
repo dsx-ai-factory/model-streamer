@@ -27,11 +27,11 @@ object_storage_install_s3_plugin() {
     fi
 }
 
-# boto3 is the client that the tests put objects with; it is not a dependency of the streamer, so it is installed here.
+# boto3 is the client that the tests put objects with: the requirements of the S3 plugin (py/runai_model_streamer_s3/requirements.txt) are installed here.
 suite_prepare() {
     export PIP_BREAK_SYSTEM_PACKAGES=1
     object_storage_install_s3_plugin || return
-    timeout --signal=TERM --kill-after=30s "$(cap 5)s" python3 -m pip install --no-cache-dir boto3 || return
+    timeout --signal=TERM --kill-after=30s "$(cap 5)s" python3 -m pip install --no-cache-dir -r py/runai_model_streamer_s3/requirements.txt || return
     # The service is a container of its own: wait until it answers, and say how to get one if the environment has none.
     timeout --signal=TERM --kill-after=10s "$(cap 5)s" python3 tests/gpu/suites/object_storage/wait_for_service.py
 }

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Runtime requirements: setup.py reads them as install_requires.
+# Caps are majors only; the Azure SDK changes majors rarely, and breaking when it does.
+azure-storage-blob>=12.26.0, <13
+azure-identity>=1.21.0, <2

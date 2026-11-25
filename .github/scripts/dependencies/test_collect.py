@@ -73,6 +73,18 @@ class DockerfileTest(unittest.TestCase):
         self.assertEqual([i[1:] for i in images], [("localhost:5000/team/app", "1", None, "x"),
                                                    ("localhost:5000/team/app", None, None, None)])
 
+    def test_pip_install_of_a_copied_requirements_file(self):
+        text = ("COPY .devcontainer/requirements.txt /tmp/r.txt\n"
+                "RUN pip install -r /tmp/r.txt \\\n    && rm /tmp/r.txt\n")
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, ".devcontainer"))
+            with open(os.path.join(root, ".devcontainer", "requirements.txt"), "w") as f:
+                f.write("# a comment\na==1.0\n\nb>=2\n")
+            packages = [p for _, p in dockerfile.pip_packages(text, root=root)]
+        self.assertEqual(packages, [["a==1.0", "b>=2"]])
+        with self.assertRaises(ValueError):
+            dockerfile.pip_packages("RUN pip install -r /tmp/missing.txt\n")
+
     def test_pip_and_npm_packages(self):
         self.assertEqual([p for _, p in dockerfile.pip_packages(SAMPLE)], [["pip==25.0.1"], ["boto3", "cpplint==1.5.4"]])
         self.assertEqual([p for _, p in dockerfile.npm_packages(SAMPLE)], [["azurite"]])
@@ -294,17 +306,18 @@ class InputsTest(unittest.TestCase):
 
     def test_makefile_installs_are_test_packages(self):
         test = inputs.pip_groups(util.REPO)["test"]
-        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/Makefile"])
-        self.assertIn("azure-storage-blob", test["specs"])
+        self.assertEqual(test["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])  # `pip install -r requirements.txt`
+        self.assertIn("azure-storage-blob>=12.26.0, <13", test["specs"])  # the bound must survive the parsing
         self.assertFalse([s for s in test["specs"] if "/" in s or s.startswith(("-", "."))])  # no paths or wheels of ours
 
     def test_pip_groups(self):
         groups = inputs.pip_groups(util.REPO)
+        self.assertIn("boto3>=1.28.0, <2", groups["run"]["specs"])  # the bound must survive the parsing
         self.assertIn("boto3", groups["run"]["specs"])
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
         self.assertIn("torch>=2.6", groups["test"]["specs"])  # quoted in the Makefile; the quotes must not survive
         self.assertTrue(groups["test"]["extra_index_urls"])
-        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/setup.py"])
+        self.assertEqual(groups["run"]["declared_by"]["azure-identity"], ["py/runai_model_streamer_azure/requirements.txt"])
         self.assertTrue(any(spec.startswith("setuptools") for spec in groups["build"]["specs"]))
 
     def test_every_workflow_action_has_a_reference(self):

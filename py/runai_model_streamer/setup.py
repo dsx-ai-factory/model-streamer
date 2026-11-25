@@ -24,6 +24,13 @@ class bdist_wheel(_bdist_wheel):
         return "py3", "none", plat
 
 
+def read_requirements(name="requirements.txt"):
+    """The requirements of this package, one per line (comments and blank lines are ignored)."""
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as f:
+        lines = (line.split("#")[0].strip() for line in f)
+        return [line for line in lines if line]
+
+
 def assert_lib_exists():
     lib_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "runai_model_streamer", LIB
@@ -47,7 +54,7 @@ setup(
     license_files=("LICENSE", "NOTICE"),
     packages=find_packages(),
     package_data={"runai_model_streamer": [LIB]},
-    install_requires=["torch>=2.0.0, <3.0.0", "humanize", "numpy"],
+    install_requires=read_requirements(),
     extras_require={
         "s3": [f"runai_model_streamer_s3=={VERSION}"],
         "gcs": [f"runai_model_streamer_gcs=={VERSION}"],

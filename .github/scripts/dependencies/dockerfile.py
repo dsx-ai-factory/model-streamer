@@ -8,7 +8,10 @@ also runs in the image).
 Every reader takes the text of the file and its path. A path that ends in `.sh` is read as a script
 (every line is a command); any other path is read as a Dockerfile (the `RUN` instructions)."""
 
+import os
 import re
+
+from util import REPO, requirement_lines
 
 DOCKERFILE = ".devcontainer/Dockerfile"
 ARCHES = ("x86_64", "aarch64")
@@ -141,14 +144,37 @@ def apt_packages(text, path=DOCKERFILE):
     return found
 
 
-def pip_packages(text, path=DOCKERFILE):
+def _copied_requirements(text, destination, root, path):
+    """The requirements of the file that `pip install -r <destination>` reads: the Dockerfile copies it
+    from the repository at `root` (a `COPY <source> <destination>` of exactly one source file)."""
+    if is_script(path):
+        raise ValueError("%s: `pip install -r` in a script is not read (a script has no COPY); name the "
+                         "packages, or teach _copied_requirements where the file comes from" % path)
+    copy = re.search(r"^COPY\s+([^\n]*\S)\s+%s\s*$" % re.escape(destination), text, re.M)
+    if not copy:
+        raise ValueError("%s: pip install -r %s: no COPY of that exact file in the Dockerfile (a COPY to a "
+                         "directory is not read)" % (path, destination))
+    sources = [t for t in copy.group(1).split() if not t.startswith("--")]
+    if len(sources) != 1:
+        raise ValueError("%s: the COPY of %s names %d sources and the collector reads exactly one"
+                         % (path, destination, len(sources)))
+    with open(os.path.join(root, sources[0])) as f:
+        return requirement_lines(f.read())
+
+
+def pip_packages(text, path=DOCKERFILE, root=REPO):
     """Requirements named on `pip install` lines, as (line, [requirement])."""
     found = []
     for number, rest in runs(text, path):
         for segment in _segments(rest):
             match = re.search(r"pip3? install\s+(.*)", segment)
             if match:
-                requirements = [t for t in _tokens(match.group(1)) if not t.startswith("-")]
+                requirements, tokens = [], _tokens(match.group(1))
+                for index, token in enumerate(tokens):
+                    if token == "-r" and index + 1 < len(tokens):
+                        requirements += _copied_requirements(text, tokens[index + 1], root, path)
+                    elif not token.startswith("-") and not (index and tokens[index - 1] == "-r"):
+                        requirements.append(token)
                 if requirements:
                     found.append((number, requirements))
     return found
