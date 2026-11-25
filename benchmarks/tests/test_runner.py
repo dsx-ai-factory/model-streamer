@@ -424,7 +424,36 @@ class RunnerTest(unittest.TestCase):
             self.assertIn("config.json", runner.unavailable(a, "vllm_streamer"))
             open(os.path.join(self.dir.name, "config.json"), "w").close()
             self.assertIsNone(runner.unavailable(a, "vllm_streamer"))
-            self.assertIn("local directory", runner.unavailable(a, "vllm_streamer", remote=True))
+            # in a bucket config.json is looked for with s5cmd, and taken to be there without it
+            a = argparse.Namespace(model_dir="s3://b/Qwen")
+            ls = lambda code: mock.patch.object(runner.subprocess, "run", return_value=mock.Mock(returncode=code))
+            with mock.patch.object(runner.shutil, "which", return_value="/bin/s5cmd"):
+                with ls(1):
+                    self.assertIn("config.json", runner.unavailable(a, "vllm_streamer", remote=True))
+                with ls(0):
+                    self.assertIsNone(runner.unavailable(a, "vllm_streamer", remote=True))
+
+    def test_vllm_tests_run_on_an_s3_model(self):
+        scratch = os.path.join(self.dir.name, "scratch")
+        rest = os.path.join(scratch, "config.json")
+        with mock.patch.object(runner, "download", return_value=(15.0, None)), \
+                mock.patch.object(runner, "download_rest", return_value=(1.0, [rest], None)) as download_rest, \
+                mock.patch.object(runner, "clear"), mock.patch.object(runner, "remove") as remove:
+            code, out = self.run_bench(gpus=1, repeats=1, vllm=True, model_dir="s3://b/Qwen", ref_dir=self.dir.name,
+                                       scratch_dir=scratch, tests="vllm_safetensors,vllm_streamer")
+        self.assertEqual(code, 0)
+        download_rest.assert_called_once_with("s3://b/Qwen", scratch)  # not for the streamer
+        remove.assert_called_once_with([rest])
+        by = {c[c.index("--child") + 1]: c for c, _ in self.calls}
+        self.assertEqual((by["vllm_safetensors"][2], by["vllm_streamer"][2]), (scratch, "s3://b/Qwen"))
+        st, streamer = out["results"]
+        self.assertEqual((st["load_s"], st["download_s"], streamer["load_s"]), (56.0, 16.0, 8.0))
+        self.assertNotIn("download_s", streamer)
+        with open(os.path.splitext(self.out)[0] + ".md") as f:
+            page = f.read()
+        self.assertIn("## Test in vLLM, from S3\n", page)
+        self.assertIn("| download + Safetensors | 56.00 (16.00 download + 40.00 load) |", page)
+        self.assertIn("Safetensors reads local files only.", page)
 
     def test_several_results_make_one_page_and_one_table(self):
         self.run_bench(gpus=1, repeats=1, device="cuda")

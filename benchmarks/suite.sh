@@ -49,8 +49,8 @@ VLLM=vllm_safetensors,vllm_instanttensor,vllm_streamer
 VLLM_DIST=vllm_dist_safetensors,vllm_dist_instanttensor,vllm_dist_streamer
 # What vLLM needs to start these models; none of it changes how the weights are loaded.
 KIMI_VLLM='--vllm-args {"trust_remote_code":true,"limit_mm_per_prompt":{"image":0,"video":0},"max_model_len":4096}'
-# The cases named vllm* load inside vLLM. They are runs of their own, from local disk only, and are left
-# out where vllm is not installed.
+# The cases named vllm* load inside vLLM. They are runs of their own and are left out where vllm is not
+# installed, and from S3 where the bucket does not hold the model's config.json.
 CASES=(
     "gpu             $QWEN      --tests safetensors_cuda,instanttensor_cuda,streamer_cuda"
     "multi_gpu       $DEEPSEEK  --nproc NPROC --tests $DIST"
@@ -207,9 +207,13 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
         # shellcheck disable=SC2086  # the case's options are split on purpose
         if [ "$source" = disk ]; then
             bench "${name}_$case" "$MODELS_DIR/$name" $options "$@"
-        elif [ "$case" = "${case#vllm}" ] && ! has "$absent" "$name"; then  # vLLM loads local models
+        elif has "$absent" "$name"; then
+            continue
+        elif [ "$case" != "${case#vllm}" ] && ! s5 ls "$S3_ROOT/$name/config.json" > /dev/null 2>&1; then
+            echo "leaving ${name}_${case} out of the S3 half: $S3_ROOT/$name has no config.json, which vLLM needs"
+        else
             tuned=${S3_OPTIONS:-}
-            [ "$case" = multi_gpu ] && tuned=${S3_MULTI_OPTIONS:-}
+            [ "$case" != "${case%multi_gpu}" ] && tuned=${S3_MULTI_OPTIONS:-}
             bench "${name}_${case}_s3" "$S3_ROOT/$name" $options $tuned --ref-dir "$MODELS_DIR/$name" \
                 --scratch-dir "$SCRATCH_DIR" "$@"
         fi

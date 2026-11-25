@@ -147,8 +147,12 @@ ranks). Whatever a loader leaves on the GPU comes out of it:
 a loader that sends on vLLM's process group leaves that group's NCCL
 communicator allocated, about 0.6 GiB per GPU on a B200.
 
-- They need `vllm` installed and the model's `config.json`, and a model on
-  local disk. Otherwise they are left out with a note.
+- They need `vllm` installed and the model's `config.json` next to the
+  weights, on local disk or in the bucket. Otherwise they are left out with a
+  note.
+- For a model on S3 the streamer test gives vLLM the `s3://` address, as a
+  server would be started. The other loaders first download the weights and
+  the files next to them, and the download is part of their load time.
 - The vLLM used is the one installed in this Python; its version is in the
   report. A streamer build on `PYTHONPATH` is used in place of the one vLLM
   was installed with.
@@ -339,8 +343,8 @@ benchmarks/suite.sh /mnt/models s3://bench
 ```
 
 The cases, each with every loader, first from local disk and then from S3.
-Where `vllm` is installed, the same loads then run inside vLLM, from local
-disk only, as cases of their own:
+Where `vllm` is installed, the same loads then run inside vLLM as cases of
+their own, from S3 too when the bucket holds the model's `config.json`:
 
 | Model | Loaded to |
 |---|---|

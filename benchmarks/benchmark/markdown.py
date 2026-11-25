@@ -254,10 +254,13 @@ def results(outs):
         rates = [r for r in (_rate(o, ceiling) for o in group) if r]
         measured = f" ({min(rates):.0f} GiB/s {how})" if rates else ""
         if cases(group):
-            parts.append(f"## Test on {what}{measured}\n\n{table(group)}" + (_download_note(group) if on_s3 else ""))
+            alone = [dict(o, results=[s for s in o["results"] if not _in_vllm(s["group"])]) for o in group]
+            parts.append(f"## Test on {what}{measured}\n\n{table(group)}" + (_download_note(alone) if on_s3 else ""))
         if cases(group, vllm=True):
+            inside = [dict(o, results=[s for s in o["results"] if _in_vllm(s["group"])]) for o in group]
             parts.append(f"## Test in vLLM, from {what}{measured}\n\n{table(group, vllm=True)}\n\n"
-                         "The load time is vLLM's weight loading step, on the slowest rank when there are several.")
+                         "The load time is vLLM's weight loading step, on the slowest rank when there are several."
+                         + (_download_note(inside) if on_s3 else ""))
     return "\n\n".join(parts)
 
 

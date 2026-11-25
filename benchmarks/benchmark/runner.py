@@ -100,6 +100,17 @@ def misfit(group, size_gib, nproc=None):
     return None
 
 
+def has_config(model, remote):
+    """Whether config.json is next to the weights, which vLLM needs. In a bucket it is looked for with
+    s5cmd; without s5cmd it is taken to be there, and vLLM says so itself when it is not."""
+    if not remote:
+        return os.path.exists(os.path.join(model, "config.json"))
+    if not shutil.which("s5cmd"):
+        return True
+    from calibration.s3 import s5cmd
+    return subprocess.run(s5cmd("ls", model.rstrip("/") + "/config.json"), capture_output=True).returncode == 0
+
+
 def unavailable(a, test, remote=False):
     """Why a test cannot run here, or None. Its loader has to be installed, and a loader that reads only
     local files needs s5cmd to download an s3:// model first."""
@@ -108,9 +119,7 @@ def unavailable(a, test, remote=False):
     if is_vllm(test):
         if importlib.util.find_spec("vllm") is None:
             return f"vllm is not installed in this Python ({sys.executable}): pip install vllm"
-        if remote:
-            return "the vLLM tests load a model from a local directory"
-        if not os.path.exists(os.path.join(a.model_dir, "config.json")):
+        if not has_config(a.model_dir, remote):
             return f"the model's config.json is not in {a.model_dir}, next to the weights"
     if remote and loader_of(test) != "streamer" and not shutil.which("s5cmd"):
         return "it reads local files, and downloading the s3:// model needs s5cmd on PATH (pip install s5cmd)"
@@ -132,6 +141,31 @@ def download(uri, scratch, profile):
     if p.returncode:
         return None, f"s5cmd could not download {uri}: {p.stderr[-800:]}"
     return time.perf_counter() - t0, None
+
+
+def download_rest(uri, scratch):
+    """Download what an s3:// model has besides its weights (config.json and the like, which vLLM
+    needs next to them) into the scratch directory: (seconds, what it added there, None), or
+    (None, [], why it failed)."""
+    from calibration.s3 import s5cmd
+    before = set(os.listdir(scratch))
+    t0 = time.perf_counter()
+    p = subprocess.run(s5cmd("cp", "--exclude", "*.safetensors", f"{uri.rstrip('/')}/*", scratch.rstrip("/") + "/"),
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    took = time.perf_counter() - t0
+    added = [os.path.join(scratch, name) for name in sorted(set(os.listdir(scratch)) - before)]
+    if p.returncode:
+        remove(added)
+        return None, [], f"s5cmd could not download the files next to the weights of {uri}: {p.stderr[-800:]}"
+    return took, added, None
+
+
+def remove(paths):
+    for path in paths:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        elif os.path.exists(path):
+            os.remove(path)
 
 
 def clear(scratch):
@@ -245,14 +279,20 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     no result is ({"failed": why}, None). The record holds what differs from run to run; the measured
     process's full record is in the log under --log-dir.
 
-    An s3:// model is read from S3 by the streamer. The other loaders read local files only, so for them
-    the run is the download to --scratch-dir followed by the load from there, as it is downloaded: its
-    load time is the two together, and download_s says how much of it the download was."""
+    An s3:// model is read from S3 by the streamer, also inside vLLM, which is given the s3:// address.
+    The other loaders read local files only, so for them the run is the download to --scratch-dir
+    followed by the load from there, as it is downloaded: its load time is the two together, and
+    download_s says how much of it the download was. For a vLLM test the download includes the files
+    next to the weights."""
     warnings = []
-    model_dir, download_s = a.model_dir, None
+    model_dir, download_s, extras = a.model_dir, None, []
     if remote and loader_of(test) != "streamer":
         download_s, why = download(a.model_dir, a.scratch_dir, profile)
+        if not why and is_vllm(test):
+            rest_s, extras, why = download_rest(a.model_dir, a.scratch_dir)
+            download_s = None if why else download_s + rest_s
         if why:
+            clear(a.scratch_dir)
             return {"failed": why}, None
         model_dir = a.scratch_dir
     if not remote:
@@ -270,6 +310,7 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     out, err, killed = launch(cmd + args, env, TIMEOUT_S)
     if download_s is not None:
         clear(a.scratch_dir)
+        remove(extras)
     if a.log_dir:
         with open(os.path.join(a.log_dir, f"{tag.replace(' ', '-')}.log"), "w") as f:
             f.write(out + "\n--- stderr ---\n" + err)
@@ -279,7 +320,7 @@ def run_once(a, test, files, remote, env, tag, profile=None):
 
     raw = json.loads(line[7:])
     if is_vllm(test):
-        return vllm_record(a, test, raw, out, err, warnings)
+        return vllm_record(a, test, raw, out, err, warnings, download_s)
     ranks = raw if is_dist(test) else [raw]
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
     if download_s is not None:
@@ -304,18 +345,20 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     return r, facts
 
 
-def vllm_record(a, test, raw, out, err, warnings):
+def vllm_record(a, test, raw, out, err, warnings, download_s=None):
     """A vLLM run's record. Its load time is the weight loading step, which every rank times itself and
-    prints: the slowest rank's counts. vLLM's own "Model loading took" line, which also covers building
-    the model, is kept as model_load_s, with the GPU memory it reports. kv_cache_gib is the KV cache vLLM
+    prints: the slowest rank's counts, with the download before it for a loader that needed one. vLLM's
+    own "Model loading took" line, which also covers building the model, is kept as model_load_s, with the GPU memory it reports. kv_cache_gib is the KV cache vLLM
     then fits on one GPU, the smallest over the ranks: what a loader leaves on the GPU comes out of it."""
     ranks = a.nproc if is_dist(test) else 1
     weights = [float(s) for s in re.findall(r"^WEIGHTS ([\d.]+)", out, re.M)]
     if len(weights) < ranks or not max(weights):
         return {"failed": f"{len(weights)} of {ranks} ranks reported a weight loading time"}, None
     took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)[-ranks:]
-    load_s = round(max(weights), 3)
+    load_s = round(max(weights) + (download_s or 0), 3)
     r = {"load_s": load_s, "gibps": round(raw["gib"] / load_s, 2) if load_s else 0.0, "startup_s": raw["startup_s"]}
+    if download_s is not None:
+        r["download_s"] = round(download_s, 3)
     if took:
         r["model_load_s"] = round(max(float(s) for _, s in took), 3)
         r["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
