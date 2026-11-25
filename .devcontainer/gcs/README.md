@@ -36,7 +36,7 @@ needs no checksum edit: `build-gcs-sdk.sh` verifies the Bazel binary against the
 
 Normal application changes to warnings, optimization or debug symbols do not
 invalidate the SDK. The shared `compatibility.h`, compiled by both workspaces,
-requires GCC 9, C++17 or newer, libstdc++'s C++11 ABI and no `_GLIBCXX_DEBUG`.
+requires GCC 10, C++17 or newer, libstdc++'s C++11 ABI and no `_GLIBCXX_DEBUG`.
 An incompatible application configuration fails during compilation. Intentional
 compiler/ABI migrations must update the SDK contract and rebuild the image.
 These checks cover the supported contract, not every possible compiler flag;

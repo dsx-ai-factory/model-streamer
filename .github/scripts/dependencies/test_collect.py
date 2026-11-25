@@ -380,6 +380,33 @@ class InputsTest(unittest.TestCase):
             self.assertTrue(ref, action)
             self.assertTrue(workflows)
 
+    def test_bazel_versions_read_both_workspaces(self):
+        with tempfile.TemporaryDirectory() as work:
+            for path, ver in (("cpp/.bazelversion", "7.6.1\n"), (".devcontainer/gcs/.bazelversion", "8.9.0\n")):
+                full = os.path.join(work, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as f:
+                    f.write(ver)
+            self.assertEqual(inputs.bazel_versions(work),
+                             {"7.6.1": ["cpp/.bazelversion"], "8.9.0": [".devcontainer/gcs/.bazelversion"]})
+            with unittest.mock.patch.object(static_sources, "http_text", return_value="abcd1234  bazel\n"):
+                entries = static_sources.bazel_binary(work)
+            self.assertEqual([e["version"] for e in entries], ["7.6.1", "8.9.0"])
+            self.assertEqual(entries[0]["declared_by"], ["cpp/.bazelversion"])
+            self.assertEqual(entries[1]["declared_by"], [".devcontainer/gcs/.bazelversion"])
+            self.assertEqual([f["platform"] for f in entries[1]["files"]], ["x86_64", "aarch64"])
+            self.assertEqual(entries[1]["files"][0]["sha256"], "abcd1234")
+
+    def test_bazel_versions_merge_identical_pins(self):
+        with tempfile.TemporaryDirectory() as work:
+            for path in ("cpp/.bazelversion", ".devcontainer/gcs/.bazelversion"):
+                full = os.path.join(work, path)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w") as f:
+                    f.write("7.6.1\n")
+            self.assertEqual(inputs.bazel_versions(work),
+                             {"7.6.1": ["cpp/.bazelversion", ".devcontainer/gcs/.bazelversion"]})
+
 
 # `bazel mod show_repo <module>...`, as Bazel 7.6 prints it.
 BAZEL_SHOW_REPO = """\

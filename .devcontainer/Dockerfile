@@ -26,22 +26,24 @@ RUN python3 -m pip install --upgrade "pip==25.0.1" \
 # update this pin and the glibc source entry in .github/release-sources.json together (the
 # glibc-nonshared version in attribution.json stays the upstream 2.31).
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential binutils libc6-dev=2.31-0ubuntu9.18 \
-    && rm -rf /var/lib/apt/lists/*
+    build-essential binutils libc6-dev=2.31-0ubuntu9.18 gcc-10 g++-10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-10 \
+        --slave /usr/bin/gcov gcov /usr/bin/gcov-10 \
+    && ln -sf cpp-10 /usr/bin/cpp
 
 ARG TARGETARCH
 
 # ThreadSanitizer (`bazel test --config=tsan`).
 #
-# Ubuntu 20.04 ships libtsan.so for gcc-9 but NOT libtsan_preinit.o, so -fsanitize=thread fails to
-# link. This is that file, which is all of GCC's own libsanitizer/tsan/tsan_preinit.c: it registers
-# __tsan_init in .preinit_array so the runtime starts before any constructor runs.
+# Ensure libtsan_preinit.o exists next to libtsan.so so -fsanitize=thread links cleanly.
+# GCC 10 ships libtsan_preinit.o on Ubuntu 20.04, so the fallback below only builds it
+# when missing (equivalent to GCC's libsanitizer/tsan/tsan_preinit.c).
 #
 # The `test -f libtsan.so` is not a formality: -print-file-name echoes its argument back when the
 # file is not there, so without it the object would land in the build directory and --config=tsan
-# would keep failing with the same confusing error. The second test never shadows a real
-# libtsan_preinit.o, in case a later base image ships one. Retain the AMD64 workaround
-# in the native AMD64 image.
+# would keep failing with the same confusing error.
 RUN if [ "$TARGETARCH" = amd64 ]; then \
     printf '%s\n' \
         'extern void __tsan_init(void);' \
