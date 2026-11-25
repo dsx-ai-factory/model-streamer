@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Tests for the parts of the dependency collector that need no network and no container.
@@ -21,6 +21,7 @@ import completeness  # noqa: E402
 import container_sources  # noqa: E402
 import dockerfile  # noqa: E402
 import inputs  # noqa: E402
+import licenses  # noqa: E402
 import static_sources  # noqa: E402
 import util  # noqa: E402
 
@@ -217,13 +218,80 @@ class ScriptTest(unittest.TestCase):
         self.assertIn(".devcontainer/scripts/install-cuda-headers.sh", files)
         found = {(e["name"], e["version"]) for e in static_sources.downloads(util.REPO, compute_hashes=False)}
         self.assertIn(("cuda_cudart", "12.8.57"), found)
-        self.assertIn(("libaio", "0.3.113"), found)
         self.assertIn("azurite", inputs.npm_roots(util.REPO))
 
     def test_every_url_ship_key_names_a_download_of_this_repository(self):
         names = {"url:" + e["name"] for e in static_sources.downloads(util.REPO, compute_hashes=False)}
         keys = {key for key in inputs.config()["ship"] if key.startswith("url:")}
         self.assertEqual(keys - names, set())
+
+    GCS_SCRIPT = """
+case "$1" in
+    amd64)
+        bazel_arch=x86_64
+        bazel_sha256=%s
+        ;;
+    arm64)
+        bazel_arch=arm64
+        bazel_sha256=%s
+        ;;
+esac
+cd /build/gcs
+bazel_version=$(cat .bazelversion)
+curl -fsSL -o /usr/local/bin/bazel \\
+    "https://example.org/bazel/releases/download/${bazel_version}/bazel-${bazel_version}-linux-${bazel_arch}"
+echo "${bazel_sha256}  /usr/local/bin/bazel" | sha256sum -c -
+""" % ("6" * 64, "7" * 64)
+
+    def test_a_version_read_from_a_file_the_dockerfile_copies_is_expanded(self):
+        files = {"/build/gcs/.bazelversion": "7.6.1\n"}
+        (bazel,) = dockerfile.downloads(self.GCS_SCRIPT, self.PATH, files.get)
+        self.assertEqual(bazel["urls"]["x86_64"], "https://example.org/bazel/releases/download/7.6.1/bazel-7.6.1-linux-x86_64")
+        self.assertEqual(bazel["urls"]["aarch64"], "https://example.org/bazel/releases/download/7.6.1/bazel-7.6.1-linux-arm64")
+        self.assertEqual(bazel["sha256"], {"x86_64": "6" * 64, "aarch64": "7" * 64})
+
+    def test_a_version_file_that_is_not_in_the_image_is_an_error(self):
+        with self.assertRaisesRegex(ValueError, "cannot work out the URL"):
+            dockerfile.downloads(self.GCS_SCRIPT, self.PATH, lambda path: None)
+
+    def test_the_cat_assignment_names_the_file_by_the_directory_of_the_last_cd(self):
+        self.assertEqual(dockerfile.script_file_variables(self.GCS_SCRIPT), {"bazel_version": "/build/gcs/.bazelversion"})
+
+    def test_copy_instructions_say_where_a_file_of_the_image_comes_from(self):
+        text = ("COPY .devcontainer/gcs/.bazelversion /build/gcs/\n"
+                "COPY .devcontainer/gcs/.bazelrc .devcontainer/gcs/MODULE.bazel \\\n    /build/gcs/\n"
+                "COPY --chown=1:1 a/b.sh /tmp/b.sh\n")
+        self.assertEqual(dockerfile.copy_map(text), {"/build/gcs/.bazelversion": ".devcontainer/gcs/.bazelversion",
+                                                     "/build/gcs/.bazelrc": ".devcontainer/gcs/.bazelrc",
+                                                     "/build/gcs/MODULE.bazel": ".devcontainer/gcs/MODULE.bazel",
+                                                     "/tmp/b.sh": "a/b.sh"})
+
+    def test_the_gcs_sdk_script_of_this_repository_is_read(self):
+        found = {(e["name"], e["version"]) for e in static_sources.downloads(util.REPO, compute_hashes=False)}
+        self.assertTrue(any(name == "bazel" for name, _ in found))
+
+
+class ComposeImagesTest(unittest.TestCase):
+    def test_the_default_of_a_variable_is_the_image_and_a_plain_name_is_kept(self):
+        text = ("services:\n  tests:\n    image: ${GPU_TEST_IMAGE:-nvidia/cuda:12.6.3-base-ubuntu24.04}\n"
+                "  seaweedfs:\n    image: chrislusf/seaweedfs:4.47  # pinned\n    command: [\"mini\"]\n")
+        with tempfile.TemporaryDirectory() as repo:
+            os.makedirs(os.path.join(repo, "tests", "gpu"))
+            with open(os.path.join(repo, "tests", "gpu", "compose.yaml"), "w") as f:
+                f.write(text)
+            with unittest.mock.patch.object(static_sources, "_image_file", lambda image, tag, digest, where: ({"platform": "any", "url": image}, where)):
+                found = static_sources.compose_images(repo)
+        self.assertEqual([(e["name"], e["version"], e["categories"], e["declared_by"]) for e in found],
+                         [("nvidia/cuda", "12.6.3-base-ubuntu24.04", ["test"], ["tests/gpu/compose.yaml:3"]),
+                          ("chrislusf/seaweedfs", "4.47", ["test"], ["tests/gpu/compose.yaml:5"])])
+
+    def test_an_image_that_cannot_be_worked_out_is_an_error(self):
+        with tempfile.TemporaryDirectory() as repo:
+            os.makedirs(os.path.join(repo, "tests"))
+            with open(os.path.join(repo, "tests", "compose.yaml"), "w") as f:
+                f.write("services:\n  a:\n    image: ${NO_DEFAULT}\n")
+            with self.assertRaisesRegex(ValueError, "cannot work out the image"):
+                static_sources.compose_images(repo)
 
 
 class CompletenessTest(unittest.TestCase):
@@ -300,7 +368,7 @@ class InputsTest(unittest.TestCase):
 
     def test_pip_groups(self):
         groups = inputs.pip_groups(util.REPO)
-        self.assertIn("boto3", groups["run"]["specs"])
+        self.assertTrue(any(spec.startswith("boto3") for spec in groups["run"]["specs"]))
         self.assertIn("numpy==1.24.4", groups["test"]["specs"])
         self.assertIn("torch>=2.6", groups["test"]["specs"])  # quoted in the Makefile; the quotes must not survive
         self.assertTrue(groups["test"]["extra_index_urls"])
@@ -432,6 +500,7 @@ class NamesTest(unittest.TestCase):
     def test_archive_names(self):
         self.assertEqual(util.archive_name_version("openssl-3.5.0.tar.gz", ""), ("openssl", "3.5.0"))
         self.assertEqual(util.archive_name_version("fake-gcs-server_1.52.2.tar.gz", ""), ("fake-gcs-server", "1.52.2"))
+        self.assertEqual(util.archive_name_version("/tmp/Python-3.11.14.tgz", ""), ("Python", "3.11.14"))  # not "/tmp/Python"
         self.assertEqual(util.archive_name_version("weed.tar.gz", "https://github.com/seaweedfs/seaweedfs/releases/download/4.47/linux_amd64.tar.gz"),
                          ("seaweedfs", "4.47"))
 
@@ -496,6 +565,29 @@ class AptHistoryTest(unittest.TestCase):
         self.assertIn("not in the apt history", result["unknown"][1][0])
 
 
+class AptFilesTest(unittest.TestCase):
+    def test_a_package_without_a_url_is_looked_up_again_after_another_update(self):
+        answers = [({"a": "https://x/a.deb"}, {"a": "1" * 64}), ({"b": "https://x/b.deb"}, {"b": "2" * 64}), ({}, {})]
+        asked = []
+
+        def uris(pins):
+            asked.append(list(pins))
+            return answers.pop(0)
+
+        with unittest.mock.patch.object(container_sources, "_apt_uris", uris), unittest.mock.patch.object(container_sources, "run"):
+            urls, hashes = container_sources._apt_files(["a=1", "b=1"])
+        self.assertEqual(asked, [["a=1", "b=1"], ["b=1"]])  # the second pass asks only for what the first did not find
+        self.assertEqual(urls, {"a": "https://x/a.deb", "b": "https://x/b.deb"})
+        self.assertEqual(hashes, {"a": "1" * 64, "b": "2" * 64})
+
+    def test_a_version_that_left_the_index_stays_without_a_url_after_three_tries(self):
+        asked = []
+        with unittest.mock.patch.object(container_sources, "_apt_uris", lambda pins: (asked.append(pins) or ({}, {}))), \
+                unittest.mock.patch.object(container_sources, "run"):
+            urls, _ = container_sources._apt_files(["gone=1"])
+        self.assertEqual((urls, len(asked)), ({}, 3))
+
+
 class PipTagsTest(unittest.TestCase):
     def test_aarch64_resolution_follows_the_interpreter_version(self):
         for version, tag in (((3, 8), "cp38"), ((3, 10), "cp310")):
@@ -514,6 +606,18 @@ class ImageNameTest(unittest.TestCase):
 
     def test_unknown_registry_has_no_anonymous_lookup(self):
         self.assertIsNone(util.oci_digest("nvcr.io", "nvidia/cuda", "12.8.0"))
+
+    def test_a_from_that_names_an_earlier_stage_pulls_no_image(self):
+        text = "FROM ubuntu:20.04 AS base\nRUN true\nFROM base AS builder\nFROM base AS devcontainer\n"
+        images, final = dockerfile.external_images(text)
+        self.assertEqual([i[1:3] for i in images], [("ubuntu", "20.04")])
+        self.assertEqual(final[1:3], ("ubuntu", "20.04"))
+
+    def test_the_final_image_follows_a_chain_of_stages_and_a_tag_is_an_image(self):
+        text = "FROM a:1 AS one\nFROM one AS two\nFROM base:2\nFROM two\n"  # `base:2` is an image named base, not a stage
+        images, final = dockerfile.external_images(text)
+        self.assertEqual([i[1:3] for i in images], [("a", "1"), ("base", "2")])
+        self.assertEqual(final[1:3], ("a", "1"))
 
     def test_the_last_from_is_the_base_and_any_image_is_listed(self):
         text = "FROM quay.io/org/builder:1 AS builder\nFROM debian\nRUN true\n"
@@ -539,12 +643,326 @@ class MergeTest(unittest.TestCase):
         unmatched = collect.tag_ship([item, other])
         self.assertEqual(item["categories"], ["build", "ship"])
         self.assertEqual(other["categories"], ["build"])
-        self.assertIn("url:liburing", unmatched)  # the map names it, the list above does not
+        self.assertIn("url:libxml2", unmatched)  # the map names it, the list above does not
         self.assertNotIn("url:openssl", unmatched)
 
     def test_unknown_category_is_rejected(self):
         with self.assertRaises(AssertionError):
             util.entry("x", "1", "pip", ["dev"], [], [])
+
+    def test_merge_keeps_the_first_license_that_a_source_names(self):
+        first = util.entry("numpy", "1.24.4", "pip", ["run"], [util.file_record("https://x/a")], ["a"])
+        second = util.entry("numpy", "1.24.4", "pip", ["test"], [util.file_record("https://x/b")], ["b"],
+                            license=("BSD-3-Clause", "wheel metadata (License)"))
+        merged = collect.merge([first, second])
+        self.assertEqual((merged[0]["license"], merged[0]["license_source"]), ("BSD-3-Clause", "wheel metadata (License)"))
+
+
+APACHE = "Apache License\n Version 2.0, January 2004\n http://www.apache.org/licenses/\n"
+MIT = ("MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software\n"
+       "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.\n")
+BSD = ("Redistribution and use in source and binary forms, with or without modification, are permitted provided that "
+       "the following conditions are met:\n1. Redistributions of source code must retain the above copyright notice.\n"
+       "2. Redistributions in binary form must reproduce the above copyright notice.\n")
+
+
+class LicenseTextTest(unittest.TestCase):
+    def test_a_text_that_matches_one_common_license_is_named(self):
+        self.assertEqual(licenses.detect_text(APACHE), "Apache-2.0")
+        self.assertEqual(licenses.detect_text(MIT), "MIT")
+        self.assertEqual(licenses.detect_text(BSD), "BSD-2-Clause")
+        self.assertEqual(licenses.detect_text(BSD + "3. Neither the name of the copyright holder nor the names of its "
+                                              "contributors may be used to endorse or promote products\n"), "BSD-3-Clause")
+
+    def test_the_json_license_is_not_named_mit(self):
+        self.assertEqual(licenses.detect_text(MIT), "MIT")
+        self.assertIsNone(licenses.detect_text(MIT + "The Software shall be used for Good, not Evil.\n"))
+        self.assertIsNone(licenses.repository_license({"LICENSE": MIT + "The Software shall be used for Good, not Evil.\n"}))
+
+    def test_the_llvm_exception_is_part_of_the_name(self):
+        self.assertEqual(licenses.detect_text(APACHE + "\n---- LLVM Exceptions to the Apache 2.0 License ----\n"),
+                         "Apache-2.0 WITH LLVM-exception")
+
+    def test_a_text_that_matches_two_licenses_or_none_is_not_named(self):
+        self.assertIsNone(licenses.detect_text(APACHE + MIT))
+        self.assertIsNone(licenses.detect_text("All rights reserved."))
+        self.assertIsNone(licenses.detect_text(BSD + "All advertising materials mentioning features must display this."))
+
+    def test_a_bsd_like_text_with_more_conditions_is_not_named(self):
+        # Apache-1.1 starts with the BSD sentence and adds an acknowledgment clause and a name clause.
+        apache_1_1 = (BSD + "3. The end-user documentation included with the redistribution, if any, must include the "
+                      "following acknowledgment: This product includes software developed by the Apache Software "
+                      "Foundation.\n4. The names must not be used to endorse or promote products derived from this software.\n")
+        self.assertIsNone(licenses.detect_text(apache_1_1))
+        # The 3-clause form that words the name clause without "Neither" is still BSD-3-Clause.
+        self.assertEqual(licenses.detect_text(BSD + "3. The name of the author may not be used to endorse or promote "
+                                              "products derived from this software.\n"), "BSD-3-Clause")
+
+    def test_a_parenthesis_after_an_operator_is_part_of_the_expression(self):
+        self.assertEqual(licenses.license_expression("MIT AND (LicenseRef-NVIDIA-Proprietary)"),
+                         "MIT AND (LicenseRef-NVIDIA-Proprietary)")
+        self.assertEqual(licenses.license_expression("MIT (dual-licensed LGPL-2.1 OR MIT; the MIT option is used)"), "MIT")
+        self.assertEqual(licenses.license_expression("(MIT OR Apache-2.0) AND BSD-3-Clause"),
+                         "(MIT OR Apache-2.0) AND BSD-3-Clause")
+        self.assertFalse(licenses.is_standard("MIT AND (LicenseRef-NVIDIA-Proprietary)"))
+        self.assertTrue(licenses.is_standard("MIT AND (Apache-2.0)"))
+        urls = {"LicenseRef-NVIDIA-Proprietary": "https://example.com/license"}
+        self.assertEqual(licenses._license_link("MIT AND (LicenseRef-NVIDIA-Proprietary)", urls), "https://example.com/license")
+
+    def test_a_list_name_that_the_table_would_overwrite_is_refused(self):
+        self.assertEqual(collect.table_path("dependencies.json"), "dependencies.md")
+        self.assertEqual(collect.table_path("deps"), "deps.md")
+        for name in ("deps.md", "x.y.md"):
+            with self.assertRaises(SystemExit):
+                collect.table_path(name)
+
+    def test_a_repository_is_named_only_when_every_license_file_is(self):
+        self.assertEqual(licenses.repository_license({"LICENSE": APACHE, "README.md": "x"}), "Apache-2.0")
+        self.assertEqual(licenses.repository_license({"LICENSE": APACHE, "LICENSE.MIT": MIT}), "Apache-2.0 AND MIT")
+        self.assertIsNone(licenses.repository_license({"LICENSE": APACHE, "COPYING": "custom terms"}))
+        self.assertIsNone(licenses.repository_license({"README.md": "x"}))
+
+    def test_standard_and_nonstandard_licenses(self):
+        for text in ("MIT", "Apache-2.0", "GPL-3.0-or-later WITH GCC-exception-3.1", "MIT (dual-licensed LGPL-2.1 OR MIT; the MIT option is used)",
+                     "GPL-2+", "BSD-3-clause", "LGPL-2.1-or-later", "MIT AND Apache-2.0"):
+            self.assertTrue(licenses.is_standard(text), text)
+        for text in ("curl", "NVIDIA CUDA header notice", "UNKNOWN", ""):
+            self.assertFalse(licenses.is_standard(text), text)
+
+
+class PackageLicenseTest(unittest.TestCase):
+    def test_pip_prefers_the_expression_then_a_short_field_then_a_known_text_then_classifiers(self):
+        self.assertEqual(licenses.pip_license({"license_expression": "MIT", "license": "other"}), ("MIT", "wheel metadata (License-Expression)"))
+        self.assertEqual(licenses.pip_license({"license": "Apache-2.0"}), ("Apache-2.0", "wheel metadata (License)"))
+        self.assertEqual(licenses.pip_license({"license": MIT + "more text " * 20}), ("MIT", "wheel metadata (License text)"))
+        self.assertEqual(licenses.pip_license({"license": "UNKNOWN", "classifier": ["License :: OSI Approved :: MIT License"]}),
+                         ("MIT", "wheel metadata (classifiers)"))
+        self.assertEqual(licenses.pip_license({"classifier": ["License :: OSI Approved :: Apache Software License",
+                                                              "License :: OSI Approved :: MIT License"]}),
+                         ("Apache-2.0 AND MIT", "wheel metadata (classifiers)"))
+
+    def test_pip_without_a_license_is_none(self):
+        self.assertIsNone(licenses.pip_license({"license": "Some long custom terms\nthat span lines", "classifier": []}))
+        self.assertIsNone(licenses.pip_license({}))
+
+    def test_npm_license_shapes(self):
+        self.assertEqual(licenses.npm_license({"license": "MIT"}), "MIT")
+        self.assertEqual(licenses.npm_license({"license": {"type": "Apache-2.0"}}), "Apache-2.0")
+        self.assertEqual(licenses.npm_license({"license": [{"type": "MIT"}, {"type": "Apache-2.0"}]}), "MIT OR Apache-2.0")
+        self.assertIsNone(licenses.npm_license({}))
+
+    def test_a_machine_readable_debian_copyright_file_names_its_licenses(self):
+        text = ("Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n\nFiles: *\nLicense: GPL-2+\n\n"
+                "Files: debian/*\nLicense: GPL-2+ or Expat\n\nLicense: GPL-2+\n This program is free software.\n")
+        self.assertEqual(licenses.debian_copyright(text), ("GPL-2+, GPL-2+ or Expat", "Debian copyright file (License fields)"))
+
+    def test_an_older_debian_copyright_file_points_to_common_licenses(self):
+        text = "On Debian systems, see /usr/share/common-licenses/GPL-3 and /usr/share/common-licenses/LGPL-2.1."
+        self.assertEqual(licenses.debian_copyright(text), ("GPL-3, LGPL-2.1", "Debian copyright file (common-licenses references)"))
+
+    def test_a_debian_copyright_file_with_nothing_to_read_is_none(self):
+        self.assertIsNone(licenses.debian_copyright("Copyright 2020 Someone. All rights reserved."))
+        self.assertEqual(licenses.debian_copyright(MIT), ("MIT", "Debian copyright file (License text)"))
+
+
+class AssignTest(unittest.TestCase):
+    COMPONENTS = [{"id": "liburing", "spdx": "MIT"},
+                  {"id": "curl", "spdx": "curl", "url": "https://example.org/curl/COPYING"},
+                  {"id": "grpc", "spdx": "Apache-2.0"}, {"id": "grpc-address-sorting", "spdx": "BSD-3-Clause"}]
+    CONFIG = {"ship": {"url:liburing": ["liburing"], "url:curl": ["curl"], "bazel:grpc": ["grpc", "grpc-address-sorting"]},
+              "licenses": {"_comment": "x", "url:seaweedfs": "Apache-2.0",
+                           "url:custom": {"license": "Custom terms", "url": "https://example.org/terms"}}}
+
+    def item(self, ecosystem, name, categories, license=None):
+        return util.entry(name, "1", ecosystem, categories, [util.file_record("https://x/" + name)], [], license=license)
+
+    def assign(self, *entries):
+        return licenses.assign(list(entries), self.COMPONENTS, self.CONFIG)
+
+    def test_a_shipped_dependency_takes_the_license_of_its_notice_row(self):
+        (found,) = self.assign(self.item("url", "liburing", ["build", "ship"]))
+        self.assertEqual(found["license"], "MIT")
+        self.assertEqual(found["license_source"], "cpp/NOTICE")
+        self.assertNotIn("license_url", found)  # the expression is standard
+
+    def test_a_shipped_dependency_of_two_components_lists_both_and_a_nonstandard_one_gets_a_link(self):
+        grpc, curl = self.assign(self.item("bazel", "grpc", ["ship"]), self.item("url", "curl", ["ship"]))
+        self.assertEqual(grpc["license"], "Apache-2.0 AND BSD-3-Clause")
+        self.assertEqual((curl["license"], curl["license_url"]), ("curl", "https://example.org/curl/COPYING"))
+
+    def test_a_link_is_given_for_a_detected_license_that_is_not_a_common_one(self):
+        config = dict(self.CONFIG, license_urls={"_comment": "x", "LicenseRef-NVIDIA-Proprietary": "https://example.org/eula"})
+        proprietary, common = licenses.assign([self.item("pip", "nvidia-cublas", ["run"], ("LicenseRef-NVIDIA-Proprietary", "wheel metadata")),
+                                               self.item("pip", "numpy", ["run"], ("BSD-3-Clause", "wheel metadata"))],
+                                              self.COMPONENTS, config)
+        self.assertEqual(proprietary["license_url"], "https://example.org/eula")
+        self.assertNotIn("license_url", common)
+
+    def test_a_license_added_later_replaces_unknown_when_the_list_is_assigned_again(self):
+        entry = self.item("url", "seaweedfs", ["test"])
+        licenses.assign([entry], self.COMPONENTS, {"ship": {}})
+        self.assertEqual(entry["license"], licenses.UNKNOWN)
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        self.assertEqual((entry["license"], entry["license_source"]), ("Apache-2.0", "categories.json licenses"))
+
+    def test_a_removed_override_gives_back_the_detected_license(self):
+        entry = self.item("url", "seaweedfs", ["test"], ("MIT", "detected"))
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entry["license"], "Apache-2.0")
+        licenses.assign([entry], self.COMPONENTS, {"ship": {}})
+        self.assertEqual((entry["license"], entry["license_source"]), ("MIT", "detected"))
+
+    def test_a_removed_override_without_a_detected_license_gives_unknown(self):
+        entry = self.item("url", "seaweedfs", ["test"])
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        licenses.assign([entry], self.COMPONENTS, {"ship": {}})
+        self.assertEqual((entry["license"], entry["license_source"]), (licenses.UNKNOWN, "no source names a license"))
+
+    def test_changing_a_custom_license_to_a_common_one_drops_its_link(self):
+        entry = self.item("url", "custom", ["test"])
+        licenses.assign([entry], self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entry["license_url"], "https://example.org/terms")
+        config = dict(self.CONFIG, licenses={"url:custom": "MIT"})
+        licenses.assign([entry], self.COMPONENTS, config)
+        self.assertEqual(entry["license"], "MIT")
+        self.assertNotIn("license_url", entry)
+
+    def test_assigning_twice_gives_the_same_result(self):
+        entries = [self.item("url", "curl", ["ship"]), self.item("url", "custom", ["test"]),
+                   self.item("pip", "numpy", ["run"], ("BSD-3-Clause", "wheel metadata"))]
+        licenses.assign(entries, self.COMPONENTS, self.CONFIG)
+        once = [dict(entry) for entry in entries]
+        licenses.assign(entries, self.COMPONENTS, self.CONFIG)
+        self.assertEqual(entries, once)
+
+    def test_notice_rows_are_read_by_the_last_part_of_the_package_name(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "cpp"))
+            with open(os.path.join(root, "cpp", "NOTICE"), "w") as handle:
+                handle.write("| Package | Version | License | License source |\n|---|---|---|---|\n"
+                             "| `github.com/axboe/liburing` | 2.14 | MIT | https://example.org/LICENSE |\n"
+                             "| `nvidia_cuda_headers` | 12.8 | LicenseRef-NVIDIA-CUDA-Header-Notice | https://example.org/cuda.h |\n")
+            found = licenses.notice_components(root)
+        self.assertEqual([(c["id"], c["version"], c["spdx"], c["url"]) for c in found],
+                         [("liburing", "2.14", "MIT", "https://example.org/LICENSE"),
+                          ("nvidia-cuda-headers", "12.8", "LicenseRef-NVIDIA-CUDA-Header-Notice", "https://example.org/cuda.h")])
+        self.assertEqual(licenses.notice_components(os.path.join(root, "missing")), [])
+
+    def test_a_nonstandard_notice_license_links_to_the_text_the_row_gives(self):
+        components = [{"id": "headers", "spdx": "LicenseRef-Vendor-Header-Notice", "url": "https://example.org/n.txt"}]
+        (found,) = licenses.assign([self.item("url", "headers", ["ship"])], components, {"ship": {"url:headers": ["headers"]}})
+        self.assertEqual(found["license_url"], "https://example.org/n.txt")
+
+    def test_a_dependency_keeps_its_detected_license_when_a_mapped_component_has_no_row(self):
+        entry = self.item("bazel", "grpc", ["ship"], ("Apache-2.0 AND BSD-3-Clause", "detected"))
+        config = {"ship": {"bazel:grpc": ["grpc", "grpc-address-sorting"]}}
+        only_grpc = [{"id": "grpc", "version": "1.81.0", "spdx": "Apache-2.0", "url": None}]
+        both = only_grpc + [{"id": "grpc-address-sorting", "version": "1.81.0", "spdx": "BSD-3-Clause", "url": None}]
+        self.assertEqual(licenses.ship_without_notice([entry], only_grpc, config),
+                         ["bazel grpc: no row in cpp/NOTICE for grpc-address-sorting"])
+        licenses.assign([entry], only_grpc, config)
+        self.assertEqual((entry["license"], entry["license_source"]), ("Apache-2.0 AND BSD-3-Clause", "detected"))
+        licenses.assign([entry], both, config)
+        self.assertEqual((entry["license"], entry["license_source"]),
+                         ("Apache-2.0 AND BSD-3-Clause", "cpp/NOTICE"))
+
+    def test_a_note_after_the_link_of_a_notice_row_is_not_part_of_the_url(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "cpp"))
+            with open(os.path.join(root, "cpp", "NOTICE"), "w") as handle:
+                handle.write("| Package | Version | License | License source |\n|---|---|---|---|\n"
+                             "| `curl` | 8.8.0.bcr.3 | curl | https://example.org/curl.tar.gz#curl-8.8.0/COPYING (via google_cloud_cpp 3.7.0) |\n"
+                             "| `plain` | 1 | MIT | https://example.org/LICENSE |\n"
+                             "| `blank` | 1 | MIT |  |\n")
+            found = licenses.notice_components(root)
+        self.assertEqual([c["url"] for c in found],
+                         ["https://example.org/curl.tar.gz#curl-8.8.0/COPYING", "https://example.org/LICENSE", ""])
+        components = [dict(found[0], id="curl")]
+        (item,) = licenses.assign([self.item("url", "curl", ["ship"])], components, {"ship": {"url:curl": ["curl"]}})
+        self.assertEqual(item["license_url"], "https://example.org/curl.tar.gz#curl-8.8.0/COPYING")
+
+    def test_components_are_joined_with_their_or_expressions_grouped(self):
+        self.assertEqual(licenses.join_licenses(["MIT OR Apache-2.0", "BSD-3-Clause"]), "(MIT OR Apache-2.0) AND BSD-3-Clause")
+        self.assertEqual(licenses.join_licenses(["Apache-2.0", "BSD-3-Clause"]), "Apache-2.0 AND BSD-3-Clause")
+        # One component alone is not wrapped.
+        self.assertEqual(licenses.join_licenses(["MIT OR Apache-2.0"]), "MIT OR Apache-2.0")
+        components = [{"id": "a", "spdx": "MIT OR Apache-2.0", "url": None}, {"id": "b", "spdx": "BSD-3-Clause", "url": None}]
+        (found,) = licenses.assign([self.item("url", "both", ["ship"])], components, {"ship": {"url:both": ["a", "b"]}})
+        self.assertEqual(found["license"], "(MIT OR Apache-2.0) AND BSD-3-Clause")
+
+    def test_the_license_link_of_a_mixed_component_is_the_nonstandard_ones(self):
+        components = [{"id": "std", "spdx": "Apache-2.0", "url": "https://example.org/apache"},
+                      {"id": "vendor", "spdx": "LicenseRef-Vendor", "url": "https://example.org/vendor"}]
+        (found,) = licenses.assign([self.item("url", "both", ["ship"])], components, {"ship": {"url:both": ["std", "vendor"]}})
+        self.assertEqual(found["license"], "Apache-2.0 AND LicenseRef-Vendor")
+        self.assertEqual(found["license_url"], "https://example.org/vendor")
+
+    def test_a_ship_dependency_without_a_notice_row_is_reported_and_keeps_another_source(self):
+        entry = self.item("url", "libaio", ["ship"], ("LGPL-2.1", "detected"))
+        config = {"ship": {"url:libaio": ["libaio"]}}
+        self.assertEqual(licenses.ship_without_notice([entry], self.COMPONENTS, config),
+                         ["url libaio: no row in cpp/NOTICE for libaio"])
+        licenses.assign([entry], self.COMPONENTS, config)
+        self.assertEqual(entry["license"], "LGPL-2.1")
+
+    def test_the_ship_category_is_needed_for_the_component_license(self):
+        (found,) = self.assign(self.item("url", "curl", ["build"]))
+        self.assertEqual(found["license"], licenses.UNKNOWN)
+
+    def test_a_hand_written_license_beats_a_detected_one_and_may_carry_a_link(self):
+        seaweed, custom = self.assign(self.item("url", "seaweedfs", ["test"], ("MIT", "detected")), self.item("url", "custom", ["test"]))
+        self.assertEqual((seaweed["license"], seaweed["license_source"]), ("Apache-2.0", "categories.json licenses"))
+        self.assertEqual((custom["license"], custom["license_url"]), ("Custom terms", "https://example.org/terms"))
+
+    def test_a_detected_license_is_kept_and_nothing_is_never_guessed(self):
+        detected, nothing = self.assign(self.item("pip", "numpy", ["run"], ("BSD-3-Clause", "wheel metadata (License)")),
+                                        self.item("pip", "mystery", ["run"]))
+        self.assertEqual(detected["license"], "BSD-3-Clause")
+        self.assertEqual((nothing["license"], nothing["license_source"]), (licenses.UNKNOWN, "no source names a license"))
+
+    def test_this_repository_has_a_notice_row_and_a_license_for_every_component_it_ships(self):
+        components = licenses.notice_components(util.REPO)
+        entries = [self.item(key.split(":")[0], key.split(":", 1)[1], ["ship"]) for key in inputs.config()["ship"] if not key.startswith("_")]
+        self.assertEqual(licenses.ship_without_notice(entries, components, inputs.config()), [])
+        for found in licenses.assign(entries, components, inputs.config()):
+            self.assertNotEqual(found["license"], licenses.UNKNOWN, found["name"])
+            self.assertEqual(found["license_source"], "cpp/NOTICE", found["name"])
+
+
+class LicenseCheckAndTableTest(unittest.TestCase):
+    DATA = {"dependencies": [
+        {"name": "b-lib", "version": "2", "ecosystem": "pip", "categories": ["run", "test"], "license": "MIT", "license_source": "x"},
+        {"name": "a-lib", "version": "1", "ecosystem": "url", "categories": ["build", "ship"], "license": "curl",
+         "license_source": "cpp/NOTICE", "license_url": "https://example.org/COPYING"},
+        {"name": "c|lib", "version": "3", "ecosystem": "apt", "categories": ["build"], "license": "UNKNOWN", "license_source": "none"}]}
+
+    def test_markdown_table_has_name_license_and_category_in_name_order(self):
+        lines = licenses.table(self.DATA).splitlines()
+        self.assertEqual(lines[0], "| Dependency | License | Category | Ecosystem |")
+        self.assertEqual(lines[2], "| a-lib 1 | curl (https://example.org/COPYING) | build, ship | url |")
+        self.assertEqual(lines[3], "| b-lib 2 | MIT | run, test | pip |")
+        self.assertEqual(lines[4], "| c\\|lib 3 | UNKNOWN | build | apt |")
+
+    def test_csv_table(self):
+        lines = licenses.table(self.DATA, "csv").splitlines()
+        self.assertEqual(lines[0], "dependency,license,category,ecosystem")
+        self.assertEqual(lines[2], 'b-lib 2,MIT,"run, test",pip')
+
+    def test_summary_and_unknown(self):
+        self.assertEqual(licenses.summary(self.DATA), {"MIT": 1, "curl": 1, "UNKNOWN": 1})
+        self.assertEqual(licenses.unknown(self.DATA), ["apt c|lib 3"])
+
+    def test_check_reports_a_missing_field_and_a_handwritten_nonstandard_license_without_a_link(self):
+        data = {"dependencies": [
+            {"name": "x", "version": "1", "ecosystem": "pip", "categories": ["run"]},
+            {"name": "y", "version": "1", "ecosystem": "url", "categories": ["ship"], "license": "curl",
+             "license_source": "cpp/NOTICE"},
+            {"name": "z", "version": "1", "ecosystem": "apt", "categories": ["build"], "license": "Custom",
+             "license_source": "Debian copyright file (License fields)"}]}
+        self.assertEqual(licenses.problems(data), ["pip x 1: no license field",
+                                                   "url y 1: nonstandard license 'curl' has no license_url"])  # a detected one needs no link
 
 
 if __name__ == "__main__":

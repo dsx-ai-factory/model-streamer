@@ -26,16 +26,13 @@
   "nodesource-setup": ["test"]
  },
  "ship": {
-  "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the components the NOTICE files list (the `# attribution:` comments). `collect.py check` fails when a key matches nothing.",
+  "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the components the NOTICE files list (the `# attribution:` comments). An id is the last part of a row's package name in cpp/NOTICE, lower case, `_` as `-` (`boringssl/third_party/fiat` is `fiat`). `collect.py check` fails when a key matches nothing.",
   "url:cuda_cudart": ["nvidia-cuda-headers"],
   "apt:libstdc++-9-dev": ["gcc-runtime"],
   "apt:libgcc-9-dev": ["gcc-runtime"],
   "apt:libc6-dev": ["glibc-nonshared"],
-  "apt:libstdc++-9-dev-arm64-cross": ["gcc-runtime"],
-  "apt:libgcc-9-dev-arm64-cross": ["gcc-runtime"],
-  "apt:libc6-dev-arm64-cross": ["glibc-nonshared"],
-  "url:liburing": ["liburing"],
-  "url:libaio": ["libaio"],
+  "bazel:liburing": ["liburing"],
+  "bazel:libaio": ["libaio"],
   "url:openssl": ["openssl"],
   "url:curl": ["curl"],
   "url:zlib": ["zlib"],
@@ -53,24 +50,74 @@
   "git:aws-c-s3": ["aws-c-s3"],
   "git:aws-c-sdkutils": ["aws-c-sdkutils"],
   "git:aws-checksums": ["aws-checksums"],
-  "git:s2n": ["s2n-tls"],
+  "git:s2n": ["s2n"],
   "git:azure-sdk-for-cpp": ["azure-sdk-for-cpp"],
   "bazel:google_cloud_cpp": ["google-cloud-cpp"],
-  "bazel:grpc": ["grpc", "grpc-address-sorting"],
+  "bazel:grpc": ["grpc", "address-sorting"],
   "bazel:abseil-cpp": ["abseil-cpp"],
   "bazel:protobuf": ["protobuf", "utf8-range"],
-  "bazel:boringssl": ["boringssl", "boringssl-fiat"],
-  "bazel:curl": ["curl-8.8.0"],
+  "bazel:boringssl": ["boringssl", "fiat"],
+  "bazel:curl": ["curl"],
   "bazel:c-ares": ["c-ares"],
   "bazel:re2": ["re2"],
-  "bazel:zlib": ["zlib-bazel"],
+  "bazel:zlib": ["zlib"],
   "bazel:envoy_api": ["envoy-api"],
-  "bazel:xds": ["cncf-xds"],
+  "bazel:xds": ["xds"],
   "bazel:protoc-gen-validate": ["protoc-gen-validate"],
   "bazel:cel-spec": ["cel-spec"],
   "bazel:googleapis": ["googleapis"],
   "bazel:opentelemetry-cpp": ["opentelemetry-cpp"],
   "bazel:nlohmann_json": ["nlohmann-json"]
+ },
+ "licenses": {
+  "_comment": "The license of a dependency nothing else names: '<ecosystem>:<name>' -> an SPDX expression, or {\"license\": ..., \"url\": the license text}. A dependency linked into a native library takes its license from its row in cpp/NOTICE first. An entry here overrides what a pip, npm, apt or Bazel package says about itself, so use it for what the package cannot name. A license that is not a common one needs a `url`. The license is what the project's own license file says, read on the date in the commit; it is not a legal review.",
+  "docker-image:ubuntu": {"license": "Varies per package (Ubuntu distribution image)", "url": "https://ubuntu.com/legal/intellectual-property-policy"},
+  "docker-image:nvidia/cuda": {"license": "NVIDIA Deep Learning Container License", "url": "https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license"},
+  "docker-image:chrislusf/seaweedfs": "Apache-2.0",
+  "devcontainer-feature:ghcr.io/rocker-org/devcontainer-features/apt-packages": "MIT",
+  "devcontainer-feature:ghcr.io/devcontainers-community/features/bazel": "MIT",
+  "_note_cuda-toolkit": "ASSUMED, not stated by the package: the cuda-toolkit meta-package (NVIDIA Kitmaker Team) names no license in its wheel metadata, in any of its 43 PyPI releases, or in a license file. Every other NVIDIA CUDA wheel from the same publisher names LicenseRef-NVIDIA-Proprietary, the CUDA EULA, so the same license is recorded here. Replace it if NVIDIA publishes one for this package.",
+  "pip:cuda-toolkit": {"license": "LicenseRef-NVIDIA-Proprietary", "url": "https://docs.nvidia.com/cuda/eula/index.html"},
+  "git:aws-lc": {"license": "Apache-2.0 OR ISC (code derived from BoringSSL and OpenSSL keeps its own licenses)", "url": "https://github.com/aws/aws-lc/blob/main/LICENSE"},
+  "git:aws-verification-model-for-libcrypto": "Apache-2.0",
+  "github-action:actions/cache": "MIT",
+  "github-action:actions/checkout": "MIT",
+  "github-action:actions/download-artifact": "MIT",
+  "github-action:actions/upload-artifact": "MIT",
+  "github-action:devcontainers/ci": "MIT",
+  "github-action:docker/login-action": "Apache-2.0",
+  "github-action:pypa/gh-action-pypi-publish": "BSD-3-Clause",
+  "github-action:softprops/action-gh-release": "MIT",
+  "github-action:tj-actions/changed-files": "MIT",
+  "url:Python": "PSF-2.0",
+  "url:bazel": "Apache-2.0",
+  "url:bazelisk": "Apache-2.0",
+  "url:buildifier": "Apache-2.0",
+  "url:seaweedfs": "Apache-2.0",
+  "url:fake-gcs-server": "BSD-2-Clause",
+  "url:nodesource-setup": "MIT",
+  "bazel:googleapis-rules-registry": "Apache-2.0",
+  "bazel:rules_kotlin": "Apache-2.0",
+  "apt:libcrypt-dev": "LGPL-2.1-or-later (the overall license of libxcrypt; many files carry other licenses, see the package's copyright file)",
+  "apt:libldap-2.4-2": {"license": "OLDAP-2.8", "url": "https://www.openldap.org/software/release/license.html"},
+  "apt:libldap-common": {"license": "OLDAP-2.8", "url": "https://www.openldap.org/software/release/license.html"},
+  "apt:libncurses-dev": "X11",
+  "apt:libssl-dev": {"license": "OpenSSL AND SSLeay (both licenses apply, as the package's copyright file says)", "url": "https://www.openssl.org/source/license.html"},
+  "apt:libssl1.1": {"license": "OpenSSL AND SSLeay (both licenses apply, as the package's copyright file says)", "url": "https://www.openssl.org/source/license.html"},
+  "apt:openssl": {"license": "OpenSSL AND SSLeay (both licenses apply, as the package's copyright file says)", "url": "https://www.openssl.org/source/license.html"},
+  "apt:libwrap0": {"license": "TCP-wrappers", "url": "https://spdx.org/licenses/TCP-wrappers.html"},
+  "apt:libx11-6": "MIT (the X.Org standard copyright, a variant of the MIT license; some files carry other licenses, see each source file)",
+  "apt:libx11-data": "MIT (the X.Org standard copyright, a variant of the MIT license; some files carry other licenses, see each source file)",
+  "apt:libxau6": {"license": "MIT-open-group", "url": "https://spdx.org/licenses/MIT-open-group.html"},
+  "apt:libxdmcp6": {"license": "MIT-open-group", "url": "https://spdx.org/licenses/MIT-open-group.html"},
+  "apt:xauth": {"license": "MIT-open-group", "url": "https://spdx.org/licenses/MIT-open-group.html"},
+  "apt:nodejs": "MIT (Node.js; the third-party components bundled in it carry their own licenses, listed in its copyright file)",
+  "apt:python3-distutils": "PSF-2.0 (the Python license; the incorporated software carries its own licenses)",
+  "apt:python3-lib2to3": "PSF-2.0 (the Python license; the incorporated software carries its own licenses)"
+ },
+ "license_urls": {
+  "_comment": "A link to the text of a license that a package names by an identifier that is not a common one, so that the table can give the link a review asks for. Matched against each name of the license expression.",
+  "LicenseRef-NVIDIA-Proprietary": "https://docs.nvidia.com/cuda/eula/index.html"
  },
  "coverage": {
   "_comment": "`collect.py check` looks for tracked files that download or install something (curl or wget with a URL, git clone, pip or npm or apt-get install, FROM, http_archive) and fails on any file the collector does not read. List a file here only when it is covered another way or is not an input of the build. Patterns are shell globs on the path from the repository root; `*` also matches `/`.",
@@ -81,11 +128,25 @@
   ],
   "not_an_input": [
    ".github/scripts/dependencies/*",
+   "tests/engine_compatibility/container_steps.sh",
    "*.md",
-   "*.ipynb"
+   "*.ipynb",
+   "py/runai_model_streamer/runai_model_streamer/file_streamer/tests/test_requests_iterator.py"
   ],
+  "resolved_at_test_time": {
+   "_comment": "Scripts of the real-GPU tests (tests/gpu) that install Python packages and apt packages inside the test container when it runs: torch, numpy, boto3 and the streamer wheels, resolved at that time from the requirement specs the run passes in (a nightly run takes the newest torch). Their images are listed from tests/gpu/compose.yaml; the packages are not listed, because what pip resolves is known only when the tests run, and the same packages are listed in the test group from py/*/Makefile.",
+   "files": [
+    "tests/gpu/run.sh",
+    "tests/gpu/tests_entrypoint.sh",
+    "tests/gpu/suites/*/suite.sh"
+   ]
+  },
   "allowed_commands": {
-   "_comment": "A file the collector reads can hold a command of a kind it does not read (for example a workflow step that runs `pip install`). List it here as '<path glob>': {\"kinds\": [\"<kind>\"], \"reason\": \"<why it is not an input of the build>\"}. The kinds are the keys of COMMANDS in completeness.py."
+   "_comment": "A file the collector reads can hold a command of a kind it does not read (for example a workflow step that runs `pip install`). List it here as '<path glob>': {\"kinds\": [\"<kind>\"], \"reason\": \"<why it is not an input of the build>\"}. The kinds are the keys of COMMANDS in completeness.py.",
+   "tests/*/compose*.y*ml": {
+    "kinds": ["wget"],
+    "reason": "the health check of a service runs wget against localhost inside the container; it downloads nothing"
+   }
   }
  }
 }

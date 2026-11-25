@@ -65,6 +65,17 @@ jobs:
         path: cpp-artifacts
         merge-multiple: false
 
+    # The source downloads are pinned by sha256 in the manifest, so the cache key is the manifest
+    # itself: a changed source list or version starts a new cache. A damaged entry is downloaded again.
+    - name: Restore the source downloads
+      uses: actions/cache@v4
+      with:
+        path: source-cache
+        key: release-sources-${{ hashFiles('.github/release-sources.json') }}
+
+    - name: Build the corresponding-source archive
+      run: python3 .github/scripts/release_sources.py create --version "$PACKAGE_VERSION" --cache source-cache
+
     - name: Assemble and verify bundle
       run: |
         set -euo pipefail

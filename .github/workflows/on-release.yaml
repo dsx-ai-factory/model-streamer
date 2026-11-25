@@ -180,6 +180,7 @@ jobs:
         files: |
           release-bundle/wheels/*.whl
           release-bundle/cpp/*.tar.gz
+          release-bundle/sources/*.tar.gz
           release-bundle/SHA256SUMS
         fail_on_unmatched_files: true
         overwrite_files: false

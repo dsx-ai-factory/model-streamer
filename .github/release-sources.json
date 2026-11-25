@@ -1,0 +1,86 @@
+{
+  "description": "Source downloads for the statically linked copyleft (LGPL/GPL) components, published in each release's runai-model-streamer-sources-X.Y.Z.tar.gz (built by .github/scripts/release_sources.py). Add an entry when a component linked statically into the native libraries has a copyleft licence in cpp/NOTICE without a runtime exception such as GCC-exception-3.1. id is the component's name in cpp/NOTICE (its last path segment); dir is its folder in the archive; files lists each upstream source file with its url and sha256. Use a url that keeps old versions (Launchpad's +sourcefiles for Ubuntu packages, not the archive pool, which drops a version when a newer update is published).Change an entry together with the version that cpp/NOTICE shows for the component: the release build fails when an id has no row in cpp/NOTICE or the versions differ. registry lists the files that the Bazel Central Registry holds for a module the build takes from it (source.json and the overlay build files), published under build-materials/bazel-registry/ because the libraries cannot be rebuilt without them: add an entry for each statically linked module that the registry builds, with the version cpp/MODULE.bazel depends on (the release build fails when they differ), and update its files and sha256 when that version changes.",
+  "components": [
+    {
+      "id": "glibc-nonshared",
+      "name": "GNU C Library (libc_nonshared.a)",
+      "version": "2.31-0ubuntu9.18",
+      "dir": "glibc-2.31-0ubuntu9.18",
+      "files": [
+        {
+          "url": "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/glibc/2.31-0ubuntu9.18/glibc_2.31-0ubuntu9.18.dsc",
+          "sha256": "b21e6952f2bb957d2c8bae40485ad94b1f6fb539b91bb3ceedce3af4a6340f13"
+        },
+        {
+          "url": "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/glibc/2.31-0ubuntu9.18/glibc_2.31.orig.tar.xz",
+          "sha256": "2b22c7b04a36747d6c74796a73193a6f8856bfd1efc551b5db96baefa053fe5e"
+        },
+        {
+          "url": "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/glibc/2.31-0ubuntu9.18/glibc_2.31-0ubuntu9.18.debian.tar.xz",
+          "sha256": "958d60a6e4f212f6438862b2ac2a4c45eca75891b5dc1894f62053cc775d2ea3"
+        }
+      ]
+    },
+    {
+      "id": "libaio",
+      "name": "libaio",
+      "version": "0.3.113",
+      "dir": "libaio-0.3.113",
+      "files": [
+        {
+          "url": "https://deb.debian.org/debian/pool/main/liba/libaio/libaio_0.3.113.orig.tar.gz",
+          "sha256": "2c44d1c5fd0d43752287c9ae1eb9c023f04ef848ea8d4aafa46e9aedb678200b"
+        }
+      ]
+    }
+  ],
+  "registry": [
+    {
+      "module": "libaio",
+      "version": "0.3.113.bcr.1",
+      "files": [
+        {
+          "path": "source.json",
+          "url": "https://bcr.bazel.build/modules/libaio/0.3.113.bcr.1/source.json",
+          "sha256": "585de5b3cb612a044a485b59d883b3cf06a48eb41cb4f25c6016c6a810b7e06b"
+        },
+        {
+          "path": "overlay/BUILD.bazel",
+          "url": "https://bcr.bazel.build/modules/libaio/0.3.113.bcr.1/overlay/BUILD.bazel",
+          "sha256": "f18aef9c28452e45278f7147a679ea776ba33e2d4202c0465b72841f911ad341"
+        },
+        {
+          "path": "overlay/MODULE.bazel",
+          "url": "https://bcr.bazel.build/modules/libaio/0.3.113.bcr.1/overlay/MODULE.bazel",
+          "sha256": "60f6de43553eb1df5e2425fafd37be9d0b68827924e323b1ae82c7c0282565ca"
+        }
+      ]
+    },
+    {
+      "module": "liburing",
+      "version": "2.14.bcr.2",
+      "files": [
+        {
+          "path": "source.json",
+          "url": "https://bcr.bazel.build/modules/liburing/2.14.bcr.2/source.json",
+          "sha256": "2236b98c0f029b8b3fee6e8451e82791361524225610cf66b35f99d87a0c7b5a"
+        },
+        {
+          "path": "overlay/BUILD.bazel",
+          "url": "https://bcr.bazel.build/modules/liburing/2.14.bcr.2/overlay/BUILD.bazel",
+          "sha256": "3ce2bd7aa2fd1436301a1cd29a2d44135bf9b4f47a3978afcc23de57c06ed1d1"
+        },
+        {
+          "path": "overlay/MODULE.bazel",
+          "url": "https://bcr.bazel.build/modules/liburing/2.14.bcr.2/overlay/MODULE.bazel",
+          "sha256": "055f87cc1291e9d726bda72a4dff216a3eb1c18d1c52d950d389d73687399ff4"
+        },
+        {
+          "path": "overlay/liburing_configure.bzl",
+          "url": "https://bcr.bazel.build/modules/liburing/2.14.bcr.2/overlay/liburing_configure.bzl",
+          "sha256": "cf73798b2d67b59905608847b6f5c3f7cacc7cde95262865b3e5953703e7b3e2"
+        }
+      ]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Assemble and verify wheel and C++ assets for PR downloads and releases."""
+"""Assemble and verify wheel, C++ and corresponding-source assets for PR downloads and releases."""
 
 import argparse
 import fnmatch
@@ -21,6 +21,9 @@ HEADERS = {"streamer.h", "device.h", "response_code.h", "submission_id.h"}
 # The third-party notice of the four libraries in the SDK: cpp/NOTICE, kept current by the
 # run-ai/repo-housekeeper Renovate pipeline, packed into each SDK archive under this name.
 NOTICE_NAME = "THIRD_PARTY_NOTICES.txt"
+# Files every corresponding-source archive must contain (built by release_sources.py).
+SOURCES_LISTING = "SOURCES.txt"
+SOURCES_GUIDE = "build-materials/docs/native-library-rebuilding.md"
 
 
 def require(condition, message):
@@ -64,6 +67,17 @@ def select_wheels(files, version):
 
 def sdk_name(version, arch):
     return f"runai-model-streamer-cpp-sdk-{version}-linux-{arch}"
+
+
+def sources_name(version):
+    return f"runai-model-streamer-sources-{version}"
+
+
+def sources_input(directory, version):
+    """Return the corresponding-source archive that release_sources.py wrote into directory."""
+    path = directory / f"{sources_name(version)}.tar.gz"
+    require(path.is_file() and not path.is_symlink(), f"Missing source archive: {path}")
+    return path
 
 
 def sdk_inputs(artifacts, notices):
@@ -120,14 +134,19 @@ def write_sdk(destination, root, files):
                         archive.addfile(info, stream)
 
 
-def create_bundle(wheels, cpp, bundle, version, notices):
+def create_bundle(wheels, cpp, bundle, version, notices, sources):
     wheel_paths = select_wheels(regular_files(wheels).values(), version)
     sdks = sdk_inputs(cpp, notices)
+    source_archive = sources_input(sources, version)
     # A fresh output directory prevents leftover assets from entering a release.
     bundle.mkdir(parents=True, exist_ok=False)
     (bundle / "wheels").mkdir()
     (bundle / "cpp").mkdir()
+    (bundle / "sources").mkdir()
     assets = []
+    destination = bundle / "sources" / source_archive.name
+    shutil.copyfile(source_archive, destination)
+    assets.append(destination)
     for path in wheel_paths:
         destination = bundle / "wheels" / path.name
         shutil.copyfile(path, destination)
@@ -149,10 +168,13 @@ def verify_bundle(bundle, version):
     assets = {path.name: path for path in wheel_paths}
     assets.update({f"{sdk_name(version, arch)}.tar.gz": bundle / "cpp" / f"{sdk_name(version, arch)}.tar.gz"
                    for arch in ARCHITECTURES})
+    source_name = f"{sources_name(version)}.tar.gz"
+    assets[source_name] = bundle / "sources" / source_name
     expected = {path.relative_to(bundle).as_posix() for path in assets.values()} | {"SHA256SUMS"}
-    require(set(files) == expected, "Release bundle must contain exactly eight wheels, two SDKs, and SHA256SUMS")
+    require(set(files) == expected,
+            "Release bundle must contain exactly eight wheels, two SDKs, a source archive, and SHA256SUMS")
     lines = files["SHA256SUMS"].read_text(encoding="utf-8").splitlines()
-    require(len(lines) == len(assets), "Checksum manifest must contain all ten assets exactly once")
+    require(len(lines) == len(assets), "Checksum manifest must contain all eleven assets exactly once")
     seen = set()
     for line in lines:
         match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\]+)", line)
@@ -169,6 +191,19 @@ def verify_bundle(bundle, version):
             member = members.get(f"{name}/{required}")
             require(member is not None and member.isfile() and member.size > 0,
                     f"{name}.tar.gz does not contain a regular, non-empty {required}")
+    root = sources_name(version)
+    with tarfile.open(bundle / "sources" / source_name) as archive:
+        members = {member.name: member for member in archive.getmembers()}
+    for required in (SOURCES_LISTING, SOURCES_GUIDE):
+        member = members.get(f"{root}/{required}")
+        require(member is not None and member.isfile() and member.size > 0,
+                f"{source_name} does not contain a regular, non-empty {required}")
+    # A directory entry alone is not a source: a component directory needs a non-empty regular file.
+    source_files = [name for name, member in members.items()
+                    if member.isfile() and member.size > 0 and name.startswith(f"{root}/")
+                    and name.count("/") >= 2 and name.split("/")[1] != "build-materials"]
+    require(source_files, f"{source_name} must contain a source directory besides build-materials, "
+                          "with at least one non-empty source file")
 
 
 def main():
@@ -183,6 +218,8 @@ def main():
     parser.add_argument("--cpp", type=Path, default=Path("cpp-artifacts"))
     parser.add_argument("--notices", type=Path, default=Path("cpp/NOTICE"),
                         help="third-party notice added to each SDK archive")
+    parser.add_argument("--sources", type=Path, default=Path("source-archive"),
+                        help="directory holding the archive written by release_sources.py")
     args = parser.parse_args()
     try:
         development_version = args.allow_development_version and re.fullmatch(
@@ -191,7 +228,7 @@ def main():
                     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", args.version),
                 "Release version must have the form X.Y.Z")
         if args.command == "create":
-            create_bundle(args.wheels, args.cpp, args.bundle, args.version, args.notices)
+            create_bundle(args.wheels, args.cpp, args.bundle, args.version, args.notices, args.sources)
         else:
             verify_bundle(args.bundle, args.version)
     except (OSError, ValueError) as error:

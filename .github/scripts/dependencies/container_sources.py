@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Dependencies that only the devcontainer can resolve, because the answer depends on the image's
@@ -16,6 +16,7 @@ import sys
 import tempfile
 
 import inputs
+import licenses
 from util import entry, file_record, http_sha256, log, run
 
 
@@ -92,13 +93,43 @@ def apt_dependencies(repo, base_packages):
         files = [file_record(urls[name], platform=arch, filename=os.path.basename(urls[name]),
                              digest=("sha256", hashes[name], "apt package index") if name in hashes else None)] if name in urls else []
         found.append(entry(name, version, "apt", cats, files, declared,
-                           (note + " " if note else "") + "Source package %s %s." % (source, source_version)))
+                           (note + " " if note else "") + "Source package %s %s." % (source, source_version),
+                           license=apt_license(name)))
     return found
 
 
+def apt_license(package):
+    """(license, source) from the copyright file the package installs, or None."""
+    try:
+        with open("/usr/share/doc/%s/copyright" % package, errors="replace") as f:
+            return licenses.debian_copyright(f.read())
+    except OSError:
+        return None
+
+
 def _apt_files(pins):
-    """{package: .deb URL} and {package: sha256} for exact package=version pins, from the index."""
-    run(["apt-get", "update", "-qq"], check=False)
+    """{package: .deb URL} and {package: sha256} for exact package=version pins, from the index.
+
+    `apt-get update` can fail in part (a mirror that does not answer) and still lets the next commands
+    run on a partial index, which leaves packages without a URL for no lasting reason. So a pin with no URL
+    is looked up again after another update, up to three times, before it is left without one: a version
+    that really left the index stays without."""
+    urls, hashes = {}, {}
+    pending = list(pins)
+    for attempt in range(3):
+        run(["apt-get", "update", "-qq"], check=False)
+        found_urls, found_hashes = _apt_uris(pending)
+        urls.update(found_urls)
+        hashes.update(found_hashes)
+        pending = [pin for pin in pending if pin.split("=")[0] not in urls]
+        if not pending:
+            break
+        log("apt: %d packages have no download URL after update %d" % (len(pending), attempt + 1))
+    return urls, hashes
+
+
+def _apt_uris(pins):
+    """{package: .deb URL} and {package: sha256} for exact package=version pins, from the current index."""
     urls, hashes = {}, {}
     for start in range(0, len(pins), 40):
         batch = pins[start:start + 40]
@@ -145,7 +176,8 @@ def pip_dependencies(repo):
                 url = item["download_info"]["url"]
                 sha256 = item["download_info"].get("archive_info", {}).get("hashes", {}).get("sha256")
                 record = found.setdefault((name, item["metadata"]["version"]),
-                                          {"categories": set(), "declared_by": set(), "files": {}})
+                                          {"categories": set(), "declared_by": set(), "files": {}, "license": None})
+                record["license"] = record["license"] or licenses.pip_license(item["metadata"])
                 record["categories"].add(group)
                 if item.get("requested"):
                     record["declared_by"].update(details["declared_by"].get(inputs.spec_name(name), []))
@@ -154,7 +186,7 @@ def pip_dependencies(repo):
                                                    filename=wheel,
                                                    digest=("sha256", sha256, "pip resolver report") if sha256 else None)
     return [entry(name, version, "pip", sorted(r["categories"]), list(r["files"].values()),
-                  sorted(r["declared_by"]) or ["(dependency of a declared package)"])
+                  sorted(r["declared_by"]) or ["(dependency of a declared package)"], license=r["license"])
             for (name, version), r in sorted(found.items())]
 
 
@@ -199,10 +231,12 @@ def npm_dependencies(repo):
             digest = None
             if integrity.startswith("sha512-"):
                 digest = ("sha512", base64.b64decode(integrity[7:]).hex(), "npm lock file integrity")
+            declared_license = licenses.npm_license(details)
             found.append(entry(name, details["version"], "npm", info["categories"],
                                [file_record(details["resolved"], digest=digest)],
                                info["declared_by"] if name == root else ["(dependency of %s)" % root],
-                               "Optional dependency." if details.get("optional") else None))
+                               "Optional dependency." if details.get("optional") else None,
+                               license=(declared_license, "npm lock file (license)") if declared_license else None))
     return found
 
 
@@ -264,14 +298,16 @@ def _module_dependencies(directory, module_file):
         else:
             declared = [module_file]
         note = "Bazel module %s." % module
+        found_license = _repository_license(os.path.join(output_base, "external", attrs["name"]))
         if rule == "go_repository":
             found.append(entry(module, version, "go", ["build"],
                                [file_record("https://proxy.golang.org/%s/@v/%s.zip" % (attrs.get("importpath", module), version),
                                             digest=("h1", attrs["sum"], "go.sum hash in the repository rule") if attrs.get("sum") else None)],
-                               declared, note))
+                               declared, note, license=found_license))
         elif rule in ("git_repository", "new_git_repository"):
             found.append(entry(module, version or attrs.get("tag") or attrs.get("commit", "unversioned")[:12], "bazel", ["build"],
-                               [file_record(attrs.get("remote", ""), commit=attrs.get("commit"))], declared, note))
+                               [file_record(attrs.get("remote", ""), commit=attrs.get("commit"))], declared, note,
+                               license=found_license))
         else:
             urls = attrs.get("urls") or ([attrs["url"]] if attrs.get("url") else [])
             if urls:
@@ -279,8 +315,24 @@ def _module_dependencies(directory, module_file):
                 found.append(entry(module, version or _version_from(primary, attrs.get("strip_prefix", "")), "bazel", ["build"],
                                    [file_record(primary, mirrors=[url for url in urls if url != primary],
                                                 digest=_module_digest(attrs))],
-                                   declared, note))
+                                   declared, note, license=found_license))
     return found
+
+
+def _repository_license(directory):
+    """(license, source) from the top-level license files of a repository Bazel fetched, or None."""
+    texts = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    for name in names:
+        path = os.path.join(directory, name)
+        if licenses.LICENSE_FILE.match(name) and os.path.isfile(path):
+            with open(path, errors="replace") as f:
+                texts[name] = f.read(200000)
+    found = licenses.repository_license(texts)
+    return (found, "license file of the fetched repository, matched by its text") if found else None
 
 
 def _module_graph(directory):

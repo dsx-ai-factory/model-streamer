@@ -1,10 +1,12 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """List everything this repository depends on to build, test and run, with where to download it.
 
-    python3 .github/scripts/dependencies/collect.py collect --image IMAGE    write dependencies.json (needs Docker and network)
+    python3 .github/scripts/dependencies/collect.py collect --image IMAGE    write dependencies.json and its license table (needs Docker and network)
     python3 .github/scripts/dependencies/collect.py check                    validate dependencies.json
+    python3 .github/scripts/dependencies/collect.py relicense                apply categories.json licenses to dependencies.json again
+    python3 .github/scripts/dependencies/collect.py table [--format md|csv]  print the name, license and category of every dependency
     python3 .github/scripts/dependencies/collect.py completeness             offline: does the collector read every file that downloads something
     python3 .github/scripts/dependencies/collect.py resolve ...              (runs inside the devcontainer, started by collect)
 
@@ -26,6 +28,7 @@ sys.path.insert(0, HERE)
 import completeness as completeness_checks  # noqa: E402
 import dockerfile  # noqa: E402
 import inputs  # noqa: E402
+import licenses  # noqa: E402
 import static_sources  # noqa: E402
 from util import CATEGORIES, REPO, local_image_digest, log, read_json, run, write_json  # noqa: E402
 
@@ -48,8 +51,9 @@ def resolve(args):
 
 
 def in_container(image, base_image, no_hash):
-    """Run `resolve` in the devcontainer image and return its entries. CI builds both architectures
-    in the one x86_64 image (aarch64 is cross-compiled), so one run covers the build environment."""
+    """Run `resolve` in the devcontainer image and return its entries. CI builds the image natively
+    for each architecture; this runs the x86_64 one, so the apt and Bazel entries are those of the
+    x86_64 build environment (see "Limits" in README.md)."""
     with tempfile.TemporaryDirectory() as work:
         try:
             names = run(["docker", "run", "--rm", "--platform", "linux/amd64", base_image, "dpkg-query", "-W", "-f", "${Package}\t${Version}\n"])
@@ -81,6 +85,8 @@ def merge(entries):
         target["declared_by"] = sorted(set(target["declared_by"]) | set(item["declared_by"]))
         seen = {(f["platform"], f["url"]) for f in target["files"]}
         target["files"] += [f for f in item["files"] if (f["platform"], f["url"]) not in seen]
+        if item.get("license") and not target.get("license"):
+            target["license"], target["license_source"] = item["license"], item["license_source"]
         if item.get("note") and item["note"] not in (target.get("note") or ""):
             target["note"] = ((target.get("note") or "") + " " + item["note"]).strip()
     return sorted(merged.values(), key=lambda e: (e["ecosystem"], e["name"].lower(), e["version"]))
@@ -112,15 +118,20 @@ def base_commit():
 
 
 def collect(args):
+    table_path(args.out)  # refuse a name the table would overwrite, before the slow steps
     base_commit_id = base_commit()
     entries = static_sources.collect(REPO, compute_hashes=not args.no_hash)
-    _, image, tag, _, _ = dockerfile.base_images(inputs.read(REPO, inputs.DOCKERFILE))[-1]  # the last FROM is the base
+    _, image, tag, _, _ = dockerfile.external_images(inputs.read(REPO, inputs.DOCKERFILE))[1]  # the image the last stage builds on
     base = next(e for e in entries if e["ecosystem"] == "docker-image" and (e["name"], e["version"]) == (image, tag or "latest"))
     entries += in_container(args.image, base["files"][0].get("reference", "%s:%s" % (image, base["version"])), args.no_hash)
     merged = merge(entries)
     unmatched = tag_ship(merged)
     if unmatched:
         sys.exit("categories.json `ship` names dependencies that were not found: " + ", ".join(unmatched))
+    components = licenses.notice_components(REPO)
+    licenses.assign(merged, components, inputs.config())
+    for problem in licenses.ship_without_notice(merged, components, inputs.config()):
+        log("warning: " + problem)
     result = {
         "generated": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
         "base_commit": base_commit_id,
@@ -137,6 +148,51 @@ def collect(args):
     }
     write_json(args.out, result)
     log("wrote %d dependencies to %s" % (len(merged), args.out))
+    write_table(result, args.out)
+    report_licenses(result)
+
+
+def table_path(out):
+    """The path of the license table, next to the list: dependencies.json -> dependencies.md. A list
+    that is already named `.md` would be overwritten by its own table, so it is refused."""
+    path = os.path.splitext(out)[0] + ".md"
+    if path == out:
+        sys.exit("--out %s must not end in .md: the license table is written to that name" % out)
+    return path
+
+
+def write_table(data, out):
+    """The license table, next to the list: dependencies.json -> dependencies.md."""
+    path = table_path(out)
+    with open(path, "w") as f:
+        f.write(licenses.table(data))
+    log("wrote the license table to %s" % path)
+
+
+def relicense(args):
+    """Apply the rows of cpp/NOTICE and the `licenses` of categories.json to a list again,
+    so that a license added to categories.json does not need a new collection. Rewrites the list and
+    its table."""
+    table_path(args.out)
+    if not os.path.exists(args.out):
+        sys.exit("%s does not exist: run `collect` first, or pass --out" % args.out)
+    data = read_json(args.out)
+    components = licenses.notice_components(REPO)
+    licenses.assign(data["dependencies"], components, inputs.config())
+    for problem in licenses.ship_without_notice(data["dependencies"], components, inputs.config()):
+        log("warning: " + problem)
+    write_json(args.out, data)
+    write_table(data, args.out)
+    report_licenses(data)
+
+
+def report_licenses(data):
+    """Say how the licenses of a list are spread, and which entries no source names."""
+    log("licenses: " + ", ".join("%s: %d" % (name, count) for name, count in
+                                 sorted(licenses.summary(data).items(), key=lambda pair: (-pair[1], pair[0]))))
+    missing = licenses.unknown(data)
+    if missing:
+        log("%d dependencies have no known license (add them to `licenses` in categories.json):\n  %s" % (len(missing), "\n  ".join(missing)))
 
 
 def completeness(args):
@@ -161,6 +217,7 @@ def check(args):
             problems.append(label + ": bad categories %s" % item["categories"])
         if not item["files"]:
             problems.append(label + ": nothing to download")
+    problems += licenses.problems(data)
     shipped = {"%s:%s" % (item["ecosystem"], item["name"]) for item in data["dependencies"] if "ship" in item["categories"]}
     for key in inputs.config()["ship"]:
         if not key.startswith("_") and key not in shipped:
@@ -168,6 +225,16 @@ def check(args):
     if problems:
         sys.exit("\n".join(problems))
     print("%d dependencies, all well formed" % len(data["dependencies"]))
+    report_licenses(data)
+    if args.strict_licenses and licenses.unknown(data):
+        sys.exit("%d dependencies have no known license" % len(licenses.unknown(data)))
+
+
+def table(args):
+    """Print the name, license and category of every dependency of a list."""
+    if not os.path.exists(args.out):
+        sys.exit("%s does not exist: run `collect` first, or pass --out" % args.out)
+    sys.stdout.write(licenses.table(read_json(args.out), args.format))
 
 
 def main():
@@ -187,7 +254,15 @@ def main():
     inside.set_defaults(run=resolve)
     verify = commands.add_parser("check", help="validate dependencies.json")
     verify.add_argument("--out", default=OUTPUT)
+    verify.add_argument("--strict-licenses", action="store_true", help="also fail when a dependency has no known license")
     verify.set_defaults(run=check)
+    again = commands.add_parser("relicense", help="apply categories.json licenses to dependencies.json again, no new collection")
+    again.add_argument("--out", default=OUTPUT)
+    again.set_defaults(run=relicense)
+    listing = commands.add_parser("table", help="print the name, license and category of every dependency")
+    listing.add_argument("--out", default=OUTPUT, help="the dependencies.json to read")
+    listing.add_argument("--format", choices=("md", "csv"), default="md")
+    listing.set_defaults(run=table)
     commands.add_parser("completeness", help="check that the collector reads every file and command that downloads something "
                                               "(offline, needs no list)").set_defaults(run=completeness)
     args = parser.parse_args()

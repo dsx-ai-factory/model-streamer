@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """The object storage that the environment provides (the `seaweedfs` service of tests/gpu/compose.yaml, started with the
 `object_storage` profile), for a test that needs objects: to put some there, to read them back, and to look at what the

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """CPU-only tests of run.sh, with --dry-run: what it refuses, and the settings that it hands to the container.
 No docker and no GPU: the machine's GPUs are given by GPU_LOCAL_GPU_COUNT.

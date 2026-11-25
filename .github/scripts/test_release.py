@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Exercise release asset packaging, verification, and tag validation locally."""
 
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -17,6 +18,35 @@ import unittest
 
 VERSION = "0.17.2"
 BUNDLE_SCRIPT = Path(__file__).with_name("release_bundle.py").resolve()
+SOURCES_SCRIPT = Path(__file__).with_name("release_sources.py").resolve()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_bundle  # noqa: E402  (needs the scripts directory on the path)
+import release_sources  # noqa: E402
+
+
+def sources_archive(directory, version, omit=(), source=b"fixture source\n", empty_directories=()):
+    """Write a minimal corresponding-source archive; omit names (or whole directories) to break it.
+    source is the content of the source file, empty_directories are directory entries without files."""
+    root = f"runai-model-streamer-sources-{version}"
+    files = {"SOURCES.txt": b"fixture listing\n", "libaio-0.3.113/libaio.tar.gz": source,
+             "build-materials/docs/native-library-rebuilding.md": b"fixture guide\n"}
+    files = {name: data for name, data in files.items()
+             if not any(name == gone or name.startswith(gone + "/") for gone in omit)}
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{root}.tar.gz"
+    directories = ({root} | {f"{root}/{parent}" for name in files
+                             for parent in map(str, Path(name).parents) if parent != "."}
+                   | {f"{root}/{name}" for name in empty_directories})
+    with tarfile.open(path, "w:gz") as archive:
+        for name in sorted(directories):
+            info = tarfile.TarInfo(name)
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+            archive.addfile(info)
+        for name, data in sorted(files.items()):
+            info = tarfile.TarInfo(f"{root}/{name}")
+            info.size, info.mode = len(data), 0o644
+            archive.addfile(info, io.BytesIO(data))
+    return path
 
 
 class ReleaseBundleTests(unittest.TestCase):
@@ -54,6 +84,8 @@ class ReleaseBundleTests(unittest.TestCase):
                 path = directory / "lib" / library
                 path.write_bytes(elf + f"{component}-{arch}".encode())
                 self.libraries.append(path)
+        self.sources = self.root / "source-archive"
+        self.source_path = sources_archive(self.sources, VERSION)
 
     def collect(self, bundle="release-bundle", version=VERSION, extra_args=()):
         """Run bundle creation with the fixture inputs and return the captured process result."""
@@ -79,12 +111,15 @@ class ReleaseBundleTests(unittest.TestCase):
         self.collect_ok()
         self.assertEqual(len(list((self.bundle / "wheels").glob("*.whl"))), 8)
         self.assertEqual(len(list((self.bundle / "cpp").glob("*.tar.gz"))), 2)
-        self.assertEqual(len((self.bundle / "SHA256SUMS").read_text().splitlines()), 10)
+        self.assertEqual(len(list((self.bundle / "sources").glob("*.tar.gz"))), 1)
+        self.assertEqual(len((self.bundle / "SHA256SUMS").read_text().splitlines()), 11)
         verified = self.verify()
         self.assertEqual(verified.returncode, 0, verified.stderr)
         for path in self.paths:
             self.assertEqual(path.read_bytes(),
                              (self.bundle / "wheels" / path.name).read_bytes())
+        self.assertEqual(self.source_path.read_bytes(),
+                         (self.bundle / "sources" / self.source_path.name).read_bytes())
 
     def test_archive_layout_contents_and_metadata(self):
         """Check SDK archive paths, file contents, and normalized metadata for both architectures."""
@@ -111,6 +146,7 @@ class ReleaseBundleTests(unittest.TestCase):
         version = "0.0.0+dev.abc1234"
         for path in self.paths:
             path.rename(path.with_name(path.name.replace(VERSION, version)))
+        sources_archive(self.sources, version)
         options = {"bundle": "pr-bundle", "version": version,
                    "extra_args": ("--allow-development-version",)}
         result = self.collect(**options)
@@ -124,7 +160,7 @@ class ReleaseBundleTests(unittest.TestCase):
         for name, release_path in release_files.items():
             if name.startswith("wheels/"):
                 self.assertEqual(release_path.read_bytes(), pr_files[name].read_bytes())
-            elif name.startswith("cpp/"):
+            elif name.startswith(("cpp/", "sources/")):
                 with tarfile.open(release_path) as archive:
                     release_members = {member.name: archive.extractfile(member).read()
                                        for member in archive.getmembers() if member.isfile()}
@@ -280,6 +316,63 @@ class ReleaseBundleTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("regular, non-empty THIRD_PARTY_NOTICES.txt", result.stderr)
 
+    def test_missing_source_archive_rejected(self):
+        """Reject packaging when release_sources.py has not produced the source archive."""
+        self.source_path.unlink()
+        result = self.collect()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing source archive", result.stderr)
+
+    def test_source_archive_link_rejected(self):
+        """Reject packaging when the source archive is a link rather than a regular file."""
+        real = self.source_path.with_suffix(".real")
+        self.source_path.rename(real)
+        self.source_path.symlink_to(real)
+        self.assertNotEqual(self.collect().returncode, 0)
+
+    def test_checksum_detects_modified_source_archive(self):
+        self.collect_ok()
+        with next((self.bundle / "sources").glob("*.tar.gz")).open("ab") as stream:
+            stream.write(b"changed")
+        result = self.verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Checksum mismatch", result.stderr)
+
+    def test_source_archive_missing_required_content_rejected(self):
+        """Verification rejects a source archive without its listing, rebuild guide or any source."""
+        self.collect_ok()
+        path = self.bundle / "sources" / self.source_path.name
+        manifest = self.bundle / "SHA256SUMS"
+        original = manifest.read_text()
+        for omitted, message in (("SOURCES.txt", "SOURCES.txt"),
+                                 ("build-materials/docs", "native-library-rebuilding.md"),
+                                 ("libaio-0.3.113", "source directory")):
+            with self.subTest(omitted=omitted):
+                sources_archive(self.bundle / "sources", VERSION, omit=(omitted,))
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                manifest.write_text("".join(f"{digest}  {path.name}\n" if path.name in line else line
+                                            for line in original.splitlines(keepends=True)))
+                result = self.verify()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def test_source_directory_without_a_source_file_rejected(self):
+        """An empty component directory, or one whose only file is empty, is not a source."""
+        self.collect_ok()
+        path = self.bundle / "sources" / self.source_path.name
+        manifest = self.bundle / "SHA256SUMS"
+        original = manifest.read_text()
+        for name, kwargs in (("empty directory", {"omit": ("libaio-0.3.113",), "empty_directories": ("libaio-0.3.113",)}),
+                             ("empty file", {"source": b""})):
+            with self.subTest(case=name):
+                sources_archive(self.bundle / "sources", VERSION, **kwargs)
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                manifest.write_text("".join(f"{digest}  {path.name}\n" if path.name in line else line
+                                            for line in original.splitlines(keepends=True)))
+                result = self.verify()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("source directory", result.stderr)
+
     def test_wrong_architecture_rejected(self):
         self.libraries[0].write_bytes(self.libraries[4].read_bytes())
         self.assertNotEqual(self.collect().returncode, 0)
@@ -337,6 +430,278 @@ class ReleaseBundleTests(unittest.TestCase):
         with (self.bundle / "SHA256SUMS").open("a") as stream:
             stream.write(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n")
         self.assertNotEqual(self.verify().returncode, 0)
+
+
+class ReleaseSourcesTests(unittest.TestCase):
+    """release_sources.py works offline here: the "upstream" sources are file:// URLs."""
+
+    DIRECTORIES = (".devcontainer", "cpp/third_party", "cpp/toolchain")
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="release-sources-test-"))
+        self.repo = self.root / "repo"
+        for entry in release_sources.BUILD_MATERIALS:
+            path = self.repo / entry
+            if entry in self.DIRECTORIES:
+                path = path / "file.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"fixture {entry}\n")
+        (self.repo / ".devcontainer" / "__pycache__").mkdir()
+        (self.repo / ".devcontainer" / "__pycache__" / "skipped.pyc").write_bytes(b"cache")
+        self.upstream = self.root / "upstream"
+        self.upstream.mkdir()
+        self.files = {}
+        for name, data in (("libaio_0.3.113.orig.tar.gz", b"libaio source"),
+                           ("glibc_2.31.orig.tar.xz", b"glibc source"),
+                           ("glibc_2.31-0ubuntu9.18.dsc", b"glibc dsc")):
+            (self.upstream / name).write_bytes(data)
+            self.files[name] = {"url": (self.upstream / name).as_uri(),
+                                "sha256": hashlib.sha256(data).hexdigest()}
+        # The registry files of two modules; both have an overlay/BUILD.bazel with different content.
+        self.registry = []
+        for module, version in (("libaio", "0.3.113.bcr.1"), ("liburing", "2.14.bcr.2")):
+            items = []
+            for path in ("source.json", "overlay/BUILD.bazel"):
+                data = f"{module} {path}".encode()
+                name = f"{module}-{path.replace('/', '-')}"
+                (self.upstream / name).write_bytes(data)
+                items.append({"path": path, "url": (self.upstream / name).as_uri(),
+                              "sha256": hashlib.sha256(data).hexdigest()})
+            self.registry.append({"module": module, "version": version, "files": items})
+        (self.repo / "cpp" / "MODULE.bazel").write_text(
+            'bazel_dep(name = "liburing", version = "2.14.bcr.2")\n'
+            'bazel_dep(\n    name = "libaio",\n    version = "0.3.113.bcr.1",\n)\n')
+        self.components = [
+            {"id": "libaio", "name": "libaio", "version": "0.3.113", "dir": "libaio-0.3.113",
+             "files": [self.files["libaio_0.3.113.orig.tar.gz"]]},
+            {"id": "glibc-nonshared", "name": "GNU C Library", "version": "2.31-0ubuntu9.18",
+             "dir": "glibc-2.31-0ubuntu9.18",
+             "files": [self.files["glibc_2.31.orig.tar.xz"], self.files["glibc_2.31-0ubuntu9.18.dsc"]]},
+        ]
+        # The rows of cpp/NOTICE as the notice generator writes them; the package column is a full
+        # name for some rows.
+        self.notice_rows = [
+            ("libaio", "0.3.113", "LGPL-2.1"),
+            ("glibc-nonshared", "2.31", "LGPL-2.1-or-later"),
+            ("gcc-runtime", "9", "GPL-3.0-or-later WITH GCC-exception-3.1"),
+            ("github.com/axboe/liburing", "2.14", "MIT"),
+            ("zlib", "1.3.1", "Zlib"),
+        ]
+
+    def write_notice(self):
+        rows = "".join(f"| `{package}` | {version} | {licence} | https://example.com/{version} |\n"
+                       for package, version, licence in self.notice_rows)
+        (self.repo / "cpp" / "NOTICE").write_text(
+            "model-streamer - cpp\n\n| Package | Version | License | License source |\n"
+            "| --- | --- | --- | --- |\n" + rows)
+
+    def write_manifest(self):
+        path = self.root / "release-sources.json"
+        path.write_text(json.dumps({"components": self.components, "registry": self.registry}))
+        return path
+
+    def create(self, output="out", version=VERSION, cache=None):
+        self.write_notice()
+        command = [sys.executable, str(SOURCES_SCRIPT), "create", "--version", version,
+                   "--root", str(self.repo), "--manifest", str(self.write_manifest()),
+                   "--output", str(self.root / output)]
+        if cache:
+            command += ["--cache", str(self.root / cache)]
+        return subprocess.run(command, capture_output=True, text=True)
+
+    def archive_path(self, output="out"):
+        return self.root / output / f"runai-model-streamer-sources-{VERSION}.tar.gz"
+
+    def test_archive_layout_and_contents(self):
+        result = self.create()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        root = f"runai-model-streamer-sources-{VERSION}"
+        with tarfile.open(self.archive_path()) as archive:
+            members = {member.name: archive.extractfile(member).read()
+                       for member in archive.getmembers() if member.isfile()}
+        for name, data in (("libaio-0.3.113/libaio_0.3.113.orig.tar.gz", b"libaio source"),
+                           ("glibc-2.31-0ubuntu9.18/glibc_2.31.orig.tar.xz", b"glibc source"),
+                           ("glibc-2.31-0ubuntu9.18/glibc_2.31-0ubuntu9.18.dsc", b"glibc dsc")):
+            self.assertEqual(members[f"{root}/{name}"], data)
+        for entry in release_sources.BUILD_MATERIALS:
+            expected = f"{root}/build-materials/{entry}"
+            self.assertTrue(any(name == expected or name.startswith(expected + "/") for name in members), entry)
+        self.assertNotIn("skipped.pyc", " ".join(members))
+        self.assertTrue({f"{root}/{release_bundle.SOURCES_LISTING}",
+                         f"{root}/{release_bundle.SOURCES_GUIDE}"} <= members.keys())
+        listing = members[f"{root}/SOURCES.txt"].decode()
+        for entry in self.files.values():
+            self.assertIn(entry["sha256"], listing)
+        self.assertIn("No patches", listing)
+        self.assertIn("GCC", listing)
+        # The licence in the listing is the one of the cpp/NOTICE row.
+        self.assertIn("libaio 0.3.113 - LGPL-2.1", listing)
+        self.assertIn("GNU C Library 2.31-0ubuntu9.18 - LGPL-2.1-or-later", listing)
+        # Only the two manifest components have a directory.
+        self.assertEqual({name.split("/")[1] for name in members
+                          if name.count("/") >= 2 and not name.startswith(f"{root}/build-materials")},
+                         {"libaio-0.3.113", "glibc-2.31-0ubuntu9.18"})
+
+    def test_registry_files_are_in_the_build_materials_and_listed(self):
+        result = self.create()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        root = f"runai-model-streamer-sources-{VERSION}"
+        with tarfile.open(self.archive_path()) as archive:
+            members = {member.name: archive.extractfile(member).read()
+                       for member in archive.getmembers() if member.isfile()}
+        base = f"{root}/build-materials/bazel-registry"
+        self.assertEqual(members[f"{base}/libaio/0.3.113.bcr.1/source.json"], b"libaio source.json")
+        self.assertEqual(members[f"{base}/libaio/0.3.113.bcr.1/overlay/BUILD.bazel"], b"libaio overlay/BUILD.bazel")
+        self.assertEqual(members[f"{base}/liburing/2.14.bcr.2/overlay/BUILD.bazel"], b"liburing overlay/BUILD.bazel")
+        listing = members[f"{root}/SOURCES.txt"].decode()
+        self.assertIn("bazel-registry", listing)
+        self.assertIn("liburing 2.14.bcr.2", listing)
+        for module in self.registry:
+            for item in module["files"]:
+                self.assertIn(item["sha256"], listing)
+
+    def test_registry_files_of_two_modules_do_not_share_a_cache_entry(self):
+        self.assertEqual(self.create("first", cache="cache").returncode, 0)
+        for path in self.upstream.iterdir():
+            path.unlink()
+        result = self.create("second", cache="cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.archive_path("first").read_bytes(), self.archive_path("second").read_bytes())
+
+    def test_registry_checksum_mismatch_rejected(self):
+        self.registry[0]["files"][1]["sha256"] = "0" * 64
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Checksum mismatch", result.stderr)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_registry_version_that_the_build_does_not_use_rejected(self):
+        self.registry[0]["version"] = "0.3.113.bcr.2"
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("libaio: the registry entry has version 0.3.113.bcr.2", result.stderr)
+
+    def test_registry_module_missing_from_the_module_file_rejected(self):
+        (self.repo / "cpp" / "MODULE.bazel").write_text('bazel_dep(name = "liburing", version = "2.14.bcr.2")\n')
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("libaio: the registry entry has version", result.stderr)
+
+    def test_registry_file_path_outside_the_module_folder_rejected(self):
+        for path in ("../escape", "/absolute"):
+            with self.subTest(path=path):
+                self.registry[0]["files"][0]["path"] = path
+                result = self.create()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Invalid registry file path", result.stderr)
+
+    def test_duplicate_registry_module_rejected(self):
+        self.registry.append(self.registry[0])
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Duplicate registry module", result.stderr)
+
+    def test_archive_is_reproducible(self):
+        self.assertEqual(self.create("first").returncode, 0)
+        self.assertEqual(self.create("second").returncode, 0)
+        self.assertEqual(self.archive_path("first").read_bytes(), self.archive_path("second").read_bytes())
+
+    def test_cache_serves_a_later_run_without_the_network(self):
+        self.assertEqual(self.create("first", cache="cache").returncode, 0)
+        for path in self.upstream.iterdir():
+            path.unlink()
+        result = self.create("second", cache="cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.archive_path("first").read_bytes(), self.archive_path("second").read_bytes())
+
+    def test_damaged_cache_entry_is_downloaded_again(self):
+        self.assertEqual(self.create("first", cache="cache").returncode, 0)
+        cached = self.root / "cache" / "libaio-0.3.113" / "libaio_0.3.113.orig.tar.gz"
+        cached.write_bytes(b"damaged")
+        result = self.create("second", cache="cache")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(cached.read_bytes(), b"libaio source")
+
+    def test_cache_does_not_hide_a_checksum_mismatch(self):
+        self.assertEqual(self.create("first", cache="cache").returncode, 0)
+        self.components[0]["files"][0] = {**self.files["libaio_0.3.113.orig.tar.gz"], "sha256": "0" * 64}
+        result = self.create("second", cache="cache")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Checksum mismatch", result.stderr)
+
+    def test_checksum_mismatch_rejected(self):
+        self.components[0]["files"][0] = {**self.files["libaio_0.3.113.orig.tar.gz"], "sha256": "0" * 64}
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Checksum mismatch", result.stderr)
+        self.assertFalse(self.archive_path().exists())
+
+    def test_component_without_a_notice_row_rejected(self):
+        self.notice_rows = [row for row in self.notice_rows if row[0] != "libaio"]
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("without a row in cpp/NOTICE: libaio", result.stderr)
+
+    def test_notice_row_with_a_full_package_name_matches_by_its_last_part(self):
+        self.components.append({"id": "liburing", "name": "liburing", "version": "2.14", "dir": "liburing-2.14",
+                                "files": [self.files["libaio_0.3.113.orig.tar.gz"]]})
+        result = self.create()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_version_differing_from_the_notice_row_rejected(self):
+        self.components[0]["version"] = "0.3.114"
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("libaio: the manifest has version 0.3.114 but cpp/NOTICE lists 0.3.113", result.stderr)
+
+    def test_version_with_a_revision_suffix_matches_the_row_version(self):
+        self.assertTrue(release_sources.version_matches("2.31-0ubuntu9.18", "2.31"))
+        self.assertTrue(release_sources.version_matches("0.3.113", "0.3.113"))
+        self.assertTrue(release_sources.version_matches("0.3.113", "0.3.113.bcr.1"))
+        self.assertFalse(release_sources.version_matches("0.3.11", "0.3.113.bcr.1"))
+        self.assertFalse(release_sources.version_matches("2.310", "2.31"))
+        self.assertFalse(release_sources.version_matches("2.32-1", "2.31"))
+
+    def test_duplicate_manifest_id_rejected(self):
+        self.components.append(self.components[0])
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Duplicate component id", result.stderr)
+
+    def test_missing_build_material_rejected(self):
+        (self.repo / "docs" / "native-library-rebuilding.md").unlink()
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("native-library-rebuilding.md", result.stderr)
+
+    def test_existing_archive_not_overwritten(self):
+        self.assertEqual(self.create().returncode, 0)
+        result = self.create()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Already exists", result.stderr)
+
+    def test_real_manifest_matches_the_notice_rows(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = json.loads((root / ".github" / "release-sources.json").read_text())
+        selected = release_sources.select_sources(manifest["components"],
+                                                  release_sources.notice_rows(root / "cpp" / "NOTICE"))
+        self.assertEqual({component["id"] for component, _ in selected}, {"libaio", "glibc-nonshared"})
+        for component, licence in selected:
+            self.assertTrue(licence.startswith("LGPL"), (component["id"], licence))
+            for entry in component["files"]:
+                self.assertRegex(entry["sha256"], r"[0-9a-f]{64}")
+
+    def test_real_registry_entries_are_the_versions_the_build_depends_on(self):
+        root = Path(__file__).resolve().parents[2]
+        manifest = json.loads((root / ".github" / "release-sources.json").read_text())
+        entries = release_sources.check_registry(manifest["registry"], root / "cpp" / "MODULE.bazel")
+        self.assertEqual({entry["module"] for entry in entries}, {"libaio", "liburing"})
+        for entry in entries:
+            self.assertIn("source.json", [item["path"] for item in entry["files"]])
+            for item in entry["files"]:
+                self.assertRegex(item["sha256"], r"^[0-9a-f]{64}$")
+                self.assertTrue(item["url"].startswith(
+                    f"https://bcr.bazel.build/modules/{entry['module']}/{entry['version']}/"), item["url"])
 
 
 class ReleaseTagTests(unittest.TestCase):

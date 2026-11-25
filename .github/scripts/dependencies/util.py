@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Helpers shared by the collectors. Python 3.8 compatible: part of the collection runs in the
@@ -23,15 +23,18 @@ def log(message):
     print(message, file=sys.stderr, flush=True)
 
 
-def entry(name, version, ecosystem, categories, files, declared_by, note=None):
+def entry(name, version, ecosystem, categories, files, declared_by, note=None, license=None):
     """One dependency. `files` is a list of {platform, url, sha256, sha256_from, filename?}; platform
-    is "any" for a file that does not depend on the architecture."""
+    is "any" for a file that does not depend on the architecture. `license` is (license, source) when
+    the package itself names its license (see licenses.py); collect.py fills in the rest."""
     for category in categories:
         assert category in CATEGORIES, category
     out = {"name": name, "version": version, "ecosystem": ecosystem, "categories": sorted(set(categories)),
            "declared_by": sorted(set(declared_by)), "files": files}
     if note:
         out["note"] = note
+    if license:
+        out["license"], out["license_source"] = license
     return out
 
 
@@ -84,8 +87,9 @@ def write_json(path, data):
 def archive_name_version(filename, url):
     """(name, version) from an archive file name such as openssl-3.5.0.tar.gz or
     fake-gcs-server_1.52.2_Linux_amd64.tar.gz. A file name with no version (linux_amd64.tar.gz) takes
-    the repository and tag of a GitHub release URL instead."""
-    match = re.match(r"^(?P<name>.+?)[-_]v?(?P<version>\d[\w.]*?)(?:[-_].*)?\.(?:tar\.gz|tar\.xz|tgz|zip)$", filename or "")
+    the repository and tag of a GitHub release URL instead. The directory of a file name such as
+    /tmp/Python-3.11.14.tgz is not part of the name."""
+    match = re.match(r"^(?P<name>.+?)[-_]v?(?P<version>\d[\w.]*?)(?:[-_].*)?\.(?:tar\.gz|tar\.xz|tgz|zip)$", os.path.basename(filename or ""))
     if match:
         return match.group("name"), match.group("version")
     release = re.match(r"https://github\.com/[^/]+/([^/]+)/releases/download/v?([^/]+)/", url)

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Find what the collector would miss, without the network or Docker. Three checks:
@@ -29,12 +29,17 @@ READ_BY_THE_COLLECTOR = [
     "py/*/pyproject.toml",
     "py/*/requirements*",
     "py/*/Makefile",
+    "tests/compose*.y*ml",
+    "tests/*/compose*.y*ml",
+    "tests/*/*/compose*.y*ml",
 ]
 
 # The commands that download or install something, by kind. A URL is part of `curl` and `wget`
-# because a `curl` that has none (a health check) does not download a dependency.
+# because a `curl` that has none (a health check) does not download a dependency. A variable named
+# `...URL` or `...url` stands for one (`curl "${bazel_url}"`). A download of `${...url}.sha256` is the
+# checksum of an archive, not another dependency.
 COMMANDS = {
-    "curl": r"\bcurl\b[^|;&\n]*?https?://",
+    "curl": r"\bcurl\b[^|;&\n]*?(?:https?://|\$\{?\w*(?:URL|url)\b(?!\}\.sha256))",
     "wget": r"\bwget\b[^\n#]*?https?://",
     "git clone": r"\bgit clone\b",
     "npm install": r"\bnpm (?:install|i)\b",
@@ -72,7 +77,7 @@ def _tracked(repo):
 def unread_files(repo):
     """Tracked files that download or install something and that nothing accounts for."""
     config = inputs.config()["coverage"]
-    accounted = READ_BY_THE_COLLECTOR + config["covered_by_bazel"] + config["not_an_input"]
+    accounted = READ_BY_THE_COLLECTOR + config["covered_by_bazel"] + config["not_an_input"] + config.get("resolved_at_test_time", {}).get("files", [])
     problems = []
     for path in _tracked(repo):
         if _matches(path, accounted):
@@ -92,7 +97,7 @@ def unparsed_commands(repo):
         text = inputs.read(repo, path)
         commands = "\n".join(command for _, command in dockerfile.runs(text, path))
         parsed = {
-            "curl": len(dockerfile.downloads(text, path)),
+            "curl": len(dockerfile.downloads(text, path, inputs.image_file_reader(repo))),
             "git clone": len(dockerfile.git_clones(text, path)),
             "npm install": len(dockerfile.npm_packages(text, path)),
             "pip install": len(dockerfile.pip_packages(text, path)),
