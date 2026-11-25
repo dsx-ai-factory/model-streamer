@@ -163,7 +163,7 @@ def models(outs):
 
 def _runs(out):
     st = out["settings"]
-    return f'median of {st["repeats"]} per loader, {"warm" if st["warm"] else "cold"} page cache'
+    return f'median of {st["repeats"]} per loader, cold page cache'
 
 
 def _settings(outs):

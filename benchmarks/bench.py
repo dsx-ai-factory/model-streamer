@@ -46,7 +46,6 @@ def main():
                     help="set for every measured process (repeatable)")
     ap.add_argument("--vllm-args", default="", metavar="JSON",
                     help='extra vLLM engine options for the vLLM tests, e.g. \'{"trust_remote_code": true}\'')
-    ap.add_argument("--warm", action="store_true", help="load from the page cache instead of evicting first")
     ap.add_argument("--ref-dir", help="local copy of an s3:// model, for tensor names and validation "
                                       "(default: downloaded once to the scratch directory)")
     ap.add_argument("--scratch-dir", help=f"where an s3:// model is downloaded to (default: {SCRATCH} here)")

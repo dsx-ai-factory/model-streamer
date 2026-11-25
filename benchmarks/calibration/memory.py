@@ -65,9 +65,10 @@ def meminfo_gib(key):
     return None
 
 
-def cgroup_left(limit, usage, stat, cache_keys):
+def cgroup_left(limit, usage, stat, cache, shmem):
     """Bytes the cgroup may still take: its limit less what it holds now, not counting the page cache,
-    which the kernel gives back. None when there is no limit."""
+    which the kernel gives back. tmpfs and shared memory are in the cache figure and are not given
+    back, so they stay counted. None when there is no limit."""
     def text(path):
         with open(path) as f:
             return f.read()
@@ -79,8 +80,10 @@ def cgroup_left(limit, usage, stat, cache_keys):
         used = int(text(usage))
         for line in text(stat).splitlines():
             key, _, value = line.partition(" ")
-            if key in cache_keys:
+            if key == cache:
                 used -= int(value)
+            elif key == shmem:
+                used += int(value)
         return max(0, int(raw) - max(0, used))
     except (OSError, ValueError):
         return None
@@ -90,9 +93,9 @@ def memory_budget_gib():
     """What this process may use: MemAvailable, capped by what is left of the cgroup limit when there is one."""
     budget = meminfo_gib("MemAvailable") or 8
     v2, v1 = "/sys/fs/cgroup/", "/sys/fs/cgroup/memory/"
-    for left in (cgroup_left(v2 + "memory.max", v2 + "memory.current", v2 + "memory.stat", ("file",)),
+    for left in (cgroup_left(v2 + "memory.max", v2 + "memory.current", v2 + "memory.stat", "file", "shmem"),
                  cgroup_left(v1 + "memory.limit_in_bytes", v1 + "memory.usage_in_bytes", v1 + "memory.stat",
-                             ("total_cache",))):
+                             "total_cache", "total_shmem")):
         if left is not None:
             budget = min(budget, left / GIB)
     return budget

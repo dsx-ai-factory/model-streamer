@@ -87,12 +87,3 @@ def evict(paths):
         finally:
             os.close(fd)
     return resident(paths)
-
-
-def prime(paths):
-    """Read every file once so it is in the page cache. Returns the bytes resident afterwards."""
-    for p in paths:
-        with open(p, "rb", buffering=0) as f:
-            while f.read(16 << 20):
-                pass
-    return resident(paths)

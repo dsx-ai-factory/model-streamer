@@ -63,14 +63,15 @@ class RunnerTest(unittest.TestCase):
         with open(os.path.join(self.dir.name, "m.safetensors"), "wb") as f:
             f.write(len(header).to_bytes(8, "little") + header + bytes(16))
         self.out = os.path.join(self.dir.name, "results.json")
-        for name in ("evict", "prime"):  # the page cache calls are Linux only
-            p = mock.patch.object(runner, name, return_value=0)
+        # the page cache call is Linux only, and the host's memory is not the test's business
+        for name, value in (("evict", 0), ("host_memory_gib", None)):
+            p = mock.patch.object(runner, name, return_value=value)
             p.start()
             self.addCleanup(p.stop)
 
     def run_bench(self, launch=child_output, prof=PROFILE, missing=None, gpus=0, vllm=False, **over):
         a = argparse.Namespace(model_dir=self.dir.name, ref_dir=None, nproc=None, device=None, loaders=[], tests="",
-                               env=[], warm=False, scratch_dir=None, vllm_args={},
+                               env=[], scratch_dir=None, vllm_args={},
                                profile=None, no_calibrate=True, repeats=2, out=self.out, log_dir=None)
         vars(a).update(over)
         self.calls = []
@@ -138,7 +139,7 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(r["runs"][0]["rank_s"], [4.0, 4.0])
         self.assertEqual(r["runs"][0]["cpu_s"], 16.0)  # summed over the ranks
         self.assertEqual(r["ceiling"]["name"], "disk_direct_read_parallel")
-        self.assertEqual(out["settings"], {"repeats": 2, "warm": False, "nproc": 2, "env": {"X": "1"}})
+        self.assertEqual(out["settings"], {"repeats": 2, "nproc": 2, "env": {"X": "1"}})
 
     def test_calibration_is_kept_with_the_results(self):
         code, out = self.run_bench(tests="streamer_cpu", repeats=1)
@@ -324,7 +325,10 @@ class RunnerTest(unittest.TestCase):
         with mock.patch.object(runner, "gpu_memory_gib", return_value=[80.0] * 8):
             self.assertIsNone(runner.misfit("cuda", 61.0))
             self.assertIn("one GPU has 80 GiB", runner.misfit("cuda", 100.0))
-            self.assertIsNone(runner.misfit("cpu", 1000.0))
+            self.assertIsNone(runner.misfit("cpu", 1000.0))  # host memory unknown: not checked
+            with mock.patch.object(runner, "host_memory_gib", return_value=1000.0):
+                self.assertIsNone(runner.misfit("cpu", 780.0))
+                self.assertIn("1000 GiB of host memory", runner.misfit("cpu", 950.0))
             self.assertIsNone(runner.misfit("dist", 500.0, 8))
             self.assertIn("needs at least 4 ranks", runner.misfit("dist", 280.0, 2))
             self.assertNotIn("needs at least", runner.misfit("dist", 1000.0, 8))  # no rank count would do
@@ -448,8 +452,7 @@ class RunnerTest(unittest.TestCase):
         self.assertIn("--nproc is for", self.run_bench(gpus=2, nproc=2, tests="streamer_cuda")[0])
         self.assertIn("unknown test", self.run_bench(tests="nope")[0])
 
-    def test_warm_is_scored_against_memcpy(self):
-        self.assertEqual(profile.ceilings_for("streamer_cpu", PROFILE, warm=True)[0], "host_memcpy_nt")
+    def test_an_s3_run_without_an_s3_ceiling_is_not_scored(self):
         self.assertEqual(profile.ceilings_for("streamer_cpu", PROFILE, remote=True)[0], None)  # no S3 ceiling
 
 

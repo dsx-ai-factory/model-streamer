@@ -53,7 +53,6 @@ python3 benchmarks/bench.py /mnt/models/Qwen3-8B --tests streamer_cuda \
 | `--tests a,b` | all that apply | Run only the named tests |
 | `--env K=V` | none | Set a variable for the measured processes (repeatable) |
 | `--vllm-args JSON` | none | Extra vLLM engine options for the vLLM tests, for example `'{"trust_remote_code": true}'` |
-| `--warm` | cold | Load from the page cache instead of evicting first |
 | `--ref-dir DIR` | downloaded | Local copy of an S3 model, used for validation |
 | `--scratch-dir DIR` | `bench_scratch` | Where an S3 model is downloaded to |
 | `--profile FILE` | `machine_profile.json` | Machine profile made by `calibrate.py` |
@@ -91,9 +90,9 @@ The tests are named in [`benchmark/__init__.py`](benchmark/__init__.py)
 `single` and `distributed` wrap it with the timing and the validation
 (`check`).
 
-Without `--tests`, the GPU tests run when a GPU is present and the model fits:
-one GPU has to hold the whole model, and with N ranks each GPU keeps a 1/N
-share of it. A test that cannot run is left out with a note, for example an
+Without `--tests`, a test runs when the model fits where it goes: host memory
+or one GPU has to hold the whole model, and with N ranks each GPU keeps a 1/N
+share of it. The GPU tests also need a GPU. A test that cannot run is left out with a note, for example an
 InstantTensor test when `instanttensor` is not installed.
 
 In a distributed test every rank receives every tensor on its GPU, as the
@@ -180,7 +179,6 @@ Each test is scored against one ceiling:
 |---|---|
 | Host tests and the distributed tests | `disk_direct_read_parallel` |
 | Single-process GPU tests | The lower of that and `h2d_pinned` |
-| Any test with `--warm` | `host_memcpy_nt` in place of the disk |
 | Any test on S3 | `s3_get_parallel` in place of the disk |
 
 The table also names the nearest ceiling: the stage in the profile whose rate

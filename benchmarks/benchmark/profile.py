@@ -78,16 +78,16 @@ def get_profile(a, remote):
     return load_json(DEFAULT_PROFILE), os.path.abspath(DEFAULT_PROFILE)
 
 
-def ceilings_for(test, profile, remote=False, warm=False):
+def ceilings_for(test, profile, remote=False):
     """(name of the ceiling this test is scored against, or None; the ceilings it may be nearest to).
 
     Host tests and the distributed tests are scored against the storage: disk_direct_read_parallel,
-    s3_get_parallel for an S3 source, host_memcpy_nt for a warm reload. A single-process GPU test is
+    or s3_get_parallel for an S3 source. A single-process GPU test is
     scored against the lower of that and h2d_pinned."""
     if not profile:
         return None, {}
     c = {k: v for k, v in profile["ceilings_gibps"].items() if v}
-    storage = "s3_get_parallel" if remote else "host_memcpy_nt" if warm else "disk_direct_read_parallel"
+    storage = "s3_get_parallel" if remote else "disk_direct_read_parallel"
     if not is_dist(test) and TESTS[test]["device"] == "cuda":
         scored = [k for k in (storage, "h2d_pinned") if k in c]
         return (min(scored, key=c.get) if scored else None), c

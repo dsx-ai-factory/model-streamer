@@ -10,7 +10,7 @@ from . import LOADERS, group_of, loader_of, markdown
 from .profile import ceilings_for, nearest
 
 
-def summarize(name, runs, model, strategies, profile, remote, warm):
+def summarize(name, runs, model, strategies, profile, remote):
     """One test: the medians over its runs and the ceiling, then the runs themselves. A test is ok only
     when every run gave a result and none returned wrong data."""
     good = [r for r in runs if "failed" not in r]
@@ -20,7 +20,7 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
         med = statistics.median(r["gibps"] for r in good)
         s.update(load_s=round(statistics.median(r["load_s"] for r in good), 2), gibps=round(med, 2),
                  gibps_min=min(r["gibps"] for r in good), gibps_max=max(r["gibps"] for r in good))
-        if all("cpu_s" in r for r in good):
+        if model["gib"] and all("cpu_s" in r for r in good):
             s.update(cpu_s_per_gib=round(statistics.median(r["cpu_s"] for r in good) / model["gib"], 2),
                      peak_rss_gib=max(r["peak_rss_gib"] for r in good))
         if all("download_s" in r for r in good):
@@ -30,7 +30,7 @@ def summarize(name, runs, model, strategies, profile, remote, warm):
                 s[key] = round(statistics.median(r[key] for r in good), 2)
         if strategies:
             s["fs_strategy"] = sorted(strategies)
-        scored, candidates = ceilings_for(name, profile, remote, warm)
+        scored, candidates = ceilings_for(name, profile, remote)
         if scored:
             s["ceiling"] = {"name": scored, "gibps": candidates[scored],
                             "pct": round(100 * med / candidates[scored], 1), "nearest": nearest(med, candidates)}
@@ -76,10 +76,10 @@ def calibration_of(profile, path):
 
 def report(a, runs_of, strategy_of, model, pkgs, versions, environment, env, profile, profile_path, remote):
     """Print the table and write the results file and its Markdown report. True when every test is ok."""
-    results = [summarize(n, runs, model, strategy_of[n], profile, remote, a.warm) for n, runs in runs_of.items()]
+    results = [summarize(n, runs, model, strategy_of[n], profile, remote) for n, runs in runs_of.items()]
     add_speedups(results)
     print_table(results, pkgs)
-    settings = {"repeats": a.repeats, "warm": a.warm}
+    settings = {"repeats": a.repeats}
     if a.nproc:
         settings["nproc"] = a.nproc
     if env:

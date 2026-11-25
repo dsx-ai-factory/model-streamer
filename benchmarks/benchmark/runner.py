@@ -15,7 +15,7 @@ import time
 
 from . import (ENTRY, GIB, GPU_IDLE_GIB, SCRATCH, SKIPPED, TESTS, TIMEOUT_S, group_of, is_dist, is_vllm,
                loader_of)
-from .files import describe, evict, is_remote, model_files, prime
+from .files import describe, evict, is_remote, model_files
 from .profile import get_profile
 from .report import report
 
@@ -67,11 +67,25 @@ def gpus_in_use(group, nproc=None):
     return {i: round(used[i], 1) for i in gpus_of(group, nproc) if i < len(used) and used[i] > GPU_IDLE_GIB}
 
 
+def host_memory_gib():
+    """Host memory a load may take here, within the container's limit; None where it cannot be told."""
+    try:
+        from calibration.memory import memory_budget_gib
+        return memory_budget_gib()
+    except OSError:
+        return None
+
+
 def misfit(group, size_gib, nproc=None):
     """Why a model of this size cannot be loaded to a destination on this machine, or None when it can.
-    One GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it. What counts is
-    the memory that is free now, and some room is left for the loader's own buffers."""
+    Host memory or one GPU has to hold the whole model; with N ranks each GPU keeps a 1/N share of it.
+    What counts is the memory that is free now, and some room is left for the loader's own buffers."""
     group = place_of(group)
+    if group == "cpu":
+        free = host_memory_gib()
+        if free is not None and size_gib > 0.9 * free:
+            return f"the model is {size_gib:.0f} GiB and {free:.0f} GiB of host memory is available"
+        return None
     gpus = gpu_memory_gib()
     used = gpu_used_gib() or [0.0] * len(gpus)
     free = [total - taken for total, taken in zip(gpus, used)]
@@ -241,10 +255,8 @@ def run_once(a, test, files, remote, env, tag, profile=None):
             return {"failed": why}, None
         model_dir = a.scratch_dir
     if not remote:
-        left = prime(files) if a.warm else evict(files)
-        if a.warm and left < sum(os.path.getsize(f) for f in files):
-            warnings.append(f"only {left / GIB:.1f} GiB in the page cache after priming")
-        if left and not a.warm:
+        left = evict(files)
+        if left:
             warnings.append(f"{left / GIB:.1f} GiB still in the page cache before the run")
     args = [ENTRY, model_dir, "--child", test]
     if a.ref_dir and model_dir == a.model_dir:
@@ -271,7 +283,7 @@ def run_once(a, test, files, remote, env, tag, profile=None):
     load_s = max(x["load_s"] for x in ranks)  # the slowest rank
     if download_s is not None:
         load_s = round(download_s + load_s, 3)
-    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2),
+    r = {"load_s": load_s, "gibps": round(ranks[0]["gib"] / load_s, 2) if load_s else 0.0,
          "cpu_s": round(sum(x["cpu_s"] for x in ranks), 2), "peak_rss_gib": max(x["peak_rss_gib"] for x in ranks)}
     if download_s is not None:
         r["download_s"] = round(download_s, 3)
@@ -302,7 +314,7 @@ def vllm_record(a, test, raw, out, err, warnings):
         return {"failed": f"{len(weights)} of {ranks} ranks reported a weight loading time"}, None
     took = re.findall(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds", out + err)[-ranks:]
     load_s = round(max(weights), 3)
-    r = {"load_s": load_s, "gibps": round(raw["gib"] / load_s, 2), "startup_s": raw["startup_s"]}
+    r = {"load_s": load_s, "gibps": round(raw["gib"] / load_s, 2) if load_s else 0.0, "startup_s": raw["startup_s"]}
     if took:
         r["model_load_s"] = round(max(float(s) for _, s in took), 3)
         r["gpu_gib"] = round(sum(float(g) for g, _ in took), 2)
@@ -330,6 +342,7 @@ def prepare_s3(a):
         if os.path.realpath(a.ref_dir) == os.path.realpath(a.scratch_dir):
             sys.exit("--ref-dir and --scratch-dir are the same directory: the scratch directory is emptied "
                      "before each download, which would delete the reference copy")
+        os.makedirs(a.scratch_dir, exist_ok=True)  # calibration writes its test files here
         return None
     if not shutil.which("s5cmd"):
         sys.exit("an s3:// model needs s5cmd on PATH to fetch a reference copy (pip install s5cmd), "
@@ -352,8 +365,6 @@ def prepare_s3(a):
 
 def main(a):
     remote = is_remote(a.model_dir)
-    if remote and a.warm:
-        sys.exit("--warm applies to local files only")
     fetched = prepare_s3(a) if remote else None
     try:
         run(a, remote)

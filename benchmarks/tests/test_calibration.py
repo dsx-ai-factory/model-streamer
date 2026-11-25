@@ -49,14 +49,14 @@ class CalibrationTest(unittest.TestCase):
     def test_the_budget_is_what_is_left_of_the_cgroup_limit(self):
         with tempfile.TemporaryDirectory() as d:
             paths = [os.path.join(d, n) for n in ("max", "current", "stat")]
-            for path, text in zip(paths, ("8000\n", "6000\n", "anon 1000\nfile 4500\n")):
+            for path, text in zip(paths, ("8000\n", "6000\n", "anon 1000\nfile 4500\nshmem 500\n")):
                 with open(path, "w") as f:
                     f.write(text)
-            self.assertEqual(memory.cgroup_left(*paths, ("file",)), 6500)  # the page cache is given back
+            self.assertEqual(memory.cgroup_left(*paths, "file", "shmem"), 6000)  # the cache is given back, tmpfs is not
             with open(paths[0], "w") as f:
                 f.write("max\n")
-            self.assertIsNone(memory.cgroup_left(*paths, ("file",)))
-        self.assertIsNone(memory.cgroup_left("/no/limit", "/no/usage", "/no/stat", ("file",)))
+            self.assertIsNone(memory.cgroup_left(*paths, "file", "shmem"))
+        self.assertIsNone(memory.cgroup_left("/no/limit", "/no/usage", "/no/stat", "file", "shmem"))
 
 
 if __name__ == "__main__":
