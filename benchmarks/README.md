@@ -124,8 +124,9 @@ time is the time vLLM spends in its weight loading step, on the slowest rank.
 The results also keep vLLM's own "Model loading took" time and the whole
 start-up time.
 
-The report adds the KV cache vLLM then fits on each GPU (`kv_cache_gib`, the
-smallest over the ranks). Whatever a loader leaves on the GPU comes out of it:
+The report gives these tests a table of their own. The results file also keeps
+the KV cache vLLM then fits on each GPU (`kv_cache_gib`, the smallest over the
+ranks). Whatever a loader leaves on the GPU comes out of it:
 a loader that sends on vLLM's process group leaves that group's NCCL
 communicator allocated, about 0.6 GiB per GPU on a B200.
 
@@ -230,8 +231,9 @@ The results and the machine profile are written to the directory you run the
 benchmark from. Their default names are in `.gitignore`.
 
 `bench_results.md` is the report: the test setting (the hardware, the storage's
-measured read rate, the versions of each loader), a table with a row per
-loader giving its load time, throughput and speedup. Speedup is against
+measured read rate, the versions of each loader), and tables with a row per
+loader giving its load time, throughput and speedup: one for local disk, one
+for the loads inside vLLM and one for S3. Speedup is against
 Safetensors to the same destination, and with several GPUs the load time is
 the slowest rank's. To make it again from a results file, or one report from several:
 
@@ -318,8 +320,9 @@ convenience around the commands above, not another way to measure.
 benchmarks/suite.sh /mnt/models s3://bench
 ```
 
-The cases, each with every loader and in vLLM, first from local disk and then
-from S3 (the vLLM tests run from local disk only):
+The cases, each with every loader, first from local disk and then from S3.
+Where `vllm` is installed, the same loads then run inside vLLM, from local
+disk only, as cases of their own:
 
 | Model | Loaded to |
 |---|---|

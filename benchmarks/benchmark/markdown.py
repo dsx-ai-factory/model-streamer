@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Results as a Markdown report: the test setting, then a table of load time, throughput and speedup per
-loader for the models on local disk and one for those on S3. Several results files make one report, a
-block of rows per model.
+loader for the models on local disk, one for the loads inside vLLM and one for the models on S3. Several
+results files make one report, a block of rows per model.
 
     python3 -m benchmark.markdown bench_results.json                 writes bench_results.md again
     python3 -m benchmark.markdown a.json b.json --out report.md      one report for both
@@ -45,37 +45,38 @@ def _destination(out, group):
         return "host memory"
     gpus = out.get("environment", {}).get("gpus") or []
     count = out["settings"].get("nproc", 1) if group in ("dist", "vllm_dist") else 1
-    place = f"{count} × {gpus[0] if gpus else 'GPU'}"
-    return f"vLLM on {place}" if group.startswith("vllm") else place
+    return f"{count} × {gpus[0] if gpus else 'GPU'}"
 
 
-def cases(outs):
-    """[(results file, group, its tests)] in the order they were run: one block of table rows each."""
+def _in_vllm(group):
+    return group.startswith("vllm")
+
+
+def cases(outs, vllm=False):
+    """[(results file, group, its tests)] in the order they were run: one block of table rows each.
+    The loads inside vLLM are apart from the others."""
     found = []
     for out in outs:
-        groups = list(dict.fromkeys(s["group"] for s in out["results"]))
+        groups = list(dict.fromkeys(s["group"] for s in out["results"] if _in_vllm(s["group"]) == vllm))
         found += [(out, g, [s for s in out["results"] if s["group"] == g]) for g in groups]
     return found
 
 
-def table(outs):
-    kv = any("kv_cache_gib" in s for out in outs for s in out["results"])  # a column for vLLM's KV cache
-    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |"
-             + (" KV cache per GPU (GiB) |" if kv else ""),
-             "|---|---|---|---|---|---|" + ("---|" if kv else "")]
-    for out, group, tests in cases(outs):
+def table(outs, vllm=False):
+    lines = ["| Model | Destination | Loader | Load time (s) | Throughput (GiB/s) | Speedup |",
+             "|---|---|---|---|---|---|"]
+    for out, group, tests in cases(outs, vllm):
         best = max([s.get("speedup", 0) for s in tests] + [0])
         for i, s in enumerate(tests):
             first = f"| {_model(out)} | {_destination(out, group)} " if i == 0 else "| | "
             if "gibps" not in s:
-                lines.append(f"{first}| {_loader(s)} | failed | | |" + (" |" if kv else ""))
+                lines.append(f"{first}| {_loader(s)} | failed | | |")
                 continue
             speedup = f'{s["speedup"]:.2f}x' if "speedup" in s else "n/a"
             if best > 1 and s.get("speedup") == best:
                 speedup = f"**{speedup}**"
             invalid = "" if s["ok"] else " (invalid data)"
-            cache = f' {s["kv_cache_gib"]:.2f} |' if "kv_cache_gib" in s else " |" if kv else ""
-            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |{cache}')
+            lines.append(f'{first}| {_loader(s)} | {_load_time(s)}{invalid} | {_num(s["gibps"])} | {speedup} |')
     return "\n".join(lines)
 
 
@@ -86,8 +87,7 @@ def _each(outs, value):
 
 def _gpus(out):
     """The GPUs the tests loaded to: none for a run to host memory only."""
-    used = dict.fromkeys(_destination(out, s["group"]).removeprefix("vLLM on ")
-                         for s in out["results"] if s["group"] != "cpu")
+    used = dict.fromkeys(_destination(out, s["group"]) for s in out["results"] if s["group"] != "cpu")
     return ", ".join(used) or None
 
 
@@ -206,7 +206,7 @@ def setting(outs):
         ("safetensors", versions.get("safetensors") if "safetensors" in ran else None),
         ("instanttensor", versions.get("instanttensor") if "instanttensor" in ran else None),
         ("runai_model_streamer", _streamer(outs, versions)),
-        ("vllm", versions.get("vllm") if any(s["group"].startswith("vllm") for o in outs for s in o["results"])
+        ("vllm", versions.get("vllm") if any(_in_vllm(s["group"]) for o in outs for s in o["results"])
          else None),
         ("torch", versions.get("torch")),
     ]
@@ -230,8 +230,8 @@ def _download_note(group):
 
 
 def results(outs):
-    """The tables: one for the models read from local storage and one for those on S3, each under a
-    heading that names the storage and the rate measured for it."""
+    """The tables: one for the models read from local storage, one for the loads inside vLLM and one for
+    the models on S3, each under a heading that names the storage and the rate measured for it."""
     parts = []
     for on_s3, what, ceiling, how in ((False, "local disk", "disk_direct_read_parallel", "parallel direct read"),
                                       (True, "S3", "s3_get_parallel", "parallel GET with s5cmd")):
@@ -240,7 +240,11 @@ def results(outs):
             continue
         rates = [r for r in (_rate(o, ceiling) for o in group) if r]
         measured = f" ({min(rates):.0f} GiB/s {how})" if rates else ""
-        parts.append(f"## Test on {what}{measured}\n\n{table(group)}" + (_download_note(group) if on_s3 else ""))
+        if cases(group):
+            parts.append(f"## Test on {what}{measured}\n\n{table(group)}" + (_download_note(group) if on_s3 else ""))
+        if cases(group, vllm=True):
+            parts.append(f"## Test in vLLM, from {what}{measured}\n\n{table(group, vllm=True)}\n\n"
+                         "The load time is vLLM's weight loading step, on the slowest rank when there are several.")
     return "\n\n".join(parts)
 
 

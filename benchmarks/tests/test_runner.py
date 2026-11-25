@@ -373,8 +373,13 @@ class RunnerTest(unittest.TestCase):
                          {"trust_remote_code": True})
         with open(os.path.splitext(self.out)[0] + ".md") as f:
             page = f.read()
-        self.assertIn("| vLLM on 1 × H200 | Safetensors | 40.00 | 1.0 | 1.00x | 100.00 |", page)
-        self.assertIn("| Model Streamer | 5.00 | 8.0 | n/a | |", page)  # not a vLLM test: no KV cache
+        # the loads inside vLLM have a table of their own, after the standalone ones
+        alone, _, inside = page.partition("## Test in vLLM, from local disk")
+        self.assertIn("| 1 × H200 | Model Streamer | 5.00 | 8.0 | n/a |", alone)
+        self.assertNotIn("| Safetensors |", alone)
+        self.assertIn("| 1 × H200 | Safetensors | 40.00 | 1.0 | 1.00x |", inside)
+        self.assertIn("| | | Model Streamer | 8.00 | 5.0 | **5.00x** |", inside)
+        self.assertNotIn("KV cache", page)  # kept in the results file only
         self.assertIn("- vllm: 0.34.0", page)
         # with tensor parallelism: the slowest rank's weight loading, and the GPU memory of all ranks
         code, out = self.run_bench(gpus=8, nproc=2, repeats=1, vllm=True, tests="vllm_dist_streamer")

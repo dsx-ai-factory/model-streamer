@@ -10,6 +10,9 @@
 #     DeepSeek-R1     to every GPU
 #     Kimi-K3-REAP    to every GPU, and to host memory
 #
+# and then, where vllm is installed, the same loads inside vLLM: Qwen3-32B on one GPU, the other two with
+# tensor parallelism over every GPU.
+#
 # MODELS_DIR is where the models are. One that is missing there is downloaded, from the bucket when it has
 # the model and from Hugging Face otherwise. A model that the directory has no room for is left out with a
 # note, and the others still run.
@@ -46,15 +49,20 @@ VLLM=vllm_safetensors,vllm_instanttensor,vllm_streamer
 VLLM_DIST=vllm_dist_safetensors,vllm_dist_instanttensor,vllm_dist_streamer
 # What vLLM needs to start these models; none of it changes how the weights are loaded.
 KIMI_VLLM='--vllm-args {"trust_remote_code":true,"limit_mm_per_prompt":{"image":0,"video":0},"max_model_len":4096}'
+# The cases named vllm* load inside vLLM. They are runs of their own, from local disk only, and are left
+# out where vllm is not installed.
 CASES=(
-    "gpu        $QWEN      --tests safetensors_cuda,instanttensor_cuda,streamer_cuda,$VLLM"
-    "multi_gpu  $DEEPSEEK  --nproc NPROC --tests $DIST,$VLLM_DIST"
-    "multi_gpu  $KIMI      --nproc NPROC --tests $DIST,$VLLM_DIST $KIMI_VLLM"
-    "cpu        $KIMI      --tests safetensors_cpu,streamer_cpu"
+    "gpu             $QWEN      --tests safetensors_cuda,instanttensor_cuda,streamer_cuda"
+    "multi_gpu       $DEEPSEEK  --nproc NPROC --tests $DIST"
+    "multi_gpu       $KIMI      --nproc NPROC --tests $DIST"
+    "cpu             $KIMI      --tests safetensors_cpu,streamer_cpu"
+    "vllm_gpu        $QWEN      --tests $VLLM"
+    "vllm_multi_gpu  $DEEPSEEK  --nproc NPROC --tests $VLLM_DIST"
+    "vllm_multi_gpu  $KIMI      --nproc NPROC --tests $VLLM_DIST $KIMI_VLLM"
 )
 
 usage() {
-    sed -n '5,25p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '5,28p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 [ $# -ge 1 ] && [ "${1#-}" = "$1" ] || usage
@@ -94,10 +102,17 @@ there() {  # whether the bucket has all of a model's files
 # only local files download during the run.
 has() { case " $1 " in *" $2 "*) return 0 ;; esac; return 1; }
 free=$(($(df --output=avail -B1 "$MODELS_DIR" | tail -1) / 1073741824))
-cases=() planned= noroom= absent=
+cases=() planned= noroom= absent= vllm=yes
+if ! "$PYTHON" -c 'import importlib.util, sys; sys.exit(importlib.util.find_spec("vllm") is None)'; then
+    echo "leaving the vLLM cases out: vllm is not installed in $PYTHON"
+    vllm=
+fi
 for entry in "${CASES[@]}"; do
     read -r case repo revision files gib options <<< "$entry"
     name=${repo##*/}
+    if [ "$case" != "${case#vllm}" ] && [ -z "$vllm" ]; then
+        continue
+    fi
     if [ "$options" != "${options#*--nproc}" ] && [ "$NPROC" -lt 2 ]; then
         echo "leaving $name to every GPU out: this machine has $NPROC"
         continue
@@ -132,7 +147,8 @@ for entry in ${cases[@]+"${cases[@]}"}; do
         echo "leaving $name out of the S3 half: $S3_ROOT/$name does not hold its $files files"
         absent+=" $name"
     elif [ "$gib" -gt "$room" ]; then
-        echo "leaving $name out of the S3 half: downloading it during the run needs $gib GiB and $SCRATCH_DIR has $room GiB free"
+        echo "leaving $name out of the S3 half: downloading it during the run needs $gib GiB and" \
+            "$SCRATCH_DIR has $room GiB free"
         absent+=" $name"
     fi
 done
@@ -191,8 +207,7 @@ for source in disk ${S3_ROOT:+s3}; do  # every case from local disk, then every 
         # shellcheck disable=SC2086  # the case's options are split on purpose
         if [ "$source" = disk ]; then
             bench "${name}_$case" "$MODELS_DIR/$name" $options "$@"
-        elif ! has "$absent" "$name"; then
-            options=$(echo "$options" | sed -E 's/,?vllm_[a-z_]+//g; s/ --vllm-args [^ ]+//')  # vLLM loads local models
+        elif [ "$case" = "${case#vllm}" ] && ! has "$absent" "$name"; then  # vLLM loads local models
             tuned=${S3_OPTIONS:-}
             [ "$case" = multi_gpu ] && tuned=${S3_MULTI_OPTIONS:-}
             bench "${name}_${case}_s3" "$S3_ROOT/$name" $options $tuned --ref-dir "$MODELS_DIR/$name" \
