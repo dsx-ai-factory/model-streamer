@@ -98,6 +98,10 @@ TEST_F(Creation, WorkersPerMountAboveTheLimitIsCapped)
     EXPECT_EQ(Config::fs_workers_per_mount(), Config::max_fs_workers_per_mount);
     EXPECT_LT(Config::max_fs_workers_per_mount, Config::max_concurrency)
         << "a reader costs more than a thread, so its cap must be the lower one";
+
+    const Config config;
+    EXPECT_EQ(config.fs_workers_per_mount_node, Config::max_fs_workers_per_mount)
+        << "the configuration log must not name a count larger than a mount is given";
 }
 
 // Capping does not floor, and a mount with no readers is a pool with no threads.

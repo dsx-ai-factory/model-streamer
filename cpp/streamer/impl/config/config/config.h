@@ -157,6 +157,11 @@ struct Config
     // the wide type the variables are parsed as, because capping after the narrowing is too late.
     static unsigned to_concurrency(unsigned long value, const char * source);
 
+    // Caps a reader count at max_fs_workers_per_mount and narrows it. Separate from to_concurrency
+    // because the limit is lower, and used by every path that reports or applies the count, so the
+    // startup log cannot name a number larger than the one a mount gets.
+    static unsigned to_fs_workers_per_mount(unsigned long value, const char * source);
+
     static constexpr const char * default_fs_strategy_candidates = "io_uring_direct,libaio_direct,sync_buffered";
 
     // Threads in the synchronous file system pool.

@@ -103,21 +103,9 @@ bool Config::registers_buffers(const std::string & fs_type) const
 
 unsigned Config::fs_workers_per_mount()
 {
-    // CAPPED LOWER THAN THE CONCURRENCIES, because a unit here costs more than a thread: each
-    // reader also builds an io engine with its own ring and a pinned staging slab. The cap is the
-    // last thing between an operator's typo and that allocation, so it is set where a mount can
-    // still be served rather than where the arithmetic stops overflowing.
-    const unsigned asked = static_cast<unsigned>(std::min<unsigned long>(
+    const unsigned configured = to_fs_workers_per_mount(
         utils::getenv<unsigned long>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1UL),
-        std::numeric_limits<unsigned>::max()));
-    const unsigned configured = std::min(asked, max_fs_workers_per_mount);
-
-    if (asked > max_fs_workers_per_mount)
-    {
-        LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << asked << " is above the limit of "
-                     << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
-                     << "an io engine with its own ring, and a pinned staging slab";
-    }
+        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT");
 
     // NODE WIDE, AND DIVIDED, exactly as the queue depth is. The readers of one mount all queue
     // against the same device, so what the storage sees is this number times the processes on the
@@ -166,13 +154,30 @@ unsigned Config::to_concurrency(unsigned long value, const char * source)
     return static_cast<unsigned>(value);
 }
 
+unsigned Config::to_fs_workers_per_mount(unsigned long value, const char * source)
+{
+    // CAPPED LOWER THAN THE CONCURRENCIES, because a unit here costs more than a thread: each
+    // reader also builds an io engine with its own ring and a pinned staging slab. The cap is the
+    // last thing between an operator's typo and that allocation, so it is set where a mount can
+    // still be served rather than where the arithmetic stops overflowing.
+    if (value > max_fs_workers_per_mount)
+    {
+        LOG(WARNING) << "Value " << value << " from " << source << " is above the limit of "
+                     << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
+                     << "an io engine with its own ring, and a pinned staging slab";
+        return max_fs_workers_per_mount;
+    }
+
+    return static_cast<unsigned>(value);
+}
+
 Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_bytesize, size_t fs_sync_read_block_bytesize,
                bool enforce_minimum, size_t fs_async_chunk_bytesize, FsQueueDepth fs_async_queue_depth,
                std::string fs_strategy_candidates, unsigned long object_storage_retry_timeout_seconds,
                std::string fs_no_register_buffers, bool fs_register_buffers, bool fs_direct_async,
                unsigned long fs_workers_per_mount_node) :
-    fs_workers_per_mount_node(to_concurrency(fs_workers_per_mount_node,
-                                             "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT")),
+    fs_workers_per_mount_node(to_fs_workers_per_mount(fs_workers_per_mount_node,
+                                                      "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT")),
     concurrency(concurrency),
     s3_concurrency(s3_concurrency),
     s3_block_bytesize(s3_block_bytesize),
