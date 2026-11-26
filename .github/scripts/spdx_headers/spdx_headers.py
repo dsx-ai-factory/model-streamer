@@ -43,6 +43,8 @@ SKIP = [
     "third_party_notices/licenses/libaio/COPYING",
     "third_party_notices/licenses/libxml2/Copyright",
     "third_party_notices/licenses/nlohmann-json/LICENSE.MIT",
+    # A patch against aws-sdk-cpp: its context lines are Amazon's code, and a patch has no comment syntax.
+    ".devcontainer/scripts/patches/aws-sdk-cpp-1.11.929-s3crt-recv-buffer.patch",
 ]
 
 # Comment syntax per file type. A file type in neither list is reported, never skipped silently.
