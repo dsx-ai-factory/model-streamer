@@ -112,6 +112,8 @@ class LibstreamerDLLWrapper:
         self.fn_runai_fs_readers_per_mount = self.lib.runai_file_streamer_fs_readers_per_mount
         self.fn_runai_fs_readers_per_mount.argtypes = [
             ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_char_p),
+            ctypes.c_uint,
             ctypes.POINTER(ctypes.c_uint),
         ]
         self.fn_runai_fs_readers_per_mount.restype = ctypes.c_int

@@ -838,18 +838,51 @@ TEST(ReadersPerMount, Reports_The_Resolved_Count)
     ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     unsigned readers = 0;
-    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &readers),
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &readers),
               static_cast<int>(common::ResponseCode::Success));
     EXPECT_EQ(readers, 4u) << "8 readers over 2 processes is 4 each";
 
     // A null streamer. Rejected, and the count must still be usable.
     readers = 0;
-    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(nullptr, &readers), invalid);
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(nullptr, nullptr, 0, &readers), invalid);
     EXPECT_EQ(readers, 1u) << "the count is written before the handle is checked, so an error exit "
                               "still leaves a usable one";
 
     // Nowhere to write, so this only reports.
-    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr), invalid);
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, nullptr), invalid);
+
+    // Paths promised but not given.
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 2, &readers), invalid);
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
+// The PATHS must reach the library. Every other call in these tests passes none, so a marshalling
+// loop that dropped them would answer identically and prove nothing.
+TEST(ReadersPerMount, The_Paths_Reach_The_Library)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::UnsetEnv configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
+
+    // tmpfs, which the synchronous reader serves: it builds no reader per mount, so it answers 1 -
+    // deliberately NOT what the same call answers with no path at all.
+    utils::temp::Dir dir("/dev/shm");
+    utils::temp::File file(dir.path, utils::random::string(), utils::random::buffer(16));
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned without = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &without),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(without, 8u) << "no path, so the default depth answers and feeds all 8";
+
+    const char * path = file.path.c_str();
+    unsigned with = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &path, 1, &with),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(with, 1u) << "the path names a mount the synchronous reader serves";
 
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
@@ -866,7 +899,7 @@ TEST(ReadersPerMount, Reports_What_The_Budget_Feeds)
     ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
 
     unsigned readers = 0;
-    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &readers),
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &readers),
               static_cast<int>(common::ResponseCode::Success));
 
     // Every reader runs at a depth of at least 3, and the default node-wide budget of 64 feeds 21 of

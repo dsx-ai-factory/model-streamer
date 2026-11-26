@@ -260,18 +260,24 @@ def runai_response_str(response_code: int) -> str:
     return dll.fn_runai_response_str(response_code)
 
 
-def runai_fs_readers_per_mount(streamer) -> int:
-    """How many asynchronous readers this process gives one mount.
+def runai_fs_readers_per_mount(streamer, paths: List[str]) -> int:
+    """How many asynchronous readers this process builds for `paths`.
 
     Asked of the library rather than read from the environment: the setting is node wide and divided
     between the processes on the node, and a second copy of that rule would drift from the one the
     readers are built with.
 
+    Per REQUEST, like the direct-I/O block, because the queue depth is resolved per file system type
+    and the reader count follows from it. The library returns the total over the mounts the request
+    spans: each builds its own readers, and they all fill one ring.
+
     Per PROCESS, so a ring sized from it matches the readers that fill it.
     """
+    array = (ctypes.c_char_p * len(paths))(*[p.encode("utf-8") for p in paths])
     readers = ctypes.c_uint(0)
 
-    error_code = dll.fn_runai_fs_readers_per_mount(streamer, ctypes.byref(readers))
+    error_code = dll.fn_runai_fs_readers_per_mount(streamer, array, len(paths),
+                                                   ctypes.byref(readers))
 
     # Raised, unlike the block probe. That one reports a mount it could not measure, which is a
     # condition of the world; here the only codes are a handle or a pointer this binding got wrong,

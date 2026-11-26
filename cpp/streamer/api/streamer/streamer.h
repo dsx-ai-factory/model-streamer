@@ -199,18 +199,31 @@ int runai_file_streamer_probe_direct_block_size(
     size_t *      out_block
 );
 
-// How many asynchronous readers this process gives one mount.
+// How many asynchronous readers this process builds for `paths`.
 //
 // The setting is node wide and divided between the processes on the node, so a caller cannot work
 // this out from the environment without repeating that rule. A ring sized from it matches the
 // readers that fill it.
 //
-//  out_readers  always set; 1 where it could not be resolved.
+// Path-aware because the queue depth is resolved per file system type and the reader count follows
+// from it: a mount whose type carries its own depth builds a different number. It returns the TOTAL
+// over the mounts these paths span, since each builds its own readers and they all fill one ring.
+// Object-storage URIs name no mount and are ignored.
 //
-// ret is Success, or InvalidParameterError for a null streamer or a null out_readers.
+// It reports 1 where these files are served by the synchronous reader and no reader is built per
+// mount at all - RUNAI_STREAMER_FS_STRATEGY=sync_buffered, a memory-backed mount, or a mount whose
+// engine died. Where no path names a readable mount, including when none is given, the default
+// queue depth answers.
+//
+//  out_readers  always set, and never 0; 1 on every error exit.
+//
+// ret is Success, or InvalidParameterError for a null streamer, null paths with num_paths above
+// zero, or a null out_readers.
 int runai_file_streamer_fs_readers_per_mount(
-    void *     streamer,
-    unsigned * out_readers
+    void *        streamer,
+    const char ** paths,
+    unsigned      num_paths,
+    unsigned *    out_readers
 );
 
 // List files at the given object storage prefix.

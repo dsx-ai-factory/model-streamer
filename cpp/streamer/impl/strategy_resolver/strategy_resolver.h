@@ -86,6 +86,14 @@ class StrategyResolver
 
     bool is_resolved() const;
 
+    // Whether an ASYNCHRONOUS reader can still serve this streamer. Resolved, that is what was
+    // resolved; before that it is whether any candidate is asynchronous - a caller sizing a ring for
+    // those readers has to ask BEFORE the first submission, which is what resolves the strategy.
+    //
+    // A malformed list answers true: resolve() rejects it and fails the submission with a message
+    // naming the variable, and refusing here would replace that with a stranger failure.
+    bool may_be_async() const;
+
     // The list resolve() actually walked, for logging and for set_candidates' second rule.
     std::string resolved_from() const;
 

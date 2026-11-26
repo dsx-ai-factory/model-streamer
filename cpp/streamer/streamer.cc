@@ -352,7 +352,11 @@ int runai_file_streamer_probe_direct_block_size(
     return static_cast<int>(common::ResponseCode::UnknownError);
 }
 
-int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_readers)
+int runai_file_streamer_fs_readers_per_mount(
+    void *        streamer,
+    const char ** paths,
+    unsigned      num_paths,
+    unsigned *    out_readers)
 {
     if (out_readers == nullptr)
     {
@@ -365,12 +369,23 @@ int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_rea
 
     try
     {
-        if (streamer == nullptr)
+        auto s = static_cast<impl::Streamer *>(streamer);
+        if (s == nullptr || (num_paths != 0 && paths == nullptr))
         {
             return static_cast<int>(common::ResponseCode::InvalidParameterError);
         }
 
-        *out_readers = static_cast<impl::Streamer *>(streamer)->fs_readers_per_mount();
+        std::vector<std::string> list;
+        list.reserve(num_paths);
+        for (unsigned i = 0; i < num_paths; ++i)
+        {
+            if (paths[i] != nullptr)
+            {
+                list.emplace_back(paths[i]);
+            }
+        }
+
+        *out_readers = s->fs_readers_per_mount(list);
         return static_cast<int>(common::ResponseCode::Success);
     }
     catch (const common::Exception & e)

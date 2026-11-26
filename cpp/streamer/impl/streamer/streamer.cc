@@ -202,9 +202,60 @@ AsyncIoCounters Streamer::async_counters() const
     return _router.counters();
 }
 
-unsigned Streamer::fs_readers_per_mount() const
+unsigned Streamer::fs_readers_per_mount(const std::vector<std::string> & paths)
 {
-    return AsyncIoSettings::readers_within(Config::fs_workers_per_mount(),
+    // NO ASYNCHRONOUS READER, NO READERS AT ALL. The synchronous reader serves every mount from one
+    // shared pool sized by RUNAI_STREAMER_CONCURRENCY, so nothing here builds a reader per mount and
+    // a ring grown for them would be grown for nobody. The first exclusion groups() makes.
+    if (!_router.may_be_async())
+    {
+        return 1;
+    }
+
+    const unsigned asked = Config::fs_workers_per_mount();
+
+    // Filesystem paths only, for the reason direct_block_for gives: an object-storage URI names no
+    // mount, and stat'ing "s3:/" would report the current directory's.
+    std::vector<std::string> filesystem;
+    filesystem.reserve(paths.size());
+    for (const auto & path : paths)
+    {
+        if (try_parse_uri(path) == nullptr)
+        {
+            filesystem.push_back(path);
+        }
+    }
+
+    const auto mounts = _router.depths_for(filesystem, _config->fs_async_queue_depth);
+
+    // SUMMED over the mounts, because they all drain into ONE ring and the caller multiplies this
+    // by a per-reader budget. A request spanning two mounts builds an engine for each, and their
+    // readers fill the same slots.
+    //
+    // It can over-report where two mounts share an engine, which BackendPools does once its engine
+    // cap is reached. Erring that way on purpose: an over-sized ring costs memory, while an
+    // under-sized one leaves readers waiting on slots, which costs the read rate.
+    unsigned readers = 0;
+    for (const auto depth : mounts.depths)
+    {
+        readers += AsyncIoSettings::readers_within(asked, depth);
+    }
+
+    if (readers != 0)
+    {
+        return readers;
+    }
+
+    // Every mount we read serves these files from the synchronous pool, so no reader is built for
+    // them however deep the queue is.
+    if (mounts.served_by_the_sync_reader)
+    {
+        return 1;
+    }
+
+    // Nothing named a mount we could read: no path, object storage only, or nothing stattable. The
+    // default depth is the only answer left, and it is the one the pool uses for an unlisted type.
+    return AsyncIoSettings::readers_within(asked,
                                            _config->fs_async_queue_depth.default_value());
 }
 

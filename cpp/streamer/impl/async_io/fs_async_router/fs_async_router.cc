@@ -297,6 +297,63 @@ bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device,
     return true;
 }
 
+bool FsAsyncRouter::may_be_async() const
+{
+    return _strategy_resolver->may_be_async();
+}
+
+FsAsyncRouter::MountDepths FsAsyncRouter::depths_for(const std::vector<std::string> & paths,
+                                                     const FsQueueDepth & depth)
+{
+    MountDepths out;
+    std::set<dev_t> seen;
+
+    // Directories already answered. MountCapabilities caches by st_dev, which saves the statfs but
+    // NOT the stat that finds st_dev - so without this a 200-shard model stats its directory 200
+    // times, and an unreadable one logs 200 errors for a condition swallowed below. The same map
+    // groups() keeps, and for the same reason.
+    std::set<std::string> directories;
+
+    for (const auto & path : paths)
+    {
+        try
+        {
+            const auto directory = directory_of(path);
+            if (!directories.insert(directory).second)
+            {
+                continue;
+            }
+
+            const auto capability = _environment.mount ? _environment.mount(directory)
+                                                       : _mounts.of_path(directory);
+
+            if (!seen.insert(capability.dev).second)
+            {
+                continue;
+            }
+
+            // The other two exclusions groups() makes, in its order: a mount whose engine died is
+            // dropped to the synchronous reader for good, and a memory-backed one never had an
+            // engine. Either way it builds no reader, so it has no depth to report - but it was
+            // read, which is not the same as a path that told us nothing.
+            if (_dead_mounts->contains(capability.dev) || capability.memory_backed)
+            {
+                out.served_by_the_sync_reader = true;
+                continue;
+            }
+
+            out.depths.push_back(depth.for_type(capability.fs_type));
+        }
+        catch (const common::Exception &)
+        {
+            // An unstattable directory names no mount; another path may still answer.
+            continue;
+        }
+    }
+
+    return out;
+}
+
 common::ResponseCode FsAsyncRouter::direct_block_for(const std::vector<std::string> & paths,
                                                      size_t & out_block)
 {

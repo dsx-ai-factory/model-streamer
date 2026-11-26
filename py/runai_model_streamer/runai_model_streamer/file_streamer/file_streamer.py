@@ -484,7 +484,8 @@ class FileStreamer:
                 # grow the ring for threads nothing builds. Any such path is enough: the rest of the
                 # request cannot be drained by readers it does not have.
                 readers = (1 if any(reads_object_storage(fc.path) for fc in file_stream_requests)
-                           else runai_fs_readers_per_mount(self.streamer))
+                           else runai_fs_readers_per_mount(
+                               self.streamer, [fc.path for fc in file_stream_requests]))
 
                 # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without
                 # it is a size for a packing the ring cannot produce.
