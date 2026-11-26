@@ -74,9 +74,17 @@ struct ThreadPool
         _handler(handler)
     {
         _threads.reserve(size);
-        for (unsigned i = 0; i < size; ++i)
+        try
         {
-            _threads.emplace_back(std::bind(routine, std::ref(*this)));
+            for (unsigned i = 0; i < size; ++i)
+            {
+                _threads.emplace_back(std::bind(routine, std::ref(*this)));
+            }
+        }
+        catch (...)
+        {
+            release_started();
+            throw;
         }
     }
 
@@ -88,10 +96,18 @@ struct ThreadPool
     {
         _workers.reserve(size);
         _threads.reserve(size);
-        for (unsigned i = 0; i < size; ++i)
+        try
         {
-            _workers.emplace_back(factory());
-            _threads.emplace_back(std::bind(worker_routine, std::ref(*this), _workers.back().get()));
+            for (unsigned i = 0; i < size; ++i)
+            {
+                _workers.emplace_back(factory());
+                _threads.emplace_back(std::bind(worker_routine, std::ref(*this), _workers.back().get()));
+            }
+        }
+        catch (...)
+        {
+            release_started();
+            throw;
         }
     }
 
@@ -199,6 +215,14 @@ struct ThreadPool
     std::atomic<bool> stopped;
 
  private:
+    // A throw from a constructor skips the destructor, so the threads already started would be joined
+    // while parked on the blocking pop, which only stop() wakes. Call this before rethrowing.
+    void release_started()
+    {
+        stopped = true;
+        _deque.stop(_threads.size());
+    }
+
     Handler _handler;
     Deque<Request> _deque;
     std::vector<std::unique_ptr<Worker<Request>>> _workers;
