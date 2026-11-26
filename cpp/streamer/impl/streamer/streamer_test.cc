@@ -258,6 +258,44 @@ TEST(ReadersPerMount, TwoMountsReportBothSetsOfReaders)
         << "both engines read into the same ring, so both sets of readers count";
 }
 
+// libaio has no asynchronous buffered mode, so a mount that cannot serve O_DIRECT has its files
+// read synchronously and builds no reader. Only knowable once the strategy is resolved, which the
+// first submission does - so this reports the full count before that, and the real one after.
+TEST(ReadersPerMount, LibaioWithoutODirectBuildsNone)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), std::string("libaio_direct"));
+
+    const auto data = utils::random::buffer(8192);
+    utils::temp::File file(data);
+
+    std::vector<char> dst(data.size() + posix_io::DirectBlockSize);
+    char * congruent = dst.data() + ((-reinterpret_cast<uintptr_t>(dst.data()))
+                                     % posix_io::DirectBlockSize);
+
+    Streamer::Environment environment;
+    environment.availability = [](posix_io::Strategy) { return common::ResponseCode::Success; };
+    environment.direct = [](dev_t, const std::string &) { return posix_io::DirectSupport::No; };
+    Streamer streamer(Config(), std::move(environment));
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ file.path }), 8u)
+        << "before the first submission nobody knows libaio will win";
+
+    // Resolve the strategy, exactly as a first request does.
+    std::vector<FileRanges> request(1);
+    request[0].path = file.path;
+    request[0].ranges.push_back(ReadRange{ 0, data.size(), congruent });
+    SubmissionId submission_id = 0;
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id),
+              common::ResponseCode::Success);
+    EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
+    ASSERT_FALSE(streamer.async_pool_used()) << "the mount really did go to the synchronous reader";
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ file.path }), 1u)
+        << "resolved to libaio on a mount without O_DIRECT, so no reader is built";
+}
+
 // sync_buffered serves every mount from ONE shared pool and builds no asynchronous reader at all,
 // so a mount's depth describes nobody. Asked before the first submission, which is when a ring is
 // sized, so the answer comes from the candidate list rather than from a resolved strategy.

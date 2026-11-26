@@ -115,6 +115,9 @@ class FsAsyncRouter
     // reader will serve every mount, so no mount builds readers of its own.
     bool may_be_async() const;
 
+    // Whether this mount can serve O_DIRECT for `path`. Unknown counts as yes.
+    bool serves_direct(dev_t device, const std::string & path);
+
     // What depths_for found. `depths` and `served_by_the_sync_reader` are separate answers, because
     // "no mount could be read" and "every mount read goes to the synchronous reader" call for
     // different numbers from a caller sizing a ring: nothing known, against nothing to size for.
