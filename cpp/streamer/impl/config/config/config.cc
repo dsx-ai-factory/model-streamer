@@ -126,8 +126,12 @@ unsigned Config::fs_workers_per_mount()
 
     // Logged rather than applied silently, as the depth does: a number that never materialises is
     // worse than one that is rejected. Covers both directions - the floor above raises a share of
-    // zero, and the division drops any remainder. Zero is read as one, so it is not reported.
-    if (configured > 0 && node_total != configured)
+    // zero, and the division drops any remainder.
+    //
+    // ONLY WHERE SOMEBODY ASKED. Unset, this reads one, and one per process over N processes is N
+    // for the mount - a deviation from a number nobody named. The assigner calls this once per
+    // submission, so reporting it there would warn on every request of every default run.
+    if (utils::env_exists("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT") && node_total != configured)
     {
         LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << configured << " over " << processes
                      << " processes on this node is " << each << " each, so a mount is read by "
