@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Measure what this machine can physically do, and write it to a JSON machine profile.
 
-Linux only. Standard library only; torch is used for the host-to-GPU numbers when it is importable.
+Linux only. The disk ceilings are read with fio, which has to be on PATH unless --skip has disk; torch is
+used for the host-to-GPU numbers when it is importable.
 
     python3 calibrate.py --path /mnt/models --out machine_profile.json
 

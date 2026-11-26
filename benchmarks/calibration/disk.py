@@ -1,82 +1,72 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Storage: direct and cold buffered reads of temporary files, one thread per file."""
+"""Storage: direct and cold buffered reads of temporary files with fio, one job per file."""
+import json
 import os
 import shutil
+import subprocess
 
 from . import GIB
 from benchmark.files import evict
-from .memory import Region, first_touch, run_threads
 
-CHUNK = 16 << 20
-BLOCK = 64 << 20
-
-
-def make_files(directory, count, size):
-    """Random data, so storage that compresses or dedups cannot flatter the result."""
-    paths = []
-    for i in range(count):
-        p = os.path.join(directory, f"calib_{i}.bin")
-        with open(p, "wb", buffering=0) as f:
-            for _ in range(size // BLOCK):
-                f.write(os.urandom(BLOCK))  # new data for every block: a repeated one can be deduplicated
-            os.fsync(f.fileno())
-        paths.append(p)
-    return paths
+BLOCK = 16 << 20  # what one read asks for, and what a file's size is a multiple of
+NAME = "calib_$jobnum.bin"  # fio gives every job its own file
 
 
-def read_file(path, view, odirect):
-    fd = os.open(path, os.O_RDONLY | (os.O_DIRECT if odirect else 0))
-    try:
-        size, off = os.fstat(fd).st_size, 0
-        while off < size:
-            n = os.preadv(fd, [view[off:min(off + CHUNK, size)]], off)
-            if n <= 0:
-                break
-            off += n
-        return off
-    finally:
-        os.close(fd)
+def fio(directory, jobs, file_size, *options):
+    """Run fio with one job per file and return its report for the jobs together."""
+    cmd = ["fio", "--name=calib", f"--directory={directory}", f"--filename_format={NAME}", f"--numjobs={jobs}",
+           f"--size={file_size}", f"--bs={BLOCK}", "--ioengine=psync", "--group_reporting", "--output-format=json",
+           *options]
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode:
+        raise RuntimeError(f"fio failed: {(p.stderr or p.stdout)[-400:]}")
+    return json.loads(p.stdout[p.stdout.index("{"):])["jobs"][0]
 
 
-def read_files(paths, region, odirect):
-    size = os.path.getsize(paths[0])
+def read_rate(report):
+    """GiB/s of a read job, from the bytes and the time fio counted itself."""
+    read = report["read"]
+    if report.get("error") or not read["runtime"]:
+        raise RuntimeError(f"fio read nothing it could time: error {report.get('error')}")
+    return read["io_bytes"] / GIB / (read["runtime"] / 1000)
 
-    def one(i):
-        return read_file(paths[i], region.view[i * size:(i + 1) * size], odirect)
 
-    return sum(run_threads(one, range(len(paths)), len(paths)))
-
-
-def measure(meter, path, files, file_size, threads):
-    """disk_direct_read_parallel   O_DIRECT, one thread per file, into memory already faulted in
-    disk_direct_read_single     one thread, one file (the queue depth 1 floor)
-    disk_direct_read_fresh_dest the same as parallel, into memory not yet touched (the kernel faults it
-                                in during the read - what a loader that allocates fresh buffers sees)
+def measure(meter, path, files, file_size):
+    """disk_direct_read_parallel   O_DIRECT, one job per file
+    disk_direct_read_single     one job, one file (the queue depth 1 floor)
     disk_buffered_read_cold     buffered reads after evicting the page cache"""
-    total = file_size * files
-    print(f"disk: {files} x {file_size / GIB:.2f} GiB on {path}")
+    print(f"disk: {files} x {file_size / GIB:.2f} GiB on {path}, read with {version()}")
     directory = os.path.join(path, f".streamer_calib_{os.getpid()}")
     os.makedirs(directory)
     try:
-        paths = make_files(directory, files, file_size)
-        warm = Region(total)
-        first_touch(warm, threads)
+        # random data, new for every block, so storage that compresses or dedups cannot flatter the result
+        fio(directory, files, file_size, "--rw=write", "--direct=0", "--refill_buffers", "--end_fsync=1")
+        paths = [os.path.join(directory, NAME.replace("$jobnum", str(i))) for i in range(files)]
+
+        def reads(name, jobs, direct, before=None):
+            values = []
+            for _ in range(meter.repeats):
+                if before:
+                    before()
+                values.append(read_rate(fio(directory, jobs, file_size, "--rw=read", f"--direct={direct}")))
+            meter.record(name, values)
+
         try:
             os.close(os.open(paths[0], os.O_RDONLY | os.O_DIRECT))
-            direct = True
+            reads("disk_direct_read_parallel", files, 1)
+            reads("disk_direct_read_single", 1, 1)
         except OSError as e:
-            direct = False
             meter.notes.append(f"O_DIRECT is not supported on this filesystem ({e}); direct ceilings are null")
-        if direct:
-            meter.rate("disk_direct_read_parallel", lambda: read_files(paths, warm, True), total)
-            meter.rate("disk_direct_read_single", lambda: read_file(paths[0], warm.view[:file_size], True), file_size)
-            meter.rate("disk_direct_read_fresh_dest", lambda: read_files(paths, Region(total), True), total)
 
         def cold():
             if evict(paths):
                 meter.notes.append("page cache could not be fully evicted before a buffered read")
 
-        meter.rate("disk_buffered_read_cold", lambda: read_files(paths, warm, False), total, before=cold)
+        reads("disk_buffered_read_cold", files, 0, before=cold)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def version():
+    return subprocess.run(["fio", "--version"], capture_output=True, text=True).stdout.strip() or "fio"

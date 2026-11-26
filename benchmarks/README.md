@@ -23,6 +23,8 @@ data fails.
     still runs. It pins its own `torch`, so installing it can change the
     `torch` of that environment.
   - `huggingface_hub` is for `suite.sh`, to download a model that is missing.
+- [`fio`](https://github.com/axboe/fio) on `PATH`, for the disk ceilings:
+  `apt-get install fio`. Without it `bench.py` runs without ceilings.
 - torch built with NCCL and one GPU per rank, for the distributed tests
 
 The benchmark measures the `runai_model_streamer` that this Python imports and
@@ -168,18 +170,16 @@ host-to-GPU rates that `calibrate.py` measures. On the first run `bench.py`
 calibrates on the model's directory and keeps the profile in
 `machine_profile.json`, which later runs on the same host and storage reuse.
 Calibration writes 16 GiB of temporary files to that directory and removes
-them, and uses about 40 GiB of memory; it uses less of both on a smaller
-machine.
+them, and uses about 12 GiB of memory, less on a smaller machine.
 
-Calibration needs only the standard library; torch is used for the
-host-to-GPU rates when it is installed. Each ceiling is the median of three
-runs, in GiB/s:
+The disk ceilings are read with `fio`, in 16 MiB reads with its synchronous
+engine; torch is used for the host-to-GPU rates when it is installed. Each
+ceiling is the median of three runs, in GiB/s:
 
 | Ceiling | What is measured |
 |---|---|
-| `disk_direct_read_parallel` | O_DIRECT reads, one thread per file, into memory already faulted in |
-| `disk_direct_read_fresh_dest` | The same into untouched memory, so the kernel faults it in during the read |
-| `disk_direct_read_single` | One thread, one file |
+| `disk_direct_read_parallel` | O_DIRECT reads, one job per file |
+| `disk_direct_read_single` | One job, one file |
 | `disk_buffered_read_cold` | Buffered reads after evicting the page cache |
 | `host_first_touch_1t`, `_nt` | First touch of fresh memory, with one and many threads |
 | `host_memcpy_1t`, `_nt` | Memory-to-memory copy, with one and many threads |

@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import calibration  # noqa: E402
-from calibration import memory  # noqa: E402
+from calibration import disk, memory  # noqa: E402
 
 
 class CalibrationTest(unittest.TestCase):
@@ -45,6 +45,14 @@ class CalibrationTest(unittest.TestCase):
             meter.rate("disk_buffered_read_cold", lambda: order.append("read"), 1 << 30,
                        before=lambda: order.append("evict"))
         self.assertEqual(order, ["evict", "read"] * 2)
+
+    def test_a_disk_rate_is_the_bytes_over_the_time_fio_counted(self):
+        report = {"error": 0, "read": {"io_bytes": 16 << 30, "runtime": 250}}
+        self.assertEqual(disk.read_rate(report), 64.0)
+        for bad in ({"error": 5, "read": {"io_bytes": 1, "runtime": 1}},
+                    {"error": 0, "read": {"io_bytes": 0, "runtime": 0}}):
+            with self.assertRaises(RuntimeError):
+                disk.read_rate(bad)
 
     def test_the_budget_is_what_is_left_of_the_cgroup_limit(self):
         with tempfile.TemporaryDirectory() as d:

@@ -67,6 +67,10 @@ def get_profile(a, remote):
         # a short sweep over part of the model: enough for a ceiling without reading a large model many times
         cmd += ["--s3-uri", a.model_dir, "--s3-max-gib", str(S3_CALIBRATE_GIB), "--s3-concurrency", "4,8",
                 "--s3-part-mib", "8,32"]
+    if not shutil.which("fio"):
+        print(f"no machine profile, and calibrating the disk needs fio on PATH (apt-get install fio): {hint}",
+              file=sys.stderr)
+        return None, None
     if not os.access(where, os.W_OK):
         print(f"no machine profile, and {where} cannot be written to calibrate on it: {hint}", file=sys.stderr)
         return None, None
