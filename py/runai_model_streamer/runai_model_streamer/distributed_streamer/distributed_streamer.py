@@ -32,6 +32,8 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     RUNAI_STREAMER_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
     RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME,
+    RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME,
     DEFAULT_MEMORY_LIMIT_STRING,
 )
 
@@ -348,9 +350,10 @@ def agreed_slot_shape(min_free_bytes: Optional[int],
     collectives its peers never post, and the device ring no longer takes one from anybody: its
     depth is the two slots that let reading and sending overlap.
 
-    EVERY INPUT IS READ PER RANK, and two of them still move the answer: the device memory limit
-    and its fraction, which only ever LOWER what the data asked for. A rank given different ones
-    sizes differently, which is what check_the_group_agreed is for.
+    EVERY INPUT IS READ PER RANK, and four of them still move the answer: the ring's minimum total
+    and slot count, which say what the data asks for, and the device memory limit and its fraction,
+    which only ever LOWER it. A rank given different ones sizes differently, which is what
+    check_the_group_agreed is for.
 
     min_free_bytes may be None, where no agreement was reached - a group whose device torch cannot
     measure, or one not using a device backend at all. There is then no ring to agree on, and the
@@ -1341,10 +1344,10 @@ class _distributedStreamer:
     def check_the_group_agreed(self) -> None:
         """Every rank packs to the same slot size, or they read each other at the wrong offsets.
 
-        The inputs are meant to be equal everywhere, but some are read per rank - the ring depth
-        setting, the device memory limit and its fraction - and any of them moves the slot size. A
-        rank that packed differently is not an error anyone would see: the load finishes and the
-        weights are wrong.
+        The inputs are meant to be equal everywhere, but some are read per rank - the ring's
+        minimum total and slot count, the device memory limit and its fraction - and any of them
+        moves the slot size. A rank that packed differently is not an error anyone would see: the
+        load finishes and the weights are wrong.
 
         Zero where this rank stages through host memory, so a group that split between the two
         paths is caught here rather than in a collective its peers never post.
@@ -1363,7 +1366,9 @@ class _distributedStreamer:
                 f"the ranks of this group did not agree on the slot size - {smallest} to {largest} "
                 f"bytes - so they would lay their ranges out differently. It is part of the "
                 f"contract between ranks, not a local choice: check that every rank was given the "
-                f"same {RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} and "
+                f"same {RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME}, "
+                f"{RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME}, "
+                f"{RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME} and "
                 f"{RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME}"
             )
 
