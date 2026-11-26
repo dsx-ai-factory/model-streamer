@@ -47,6 +47,12 @@ from humanize import naturalsize
 
 import logging
 
+
+def reads_object_storage(path: str) -> bool:
+    """Whether this path is served by the object storage pool rather than a file system mount."""
+    return is_s3_path(path) or is_gs_path(path) or is_azure_path(path)
+
+
 logger = logging.getLogger(__name__)
 
 # Resolved on FIRST USE, not at import. get_s3_credentials_module() already looks the module up
@@ -471,10 +477,17 @@ class FileStreamer:
             # ASKED OF THE LIBRARY, not read from the environment: the reader count is node wide
             # and divided between the processes on the node, and a ring sized from a second copy of
             # that rule would drift from the readers that fill it.
+            #
+            # ONLY WHERE THOSE READERS FILL THE RING. Object storage is served by its own pool,
+            # sized by RUNAI_STREAMER_OBJ_CONCURRENCY, and a file system reader count there would
+            # grow the ring for threads nothing builds. Any such path is enough: the rest of the
+            # request cannot be drained by readers it does not have.
+            readers = (1 if any(reads_object_storage(fc.path) for fc in file_stream_requests)
+                       else runai_fs_readers_per_mount(self.streamer))
             sizing = (slot_shape if slot_shape is not None
                       else device_ring_sizing(free, file_stream_requests,
                                               SlotBounds(max_ranges=max_ranges_per_slot),
-                                              readers=runai_fs_readers_per_mount(self.streamer)))
+                                              readers=readers))
 
         if sizing is not None:
             buffer_size, num_buffers = sizing

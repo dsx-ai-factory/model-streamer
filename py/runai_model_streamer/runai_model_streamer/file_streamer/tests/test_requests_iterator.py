@@ -41,6 +41,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     host_ring_sizing,
 )
 from runai_model_streamer.file_streamer.yield_order import YieldOrder
+from runai_model_streamer.file_streamer.file_streamer import reads_object_storage
 
 
 class TestRingSizing(unittest.TestCase):
@@ -1820,3 +1821,22 @@ class TestTheRingNeverOutgrowsItsStream(unittest.TestCase):
         comes down to three rather than reserving a slot nothing can reach."""
         size, slots = device_ring_sizing(64 << 20, self.files([6 << 20] * 3))
         self.assertEqual((size, slots), (6 << 20, 3))
+
+
+class TestTheReaderCountOnlyGrowsAFileSystemRing(unittest.TestCase):
+    """The per-reader growth is for the readers that FILL the ring.
+
+    Object storage is served by its own pool, sized by RUNAI_STREAMER_OBJ_CONCURRENCY. A file
+    system reader count there grows the ring for threads nothing builds."""
+
+    def test_an_object_storage_path_is_recognised(self):
+        for path in ("s3://bucket/model/f.safetensors",
+                     "gs://bucket/model/f.safetensors",
+                     "az://account/model/f.safetensors"):
+            with self.subTest(path=path):
+                self.assertTrue(reads_object_storage(path))
+
+    def test_a_file_system_path_is_not(self):
+        for path in ("/mnt/models/f.safetensors", "relative/f.safetensors", "/s3/not-a-uri"):
+            with self.subTest(path=path):
+                self.assertFalse(reads_object_storage(path))
