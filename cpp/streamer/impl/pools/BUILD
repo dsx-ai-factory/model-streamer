@@ -10,6 +10,7 @@ runai_cc_auto_library(
         "//utils/env",
         "//utils/logging",
         "//utils/threadpool",
+        "//streamer/impl/async_io/async_io_settings",
         "//streamer/impl/config/config",
         "//streamer/impl/workload",
     ],

@@ -164,7 +164,7 @@ TEST(BackendPools, SharedGroupsDoNotAddReaders)
 }
 
 // A reader must always have a request it may issue, however many readers share a shallow budget.
-TEST(BackendPools, AReaderNeverGetsAZeroDepth)
+TEST(BackendPools, MoreReadersThanTheBudgetFeedsAreReducedToIt)
 {
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
 
@@ -180,11 +180,32 @@ TEST(BackendPools, AReaderNeverGetsAZeroDepth)
     BackendPools pools(run, recording, noop_factory, 2, 3);
     pools.push_async(makedev(8, 1), 0 /* block */, 4, true /* register buffers */, true /* async direct */, Workload{});
 
-    ASSERT_EQ(depths.size(), 8u);
-    for (const auto depth : depths)
+    // Eight readers on a depth of four would each be raised to MinDepth and put 24 requests in
+    // flight where the mount allows 4. The reader count comes down instead.
+    ASSERT_EQ(depths.size(), 1u) << "the budget feeds one reader at the engine's minimum, not eight";
+    EXPECT_EQ(depths.front(), 4u) << "and that reader gets the whole budget";
+}
+
+// A depth below the engine's minimum cannot be divided at all, and the share still never reaches
+// zero - the reader would then have no request it may issue.
+TEST(BackendPools, ADepthOfOneStillLeavesAReaderOneRequest)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
     {
-        EXPECT_EQ(depth, 1u) << "4 between 8 readers floors at one each, never zero";
-    }
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 2), 0 /* block */, 1, true /* register buffers */, true /* async direct */, Workload{});
+
+    ASSERT_EQ(depths.size(), 1u);
+    EXPECT_EQ(depths.front(), 1u) << "never zero, however small the budget";
 }
 
 // The setting is read per ENGINE, not once per process, so a second streamer sees the value it was
