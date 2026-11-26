@@ -1140,16 +1140,18 @@ class TestDeviceRingShape(unittest.TestCase):
         """One solver. A reservation taken afterwards would shrink a shape this already chose."""
         size, slots = device_ring_sizing(30 * GiB, self.files([3 * GiB] * 8), extra_slots=2)
         self.assertLessEqual((slots + 2) * size, int(30 * GiB * 0.5))
-        self.assertGreaterEqual(slots, 2, "the overlap must survive the reservation")
+        self.assertEqual(slots, 3, "the depth gave one slot to the reservation and kept the overlap")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_the_slot_gives_way_before_the_depth_does(self):
         """Dropping to one slot is the one cliff both models measure. A slot somewhat below what
         the data asked for is flat over a wide range, so that is what gives."""
-        # enough that every slot can shrink and the depth still survives
-        size, slots = device_ring_sizing(9 * GiB, self.files([GiB] * 8))
-        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS)
-        self.assertGreaterEqual(size, GiB, "never below the largest range")
+        # Half of 5 GiB cannot pay for the depth at any slot size, so both have to give - and the
+        # order is what this pins: the slot reaches the largest range FIRST, and only then does the
+        # depth come down to what that size fits.
+        size, slots = device_ring_sizing(5 * GiB, self.files([GiB] * 8))
+        self.assertEqual(size, GiB, "the slot gave way to the largest range before the depth moved")
+        self.assertEqual(slots, 2, "and the depth stopped at the overlap floor, not below it")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_two_slots_beat_one_that_cannot_span_the_stream(self):
@@ -1161,16 +1163,16 @@ class TestDeviceRingShape(unittest.TestCase):
         stream = self.files([10 * MiB] * 20)                 # 200 MiB in 10 MiB ranges
         size, slots = device_ring_sizing(600 * MiB, stream, extra_slots=2)
 
-        self.assertGreater(slots, 1, "one slot here cannot span the stream, so it must not be chosen")
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS,
+                         "one slot here cannot span the stream, so it must not be chosen")
         self.assertLess(size, 200 * MiB, "and the fixture really does not fit in one slot")
         self.assertLessEqual((slots + 2) * size, 300 * MiB, "within the allowance")
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_a_cap_that_splits_the_stream_keeps_the_second_slot(self):
-        """A stream of SEVERAL ranges always keeps both slots, cap or no cap.
-
-        A slot is capped at the stream's share of the depth, so one slot can never hold a stream
-        that has a second range to put somewhere - which is what the overlap needs."""
+    def test_a_range_cap_does_not_change_the_shape(self):
+        """A slot is capped at the stream's share of the depth, so a stream of SEVERAL ranges keeps
+        its slots whether or not a cap also ends them early. The cap is the caller's business; it
+        must not reach the sizing."""
         MiB = 1 << 20
         stream = self.files([MiB] * 4)                       # 4 MiB over four ranges
         bounds = SlotBounds(max_ranges=2)                    # only two ranges at a time
@@ -1179,9 +1181,9 @@ class TestDeviceRingShape(unittest.TestCase):
 
         self.assertEqual(size, MiB, "the stream's share of the depth, so the rest has slots to go in")
         self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS, "every slot, so reading and handing over overlap")
+        self.assertEqual(device_ring_sizing(64 * MiB, stream), (size, slots),
+                         "the cap changed nothing: the slot size alone decided the shape")
 
-        # Without the cap as well: the depth is the slot size's doing, not the cap's.
-        self.assertEqual(device_ring_sizing(64 * MiB, stream), (MiB, DEFAULT_DEVICE_RING_SLOTS))
 
     @patch.dict(os.environ, {}, clear=True)
     def test_one_range_that_is_the_whole_stream_takes_one_slot(self):
@@ -1191,7 +1193,7 @@ class TestDeviceRingShape(unittest.TestCase):
         self.assertEqual(device_ring_sizing(64 * MiB, self.files([4 * MiB])), (4 * MiB, 1))
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_alignment_that_splits_the_stream_keeps_the_second_slot(self):
+    def test_alignment_that_pads_the_stream_keeps_every_slot(self):
         """The same for padding: each range is rounded up, so the packed stream outgrows a slot
         that its raw bytes fit inside."""
         stream = self.files([8] * 4)                         # 32 bytes raw
@@ -1199,7 +1201,7 @@ class TestDeviceRingShape(unittest.TestCase):
 
         size, slots = device_ring_sizing(64 << 20, stream, bounds)
 
-        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS, "padded, this stream does not fit in one slot")
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS, "padded, this stream still fills every slot")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_one_slot_is_still_right_when_it_does_span(self):

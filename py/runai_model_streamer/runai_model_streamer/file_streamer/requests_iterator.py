@@ -61,8 +61,7 @@ MAX_DEVICE_RING_SLOTS = 1024
 # SETTABLE, unlike the limit and the fraction beside it, which can only ever LOWER the ring. How
 # much a ring must hold depends on the storage behind it, and that is not known here: storage that
 # answers slowly needs more bytes in flight to keep the device busy, and object storage answers far
-# more slowly than a local disk. The default suits the slow end, because the fast end loses little
-# by holding more - see docs/.
+# more slowly than a local disk.
 #
 # IN GIBIBYTES, and the name says so. The ring is sized in gibibytes whatever anyone types, and a
 # byte count for a figure of this size is a row of digits nobody can read back.
@@ -1105,7 +1104,8 @@ def device_ring_sizing(free_bytes: Optional[int],
     if free_bytes is None:
         return None
 
-    size = device_slot_size(files_chunks, readers)
+    slots = _device_ring_slots()
+    size = device_slot_size(files_chunks, readers, slots)
     if size <= 0:
         # Nothing to read. One empty buffer, as the host ring answers for the same case.
         return 0, 1
@@ -1118,8 +1118,6 @@ def device_ring_sizing(free_bytes: Optional[int],
     # device that is simply too full falls back rather than building a ring that cannot work.
     if allowance < device_ring_floor(files_chunks):
         return None
-
-    slots = _device_ring_slots()
 
     # THE SLOT GIVES WAY BEFORE THE DEPTH DOES, down to the largest range. Dropping to one slot
     # loses the overlap entirely, which is the one cliff both models measure; a slot somewhat
@@ -1142,6 +1140,12 @@ def device_ring_sizing(free_bytes: Optional[int],
     #
     # The PACKER answers it, not the byte count: a range carries one destination and cannot span two
     # slots, so uneven ranges fill more slots than their bytes alone would need.
+    #
+    # It walks every range, where the sum only adds them. The byte test in front of it is what keeps
+    # that affordable: a ring smaller than its stream can always fill every slot, so a model large
+    # enough for the walk to matter never reaches it. What does reach it is a stream dominated by one
+    # range, where the slot is the largest range rather than the share and the last slots have
+    # nothing to hold.
     #
     # AFTER THE SHRINK, NEVER BEFORE IT. Asking first uses a size the allowance may not pay for.
     streamed = sum(size_ for file_chunks in files_chunks for size_ in file_chunks.sizes)
@@ -1208,7 +1212,8 @@ def device_ring_target(readers: int = 1) -> int:
     return max(_device_ring_min_total(), max(1, readers) * DEVICE_RING_PER_READER)
 
 
-def device_slot_size(files_chunks: List[FileChunks], readers: int = 1) -> int:
+def device_slot_size(files_chunks: List[FileChunks], readers: int = 1,
+                     slots: Optional[int] = None) -> int:
     """How big one slot wants to be, from the DATA and the readers that fill it.
 
     A range carries one destination address and cannot span two slots, so the largest range is a
@@ -1225,7 +1230,9 @@ def device_slot_size(files_chunks: List[FileChunks], readers: int = 1) -> int:
     if largest <= 0:
         return 0
     streamed = sum(size for file_chunks in files_chunks for size in file_chunks.sizes)
-    slots = _device_ring_slots()
+    # Taken from the caller where there is one: reading it again would report a capped count twice
+    # for one sizing.
+    slots = _device_ring_slots() if slots is None else slots
     share = device_ring_target(readers) // slots
     return min(max(largest, share), max(largest, streamed // slots))
 
