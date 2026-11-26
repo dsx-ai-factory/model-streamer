@@ -51,7 +51,7 @@ The collector reads these files, so a new dependency is picked up when it is add
 | `py/*/setup.py` | `install_requires` of the four wheels (`run`) |
 | `py/*/pyproject.toml` | build requirements (`build`) |
 | `py/runai_model_streamer/requirements.dev` and the `pip download` line of `py/runai_model_streamer/Makefile` | test requirements and the torch index (`test`) |
-| `cpp/.bazelversion` | the Bazel release |
+| `cpp/.bazelversion` and `.devcontainer/gcs/.bazelversion` | the Bazel releases |
 | `cpp/MODULE.bazel` and `.devcontainer/gcs/MODULE.bazel` | the Bazel modules, as Bzlmod resolves them |
 | `.github/workflows/*` | GitHub actions |
 
@@ -177,7 +177,7 @@ What else to check after the change:
   `/var/log/apt/history.log`. A base that is not Debian or Ubuntu stops with a message; extend
   `container_sources.py` for its package manager.
 - The `ship` entries in `categories.json` name apt packages that depend on the distribution release
-  (`libstdc++-9-dev`, `libgcc-9-dev`, `libc6-dev` for Ubuntu 20.04, GCC 9). `collect` stops if a key
+  (`libstdc++-10-dev`, `libgcc-10-dev`, `libc6-dev` for Ubuntu 20.04, GCC 10). `collect` stops if a key
   no longer matches a package, so update them to the new names, and update the toolchain
   `# attribution: shipped component=` lines (`gcc-runtime`, `glibc-nonshared`) in `.devcontainer/Dockerfile`.
 - The Python version of the image (3.11 now) decides what pip resolves; see the limits below.

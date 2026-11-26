@@ -157,8 +157,16 @@ def npm_roots(repo):
     return roots
 
 
-def bazel_version(repo):
-    return read(repo, "cpp/.bazelversion").strip()
+BAZEL_VERSIONS = ("cpp/.bazelversion", ".devcontainer/gcs/.bazelversion")
+
+
+def bazel_versions(repo):
+    """{version: [declaring files]} for every .bazelversion in the repository."""
+    found = {}
+    for path in BAZEL_VERSIONS:
+        version = read(repo, path).strip()
+        found.setdefault(version, []).append(path)
+    return found
 
 
 def workflow_actions(repo):

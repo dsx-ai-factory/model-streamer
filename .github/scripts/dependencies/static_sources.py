@@ -168,18 +168,20 @@ def devcontainer_features(repo):
 
 
 def bazel_binary(repo):
-    """The Bazel release bazelisk downloads, per .bazelversion."""
-    version = inputs.bazel_version(repo)
-    files = []
-    for arch, suffix in (("x86_64", "x86_64"), ("aarch64", "arm64")):
-        url = "https://releases.bazel.build/%s/release/bazel-%s-linux-%s" % (version, version, suffix)
-        try:
-            checksum = http_text(url + ".sha256").split()[0]
-            digest = ("sha256", checksum, "published next to the release")
-        except urllib.error.URLError:
-            digest = None
-        files.append(file_record(url, platform=arch, digest=digest))
-    return [entry("bazel", version, "url", ["build"], files, ["cpp/.bazelversion"])]
+    """The Bazel releases bazelisk and build-gcs-sdk.sh download, per .bazelversion."""
+    found = []
+    for version, declared_by in sorted(inputs.bazel_versions(repo).items()):
+        files = []
+        for arch, suffix in (("x86_64", "x86_64"), ("aarch64", "arm64")):
+            url = "https://releases.bazel.build/%s/release/bazel-%s-linux-%s" % (version, version, suffix)
+            try:
+                checksum = http_text(url + ".sha256").split()[0]
+                digest = ("sha256", checksum, "published next to the release")
+            except urllib.error.URLError:
+                digest = None
+            files.append(file_record(url, platform=arch, digest=digest))
+        found.append(entry("bazel", version, "url", ["build"], files, declared_by))
+    return found
 
 
 def http_text(url):

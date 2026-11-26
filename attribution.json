@@ -3,9 +3,9 @@
   "components": [
     {
       "name": "gcc-runtime",
-      "version": "9",
+      "version": "10",
       "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
-      "reason": "libstdc++ and libgcc, linked statically into every native library; Ubuntu 20.04's gcc-9 (the devcontainer's base image)"
+      "reason": "libstdc++ and libgcc, linked statically into every native library; Ubuntu 20.04's gcc-10"
     },
     {
       "name": "glibc-nonshared",

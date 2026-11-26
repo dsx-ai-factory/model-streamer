@@ -28,8 +28,8 @@
  "ship": {
   "_comment": "Dependencies whose code is linked into a native library we distribute: '<ecosystem>:<name>' -> ids of the components the NOTICE files list (the `# attribution:` comments). An id is the last part of a row's package name in cpp/NOTICE, lower case, `_` as `-` (`boringssl/third_party/fiat` is `fiat`). `collect.py check` fails when a key matches nothing.",
   "url:cuda_cudart": ["nvidia-cuda-headers"],
-  "apt:libstdc++-9-dev": ["gcc-runtime"],
-  "apt:libgcc-9-dev": ["gcc-runtime"],
+  "apt:libstdc++-10-dev": ["gcc-runtime"],
+  "apt:libgcc-10-dev": ["gcc-runtime"],
   "apt:libc6-dev": ["glibc-nonshared"],
   "bazel:liburing": ["liburing"],
   "bazel:libaio": ["libaio"],
@@ -66,6 +66,7 @@
   "bazel:protoc-gen-validate": ["protoc-gen-validate"],
   "bazel:cel-spec": ["cel-spec"],
   "bazel:googleapis": ["googleapis"],
+  "bazel:grpc-proto": ["grpc-proto"],
   "bazel:opentelemetry-cpp": ["opentelemetry-cpp"],
   "bazel:nlohmann_json": ["nlohmann-json"]
  },
