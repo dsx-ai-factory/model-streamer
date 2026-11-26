@@ -88,14 +88,16 @@ TEST_F(Creation, ObjectStorageRetryTimeout)
     EXPECT_EQ(config.object_storage_retry_timeout, std::chrono::seconds(expected));
 }
 
-// The legacy variable alone still configures both backends.
 // THE ASSIGNER SIZES AN ARRAY FROM THIS NUMBER, so an uncapped one overflows that arithmetic
 // before any allocation could refuse it - the ceiling wraps to zero and the writes land on an
-// empty vector. Capped like the two concurrencies and the engine count.
+// empty vector. The cap is lower than the concurrencies because a reader costs an io engine and a
+// pinned slab as well as a thread.
 TEST_F(Creation, WorkersPerMountAboveTheLimitIsCapped)
 {
     utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4294967295UL);
-    EXPECT_EQ(Config::fs_workers_per_mount(), Config::max_concurrency);
+    EXPECT_EQ(Config::fs_workers_per_mount(), Config::max_fs_workers_per_mount);
+    EXPECT_LT(Config::max_fs_workers_per_mount, Config::max_concurrency)
+        << "a reader costs more than a thread, so its cap must be the lower one";
 }
 
 // Capping does not floor, and a mount with no readers is a pool with no threads.
@@ -127,9 +129,8 @@ TEST_F(Creation, WorkersPerMountAreSharedBetweenTheProcessesOnTheNode)
         utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"),
                                static_cast<unsigned long>(processes));
 
+        // times the processes, the node reads with the same 8 however it is split
         EXPECT_EQ(Config::fs_workers_per_mount(), 8u / processes);
-        EXPECT_EQ(Config::fs_workers_per_mount() * processes, 8u)
-            << "the node reads with the same number of readers however it is split";
     }
 }
 
@@ -151,15 +152,15 @@ TEST_F(Creation, WorkersPerMountDropsARemainder)
         utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 12UL);
         utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
 
+        // one each over eight processes, so the node reads with 8 and not the 12 asked for
         EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
-        EXPECT_EQ(Config::fs_workers_per_mount() * 8u, 8u) << "the node reads with 8, not the 12 asked for";
     }
     {
         utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 9UL);
         utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 4UL);
 
+        // two each over four processes, so the node reads with 8 and not the 9 asked for
         EXPECT_EQ(Config::fs_workers_per_mount(), 2u);
-        EXPECT_EQ(Config::fs_workers_per_mount() * 4u, 8u) << "the node reads with 8, not the 9 asked for";
     }
 }
 

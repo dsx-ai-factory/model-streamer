@@ -103,12 +103,21 @@ bool Config::registers_buffers(const std::string & fs_type) const
 
 unsigned Config::fs_workers_per_mount()
 {
-    // CAPPED like the two concurrencies and the engine count, and warned about the same way. Each
-    // reader costs a thread, a ring and a staging slab - and the assigner sizes an array from this
-    // number, so an unbounded one overflows that arithmetic before any allocation can refuse.
-    const unsigned configured = Config::to_concurrency(
+    // CAPPED LOWER THAN THE CONCURRENCIES, because a unit here costs more than a thread: each
+    // reader also builds an io engine with its own ring and a pinned staging slab. The cap is the
+    // last thing between an operator's typo and that allocation, so it is set where a mount can
+    // still be served rather than where the arithmetic stops overflowing.
+    const unsigned asked = static_cast<unsigned>(std::min<unsigned long>(
         utils::getenv<unsigned long>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1UL),
-        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT");
+        std::numeric_limits<unsigned>::max()));
+    const unsigned configured = std::min(asked, max_fs_workers_per_mount);
+
+    if (asked > max_fs_workers_per_mount)
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << asked << " is above the limit of "
+                     << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
+                     << "an io engine with its own ring, and a pinned staging slab";
+    }
 
     // NODE WIDE, AND DIVIDED, exactly as the queue depth is. The readers of one mount all queue
     // against the same device, so what the storage sees is this number times the processes on the
@@ -135,7 +144,7 @@ unsigned Config::fs_workers_per_mount()
     {
         LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << configured << " over " << processes
                      << " processes on this node is " << each << " each, so a mount is read by "
-                     << node_total << " readers rather than the " << configured << " asked for";
+                     << node_total << " readers rather than the " << configured;
     }
 
     return each;

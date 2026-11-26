@@ -130,6 +130,11 @@ struct Config
     // misunderstanding, not a typo, and the load should still run.
     static constexpr unsigned max_concurrency = 1024;
 
+    // Lower than max_concurrency: a reader is a thread AND an io engine with its own ring AND a
+    // pinned staging slab, where a concurrency unit is a thread. Far above any count that has been
+    // useful on a mount, and still a number a node can allocate.
+    static constexpr unsigned max_fs_workers_per_mount = 64;
+
     // RUNAI_STREAMER_FS_WORKERS_PER_MOUNT: how many independent readers one mount gets.
     //
     // One is the default, and it is one thread with one ring. On storage fast enough to outrun a
