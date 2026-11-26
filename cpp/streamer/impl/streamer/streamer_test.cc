@@ -277,6 +277,18 @@ TEST(ReadersPerMount, LibaioWithoutODirectBuildsNone)
     Streamer::Environment environment;
     environment.availability = [](posix_io::Strategy) { return common::ResponseCode::Success; };
     environment.direct = [](dev_t, const std::string &) { return posix_io::DirectSupport::No; };
+
+    // INJECTED, so the answer is about libaio and not about the file system this suite happens to
+    // be built on. A real tmpfs working directory is memory backed, which is tested above and would
+    // decide this test before the O_DIRECT check was reached.
+    environment.mount = [](const std::string &) -> posix_io::MountCapability
+    {
+        return posix_io::MountCapability{ makedev(8, 1), false };
+    };
+    environment.direct_block = [](dev_t, const std::string &) -> size_t
+    {
+        return posix_io::DirectBlockSize;   // the block the destination above is congruent for
+    };
     Streamer streamer(Config(), std::move(environment));
 
     EXPECT_EQ(streamer.fs_readers_per_mount({ file.path }), 8u)
