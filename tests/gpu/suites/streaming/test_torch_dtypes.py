@@ -5,9 +5,8 @@
 A dtype that `save_file` refuses has no name in a safetensors file, so the streamer need not support it.
 """
 
-import json
 import os
-import struct
+import sys
 import tempfile
 import unittest
 
@@ -15,9 +14,12 @@ import torch
 from safetensors import __version__ as SAFETENSORS_VERSION
 from safetensors.torch import save_file
 
-from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gen_models as gen  # noqa: E402
+from runai_model_streamer.safetensors_streamer.safetensors_pytorch import safetensors_to_torch_dtype  # noqa: E402
 
 PROBE_BYTES = 16  # a whole number of elements of every dtype up to complex128
+BASE_DTYPES = {torch.float32: "F32", torch.float16: "F16", torch.int64: "I64", torch.uint8: "U8", torch.bool: "BOOL"}
 
 
 def torch_dtypes():
@@ -43,10 +45,7 @@ def safetensors_name(directory, dtype):
         save_file({"probe": tensor}, path)
     except Exception as error:
         return None, "safetensors %s cannot write it (%s: %s)" % (SAFETENSORS_VERSION, type(error).__name__, error)
-    with open(path, "rb") as handle:
-        (header_length,) = struct.unpack("<Q", handle.read(8))
-        header = json.loads(handle.read(header_length))
-    return header["probe"]["dtype"], None
+    return gen.header_dtypes(path)["probe"], None
 
 
 class TorchDtypes(unittest.TestCase):
@@ -59,6 +58,12 @@ class TorchDtypes(unittest.TestCase):
     def test_the_dtypes_of_torch_were_found(self):
         self.assertGreater(len(torch_dtypes()), 10, "torch %s: only %d dtypes found" % (torch.__version__,
                                                                                       len(torch_dtypes())))
+
+    def test_base_dtypes_are_writable(self):
+        for dtype, expected in BASE_DTYPES.items():
+            name, why = safetensors_name(self.directory.name, dtype)
+            self.assertEqual(name, expected, "%s: safetensors %s must write it as %s, but: %s" % (
+                dtype, SAFETENSORS_VERSION, expected, why))
 
 
 def make_case(dtype):

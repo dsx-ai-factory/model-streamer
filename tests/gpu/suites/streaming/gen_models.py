@@ -170,6 +170,14 @@ def packed_shape(dtype, shape):
     return list(shape[:-1]) + [shape[-1] // values]
 
 
+def header_dtypes(path):
+    """tensor name -> dtype name, as the header of a safetensors file records it."""
+    with open(path, "rb") as handle:
+        (length,) = struct.unpack("<Q", handle.read(8))
+        header = json.loads(handle.read(length))
+    return {name: entry["dtype"] for name, entry in header.items() if name != "__metadata__"}
+
+
 # ----------------------------------------------------------------------------------------------------------
 # bytes of a tensor
 # ----------------------------------------------------------------------------------------------------------

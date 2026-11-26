@@ -99,6 +99,9 @@ def make_case(st_name):
             save_file(build_tensors(st_name), path)
         except Exception as error:
             self.cannot_compare(st_name, "write it", error)
+        for name, written in gen.header_dtypes(path).items():
+            self.assertEqual(written, st_name, "%s: safetensors %s wrote %s for tensor %s, so no %s file was read" % (
+                st_name, SAFETENSORS_VERSION, written, name, st_name))
 
         theirs = self.reference(st_name, path)
         ours = self.streamed(path)
