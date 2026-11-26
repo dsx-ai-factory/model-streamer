@@ -33,9 +33,22 @@ DEFAULT_RING_BUFFERS = 18
 RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_MEMORY_LIMIT"
 
 # Two slots is where reading and sending overlap at all: a slot is refilled only once it has been
-# handed over, so one slot never overlaps anything. Measured as a cliff on both models to hand -
-# one slot costs 11% on an 80B and 19.6% on a 235B - and flat above it.
-DEVICE_RING_SLOTS = 2
+# handed over, so one slot never overlaps anything.
+#
+# The total is split between them, so more slots means smaller ones, and a slot is released only
+# once its LAST range has been handed over - so a large slot waits for its slowest range.
+#
+# PART OF THE CONTRACT BETWEEN RANKS, through the size rather than the count: the total is split
+# by this, so ranks given different counts agree different sizes and check_the_group_agreed raises.
+# The COUNT they end up with may still differ - a rank that cannot allocate the agreed depth drops
+# to one slot by itself, which changes no collective.
+RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_RING_SLOTS"
+DEFAULT_DEVICE_RING_SLOTS = 4
+
+# Capped rather than refused, as the C++ side caps its worker counts: a number far above this is a
+# typo, not a request worth failing a load over. The depth is walked down one slot at a time where
+# the allowance is short, and every slot is allocated before the first read.
+MAX_DEVICE_RING_SLOTS = 1024
 
 # The least a device ring may hold IN TOTAL, whatever the ranges are. A ring below this cannot cover
 # the round trip of filling a slot, handing it over and refilling it, so the readers wait on the ring
@@ -44,7 +57,17 @@ DEVICE_RING_SLOTS = 2
 # A TOTAL, not a per-slot floor. What a ring can sustain follows the bytes it holds, and the same
 # bytes split two ways or eight measure the same; a per-slot number only matched a total by accident
 # of the slot count.
-DEVICE_RING_MIN_TOTAL = 4 * (1 << 30)
+#
+# SETTABLE, unlike the limit and the fraction beside it, which can only ever LOWER the ring. How
+# much a ring must hold depends on the storage behind it, and that is not known here: storage that
+# answers slowly needs more bytes in flight to keep the device busy, and object storage answers far
+# more slowly than a local disk. The default suits the slow end, because the fast end loses little
+# by holding more - see docs/.
+#
+# IN GIBIBYTES, and the name says so. The ring is sized in gibibytes whatever anyone types, and a
+# byte count for a figure of this size is a row of digits nobody can read back.
+RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME = "RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB"
+DEFAULT_DEVICE_RING_MIN_TOTAL_GIB = 8
 
 # Added per reader above that minimum. More readers reach a higher rate, and a higher rate empties
 # the ring sooner, so the bytes it must hold grow with them.
@@ -928,6 +951,40 @@ def _device_memory_limit() -> Optional[int]:
     return value
 
 
+def _device_ring_min_total() -> int:
+    """The least a device ring may hold, in bytes.
+
+    The backstops still apply afterwards: a ring is never larger than the fraction of free memory
+    allows, so asking for more than the device can give is shrunk rather than refused."""
+    value = _numeric_env(RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME,
+                         DEFAULT_DEVICE_RING_MIN_TOTAL_GIB, int)
+    if value <= 0:
+        raise ValueError(
+            f"{RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME} must be a positive number of "
+            f"gibibytes, got {value}"
+        )
+    return value * (1 << 30)
+
+
+def _device_ring_slots() -> int:
+    """How many slots a device ring is built from.
+
+    The sizing may still lower it where the allowance cannot pay for that many."""
+    value = _numeric_env(RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME, DEFAULT_DEVICE_RING_SLOTS, int)
+    if value < 1:
+        raise ValueError(
+            f"{RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME} must be at least 1, got {value}"
+        )
+    if value > MAX_DEVICE_RING_SLOTS:
+        logger.warning(
+            f"[RunAI Streamer] {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME}={value} is above the "
+            f"limit of {MAX_DEVICE_RING_SLOTS} and is capped to it. Each one is a device buffer, "
+            f"allocated before the first read"
+        )
+        return MAX_DEVICE_RING_SLOTS
+    return value
+
+
 def _device_memory_fraction() -> float:
     value = _numeric_env(RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME, DEFAULT_DEVICE_MEMORY_FRACTION, float)
     if not 0 < value <= 1:
@@ -1062,7 +1119,7 @@ def device_ring_sizing(free_bytes: Optional[int],
     if allowance < device_ring_floor(files_chunks):
         return None
 
-    slots = DEVICE_RING_SLOTS
+    slots = _device_ring_slots()
 
     # THE SLOT GIVES WAY BEFORE THE DEPTH DOES, down to the largest range. Dropping to one slot
     # loses the overlap entirely, which is the one cliff both models measure; a slot somewhat
@@ -1078,15 +1135,18 @@ def device_ring_sizing(free_bytes: Optional[int],
     if (slots + extra_slots) * size > allowance:
         return None
 
-    # A STREAM THAT FITS IN ONE SLOT RECYCLES NOTHING, so a second slot could never be filled.
-    # device_slot_size caps a slot at the stream's share of the depth, so this is reached only where
-    # ONE RANGE is the whole stream - which has nothing to overlap with anyway. The packer is kept
-    # as the general test, so a later change to that cap cannot pin the depth at one in silence.
+    # NEVER MORE SLOTS THAN THE STREAM FILLS. A slot the data cannot reach is device memory taken
+    # and never written, and the pool allocates every slot up front. The largest range outranks the
+    # share a slot is sized from, so a slot can be larger than the stream divided by the depth, and
+    # then the last slots have nothing to hold.
+    #
+    # The PACKER answers it, not the byte count: a range carries one destination and cannot span two
+    # slots, so uneven ranges fill more slots than their bytes alone would need.
     #
     # AFTER THE SHRINK, NEVER BEFORE IT. Asking first uses a size the allowance may not pay for.
     streamed = sum(size_ for file_chunks in files_chunks for size_ in file_chunks.sizes)
-    if slots > 1 and size >= streamed and pack(files_chunks, size, bounds).slots <= 1:
-        slots = 1
+    if slots > 1 and slots * size > streamed:
+        slots = max(1, min(slots, pack(files_chunks, size, bounds).slots))
 
     if bounds.max_ranges is not None and rows_ended_a_slot(files_chunks, size, bounds):
         # NOT corrected here: the cap is the caller's. Said out loud because this is the pairing
@@ -1145,7 +1205,7 @@ def device_ring_target(readers: int = 1) -> int:
 
     readers is what THIS PROCESS gives one mount, which the library reports: the setting is node
     wide and divided, so it cannot be read from the environment without repeating that rule."""
-    return max(DEVICE_RING_MIN_TOTAL, max(1, readers) * DEVICE_RING_PER_READER)
+    return max(_device_ring_min_total(), max(1, readers) * DEVICE_RING_PER_READER)
 
 
 def device_slot_size(files_chunks: List[FileChunks], readers: int = 1) -> int:
@@ -1165,8 +1225,9 @@ def device_slot_size(files_chunks: List[FileChunks], readers: int = 1) -> int:
     if largest <= 0:
         return 0
     streamed = sum(size for file_chunks in files_chunks for size in file_chunks.sizes)
-    share = device_ring_target(readers) // DEVICE_RING_SLOTS
-    return min(max(largest, share), max(largest, streamed // DEVICE_RING_SLOTS))
+    slots = _device_ring_slots()
+    share = device_ring_target(readers) // slots
+    return min(max(largest, share), max(largest, streamed // slots))
 
 
 def device_ring_floor(files_chunks: List[FileChunks]) -> int:
