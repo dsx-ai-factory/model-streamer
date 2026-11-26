@@ -79,6 +79,10 @@ suite_run() {
     export GPU_MATRIX="${GPU_MATRIX:-core}"
     local strategy
 
+    # CPU dtype checks against PyTorch and safetensors; a failure fails the run, and the rows still run.
+    run_unittest torch_dtypes 5 "$streaming_dir/test_torch_dtypes.py"
+    run_unittest vs_safetensors 10 "$streaming_dir/test_against_safetensors.py"
+
     # The time caps are for a hang: a strategy takes about 10 minutes when the runner is healthy (18 on a slow day), and
     # its cap is 60. A cap is cut to what is left of the run's budget (see cap, in common.sh), so the caps never need to
     # add up to less than the job's timeout for the script to get to print which rows ran.
@@ -108,6 +112,8 @@ suite_run() {
 
 suite_expect() {
     local strategy
+    echo "results-torch_dtypes-rank0.json"
+    echo "results-vs_safetensors-rank0.json"
     for strategy in "${streaming_strategies[@]}"; do
         echo "results-$strategy-rank*.json"
     done

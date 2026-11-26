@@ -82,9 +82,10 @@ install_python_packages() {
     # Ubuntu 24.04 marks its Python as externally managed (PEP 668) and pip refuses to install into it. The container is
     # thrown away after the run, so the system Python is the environment (older pip ignores the variable).
     export PIP_BREAK_SYSTEM_PACKAGES=1
-    # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others.
+    # PyTorch and numpy first, at the versions of this run, so that installing the wheel cannot pick others. safetensors
+    # (newest) is the reference reader of the dtype tests, not a dependency of the package.
     timeout --signal=TERM --kill-after=30s "$(cap 45)s" \
-        python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" || return
+        python3 -m pip install --no-cache-dir "$TORCH_SPEC" "$NUMPY_SPEC" safetensors || return
     if [ -n "$STREAMER_SPEC" ]; then
         echo "installing the streamer from the requirement specifier: $STREAMER_SPEC"
         timeout --signal=TERM --kill-after=30s "$(cap 15)s" \
@@ -101,7 +102,7 @@ install_python_packages() {
     timeout --signal=TERM --kill-after=30s "$(cap 15)s" python3 -m pip install --no-cache-dir "$wheel" || return
 }
 phase install_python_packages install_python_packages
-python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|humanize|runai)" || true
+python3 -m pip list 2>/dev/null | grep -i -E "^(torch|numpy|safetensors|humanize|runai)" || true
 
 timeout --signal=TERM --kill-after=10s "$(cap 10)s" python3 tests/gpu/harness/gpu_check.py
 

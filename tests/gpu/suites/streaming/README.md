@@ -14,6 +14,8 @@ add another). It is the one that runs by default (`GPU_SUITES=streaming`), and t
 | `suite.sh` | what the runner does for this suite: prepare (generate the models, fetch the real model, check the storage), run (once per filesystem strategy, the self-check, the smoke test), and what it expects to have written |
 | `gen_models.py` | the generator of the four synthetic models, and their manifests |
 | `dtype_check.py` | the dtypes that the generator writes and the installed streamer accepts; fails on a dtype the generator does not know |
+| `test_torch_dtypes.py` | CPU, in seconds: every dtype of the installed PyTorch that safetensors can store (decided by `save_file`) is in the streamer's table, under the name safetensors writes. One case per PyTorch dtype; a new PyTorch dtype that the table lacks fails by name |
+| `test_against_safetensors.py` | CPU, in seconds: for every dtype of the streamer's table, a small file (a scalar, a vector, a 3-D tensor, from `gen_models.special_pattern`) is written with `save_file`, streamed, and compared with `safe_open` for name, dtype, shape and bytes. One case per dtype |
 | `direct_io_probe.py` | probes that the fixtures directory serves `O_DIRECT` reads |
 | `real_model.py` | the small real model: download, pin, manifest |
 | `matrix.py` | the rows (one load each) and the memory limit of each; no torch, unit tested on the CPU |
