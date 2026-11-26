@@ -76,6 +76,8 @@ DTYPES = {
     "BF16": (2, "random"),
     "F8_E4M3": (1, "random"),
     "F8_E5M2": (1, "random"),
+    "F8_E4M3FNUZ": (1, "random"),
+    "F8_E5M2FNUZ": (1, "random"),
     "F8_E8M0": (1, "random"),
     "F4": (1, "random"),
     "C64": (8, "random"),
