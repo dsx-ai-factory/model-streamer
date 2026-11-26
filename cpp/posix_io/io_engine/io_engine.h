@@ -167,8 +167,10 @@ struct AsyncIoConfig
 
     // Whether direct reads go to io-wq (IOSQE_ASYNC) instead of inline on our one worker; buffered
     // reads always do. On for block devices, where an inline submit takes the destination's
-    // first-touch faults on the worker (#323). Off for NFS, where it only sends an RPC and io-wq costs
-    // more CPU. Ignored by libaio. Default false: the behaviour before it existed.
+    // first-touch faults on the worker (#323). On for NFS too, where an inline submit pins the
+    // destination and builds one request per page before any RPC goes out, so a deep window runs one
+    // read at a time; the worker then also spreads each file over several descriptors and caps the
+    // reads per file. Ignored by libaio. Default false: the behaviour before it existed.
     bool async_direct = false;
 };
 

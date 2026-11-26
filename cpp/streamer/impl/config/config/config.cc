@@ -101,6 +101,31 @@ bool Config::registers_buffers(const std::string & fs_type) const
     return true;
 }
 
+unsigned Config::resolve_fs_direct_fds()
+{
+    const auto value = utils::getenv<unsigned long>("RUNAI_STREAMER_FS_DIRECT_FDS", default_fs_direct_fds);
+    const auto used = std::clamp(value, 1UL, max_fs_direct_fds);
+    if (used != value)
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_DIRECT_FDS=" << value << " is outside 1 to "
+                     << max_fs_direct_fds << "; using " << used;
+    }
+    return static_cast<unsigned>(used);
+}
+
+unsigned Config::resolve_fs_direct_file_depth()
+{
+    const auto value = utils::getenv<unsigned long>("RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH",
+                                                    default_fs_direct_file_depth);
+    const auto used = std::min(value, max_fs_direct_file_depth);
+    if (used != value)
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH=" << value << " is above "
+                     << max_fs_direct_file_depth << "; using " << used;
+    }
+    return static_cast<unsigned>(used);
+}
+
 unsigned Config::to_concurrency(unsigned long value, const char * source)
 {
     // Caps BEFORE narrowing. The variables are parsed as 64-bit, so a cast alone would wrap:

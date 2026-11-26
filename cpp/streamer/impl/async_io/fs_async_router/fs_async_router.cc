@@ -109,6 +109,11 @@ std::string directory_of(const std::string & path)
 
 } // namespace
 
+bool FsAsyncRouter::spreads_reads(const std::string & fs_type)
+{
+    return fs_type.rfind("nfs", 0) == 0;
+}
+
 FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & request,
                                             const FsQueueDepth & depth,
                                             common::Device destination,
@@ -122,6 +127,9 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
     {
         return out;   // the synchronous reader serves everything
     }
+
+    const auto strategy = _strategy_resolver->resolved();
+    const bool io_uring = strategy == posix_io::Strategy::IoUringDirect || strategy == posix_io::Strategy::IoUringBuffered;
 
     // Directory -> its group. MountCapabilities caches by st_dev, which saves the statfs but NOT the
     // stat that finds st_dev - so without this a 200-shard model would stat its directory 200 times.
@@ -175,16 +183,24 @@ FsAsyncRouter::Groups FsAsyncRouter::groups(const std::vector<FileRanges> & requ
                         const bool may_register = registers == nullptr || registers(capability.fs_type);
                         out.registers.push_back(may_register);
 
-                        // By device, not type name: a name list would miss unlisted network
-                        // file systems.
-                        const bool to_io_wq = direct_async && capability.block_backed;
+                        // Spread only under io_uring: libaio issues every read inline, so its window
+                        // rarely gets deep enough on one file for a cap to matter.
+                        const bool spread = direct_async && io_uring && spreads_reads(capability.fs_type);
+                        out.spreads.push_back(spread);
+
+                        // Block devices by device, not type name: a name list would miss unlisted
+                        // network file systems. NFS by name, because it spreads its reads as well.
+                        // Never under libaio, which has no io-wq: the flag would only split the
+                        // engine key and build a second engine for nothing.
+                        const bool to_io_wq = direct_async && io_uring && (capability.block_backed || spread);
                         out.async_direct.push_back(to_io_wq);
 
                         LOG(DEBUG) << "Mount " << major(capability.dev) << ":" << minor(capability.dev)
                                    << " is " << capability.fs_type << " and reads at a queue depth of "
                                    << resolved << (may_register ? " with" : " without")
                                    << " registered buffers, direct reads "
-                                   << (to_io_wq ? "via io-wq" : "inline");
+                                   << (to_io_wq ? "via io-wq" : "inline")
+                                   << (spread ? ", spread over files" : "");
                     }
                 }
             }

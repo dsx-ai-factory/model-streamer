@@ -30,6 +30,13 @@ struct Workload
     // submissions on one streamer - would keep a provisional block for the life of the process.
     size_t direct_block = 0;
 
+    // On a mount whose reads are spread (NFS, see FsAsyncRouter::spreads_reads): how many direct
+    // descriptors each file is read through, and how many reads of one file may be in flight at once.
+    // 1 and 0 elsewhere: one descriptor, no cap. Per workload like direct_block, because mounts can
+    // share an engine.
+    unsigned direct_fds = 1;
+    unsigned file_depth = 0;
+
     Workload() = default;
     Workload(Workload &&) = default;
     Workload & operator=(Workload &&) = default;

@@ -312,6 +312,37 @@ TEST_F(Creation, Register_Buffers_Denies_Nfs_By_Default)
     EXPECT_FALSE(config.registers_buffers("nfs4")) << "a prefix must cover the versioned name";
 }
 
+// The NFS spreading knobs are internal, and clamped rather than rejected.
+TEST_F(Creation, Direct_Fds_And_File_Depth_Are_Internal_And_Clamped)
+{
+    {
+        const Config config;
+        EXPECT_EQ(config.fs_direct_fds, Config::default_fs_direct_fds);
+        EXPECT_EQ(config.fs_direct_file_depth, Config::default_fs_direct_file_depth);
+    }
+    {
+        const utils::temp::Env fds("RUNAI_STREAMER_FS_DIRECT_FDS", 16UL);
+        const utils::temp::Env depth("RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH", 4UL);
+        const Config config;
+        EXPECT_EQ(config.fs_direct_fds, 16u);
+        EXPECT_EQ(config.fs_direct_file_depth, 4u);
+    }
+    {
+        const utils::temp::Env fds("RUNAI_STREAMER_FS_DIRECT_FDS", 0UL);
+        const utils::temp::Env depth("RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH", 0UL);
+        const Config config;
+        EXPECT_EQ(config.fs_direct_fds, 1u) << "zero still reads through the one descriptor";
+        EXPECT_EQ(config.fs_direct_file_depth, 0u) << "zero lifts the cap";
+    }
+    {
+        const utils::temp::Env fds("RUNAI_STREAMER_FS_DIRECT_FDS", 100000UL);
+        const utils::temp::Env depth("RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH", 100000UL);
+        const Config config;
+        EXPECT_EQ(config.fs_direct_fds, static_cast<unsigned>(Config::max_fs_direct_fds));
+        EXPECT_EQ(config.fs_direct_file_depth, static_cast<unsigned>(Config::max_fs_direct_file_depth));
+    }
+}
+
 // We have measured three file systems and a site may have a fourth, so the list is not a constant.
 TEST_F(Creation, Register_Buffers_Deny_List_Is_Configurable)
 {

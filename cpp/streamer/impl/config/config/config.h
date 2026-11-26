@@ -103,7 +103,8 @@ struct Config
     static constexpr bool default_fs_register_buffers = true;
 
     // RUNAI_STREAMER_FS_DIRECT_ASYNC: kill switch, on by default. Off issues every direct read inline,
-    // as before. Which mounts use io-wq when on: AsyncIoConfig::async_direct. Buffered reads unaffected.
+    // as before, and leaves NFS reads unspread. Which mounts use io-wq when on: AsyncIoConfig::async_direct;
+    // which are spread: FsAsyncRouter::spreads_reads.
     static constexpr bool default_fs_direct_async = true;
 
     // 32 times smaller than the depth above, because here a concurrent read costs an OS thread rather
@@ -155,6 +156,30 @@ struct Config
 
     // See default_fs_direct_async.
     bool fs_direct_async;
+
+    // Tuning for NFS mounts, whose reads are spread while fs_direct_async is on (see
+    // FsAsyncRouter::spreads_reads). Neither has any effect while it is off.
+    //
+    // RUNAI_STREAMER_FS_DIRECT_FDS: direct descriptors per file, dealt in turn. NFS keeps one
+    // lock context per open file and takes a reference on it for every page of a direct read, so
+    // io-wq workers sharing one descriptor contend on it: a 141 GB load over NFSv4.2/RDMA reached
+    // 16.9 GB/s through one descriptor at 5.5 times the CPU of eight, which reached 20.9 GB/s.
+    static constexpr unsigned long default_fs_direct_fds = 8;
+    static constexpr unsigned long max_fs_direct_fds = 64;
+    unsigned fs_direct_fds = resolve_fs_direct_fds();
+
+    // RUNAI_STREAMER_FS_DIRECT_FILE_DEPTH: reads of ONE file in flight at once; the rest of
+    // the window goes to the next files queued. A file server reading one file cold gets no faster
+    // with more concurrent readers of it and only burns CPU. Against a cold server, a whole window on
+    // one file was up to 5x slower than master (kernel nfsd and Ganesha); spread over the queued files
+    // it was 1.5 to 2x faster. 8 rather than 4: a single-file checkpoint has nothing to spread to,
+    // and at 4 its window is capped at 4. 0 lifts the cap.
+    static constexpr unsigned long default_fs_direct_file_depth = 8;
+    static constexpr unsigned long max_fs_direct_file_depth = 1024;
+    unsigned fs_direct_file_depth = resolve_fs_direct_file_depth();
+
+    static unsigned resolve_fs_direct_fds();
+    static unsigned resolve_fs_direct_file_depth();
 
     // Whether reads on a mount of this type may use registered buffers. Prefix matched, so `nfs`
     // covers `nfs4`. An unknown or empty type registers - we deny what we have measured, not what we

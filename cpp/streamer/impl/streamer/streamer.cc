@@ -446,6 +446,8 @@ common::ResponseCode Streamer::async_request(
                         << " but only " << groups.devices.size() << " mounts were probed";
 
                     workloads[next].direct_block = groups.blocks[group];
+                    workloads[next].direct_fds = groups.spreads[group] ? _config->fs_direct_fds : 1;
+                    workloads[next].file_depth = groups.spreads[group] ? _config->fs_direct_file_depth : 0;
                     _pools.push_async(groups.devices[group], groups.blocks[group], groups.depths[group],
                                       groups.registers[group], groups.async_direct[group],
                                       std::move(workloads[next]));

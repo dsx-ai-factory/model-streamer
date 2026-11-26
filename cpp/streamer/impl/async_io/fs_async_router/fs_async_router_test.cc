@@ -300,6 +300,101 @@ TEST(FsAsyncRouter, The_Kill_Switch_Keeps_Every_Direct_Read_Inline)
     EXPECT_FALSE(groups.async_direct[0]) << "switched off: inline even on a block device";
 }
 
+posix_io::MountCapability nfs4(const std::string &)
+{
+    return posix_io::MountCapability{ makedev(0, 51), false, "nfs4", false /* block_backed */ };
+}
+
+// NFS is no block device, yet its direct reads go to io-wq, and its files are spread: several
+// descriptors and a cap on the reads of one file. A local mount beside it only gets io-wq.
+TEST(FsAsyncRouter, Nfs_Reads_Go_To_Io_Wq_And_Are_Spread)
+{
+    FsAsyncRouter router(direct_candidates, with_mounts([](const std::string & directory)
+    {
+        return directory == "/nfs" ? nfs4(directory)
+                                   : posix_io::MountCapability{ makedev(9, 1), false, "ext4", true };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st", "/raid/b.st" }), FsQueueDepth(512),
+                                      common::Device::host());
+
+    ASSERT_EQ(groups.spreads.size(), 2u) << "one answer per group, like the depth";
+    EXPECT_TRUE(groups.async_direct[0]) << "NFS: direct reads go to io-wq";
+    EXPECT_TRUE(groups.spreads[0]) << "NFS: spread over descriptors and files";
+    EXPECT_TRUE(groups.async_direct[1]) << "ext4 on md RAID: io-wq";
+    EXPECT_FALSE(groups.spreads[1]) << "a block device gains nothing from spreading";
+}
+
+// Buffered io_uring reads on NFS are spread too: they always go to io-wq, so without the cap a whole
+// window lands on one file just the same.
+TEST(FsAsyncRouter, Buffered_Nfs_Reads_Are_Spread_As_Well)
+{
+    FsAsyncRouter router(async_candidates, with_mounts(nfs4));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st" }), FsQueueDepth(512), common::Device::host());
+
+    ASSERT_EQ(groups.spreads.size(), 1u);
+    EXPECT_TRUE(groups.spreads[0]);
+}
+
+// The kill switch turns all of it off on NFS as well.
+TEST(FsAsyncRouter, The_Kill_Switch_Turns_Nfs_Spreading_Off)
+{
+    FsAsyncRouter router(direct_candidates, with_mounts(nfs4));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st" }), FsQueueDepth(512),
+                                      common::Device::host(), nullptr, false /* direct_async */);
+
+    ASSERT_EQ(groups.spreads.size(), 1u);
+    EXPECT_FALSE(groups.async_direct[0]);
+    EXPECT_FALSE(groups.spreads[0]);
+}
+
+// libaio issues every read inline and has no io-wq, so NFS under libaio is left as it was.
+TEST(FsAsyncRouter, Libaio_Does_Not_Spread_Nfs)
+{
+    FsAsyncRouter router(libaio_candidates, with_direct(nfs4));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+    ASSERT_EQ(router.strategy(), posix_io::Strategy::LibaioDirect);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st" }), FsQueueDepth(512), common::Device::host());
+
+    ASSERT_EQ(groups.spreads.size(), 1u);
+    EXPECT_FALSE(groups.spreads[0]);
+}
+
+// Nor does libaio ask for io-wq on a block device: it has none, and the flag keys the engine, so a
+// block mount and an NFS mount would get two engines where one serves both.
+TEST(FsAsyncRouter, Libaio_Never_Asks_For_Io_Wq)
+{
+    FsAsyncRouter router(libaio_candidates, with_direct([](const std::string & directory)
+    {
+        return directory == "/nfs" ? nfs4(directory)
+                                   : posix_io::MountCapability{ makedev(9, 1), false, "ext4", true };
+    }));
+    ASSERT_EQ(router.resolve(), common::ResponseCode::Success);
+    ASSERT_EQ(router.strategy(), posix_io::Strategy::LibaioDirect);
+
+    const auto groups = router.groups(request_for({ "/nfs/a.st", "/raid/b.st" }), FsQueueDepth(512),
+                                      common::Device::host());
+
+    ASSERT_EQ(groups.async_direct.size(), 2u);
+    EXPECT_FALSE(groups.async_direct[0]);
+    EXPECT_FALSE(groups.async_direct[1]) << "a block device under libaio: no io-wq to hand to";
+}
+
+TEST(FsAsyncRouter, Only_Nfs_Spreads)
+{
+    EXPECT_TRUE(FsAsyncRouter::spreads_reads("nfs"));
+    EXPECT_TRUE(FsAsyncRouter::spreads_reads("nfs4"));
+    EXPECT_FALSE(FsAsyncRouter::spreads_reads("ext4"));
+    EXPECT_FALSE(FsAsyncRouter::spreads_reads("lustre"));
+    EXPECT_FALSE(FsAsyncRouter::spreads_reads(""));
+}
+
 // Directories on one mount share a group, so they share an engine.
 TEST(FsAsyncRouter, One_Group_Per_Mount_Not_Per_Directory)
 {

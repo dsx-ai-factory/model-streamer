@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "posix_io/engine_factory/engine_factory.h"
@@ -188,8 +189,12 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     void drain_batch(std::atomic<bool> & stopped) override;
 
     // A copy still in flight is work this worker owes, even with an empty window and an idle engine.
-    // Without this the pool would park on its queue and the workload would never finalize.
+    // Without this the pool would park on its queue and the workload would never finalize. So are
+    // chunks still waiting in the per-file backlog.
     bool has_deferred_work() const override;
+
+    // Move chunks from the per-file backlog into the window - see fill_from_backlog().
+    void pre_pump() override;
 
     // Buffers beyond the window, by default. RUNAI_STREAMER_INTERNAL_DEVICE_COPY_DEPTH overrides it.
     static constexpr unsigned DefaultCopyDepth = 2;
@@ -215,6 +220,20 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
         // buffered read, or map a buffered read's -EINVAL as an alignment bug.
         bool direct = false;
 
+        // More direct descriptors on the same file, when the workload asks for several
+        // (Workload::direct_fds). Reads are dealt to `fd` and these in turn. Linux NFS takes a
+        // reference on one lock context per open file for every page of a direct read, so the io-wq
+        // workers that punted reads run on would otherwise all contend on one.
+        //
+        // Optional, so they never cost a required open: their number is bounded by
+        // extra_fd_budget(), and they close as soon as this batch's last chunk is accounted rather
+        // than with `fd` when the workload ends.
+        std::vector<int> extra;
+        unsigned next = 0;
+
+        // This batch's chunks not yet accounted. Zero means no read of it is staged or in flight.
+        size_t pending_chunks = 0;
+
         common::ResponseCode error = common::ResponseCode::Success;
     };
 
@@ -230,6 +249,61 @@ class AsyncIoWorker : public utils::CapacityWorker<Workload, QueuedChunk>
     };
 
     using InflightMap = std::map<uint64_t, Inflight>;
+
+ public:
+    // How many more optional direct descriptors may be opened. A quarter of the soft RLIMIT_NOFILE
+    // is set aside for them, less one descriptor for every batch an in-flight workload holds or will
+    // still open (`primaries`), less those already open (`extras_open`). So required opens keep the
+    // rest of the limit, and a load with many files gets fewer extras instead of failing.
+    // A static function of its inputs so the arithmetic is tested on its own.
+    static size_t extra_fd_budget(uint64_t soft_limit, size_t primaries, size_t extras_open);
+
+ private:
+    // Closes a batch's optional descriptors. Only once nothing staged can still name them.
+    void close_extras(BatchFd & batch_fd);
+
+    // Chunks of a workload that caps its reads per file (Workload::file_depth), held back until their
+    // file has room.
+    //
+    // A file server reading one file cold gets nothing from many concurrent reads of it: on Linux each
+    // extra reader of the same file mostly waits, on a CPU. A deep window spent on one file therefore
+    // costs the server CPU and buys no throughput. The same window spread over several files is
+    // served in parallel. So a capped workload's chunks wait here, one list per file in the order the
+    // files arrived, and fill_from_backlog() lets at most `depth` of each file into the window.
+    //
+    // Workloads are still taken whole and in order, and the oldest file with room always goes first,
+    // so the window only spreads to a later file when the earlier ones are at their cap. Nothing here
+    // reorders delivery: every chunk taken from here is already one of an admitted workload's.
+    struct FileBacklog
+    {
+        std::string path;
+        unsigned depth = 0;
+        std::deque<QueuedChunk> chunks;
+    };
+    std::deque<FileBacklog> _backlog;
+
+    // Window slots each file holds, for chunks that came through the backlog. Keyed by path because
+    // consecutive workloads usually read the same file.
+    std::map<std::string, unsigned> _file_reads;
+
+    // Which file each such chunk counts against, until its window slot is given back.
+    std::map<posix_io::RequestId, std::string> _counted_against;
+
+    // Queue `chunk` behind the other chunks of its file.
+    void hold_back(const std::string & path, unsigned depth, const QueuedChunk & chunk);
+
+    // Move chunks from the backlog into the window, oldest file with room first, while the window has
+    // room. Called whenever a slot may have been freed and when a workload arrives.
+    void fill_from_backlog();
+
+    // Give back a chunk's window slot, and its file's share of it if it came through the backlog.
+    void free_slot(posix_io::RequestId id);
+
+    // Every batch of every in-flight workload, each of which holds or will open one descriptor.
+    size_t _primaries_reserved = 0;
+
+    // Optional descriptors open across this worker's batches.
+    size_t _extra_fds_open = 0;
 
     // Stage the outstanding part of a request - the whole chunk the first time, the remainder after a
     // short read. Resolves it here if it cannot be staged, since no completion would then arrive.
