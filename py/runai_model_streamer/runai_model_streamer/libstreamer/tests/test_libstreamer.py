@@ -20,6 +20,8 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_set_credentials,
     runai_request,
     runai_response,
+    runai_end,
+    runai_fs_readers_per_mount,
 )
 from runai_model_streamer.s3_utils.s3_utils import (
     S3Credentials,
@@ -452,6 +454,20 @@ class TestRequestDevice(unittest.TestCase):
         for member in RunaiFileStreamerDeviceType:
             self.assertIn(f"RUNAI_FILE_STREAMER_DEVICE_{member.name} ({member.value})",
                           str(raised.exception), member.name)
+
+
+class ReadersPerMount(unittest.TestCase):
+    def test_a_live_streamer_reports_at_least_one_reader(self):
+        streamer = runai_start()
+        try:
+            self.assertGreaterEqual(runai_fs_readers_per_mount(streamer), 1)
+        finally:
+            runai_end(streamer)
+
+    def test_an_invalid_handle_is_refused(self):
+        """A ring sized from a dead handle would be sized from a number nobody answered."""
+        with self.assertRaises(ValueError):
+            runai_fs_readers_per_mount(None)
 
 
 if __name__ == "__main__":

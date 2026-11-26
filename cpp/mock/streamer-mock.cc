@@ -356,14 +356,20 @@ extern "C" int runai_file_streamer_probe_direct_block_size(void * streamer, cons
 // the configuration that lives there; the sizing arithmetic is tested directly instead.
 extern "C" int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_readers)
 {
-    (void)streamer;
-
     if (out_readers == nullptr)
     {
         return static_cast<int>(runai::llm::streamer::common::ResponseCode::InvalidParameterError);
     }
 
+    // Written before the handle is checked, as the real entry point does: a caller sizes a ring from
+    // this number, and an unwritten one is read as a ring of nothing.
     *out_readers = 1;
+
+    if (streamer == nullptr)
+    {
+        return static_cast<int>(runai::llm::streamer::common::ResponseCode::InvalidParameterError);
+    }
+
     return static_cast<int>(runai::llm::streamer::common::ResponseCode::Success);
 }
 
