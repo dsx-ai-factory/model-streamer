@@ -135,8 +135,9 @@ given to each: four readers on a depth of 64 run at 16 each. The reads in flight
 then about what they were; they are issued from more threads. Each reader costs a thread and its
 own staging memory, so raising this is not free.
 
-A reader never runs below a depth of 3, so asking for more readers than a third of the depth raises
-the reads in flight above what the depth asks for. The streamer warns when that happens.
+A reader never runs below a depth of 1. Asking for more readers than the depth therefore puts more
+reads in flight for the mount than the depth asks for: eight readers on a depth of 4 run at 1 each,
+which is 8 in flight rather than 4.
 
 Not used by `sync_buffered`, which serves all mounts from a single shared pool.
 
