@@ -6,6 +6,7 @@
 #include "streamer/impl/config/config/config.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 
 #include "posix_io/alignment/alignment.h"
@@ -126,9 +127,12 @@ unsigned Config::fs_workers_per_mount()
     // zero, and the division drops any remainder.
     //
     // ONLY WHERE SOMEBODY ASKED. Unset, this reads one, and one per process over N processes is N
-    // for the mount - a deviation from a number nobody named. The assigner calls this once per
-    // submission, so reporting it there would warn on every request of every default run.
-    if (utils::env_exists("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT") && node_total != configured)
+    // for the mount - a deviation from a number nobody named.
+    //
+    // ONCE PER PROCESS, like the cap above: this resolves on every submission.
+    static std::atomic<bool> deviation_reported(false);
+    if (utils::env_exists("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT") && node_total != configured &&
+        !deviation_reported.exchange(true))
     {
         LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << configured << " over " << processes
                      << " processes on this node is " << each << " each, so a mount is read by "
@@ -162,9 +166,17 @@ unsigned Config::to_fs_workers_per_mount(unsigned long value, const char * sourc
     // still be served rather than where the arithmetic stops overflowing.
     if (value > max_fs_workers_per_mount)
     {
-        LOG(WARNING) << "Value " << value << " from " << source << " is above the limit of "
-                     << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
-                     << "an io engine with its own ring, and a pinned staging slab";
+        // ONCE PER PROCESS. The assigner resolves this on every submission and the reporting path
+        // asks again on every request, so one warning per call would repeat hundreds of times in a
+        // single model load and bury everything else. The condition it reports cannot change: the
+        // cap is a constant, and the setting is read at the start of a run.
+        static std::atomic<bool> reported(false);
+        if (!reported.exchange(true))
+        {
+            LOG(WARNING) << "Value " << value << " from " << source << " is above the limit of "
+                         << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
+                         << "an io engine with its own ring, and a pinned staging slab";
+        }
         return max_fs_workers_per_mount;
     }
 
