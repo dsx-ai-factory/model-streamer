@@ -854,6 +854,28 @@ TEST(ReadersPerMount, Reports_The_Resolved_Count)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+// What the caller reads back is what the pool will BUILD. A caller sizes a ring from this number, so
+// reporting the count that was asked for would reserve memory for readers that never exist.
+TEST(ReadersPerMount, Reports_What_The_Budget_Feeds)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 64UL);
+    utils::temp::UnsetEnv depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &readers),
+              static_cast<int>(common::ResponseCode::Success));
+
+    // Every reader runs at a depth of at least 3, and the default node-wide budget of 64 feeds 21 of
+    // them. Change that default and this number changes with it.
+    EXPECT_EQ(readers, 21u) << "64 asked, but 64 x 3 requests is past a budget of 64";
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
 // The device is validated HERE, before any batch exists and before the caller is owed a response.
 TEST(Device, Is_Validated_At_The_Boundary)
 {

@@ -98,6 +98,14 @@ struct Streamer
     // How many async engines exist
     unsigned async_engines() const;
 
+    // How many asynchronous readers this process gives one mount. The count the pool will build, not
+    // the count that was asked for: a caller sizes a ring from it, so a number larger than the readers
+    // reserves memory for readers that never exist.
+    //
+    // Answered from the DEFAULT queue depth, because this call names no path and a depth is resolved
+    // per file system type. A mount whose type carries its own depth may build a different number.
+    unsigned fs_readers_per_mount() const;
+
     const AsyncIoStats & stats() const;
 
     // What the async workers have done, summed over all of them and over the streamer's whole life.

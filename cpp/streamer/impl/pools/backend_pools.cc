@@ -101,13 +101,14 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                 // the setting promises not to do. At least one each, so a reader always has a
                 // request it may issue.
                 // NO MORE READERS THAN THE BUDGET FEEDS. The share is not an engine's final depth:
-                // AsyncIoSettings raises anything below MinDepth to it, so readers past depth/MinDepth
-                // each run deeper than their share and the mount exceeds the budget it was given -
-                // 32 readers on a depth of 64 would issue 96. Reduced rather than allowed, because a
-                // budget that silently does not hold is the one thing this setting promises.
+                // AsyncIoSettings raises anything below MinDepth to it, so extra readers each run
+                // deeper than their share and the mount exceeds the budget it was given. Reduced
+                // rather than allowed, because a budget that silently does not hold is the one thing
+                // this setting promises.
                 const unsigned asked = Config::fs_workers_per_mount();
-                const unsigned affordable = std::max(1u, depth / AsyncIoSettings::MinDepth);
-                const unsigned readers = std::min(asked, affordable);
+                const unsigned readers = AsyncIoSettings::readers_within(asked, depth);
+
+                // NODE WIDE, like `depth` itself, because the engine divides it again per process.
                 const unsigned share = std::max(1u, depth / readers);
 
                 if (readers < asked)
@@ -115,8 +116,8 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                     LOG(WARNING) << "Mount " << major(device) << ":" << minor(device) << " is read by "
                                  << readers << " reader(s) rather than the " << asked << " asked for:"
                                  << " a reader never runs below a queue depth of " << AsyncIoSettings::MinDepth
-                                 << ", and " << asked << " of those would put " << asked * AsyncIoSettings::MinDepth
-                                 << " requests in flight where the depth allows " << depth
+                                 << ", and " << asked << " of those would put more requests in flight than"
+                                 << " this process's share of the node-wide budget of " << depth
                                  << ". Raise RUNAI_STREAMER_FS_QUEUE_DEPTH to use more readers";
                 }
 

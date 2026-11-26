@@ -28,6 +28,7 @@
 
 #include "streamer/impl/workload/workload.h"
 #include "streamer/impl/async_io/async_io_worker/async_io_worker.h"
+#include "streamer/impl/async_io/async_io_settings/async_io_settings.h"
 #include "streamer/impl/filesystem_worker/filesystem_worker.h"
 #include "streamer/impl/object_storage_worker/object_storage_worker.h"
 #include "streamer/impl/assigner/assigner.h"
@@ -199,6 +200,12 @@ const AsyncIoStats & Streamer::stats() const
 AsyncIoCounters Streamer::async_counters() const
 {
     return _router.counters();
+}
+
+unsigned Streamer::fs_readers_per_mount() const
+{
+    return AsyncIoSettings::readers_within(Config::fs_workers_per_mount(),
+                                           _config->fs_async_queue_depth.default_value());
 }
 
 unsigned Streamer::async_engines() const

@@ -370,7 +370,7 @@ int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_rea
             return static_cast<int>(common::ResponseCode::InvalidParameterError);
         }
 
-        *out_readers = impl::Config::fs_workers_per_mount();
+        *out_readers = static_cast<impl::Streamer *>(streamer)->fs_readers_per_mount();
         return static_cast<int>(common::ResponseCode::Success);
     }
     catch (const common::Exception & e)

@@ -186,6 +186,31 @@ TEST(BackendPools, MoreReadersThanTheBudgetFeedsAreReducedToIt)
     EXPECT_EQ(depths.front(), 4u) << "and that reader gets the whole budget";
 }
 
+// The budget a reader is held to is the PROCESS's share, not the node's. Measured against the
+// node-wide figure instead, every process would be allowed the whole budget and a node at TP=8
+// would issue eight times what the setting names.
+TEST(BackendPools, TheBudgetIsDividedBetweenTheProcessesOnTheNode)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 64UL);
+    utils::temp::Env processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 3), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    // 64 asked over 8 processes is 8 each, but this process's share of the depth is 64/8 = 8, which
+    // feeds only 8/3 = 2 readers.
+    EXPECT_EQ(depths.size(), 2u) << "the node-wide depth must not be read as this process's budget";
+}
+
 // A depth below the engine's minimum cannot be divided at all, and the share still never reaches
 // zero - the reader would then have no request it may issue.
 TEST(BackendPools, ADepthOfOneStillLeavesAReaderOneRequest)

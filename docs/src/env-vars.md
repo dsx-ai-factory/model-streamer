@@ -132,13 +132,13 @@ ends up with a number other than the one asked for.
 
 The mount's queue depth from `RUNAI_STREAMER_FS_QUEUE_DEPTH` is SHARED between its readers, not
 given to each: four readers on a depth of 64 run at 16 each. The division drops a remainder here
-too, without a warning: four readers on a depth of 10 run at 2 each, so the mount runs at 8. The reads in flight for the mount are
-then about what they were; they are issued from more threads. Each reader costs a thread and its
-own staging memory, so raising this is not free.
+too, without a warning: eight readers on a depth of 60 run at 7 each, so the mount runs at 56. The
+reads in flight for the mount are then about what they were; they are issued from more threads. Each
+reader costs a thread and its own staging memory, so raising this is not free.
 
-A reader never runs below a depth of 1. Asking for more readers than the depth therefore puts more
-reads in flight for the mount than the depth asks for: eight readers on a depth of 4 run at 1 each,
-which is 8 in flight rather than 4.
+A reader never runs below a depth of 3. When the readers asked for would need more than the mount's
+depth, the mount is read by fewer of them instead, and the streamer warns: eight readers on a depth
+of 4 is one reader at depth 4. Raise `RUNAI_STREAMER_FS_QUEUE_DEPTH` to use more readers.
 
 Not used by `sync_buffered`, which serves all mounts from a single shared pool.
 
