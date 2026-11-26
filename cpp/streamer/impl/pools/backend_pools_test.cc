@@ -5,6 +5,8 @@
 
 #include "streamer/impl/pools/backend_pools.h"
 
+#include "streamer/impl/async_io/async_io_settings/async_io_settings.h"
+
 #include <gtest/gtest.h>
 
 #include <sys/sysmacros.h>   // makedev
@@ -209,6 +211,15 @@ TEST(BackendPools, TheBudgetIsDividedBetweenTheProcessesOnTheNode)
     // 64 asked over 8 processes is 8 each, but this process's share of the depth is 64/8 = 8, which
     // feeds only 8/3 = 2 readers.
     EXPECT_EQ(depths.size(), 2u) << "the node-wide depth must not be read as this process's budget";
+
+    // What the budget actually promises. The recorded value is node wide, so it reaches an engine
+    // divided by the same count and floored at MinDepth - which is where the overshoot would appear.
+    unsigned in_flight = 0;
+    for (const auto depth : depths)
+    {
+        in_flight += std::max(depth / 8u, AsyncIoSettings::MinDepth);
+    }
+    EXPECT_LE(in_flight, 64u / 8u) << "this process must not exceed its share of the node-wide budget";
 }
 
 // A depth below the engine's minimum cannot be divided at all, and the share still never reaches
