@@ -472,22 +472,25 @@ class FileStreamer:
         free = device_free_memory(self.device_str) if support else None
         sizing = None
         if support is not None:
-            # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without it
-            # is a size for a packing the ring cannot produce.
-            # ASKED OF THE LIBRARY, not read from the environment: the reader count is node wide
-            # and divided between the processes on the node, and a ring sized from a second copy of
-            # that rule would drift from the readers that fill it.
-            #
-            # ONLY WHERE THOSE READERS FILL THE RING. Object storage is served by its own pool,
-            # sized by RUNAI_STREAMER_OBJ_CONCURRENCY, and a file system reader count there would
-            # grow the ring for threads nothing builds. Any such path is enough: the rest of the
-            # request cannot be drained by readers it does not have.
-            readers = (1 if any(reads_object_storage(fc.path) for fc in file_stream_requests)
-                       else runai_fs_readers_per_mount(self.streamer))
-            sizing = (slot_shape if slot_shape is not None
-                      else device_ring_sizing(free, file_stream_requests,
-                                              SlotBounds(max_ranges=max_ranges_per_slot),
-                                              readers=readers))
+            if slot_shape is not None:
+                sizing = slot_shape
+            else:
+                # ASKED OF THE LIBRARY, not read from the environment: the reader count is node wide
+                # and divided between the processes on the node, and a ring sized from a second copy
+                # of that rule would drift from the readers that fill it.
+                #
+                # ONLY WHERE THOSE READERS FILL THE RING. Object storage is served by its own pool,
+                # sized by RUNAI_STREAMER_OBJ_CONCURRENCY, and a file system reader count there would
+                # grow the ring for threads nothing builds. Any such path is enough: the rest of the
+                # request cannot be drained by readers it does not have.
+                readers = (1 if any(reads_object_storage(fc.path) for fc in file_stream_requests)
+                           else runai_fs_readers_per_mount(self.streamer))
+
+                # THE SAME max_ranges_per_slot THE RING BELOW IS BUILT WITH. A size chosen without
+                # it is a size for a packing the ring cannot produce.
+                sizing = device_ring_sizing(free, file_stream_requests,
+                                            SlotBounds(max_ranges=max_ranges_per_slot),
+                                            readers=readers)
 
         if sizing is not None:
             buffer_size, num_buffers = sizing
