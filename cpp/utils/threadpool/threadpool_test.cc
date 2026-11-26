@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <memory>
+#include <stdexcept>
 
 #include "utils/logging/logging.h"
 #include "utils/random/random.h"
@@ -261,6 +262,26 @@ TEST(Handle, Stopped)
         EXPECT_EQ(released, size);
         EXPECT_EQ(total, size);
     }
+}
+
+// A worker factory that fails only after some workers were built, so threads are already parked on the
+// blocking pop when the constructor gives up. Without cleanup, joining them never returns.
+TEST(ThreadPool, AFailedWorkerDoesNotLeaveThreadsParked)
+{
+    std::atomic<unsigned> executed(0);
+    unsigned built = 0;
+
+    auto factory = [&]() -> std::unique_ptr<Worker<unsigned>>
+    {
+        if (++built == 3)
+        {
+            throw std::runtime_error("no worker");
+        }
+        return std::make_unique<SyncWorker>(executed);
+    };
+
+    EXPECT_THROW(ThreadPool<unsigned>(factory, 4), std::runtime_error);
+    EXPECT_EQ(built, 3u) << "the pool gave up at the failing worker";
 }
 
 } // namespace runai::llm::streamer::utils

@@ -128,6 +128,35 @@ common::ResponseCode StrategyResolver::resolve()
     return resolve_locked();
 }
 
+bool StrategyResolver::may_be_async() const
+{
+    const auto lock = std::unique_lock<std::mutex>(_mutex);
+
+    if (_resolved.has_value())
+    {
+        return posix_io::is_async(_resolved.value());
+    }
+
+    const auto & candidates = _candidates.has_value() ? _candidates.value() : _default_candidates;
+
+    try
+    {
+        for (const auto strategy : posix_io::parse_candidates(candidates))
+        {
+            if (posix_io::is_async(strategy))
+            {
+                return true;
+            }
+        }
+    }
+    catch (const common::Exception &)
+    {
+        return true;
+    }
+
+    return false;
+}
+
 common::ResponseCode StrategyResolver::resolve_locked()
 {
     if (_resolved.has_value())

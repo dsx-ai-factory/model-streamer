@@ -111,6 +111,32 @@ class FsAsyncRouter
     // caller can still lay out its buffers.
     common::ResponseCode direct_block_for(const std::vector<std::string> & paths, size_t & out_block);
 
+    // Whether an asynchronous reader can still serve this streamer. False means the synchronous
+    // reader will serve every mount, so no mount builds readers of its own.
+    bool may_be_async() const;
+
+    // Whether this mount can serve O_DIRECT for `path`. Unknown counts as yes.
+    bool serves_direct(dev_t device, const std::string & path);
+
+    // What depths_for found. `depths` and `served_by_the_sync_reader` are separate answers, because
+    // "no mount could be read" and "every mount read goes to the synchronous reader" call for
+    // different numbers from a caller sizing a ring: nothing known, against nothing to size for.
+    struct MountDepths
+    {
+        // The node-wide queue depth of each DISTINCT mount that builds readers, in first-seen order.
+        std::vector<unsigned> depths;
+
+        // Whether any path named a mount that builds no readers of its own - memory backed, or one
+        // whose engine died and was dropped to the synchronous reader.
+        bool served_by_the_sync_reader = false;
+    };
+
+    // The mounts these paths live on. `paths` must exclude object-storage URIs, which name no mount.
+    //
+    // An unstattable directory contributes to neither answer: it tells us nothing, and another path
+    // may still answer.
+    MountDepths depths_for(const std::vector<std::string> & paths, const FsQueueDepth & depth);
+
     AsyncIoCounters counters() const;
 
  private:

@@ -118,6 +118,226 @@ Streamer::Environment without(posix_io::Strategy unavailable)
     return environment;
 }
 
+// The reported reader count must come from the MOUNT'S depth, not the default. A queue depth is
+// resolved per file system type, so a reporting path that read the default would promise readers the
+// pool never builds - and a ring is sized from this number.
+TEST(ReadersPerMount, FollowsTheDepthOfTheMountTheseFilesAreOn)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    utils::temp::Dir dir;
+    utils::temp::File file(dir.path, utils::random::string(), utils::random::buffer(8));
+
+    // Through the environment, so the depth is parsed exactly as a run would parse it.
+    utils::temp::Env configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("64,nfs=12"));
+
+    auto on_type = [&](const std::string & fs_type) -> unsigned
+    {
+        Streamer streamer(Config(), Streamer::Environment{
+                          .mount = [fs_type](const std::string &) -> posix_io::MountCapability
+                          {
+                              posix_io::MountCapability capability{ makedev(8, 1), false };
+                              capability.fs_type = fs_type;
+                              return capability;
+                          },
+        });
+        return streamer.fs_readers_per_mount({ file.path });
+    };
+
+    // 64 feeds all 8 readers; 12 feeds only 12/3 = 4 of them. The default stays 64 in both, so a
+    // reporting path reading the default would answer 8 for the nfs mount as well.
+    EXPECT_EQ(on_type("ext4"), 8u) << "an unlisted type takes the default";
+    EXPECT_EQ(on_type("nfs4"), 4u) << "a listed type takes its own depth";
+}
+
+// A mount that builds no reader of its own is not the same as a path that told us nothing: the
+// first has an answer, which is one, and the second has to fall back.
+TEST(ReadersPerMount, AMountServedByTheSynchronousReaderBuildsNone)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    utils::temp::Dir dir;
+    utils::temp::File file(dir.path, utils::random::string(), utils::random::buffer(8));
+
+    auto readers_on = [&](bool memory_backed) -> unsigned
+    {
+        Streamer streamer(Config(), Streamer::Environment{
+                          .mount = [memory_backed](const std::string &) -> posix_io::MountCapability
+                          {
+                              return posix_io::MountCapability{ makedev(8, 1), memory_backed };
+                          },
+        });
+        return streamer.fs_readers_per_mount({ file.path });
+    };
+
+    EXPECT_EQ(readers_on(true), 1u) << "a memory-backed mount is read by the synchronous pool";
+    EXPECT_EQ(readers_on(false), 8u) << "and a disk-backed one is not";
+}
+
+// Two separate rules, and the test pins them apart. A shard list is stat'ed once per DIRECTORY -
+// a 200-shard model in one directory must not stat it 200 times - and counted once per DEVICE, so
+// two directories on one mount still describe one set of readers.
+TEST(ReadersPerMount, OneMountCountsOnceHoweverManyFilesAreOnIt)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::Env configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("64,nfs=12"));
+
+    utils::temp::Dir one_dir;
+    utils::temp::Dir other_dir;
+    utils::temp::File one(one_dir.path, utils::random::string(), utils::random::buffer(8));
+    utils::temp::File beside_it(one_dir.path, utils::random::string(), utils::random::buffer(8));
+    utils::temp::File elsewhere(other_dir.path, utils::random::string(), utils::random::buffer(8));
+
+    unsigned probes = 0;
+    // ONE device for both directories, so the two rules can be told apart by the probe count.
+    Streamer streamer(Config(), Streamer::Environment{
+                      .mount = [&probes](const std::string &) -> posix_io::MountCapability
+                      {
+                          ++probes;
+                          posix_io::MountCapability capability{ makedev(8, 1), false };
+                          capability.fs_type = "nfs4";
+                          return capability;
+                      },
+    });
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ one.path, beside_it.path }), 4u)
+        << "one mount at depth 12 feeds 4 readers";
+    EXPECT_EQ(probes, 1u) << "both files share a directory, so it is stat'ed once";
+
+    probes = 0;
+    EXPECT_EQ(streamer.fs_readers_per_mount({ one.path, elsewhere.path }), 4u)
+        << "still one mount, so still 4 readers";
+    EXPECT_EQ(probes, 2u) << "two directories are two stats; the DEVICE is what collapses them";
+}
+
+// A request spanning two mounts builds an engine for each, and BOTH sets of readers fill the one
+// ring the caller sizes from this number. The busiest mount alone would under-report it.
+TEST(ReadersPerMount, TwoMountsReportBothSetsOfReaders)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::Env configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("64,nfs=12"));
+
+    utils::temp::Dir local_dir;
+    utils::temp::Dir network_dir;
+    utils::temp::File local(local_dir.path, utils::random::string(), utils::random::buffer(8));
+    utils::temp::File network(network_dir.path, utils::random::string(), utils::random::buffer(8));
+
+    // Two devices, two types: ext4 takes the default 64 and builds 8, nfs4 takes 12 and builds 4.
+    Streamer streamer(Config(), Streamer::Environment{
+                      .mount = [&](const std::string & directory) -> posix_io::MountCapability
+                      {
+                          const bool is_network = directory.find(network_dir.path) != std::string::npos;
+                          posix_io::MountCapability capability{ makedev(8, is_network ? 2 : 1), false };
+                          capability.fs_type = is_network ? "nfs4" : "ext4";
+                          return capability;
+                      },
+    });
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ local.path }), 8u);
+    EXPECT_EQ(streamer.fs_readers_per_mount({ network.path }), 4u);
+    EXPECT_EQ(streamer.fs_readers_per_mount({ local.path, network.path }), 12u)
+        << "both engines read into the same ring, so both sets of readers count";
+}
+
+// libaio has no asynchronous buffered mode, so a mount that cannot serve O_DIRECT has its files
+// read synchronously and builds no reader. Only knowable once the strategy is resolved, which the
+// first submission does - so this reports the full count before that, and the real one after.
+TEST(ReadersPerMount, LibaioWithoutODirectBuildsNone)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), std::string("libaio_direct"));
+
+    const auto data = utils::random::buffer(8192);
+    utils::temp::File file(data);
+
+    std::vector<char> dst(data.size() + posix_io::DirectBlockSize);
+    char * congruent = dst.data() + ((-reinterpret_cast<uintptr_t>(dst.data()))
+                                     % posix_io::DirectBlockSize);
+
+    Streamer::Environment environment;
+    environment.availability = [](posix_io::Strategy) { return common::ResponseCode::Success; };
+    environment.direct = [](dev_t, const std::string &) { return posix_io::DirectSupport::No; };
+
+    // INJECTED, so the answer is about libaio and not about the file system this suite happens to
+    // be built on. A real tmpfs working directory is memory backed, which is tested above and would
+    // decide this test before the O_DIRECT check was reached.
+    environment.mount = [](const std::string &) -> posix_io::MountCapability
+    {
+        return posix_io::MountCapability{ makedev(8, 1), false };
+    };
+    environment.direct_block = [](dev_t, const std::string &) -> size_t
+    {
+        return posix_io::DirectBlockSize;   // the block the destination above is congruent for
+    };
+    Streamer streamer(Config(), std::move(environment));
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ file.path }), 8u)
+        << "before the first submission nobody knows libaio will win";
+
+    // Resolve the strategy, exactly as a first request does.
+    std::vector<FileRanges> request(1);
+    request[0].path = file.path;
+    request[0].ranges.push_back(ReadRange{ 0, data.size(), congruent });
+    SubmissionId submission_id = 0;
+    ASSERT_EQ(streamer.async_request(request, common::Device::host(), &submission_id),
+              common::ResponseCode::Success);
+    EXPECT_EQ(recv(streamer).response.ret, common::ResponseCode::Success);
+    ASSERT_FALSE(streamer.async_pool_used()) << "the mount really did go to the synchronous reader";
+
+    EXPECT_EQ(streamer.fs_readers_per_mount({ file.path }), 1u)
+        << "resolved to libaio on a mount without O_DIRECT, so no reader is built";
+}
+
+// sync_buffered serves every mount from ONE shared pool and builds no asynchronous reader at all,
+// so a mount's depth describes nobody. Asked before the first submission, which is when a ring is
+// sized, so the answer comes from the candidate list rather than from a resolved strategy.
+TEST(ReadersPerMount, TheSynchronousReaderBuildsNone)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    utils::temp::Dir dir;
+    utils::temp::File file(dir.path, utils::random::string(), utils::random::buffer(8));
+
+    auto readers_with = [&](const std::string & candidates) -> unsigned
+    {
+        utils::temp::Env strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"), candidates);
+        Streamer streamer(Config(), Streamer::Environment{
+                          .mount = [](const std::string &) -> posix_io::MountCapability
+                          {
+                              return posix_io::MountCapability{ makedev(8, 1), false };
+                          },
+        });
+        return streamer.fs_readers_per_mount({ file.path });
+    };
+
+    EXPECT_EQ(readers_with("sync_buffered"), 1u) << "no asynchronous reader is ever built";
+    EXPECT_EQ(readers_with("io_uring_direct,sync_buffered"), 8u)
+        << "an asynchronous candidate is still on the list, so readers may yet be built";
+}
+
+
 
 TEST(Creation, Default)
 {

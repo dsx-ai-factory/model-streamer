@@ -15,6 +15,7 @@
 #include "common/exception/exception.h"
 #include "common/response_code/response_code.h"
 #include "common/s3_credentials/s3_credentials.h"
+#include "streamer/impl/config/config/config.h"
 #include "streamer/impl/streamer/streamer.h"
 #include "posix_io/alignment/alignment.h"
 
@@ -340,6 +341,52 @@ int runai_file_streamer_probe_direct_block_size(
         }
 
         return static_cast<int>(s->direct_block_for(list, *out_block));
+    }
+    catch (const common::Exception & e)
+    {
+        return static_cast<int>(e.error());
+    }
+    catch (...)
+    {
+    }
+    return static_cast<int>(common::ResponseCode::UnknownError);
+}
+
+int runai_file_streamer_fs_readers_per_mount(
+    void *        streamer,
+    const char ** paths,
+    unsigned      num_paths,
+    unsigned *    out_readers)
+{
+    if (out_readers == nullptr)
+    {
+        return static_cast<int>(common::ResponseCode::InvalidParameterError);
+    }
+
+    // Written before anything that can fail, as the block probe is: a caller sizes a ring from this
+    // number, and an unwritten one is read as a ring of nothing.
+    *out_readers = 1;
+
+    try
+    {
+        auto s = static_cast<impl::Streamer *>(streamer);
+        if (s == nullptr || (num_paths != 0 && paths == nullptr))
+        {
+            return static_cast<int>(common::ResponseCode::InvalidParameterError);
+        }
+
+        std::vector<std::string> list;
+        list.reserve(num_paths);
+        for (unsigned i = 0; i < num_paths; ++i)
+        {
+            if (paths[i] != nullptr)
+            {
+                list.emplace_back(paths[i]);
+            }
+        }
+
+        *out_readers = s->fs_readers_per_mount(list);
+        return static_cast<int>(common::ResponseCode::Success);
     }
     catch (const common::Exception & e)
     {

@@ -110,6 +110,46 @@ Boolean: `1` or `0`
 
 `1`
 
+### RUNAI_STREAMER_FS_WORKERS_PER_MOUNT
+
+Since version 0.18.0
+
+Controls how many asynchronous readers serve each mount. A reader is a thread with its own queue.
+
+One mount, one reader, is the default. Storage that answers many requests at once - a scale-out
+filer, or a striped local array - can be read faster by several readers than by one, because a
+single reader can only have its own queue's worth of requests outstanding.
+
+The value is for the NODE, not for one process, and is divided between the streamer processes on
+it the same way `RUNAI_STREAMER_FS_QUEUE_DEPTH` is. Eight readers over eight processes is one each;
+over two processes it is four each.
+
+The division drops a remainder. Each process gets the whole part of the share, so the mount is read
+by that number times the processes on the node: twelve readers over eight processes is one each, and
+the mount is read by eight, not twelve. A process never gets fewer than one reader, so asking for
+fewer readers than there are processes also gives one each. The streamer warns whenever the mount
+ends up with a number other than the one asked for.
+
+The mount's queue depth from `RUNAI_STREAMER_FS_QUEUE_DEPTH` is SHARED between its readers, not
+given to each: four readers on a depth of 64 run at 16 each. The division drops a remainder here
+too, without a warning: eight readers on a depth of 60 run at 7 each, so the mount runs at 56. The
+reads in flight for the mount are then about what they were; they are issued from more threads. Each
+reader costs a thread and its own staging memory, so raising this is not free.
+
+A reader never runs below a depth of 3. When the readers asked for would need more than the mount's
+depth, the mount is read by fewer of them instead, and the streamer warns: eight readers on a depth
+of 4 is one reader at depth 4. Raise `RUNAI_STREAMER_FS_QUEUE_DEPTH` to use more readers.
+
+Not used by `sync_buffered`, which serves all mounts from a single shared pool.
+
+#### Values accepted
+
+Positive integer, at most 64. A larger value is capped, with a warning. Zero is read as one.
+
+#### Default value
+
+1
+
 ### RUNAI_STREAMER_CHUNK_BYTESIZE
 
 Controls the maximum size of memory each OS thread reads from the file at once.
@@ -177,10 +217,11 @@ can only lower the result.
 #### How the size is chosen
 
 1. One buffer is the largest single tensor in the request, because a tensor cannot span two
-   buffers. It is raised to 256 MiB if the largest tensor is smaller than that, and it is never
-   larger than the whole request.
-2. There are two buffers, so one can be filled while the other is in use. A request that fits in a
-   single buffer gets one.
+   buffers. It is raised to `RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB` divided by the buffer count
+   if the largest tensor is smaller than that, and it is never larger than the request divided by
+   the same count.
+2. The number of buffers is `RUNAI_STREAMER_DEVICE_RING_SLOTS`, so one can be filled while the
+   others are in use. A request with too few tensors to fill them all gets fewer.
 3. Under distributed streaming each rank adds up to two more buffers of the same size, to receive
    what its peers send.
 4. That total is then capped by `RUNAI_STREAMER_DEVICE_MEMORY_FRACTION`, and by this setting when
@@ -216,6 +257,54 @@ A number greater than `0` and at most `1`
 #### Default value
 
 `0.5`
+
+### RUNAI_STREAMER_DEVICE_RING_SLOTS
+
+Since version 0.18.0
+
+How many buffers the device ring above is built from.
+
+The total is shared between them, so more buffers means smaller ones. A buffer is never smaller
+than the largest range the caller asks for.
+
+The streamer may use fewer than asked where the device cannot hold that many, where the request has
+too few ranges to fill them, or where the value is above `1024`.
+
+> [!NOTE]
+> Under distributed streaming every rank must be given the same value. It decides the buffer size
+> as well as the count, and the ranks exchange data in buffers of one size. A rank that cannot hold
+> the agreed count still uses fewer.
+
+#### Values accepted
+
+A whole number of `1` or more
+
+#### Default value
+
+`4`
+
+### RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB
+
+Since version 0.18.0
+
+The least the device buffers above may hold in total, in gibibytes.
+
+`RUNAI_STREAMER_DEVICE_MEMORY_LIMIT` and `RUNAI_STREAMER_DEVICE_MEMORY_FRACTION` still apply after
+it: a value larger than the device allows is reduced, not refused. A buffer is also never larger
+than the request's share of the buffer count, so a request smaller than this value does not reach
+it.
+
+> [!NOTE]
+> Under distributed streaming every rank must be given the same value. It decides the buffer size,
+> which the ranks exchange data in and must agree on.
+
+#### Values accepted
+
+A whole number of gibibytes, `1` or more
+
+#### Default value
+
+`8`
 
 ### RUNAI_STREAMER_ORDERED_YIELD
 

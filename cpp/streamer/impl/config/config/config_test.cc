@@ -88,7 +88,119 @@ TEST_F(Creation, ObjectStorageRetryTimeout)
     EXPECT_EQ(config.object_storage_retry_timeout, std::chrono::seconds(expected));
 }
 
-// The legacy variable alone still configures both backends.
+// THE ASSIGNER SIZES AN ARRAY FROM THIS NUMBER, so an uncapped one overflows that arithmetic
+// before any allocation could refuse it - the ceiling wraps to zero and the writes land on an
+// empty vector. The cap is lower than the concurrencies because a reader costs an io engine and a
+// pinned slab as well as a thread.
+TEST_F(Creation, WorkersPerMountAboveTheLimitIsCapped)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4294967295UL);
+    EXPECT_EQ(Config::fs_workers_per_mount(), Config::max_fs_workers_per_mount);
+    EXPECT_LT(Config::max_fs_workers_per_mount, Config::max_concurrency)
+        << "a reader costs more than a thread, so its cap must be the lower one";
+
+    const Config config;
+    EXPECT_EQ(config.fs_workers_per_mount_node, Config::max_fs_workers_per_mount)
+        << "the configuration log must not name a count larger than a mount is given";
+}
+
+// Capping does not floor, and a mount with no readers is a pool with no threads.
+TEST_F(Creation, WorkersPerMountIsAtLeastOne)
+{
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 0UL);
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+
+        const Config config;
+        EXPECT_EQ(config.fs_workers_per_mount_node, 1u)
+            << "zero reads as one at both ends, so the configuration reports what is used";
+    }
+    {
+        utils::temp::UnsetEnv readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+}
+
+// NODE WIDE. The readers of one mount queue against the same device, so the setting is what the
+// node asks for and each process takes its share - the same arithmetic the queue depth uses. Left
+// per process, the real count would multiply with the tensor parallelism.
+TEST_F(Creation, WorkersPerMountAreSharedBetweenTheProcessesOnTheNode)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    for (const unsigned processes : { 1u, 2u, 4u, 8u })
+    {
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"),
+                               static_cast<unsigned long>(processes));
+
+        // times the processes, the node reads with the same 8 however it is split
+        EXPECT_EQ(Config::fs_workers_per_mount(), 8u / processes);
+    }
+}
+
+// The floor still wins, and the node then reads with MORE than was asked for - which is logged.
+TEST_F(Creation, MoreProcessesThanReadersStillLeavesOneEach)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 2UL);
+    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+    EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+}
+
+// A REMAINDER IS DROPPED, which the tests above cannot show because every pair in them divides. Each
+// process takes the whole part, so the node reads the mount with less than was asked for. Rounding
+// the division up instead would give twelve over eight two each, and the node twenty-four.
+TEST_F(Creation, WorkersPerMountDropsARemainder)
+{
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 12UL);
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+        // one each over eight processes, so the node reads with 8 and not the 12 asked for
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+    {
+        utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 9UL);
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 4UL);
+
+        // two each over four processes, so the node reads with 8 and not the 9 asked for
+        EXPECT_EQ(Config::fs_workers_per_mount(), 2u);
+    }
+}
+
+// THE DIVISION HAPPENS LATE, after a Config exists. Python writes the process group size while it
+// streams, so a number resolved when the streamer was built would skip the division and hand every
+// process the whole node's readers. What a Config holds is the node-wide figure, undivided.
+TEST_F(Creation, WorkersPerMountDividesByAGroupSizeWrittenAfterTheConfig)
+{
+    utils::temp::Env readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    unsigned node_wide = 0;
+    {
+        utils::temp::UnsetEnv group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+        const Config config;
+        node_wide = config.fs_workers_per_mount_node;
+    }
+    EXPECT_EQ(node_wide, 8u) << "a Config holds what the node was asked for";
+
+    utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+    EXPECT_EQ(Config::fs_workers_per_mount(), 1u)
+        << "8 readers over 8 processes is one each, divided after the Config was built";
+}
+
+// The default is untouched by the division: one per process, whatever the parallelism.
+TEST_F(Creation, TheDefaultIsOnePerProcessAtEveryGroupSize)
+{
+    utils::temp::UnsetEnv readers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+
+    for (const unsigned processes : { 1u, 8u })
+    {
+        utils::temp::Env group(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"),
+                               static_cast<unsigned long>(processes));
+        EXPECT_EQ(Config::fs_workers_per_mount(), 1u);
+    }
+}
+
 TEST_F(Creation, Concurrency)
 {
     const auto expected = utils::random::number<int>(1, 1000);

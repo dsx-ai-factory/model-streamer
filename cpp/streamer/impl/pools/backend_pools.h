@@ -29,11 +29,13 @@ namespace runai::llm::streamer::impl
 //   FileSystem       synchronous pread on `concurrency` threads. EXACTLY ONE POOL, always - the
 //                    synchronous reader is not modified by the async work, and it has no shared
 //                    submission point to wedge, so there is nothing to isolate by splitting it.
-//   FileSystemAsync  ONE POOL PER MOUNT. Each pool has one thread, which owns an AsyncIoWorker and
-//                    its IoEngine. One thread per pool, because the engine is not thread safe (5.2).
-//                    A separate pool per mount, not one pool with several workers: all workers in a
-//                    pool take work from the same queue, so one pool could not keep a mount's work
-//                    on one engine.
+//   FileSystemAsync  ONE POOL PER MOUNT, with RUNAI_STREAMER_FS_WORKERS_PER_MOUNT threads in it -
+//                    one by default. Each thread owns its OWN AsyncIoWorker and IoEngine, built by
+//                    the pool's factory once per thread, so the engine is never shared and its not
+//                    being thread safe (5.2) still holds. Several readers on one mount is what a
+//                    filer rewards: shallow rings in parallel beat one deep ring.
+//                    A separate pool per mount, not one pool serving several: all threads in a pool
+//                    take from the same queue, so one pool could not keep a mount's work together.
 //   ObjectStorage    `s3_concurrency` threads, each worker owning a plugin client and its own
 //                    in-flight window.
 //
@@ -119,8 +121,14 @@ class BackendPools
     // For testing: number of pools created so far.
     unsigned pools_created() const;
 
-    // How many async engines exist. For tests: nothing in production reads it.
+    // How many async engine GROUPS exist - the entries of _async_pools, which is what
+    // _max_async_engines caps. A group runs several readers, so this is not the number of rings or
+    // threads; async_readers() is. For tests: nothing in production reads it.
     unsigned async_engines() const;
+
+    // The readers across every group, each of which owns a ring and a thread. The number a mount
+    // gets is a share of the node's, so this is what the process really runs. For tests.
+    unsigned async_readers() const;
 
     // The resolved limit per queue depth, after the environment is read and capped. For tests: the
     // cap is otherwise only visible by building enough engines to reach it.
@@ -160,9 +168,11 @@ class BackendPools
     // point at the same engine, and because a mount must keep the engine it was given.
     std::map<dev_t, utils::ThreadPool<Workload> *> _async_by_device;
 
-    // The largest number of engines PER QUEUE DEPTH, so the worst case is this times the number of
-    // distinct depths configured. 1 puts every mount of one depth on one engine. That is the default,
-    // and it is also how an operator turns the feature off, because we have not measured the gain.
+    // The largest number of engine GROUPS per queue depth. A group runs fs_workers_per_mount()
+    // readers, each with its own ring and thread, so the worst case is this times the distinct depths
+    // configured times that reader count. 1 puts every mount of one depth on one group. That is the
+    // default, and it is also how an operator turns the feature off, because we have not measured
+    // the gain.
     const unsigned _max_async_engines;
 
     // Mounts that were given an engine already in use. Not the same as (mounts - engines): a mount
@@ -173,8 +183,11 @@ class BackendPools
     static utils::ThreadPool<Workload> * least_loaded_async(
         const std::vector<std::unique_ptr<utils::ThreadPool<Workload>>> & engines);
 
-    // Engines across every depth. Called under _async_mutex.
+    // Engine groups across every depth. Called under _async_mutex.
     unsigned count_async_engines() const;
+
+    // Readers across every group of every depth. Called under _async_mutex.
+    unsigned count_async_readers() const;
 
     std::unique_ptr<utils::ThreadPool<Workload>> _object_storage_pool;
 

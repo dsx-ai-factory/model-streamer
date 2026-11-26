@@ -156,6 +156,34 @@ TEST_F(StreamerTest, Creation)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
+// A MALFORMED READER COUNT IS REJECTED AT START, like every other malformed variable. Read first on
+// the request path instead, a parse failure is not a common::Exception and so becomes UnknownError -
+// the code that tells a caller to abandon the streamer rather than fix its input.
+TEST_F(StreamerTest, MalformedWorkersPerMountIsRejectedAtStart)
+{
+    for (const auto & written : { std::string("-1"), std::string("abc"), std::string("4 ") })
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), written);
+
+        void * streamer = nullptr;
+        EXPECT_EQ(runai_file_streamer_start(&streamer),
+                  static_cast<int>(common::ResponseCode::InvalidParameterError))
+            << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << written;
+        EXPECT_EQ(streamer, nullptr);
+    }
+}
+
+// The streamer still starts for a value it can use, so the check above rejects the malformed ones
+// rather than the variable.
+TEST_F(StreamerTest, AValidWorkersPerMountStartsNormally)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
 // Replaces AssignerTest.Mismatched_Input_Sizes, which asserted the old per-file vector length check.
 // Lengths cannot disagree now - num_ranges describes the flat arrays - so what remains checkable at the C
 // boundary is null-ness, validated in submit_request before anything is dereferenced.
@@ -795,6 +823,101 @@ TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
 
     // A null out-parameter is the one case with nowhere to write, so it only reports.
     EXPECT_EQ(runai_file_streamer_probe_direct_block_size(streamer, &path, 1, nullptr), invalid);
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
+// The reader count a caller reads back is the one THIS PROCESS runs with - node wide, divided.
+TEST(ReadersPerMount, Reports_The_Resolved_Count)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    const int invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
+
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::Env processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 2UL);
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &readers),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(readers, 4u) << "8 readers over 2 processes is 4 each";
+
+    // A null streamer. Rejected, and the count must still be usable.
+    readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(nullptr, nullptr, 0, &readers), invalid);
+    EXPECT_EQ(readers, 1u) << "the count is written before the handle is checked, so an error exit "
+                              "still leaves a usable one";
+
+    // Nowhere to write, so this only reports.
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, nullptr), invalid);
+
+    // Paths promised but not given.
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 2, &readers), invalid);
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
+// The PATHS must reach the library. Every other call in these tests passes none, so a marshalling
+// loop that dropped them would answer identically and prove nothing.
+TEST(ReadersPerMount, The_Paths_Reach_The_Library)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+    utils::temp::UnsetEnv configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
+
+    // tmpfs, which the synchronous reader serves: it builds no reader per mount, so it answers 1 -
+    // deliberately NOT what the same call answers with no path at all.
+    utils::temp::Dir dir("/dev/shm");
+    utils::temp::File file(dir.path, utils::random::string(), utils::random::buffer(16));
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned without = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &without),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(without, 8u) << "no path, so the default depth answers and feeds all 8";
+
+    const char * path = file.path.c_str();
+    unsigned with = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, &path, 1, &with),
+              static_cast<int>(common::ResponseCode::Success));
+    EXPECT_EQ(with, 1u) << "the path names a mount the synchronous reader serves";
+
+    EXPECT_NO_THROW(runai_file_streamer_end(streamer));
+}
+
+// What the caller reads back is what the pool will BUILD. A caller sizes a ring from this number, so
+// reporting the count that was asked for would reserve memory for readers that never exist.
+TEST(ReadersPerMount, Reports_What_The_Budget_Feeds)
+{
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 64UL);
+    utils::temp::UnsetEnv depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
+    utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
+
+    void * streamer = nullptr;
+    ASSERT_EQ(runai_file_streamer_start(&streamer), static_cast<int>(common::ResponseCode::Success));
+
+    unsigned readers = 0;
+    EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr, 0, &readers),
+              static_cast<int>(common::ResponseCode::Success));
+
+    // Every reader runs at a depth of at least 3, and the default node-wide budget of 64 feeds 21 of
+    // them. Change that default and this number changes with it.
+    EXPECT_EQ(readers, 21u) << "64 asked, but 64 x 3 requests is past a budget of 64";
 
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }

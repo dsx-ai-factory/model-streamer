@@ -12,6 +12,7 @@
 #include <atomic>
 #include <utility>
 
+#include "streamer/impl/async_io/async_io_settings/async_io_settings.h"
 #include "streamer/impl/config/config/config.h"
 #include "utils/env/env.h"
 #include "utils/logging/logging.h"
@@ -32,6 +33,11 @@ BackendPools::BackendPools(WorkerFactory filesystem_factory,
     // Per queue depth and per PROCESS, not per node. Each engine has its own queue depth, so N
     // engines mean N times the depth of reads running at the device - and a thread and a ring each,
     // which is why to_concurrency caps it like the two concurrencies, and warns the same way.
+    //
+    // DELIBERATELY UNLIKE RUNAI_STREAMER_FS_WORKERS_PER_MOUNT, which SHARES a mount's depth between
+    // its readers rather than replicating it. The two knobs answer different questions: this one
+    // caps how many mounts may be served at once when they outnumber the engines, and each of those
+    // mounts brought its own depth; that one decides how a SINGLE mount's one budget is carried.
     _max_async_engines(Config::to_concurrency(
         utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_MAX_ENGINES", 1U),
         "RUNAI_STREAMER_FS_MAX_ENGINES"))
@@ -89,14 +95,41 @@ void BackendPools::push_async(dev_t device, size_t block, unsigned depth, bool r
                 // storage's plugin lock - the strategy was settled before dispatch, and a mount needs
                 // no agreement at all. (The mutex above guards the map, not a decision.)
                 // The block is bound HERE and never changes for this engine.
+                // THE DEPTH IS SHARED BETWEEN THE READERS, NOT GIVEN TO EACH. It is a budget for
+                // the whole node per file system type, so handing every reader the full number
+                // would multiply the node's in-flight requests by the reader count - the one thing
+                // the setting promises not to do. At least one each, so a reader always has a
+                // request it may issue.
+                // NO MORE READERS THAN THE BUDGET FEEDS. The share is not an engine's final depth:
+                // AsyncIoSettings raises anything below MinDepth to it, so extra readers each run
+                // deeper than their share and the mount exceeds the budget it was given. Reduced
+                // rather than allowed, because a budget that silently does not hold is the one thing
+                // this setting promises.
+                const unsigned asked = Config::fs_workers_per_mount();
+                const unsigned readers = AsyncIoSettings::readers_within(asked, depth);
+
+                // NODE WIDE, like `depth` itself, because the engine divides it again per process.
+                const unsigned share = std::max(1u, depth / readers);
+
+                if (readers < asked)
+                {
+                    LOG(WARNING) << "Mount " << major(device) << ":" << minor(device) << " is read by "
+                                 << readers << " reader(s) rather than the " << asked << " asked for:"
+                                 << " a reader never runs below a queue depth of " << AsyncIoSettings::MinDepth
+                                 << ", and " << asked << " of those would put more requests in flight than"
+                                 << " this process's share of the node-wide budget of " << depth
+                                 << ". Raise RUNAI_STREAMER_FS_QUEUE_DEPTH to use more readers";
+                }
+
                 auto created = std::make_unique<utils::ThreadPool<Workload>>(
-                    [factory = _filesystem_async_factory, device, block, depth, register_buffers, async_direct]()
-                    { return factory(device, block, depth, register_buffers, async_direct); }, 1);
+                    [factory = _filesystem_async_factory, device, block, share, register_buffers, async_direct]()
+                    { return factory(device, block, share, register_buffers, async_direct); }, readers);
                 pool = created.get();
                 engines.push_back(std::move(created));
 
-                LOG(DEBUG) << "Engine " << engines.size() << " at queue depth " << depth << " serves mount "
-                           << major(device) << ":" << minor(device);
+                LOG(DEBUG) << "Engine " << engines.size() << " serves mount " << major(device) << ":"
+                           << minor(device) << " with " << readers << " reader(s) at queue depth "
+                           << share << " each, from a budget of " << depth;
             }
             else
             {
@@ -217,6 +250,12 @@ unsigned BackendPools::async_engines() const
     return count_async_engines();
 }
 
+unsigned BackendPools::async_readers() const
+{
+    const auto guard = std::unique_lock<std::mutex>(_async_mutex);
+    return count_async_readers();
+}
+
 unsigned BackendPools::pools_created() const
 {
     const auto guard = std::unique_lock<std::mutex>(_async_mutex);
@@ -233,6 +272,20 @@ unsigned BackendPools::count_async_engines() const
     {
         (void)key;
         total += static_cast<unsigned>(engines.size());
+    }
+    return total;
+}
+
+unsigned BackendPools::count_async_readers() const
+{
+    unsigned total = 0;
+    for (const auto & [key, engines] : _async_pools)
+    {
+        (void)key;
+        for (const auto & pool : engines)
+        {
+            total += pool->threads();
+        }
     }
     return total;
 }

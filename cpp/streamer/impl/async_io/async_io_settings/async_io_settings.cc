@@ -14,6 +14,16 @@
 namespace runai::llm::streamer::impl
 {
 
+unsigned AsyncIoSettings::readers_within(unsigned asked, unsigned node_wide_depth)
+{
+    // The same division the constructor makes, because what a reader is held to is the PROCESS's
+    // depth: comparing against the node-wide figure would allow every process the whole budget.
+    const unsigned processes = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
+    const unsigned share = std::max(1u, node_wide_depth / processes);
+
+    return std::max(1u, std::min(asked, share / MinDepth));
+}
+
 AsyncIoSettings::AsyncIoSettings(const Config & config, unsigned node_wide_depth, size_t max_read_bytesize) :
     // getenv_positive, not std::max on the raw value: the very next line DIVIDES by this, and a
     // floor applied before the narrowing to `unsigned` does not survive it (env.h).

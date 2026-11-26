@@ -20,6 +20,8 @@ from runai_model_streamer.libstreamer.libstreamer import (
     runai_set_credentials,
     runai_request,
     runai_response,
+    runai_end,
+    runai_fs_readers_per_mount,
 )
 from runai_model_streamer.s3_utils.s3_utils import (
     S3Credentials,
@@ -452,6 +454,34 @@ class TestRequestDevice(unittest.TestCase):
         for member in RunaiFileStreamerDeviceType:
             self.assertIn(f"RUNAI_FILE_STREAMER_DEVICE_{member.name} ({member.value})",
                           str(raised.exception), member.name)
+
+
+class ReadersPerMount(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.temp_dir, "w.bin")
+        with open(self.path, "w") as handle:
+            handle.write("x" * 16)
+        self.addCleanup(shutil.rmtree, self.temp_dir)
+
+    def test_the_paths_are_marshalled_without_error(self):
+        """What this binding owns: encoding the list and reading the count back.
+
+        The NUMBER is not checked here - the mock answers 1 whatever it is given, so an assertion on
+        it would pass for any implementation. The rules behind the number are pinned in the C++
+        tests, against the real library.
+        """
+        streamer = runai_start()
+        try:
+            self.assertEqual(runai_fs_readers_per_mount(streamer, [self.path, self.path]), 1)
+            self.assertEqual(runai_fs_readers_per_mount(streamer, []), 1)
+        finally:
+            runai_end(streamer)
+
+    def test_an_invalid_handle_is_refused(self):
+        """A ring sized from a dead handle would be sized from a number nobody answered."""
+        with self.assertRaises(ValueError):
+            runai_fs_readers_per_mount(None, [self.path])
 
 
 if __name__ == "__main__":

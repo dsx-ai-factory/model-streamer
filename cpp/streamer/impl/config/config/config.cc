@@ -6,6 +6,7 @@
 #include "streamer/impl/config/config/config.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 
 #include "posix_io/alignment/alignment.h"
@@ -101,6 +102,46 @@ bool Config::registers_buffers(const std::string & fs_type) const
     return true;
 }
 
+unsigned Config::fs_workers_per_mount()
+{
+    const unsigned configured = to_fs_workers_per_mount(
+        utils::getenv<unsigned long>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1UL),
+        "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT");
+
+    // NODE WIDE, AND DIVIDED, exactly as the queue depth is. The readers of one mount all queue
+    // against the same device, so what the storage sees is this number times the processes on the
+    // node. Left per process it would multiply with the tensor parallelism, asking one mount for
+    // eight times as many readers at TP=8 as the same setting asks for at TP=1.
+    //
+    // ASYNC ONLY. The synchronous pool and object storage never read this: a mount gets more than
+    // one reader only where an engine serves it.
+    const unsigned processes = utils::getenv_positive<unsigned>("RUNAI_STREAMER_PROCESS_GROUP_SIZE", 1U);
+
+    // AT LEAST ONE: to_concurrency caps but does not floor, and the division can reach zero on its
+    // own. A mount with no readers is a pool with no threads, which reads nothing at all.
+    const unsigned each = std::max(1u, configured / processes);
+    const unsigned node_total = each * processes;
+
+    // Logged rather than applied silently, as the depth does: a number that never materialises is
+    // worse than one that is rejected. Covers both directions - the floor above raises a share of
+    // zero, and the division drops any remainder.
+    //
+    // ONLY WHERE SOMEBODY ASKED. Unset, this reads one, and one per process over N processes is N
+    // for the mount - a deviation from a number nobody named.
+    //
+    // ONCE PER PROCESS, like the cap above: this resolves on every submission.
+    static std::atomic<bool> deviation_reported(false);
+    if (utils::env_exists("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT") && node_total != configured &&
+        !deviation_reported.exchange(true))
+    {
+        LOG(WARNING) << "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT=" << configured << " over " << processes
+                     << " processes on this node is " << each << " each, so a mount is read by "
+                     << node_total << " readers rather than the " << configured;
+    }
+
+    return each;
+}
+
 unsigned Config::to_concurrency(unsigned long value, const char * source)
 {
     // Caps BEFORE narrowing. The variables are parsed as 64-bit, so a cast alone would wrap:
@@ -117,10 +158,38 @@ unsigned Config::to_concurrency(unsigned long value, const char * source)
     return static_cast<unsigned>(value);
 }
 
+unsigned Config::to_fs_workers_per_mount(unsigned long value, const char * source)
+{
+    // CAPPED LOWER THAN THE CONCURRENCIES, because a unit here costs more than a thread: each
+    // reader also builds an io engine with its own ring and a pinned staging slab. The cap is the
+    // last thing between an operator's typo and that allocation, so it is set where a mount can
+    // still be served rather than where the arithmetic stops overflowing.
+    if (value > max_fs_workers_per_mount)
+    {
+        // ONCE PER PROCESS. The assigner resolves this on every submission and the reporting path
+        // asks again on every request, so one warning per call would repeat hundreds of times in a
+        // single model load and bury everything else. The condition it reports cannot change: the
+        // cap is a constant, and the setting is read at the start of a run.
+        static std::atomic<bool> reported(false);
+        if (!reported.exchange(true))
+        {
+            LOG(WARNING) << "Value " << value << " from " << source << " is above the limit of "
+                         << max_fs_workers_per_mount << " and is capped to it. Each reader is a thread, "
+                         << "an io engine with its own ring, and a pinned staging slab";
+        }
+        return max_fs_workers_per_mount;
+    }
+
+    return static_cast<unsigned>(value);
+}
+
 Config::Config(unsigned concurrency, unsigned s3_concurrency, size_t s3_block_bytesize, size_t fs_sync_read_block_bytesize,
                bool enforce_minimum, size_t fs_async_chunk_bytesize, FsQueueDepth fs_async_queue_depth,
                std::string fs_strategy_candidates, unsigned long object_storage_retry_timeout_seconds,
-               std::string fs_no_register_buffers, bool fs_register_buffers, bool fs_direct_async) :
+               std::string fs_no_register_buffers, bool fs_register_buffers, bool fs_direct_async,
+               unsigned long fs_workers_per_mount_node) :
+    fs_workers_per_mount_node(to_fs_workers_per_mount(fs_workers_per_mount_node,
+                                                      "RUNAI_STREAMER_FS_WORKERS_PER_MOUNT")),
     concurrency(concurrency),
     s3_concurrency(s3_concurrency),
     s3_block_bytesize(s3_block_bytesize),
@@ -226,12 +295,13 @@ Config::Config(FsSettings fs, bool enforce_minimum) :
            utils::getenv<std::string>("RUNAI_STREAMER_FS_NO_REGISTER_BUFFERS",
                                       default_fs_no_register_buffers),
            utils::getenv<bool>("RUNAI_STREAMER_FS_REGISTER_BUFFERS", default_fs_register_buffers),
-           utils::getenv<bool>("RUNAI_STREAMER_FS_DIRECT_ASYNC", default_fs_direct_async))
+           utils::getenv<bool>("RUNAI_STREAMER_FS_DIRECT_ASYNC", default_fs_direct_async),
+           utils::getenv_positive<unsigned>("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT", 1U))
 {}
 
 std::ostream & operator<<(std::ostream & os, const Config & config)
 {
-    return os << "Streamer concurrency " << config.concurrency << " ; s3 concurrency " << config.s3_concurrency << " ; s3 block size " << config.s3_block_bytesize << " bytes; " << " ; file system block size " << config.fs_sync_read_block_bytesize << " bytes; " << " ; file system chunk size " << config.fs_async_chunk_bytesize << " bytes; " << " ; file system queue depth " << config.fs_async_queue_depth << " (node-wide); " << " ; file system strategy " << config.fs_strategy_candidates << "; object storage retry timeout " << config.object_storage_retry_timeout.count() << " seconds; ";
+    return os << "Streamer concurrency " << config.concurrency << " ; s3 concurrency " << config.s3_concurrency << " ; s3 block size " << config.s3_block_bytesize << " bytes; " << " ; file system block size " << config.fs_sync_read_block_bytesize << " bytes; " << " ; file system chunk size " << config.fs_async_chunk_bytesize << " bytes; " << " ; file system queue depth " << config.fs_async_queue_depth << " (node-wide); " << " ; file system readers per mount " << config.fs_workers_per_mount_node << " (node-wide); " << " ; file system strategy " << config.fs_strategy_candidates << "; object storage retry timeout " << config.object_storage_retry_timeout.count() << " seconds; ";
 }
 
 }; // namespace runai::llm::streamer::impl

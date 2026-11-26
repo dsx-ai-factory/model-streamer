@@ -48,12 +48,23 @@ struct Config
            unsigned long object_storage_retry_timeout_seconds = 0,
            std::string fs_no_register_buffers = default_fs_no_register_buffers,
            bool fs_register_buffers = default_fs_register_buffers,
-           bool fs_direct_async = default_fs_direct_async);
+           bool fs_direct_async = default_fs_direct_async,
+           unsigned long fs_workers_per_mount_node = 1);
     Config(bool enforce_minimum = true);
 
  private:
     // The deny list as written, into lowercased entries with empties dropped.
     static std::vector<std::string> split_types(const std::string & value);
+
+ public:
+    // What RUNAI_STREAMER_FS_WORKERS_PER_MOUNT asks of the NODE, floored at one and capped. Held so
+    // a malformed value is rejected while a Config is being built, where runai_file_streamer_start
+    // turns it into InvalidParameterError naming the variable - the request path would report
+    // UnknownError, which tells a caller to abandon the streamer. NOT the number a process uses:
+    // that is fs_workers_per_mount(), which divides this late.
+    unsigned fs_workers_per_mount_node;
+
+ private:
 
     // Both file system settings come from the same variable, so they are resolved together: reading it
     // twice would parse it twice and state the precedence rule twice.
@@ -119,9 +130,37 @@ struct Config
     // misunderstanding, not a typo, and the load should still run.
     static constexpr unsigned max_concurrency = 1024;
 
+    // Lower than max_concurrency: a reader is a thread AND an io engine with its own ring AND a
+    // pinned staging slab, where a concurrency unit is a thread. Far above any count that has been
+    // useful on a mount, and still a number a node can allocate.
+    static constexpr unsigned max_fs_workers_per_mount = 64;
+
+    // RUNAI_STREAMER_FS_WORKERS_PER_MOUNT: how many independent readers one mount gets.
+    //
+    // One is the default, and it is one thread with one ring. On storage fast enough to outrun a
+    // single thread - a scale-out filer answers many parallel requests far better than one stream -
+    // several workers read it the way several processes would, each owning its own engine.
+    //
+    // READ IN TWO PLACES and so defined in one: the pools build this many threads per mount, and
+    // the assigner must cut that mount's work into this many workloads or the extra threads have
+    // nothing to pull. The two must agree.
+    //
+    // STATIC, and the environment is read again on every call, because the value is divided by
+    // RUNAI_STREAMER_PROCESS_GROUP_SIZE - which the Python layer does not write until it streams,
+    // long after a Config exists. Resolving it here would read the unset default and skip the
+    // division. The same reason AsyncIoSettings is built on the first workload.
+    //
+    // Costs pinned memory and queue depth per worker, so it is opt in.
+    static unsigned fs_workers_per_mount();
+
     // Caps a worker count at max_concurrency and narrows it, naming the variable it came from. Takes
     // the wide type the variables are parsed as, because capping after the narrowing is too late.
     static unsigned to_concurrency(unsigned long value, const char * source);
+
+    // Caps a reader count at max_fs_workers_per_mount and narrows it. Separate from to_concurrency
+    // because the limit is lower, and used by every path that reports or applies the count, so the
+    // startup log cannot name a number larger than the one a mount gets.
+    static unsigned to_fs_workers_per_mount(unsigned long value, const char * source);
 
     static constexpr const char * default_fs_strategy_candidates = "io_uring_direct,libaio_direct,sync_buffered";
 

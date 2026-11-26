@@ -48,6 +48,15 @@ class AsyncIoSettings
     static constexpr unsigned MinDepth = 3;
     static constexpr unsigned MaxDepth = 1024;
 
+    // How many readers ONE PROCESS may build for a mount whose node-wide budget is this deep, given
+    // the count that was asked for. A reader never runs below MinDepth, so more readers than the
+    // process's share of the budget allows would put more requests in flight than the budget names.
+    // At least one, because a mount with no reader reads nothing.
+    //
+    // The one place this rule lives: the pool builds the readers and the C API reports them, and a
+    // second copy would let a caller size a ring for readers that are never built.
+    static unsigned readers_within(unsigned asked, unsigned node_wide_depth);
+
     // Bytes per request, clamped to what the kernel will read in one go. Beyond that the kernel
     // short-reads and the caller re-stages, so the bytes actually in flight would be depth x the cap
     // rather than depth x this - a window smaller than the one reserved against the memory limit,

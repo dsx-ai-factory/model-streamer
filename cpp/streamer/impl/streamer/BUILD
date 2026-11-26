@@ -22,6 +22,7 @@ runai_cc_auto_library(
         "//posix_io/alignment",
         "//posix_io/mount_capabilities",
         "//streamer/impl/async_io/async_io_worker",
+        "//streamer/impl/async_io/async_io_settings",
         "//streamer/impl/async_io/fs_async_router",
         "//streamer/impl/async_io/async_io_stats",
         "//common/responder",

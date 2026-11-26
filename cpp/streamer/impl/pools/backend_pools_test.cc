@@ -5,12 +5,15 @@
 
 #include "streamer/impl/pools/backend_pools.h"
 
+#include "streamer/impl/async_io/async_io_settings/async_io_settings.h"
+
 #include <gtest/gtest.h>
 
 #include <sys/sysmacros.h>   // makedev
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 #include <memory>
 #include <thread>
@@ -65,6 +68,212 @@ std::unique_ptr<utils::Worker<Workload>> noop_factory()
     return std::make_unique<NoopWorker>();
 }
 } // namespace
+
+// One mount is ONE worker unless asked otherwise - one thread, one ring, one staging pool.
+TEST(BackendPools, OneWorkerPerMountByDefault)
+{
+    utils::temp::UnsetEnv workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"));
+
+    std::atomic<unsigned> built{0};
+    auto counting = [&](dev_t, size_t, unsigned, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        ++built;
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, counting, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 512, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(built.load(), 1u);
+}
+
+// RUNAI_STREAMER_FS_WORKERS_PER_MOUNT gives ONE mount several readers. ThreadPool calls the factory
+// once per thread, so the count of factory calls IS the worker count - and each of those workers
+// owns its own engine, thread and staging pool.
+//
+// Three, not two: two is also what a second mount would produce, so it cannot tell a second worker
+// from a second engine.
+TEST(BackendPools, WorkersPerMountBuildsThatManyWorkersForOneMount)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 3UL);
+
+    std::atomic<unsigned> built{0};
+    auto counting = [&](dev_t, size_t, unsigned, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        ++built;
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, counting, noop_factory, 2, 3);
+
+    // ONE mount, pushed once. Everything built here belongs to it.
+    pools.push_async(makedev(8, 1), 0 /* block */, 512, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(built.load(), 3u) << "one mount must get the configured number of workers";
+}
+
+// THE DEPTH IS A BUDGET FOR THE MOUNT, SHARED BETWEEN ITS READERS. Handing each the full number
+// would multiply the node's in-flight requests by the reader count, which is the one thing the
+// node-wide promise rules out.
+TEST(BackendPools, TheMountsDepthIsSharedBetweenItsReaders)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    ASSERT_EQ(depths.size(), 4u);
+    for (const auto depth : depths)
+    {
+        EXPECT_EQ(depth, 16u) << "64 shared between 4 readers is 16 each, not 64 each";
+    }
+}
+
+// A GROUP IS NOT A RING. The cap counts groups, and a group now runs one reader per setting - each
+// with its own ring and thread, so the number of engines is the groups times their readers.
+TEST(BackendPools, ReadersAreCountedSeparatelyFromEngineGroups)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(pools.async_engines(), 1u) << "one mount, one group";
+    EXPECT_EQ(pools.async_readers(), 4u) << "that group runs four readers, each with a ring";
+}
+
+// Two mounts at the same depth above the cap share a group, so the groups do not grow but the
+// readers do not either - the sharers read through the same four.
+TEST(BackendPools, SharedGroupsDoNotAddReaders)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+
+    BackendPools pools(run, noop_async_factory, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+    pools.push_async(makedev(8, 2), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    EXPECT_EQ(pools.async_engines(), 1u);
+    EXPECT_EQ(pools.async_readers(), 4u) << "the second mount shares the first group's readers";
+}
+
+// A reader must always have a request it may issue, however many readers share a shallow budget.
+TEST(BackendPools, MoreReadersThanTheBudgetFeedsAreReducedToIt)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 1), 0 /* block */, 4, true /* register buffers */, true /* async direct */, Workload{});
+
+    // Eight readers on a depth of four would each be raised to MinDepth and put 24 requests in
+    // flight where the mount allows 4. The reader count comes down instead.
+    ASSERT_EQ(depths.size(), 1u) << "the budget feeds one reader at the engine's minimum, not eight";
+    EXPECT_EQ(depths.front(), 4u) << "and that reader gets the whole budget";
+}
+
+// The budget a reader is held to is the PROCESS's share, not the node's. Measured against the
+// node-wide figure instead, every process would be allowed the whole budget and a node at TP=8
+// would issue eight times what the setting names.
+TEST(BackendPools, TheBudgetIsDividedBetweenTheProcessesOnTheNode)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 64UL);
+    utils::temp::Env processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 3), 0 /* block */, 64, true /* register buffers */, true /* async direct */, Workload{});
+
+    // 64 asked over 8 processes is 8 each, but this process's share of the depth is 64/8 = 8, which
+    // feeds only 8/3 = 2 readers.
+    EXPECT_EQ(depths.size(), 2u) << "the node-wide depth must not be read as this process's budget";
+
+    // What the budget actually promises. The recorded value is node wide, so it reaches an engine
+    // divided by the same count and floored at MinDepth - which is where the overshoot would appear.
+    unsigned in_flight = 0;
+    for (const auto depth : depths)
+    {
+        in_flight += std::max(depth / 8u, AsyncIoSettings::MinDepth);
+    }
+    EXPECT_LE(in_flight, 64u / 8u) << "this process must not exceed its share of the node-wide budget";
+}
+
+// A depth below the engine's minimum cannot be divided at all, and the share still never reaches
+// zero - the reader would then have no request it may issue.
+TEST(BackendPools, ADepthOfOneStillLeavesAReaderOneRequest)
+{
+    utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
+
+    std::vector<unsigned> depths;
+    std::mutex seen;
+    auto recording = [&](dev_t, size_t, unsigned depth, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+    {
+        const auto guard = std::unique_lock<std::mutex>(seen);
+        depths.push_back(depth);
+        return std::make_unique<NoopWorker>();
+    };
+
+    BackendPools pools(run, recording, noop_factory, 2, 3);
+    pools.push_async(makedev(8, 2), 0 /* block */, 1, true /* register buffers */, true /* async direct */, Workload{});
+
+    ASSERT_EQ(depths.size(), 1u);
+    EXPECT_EQ(depths.front(), 1u) << "never zero, however small the budget";
+}
+
+// The setting is read per ENGINE, not once per process, so a second streamer sees the value it was
+// given rather than the first streamer's. A static would make this test depend on which test ran
+// first, and would hand a long-lived process a stale answer.
+TEST(BackendPools, WorkersPerMountIsReadAgainForEachStreamer)
+{
+    std::atomic<unsigned> first{0};
+    std::atomic<unsigned> second{0};
+    auto counting = [](std::atomic<unsigned> & into)
+    {
+        return [&into](dev_t, size_t, unsigned, bool, bool) -> std::unique_ptr<utils::Worker<Workload>>
+        {
+            ++into;
+            return std::make_unique<NoopWorker>();
+        };
+    };
+
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 2UL);
+        BackendPools pools(run, counting(first), noop_factory, 2, 3);
+        pools.push_async(makedev(8, 1), 0 /* block */, 512, true, true /* async direct */, Workload{});
+    }
+    {
+        utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
+        BackendPools pools(run, counting(second), noop_factory, 2, 3);
+        pools.push_async(makedev(8, 1), 0 /* block */, 512, true, true /* async direct */, Workload{});
+    }
+
+    EXPECT_EQ(first.load(), 2u);
+    EXPECT_EQ(second.load(), 4u) << "the second streamer read a stale value";
+}
 
 // The default is ONE engine per queue depth: the throughput case for splitting is unmeasured, and
 // io_uring itself is off by default for the same reason. So a streamer that reads three mounts at one

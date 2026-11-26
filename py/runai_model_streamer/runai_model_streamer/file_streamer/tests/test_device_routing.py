@@ -89,6 +89,20 @@ class TestDictatedSlotShape(unittest.TestCase):
         self.assertEqual(self.ring_shape(supported=True, slot_shape=(RANGE_SIZE * 3, 5)),
                          (RANGE_SIZE * 3, 5, True))
 
+    def test_a_dictated_shape_does_not_ask_the_library_for_readers(self):
+        """The reader count exists to SIZE a ring. With the shape dictated there is nothing to size,
+        so neither the library call nor the walk over every path is paid for."""
+        def must_not_be_called(*args, **kwargs):
+            raise AssertionError("the reader count was read although a shape was dictated")
+
+        with patch.object(file_streamer_module, "device_support", return_value=self.SUPPORT), \
+                patch.object(file_streamer_module, "device_free_memory", return_value=1 << 30), \
+                patch.object(file_streamer_module, "runai_fs_readers_per_mount", must_not_be_called), \
+                patch.object(file_streamer_module, "runai_probe_direct_block_size", return_value=4096):
+            with FileStreamer() as fs:
+                fs.stream_files(self.chunks(), None, "cpu", slot_shape=(RANGE_SIZE * 3, 5))
+                fs.drain_live_submissions()
+
     def test_the_host_fallback_uses_the_dictated_shape(self):
         # A device the C++ layer does not serve still takes the shape, on the host ring.
         self.assertEqual(self.ring_shape(supported=False, slot_shape=(RANGE_SIZE * 2, 7)),

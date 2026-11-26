@@ -29,8 +29,13 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     _max_pads_per_buffer,
     _ring_sizing,
     device_ring_sizing,
-    DEVICE_RING_MIN_SLOT,
-    DEVICE_RING_SLOTS,
+    DEFAULT_DEVICE_RING_MIN_TOTAL_GIB,
+    RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME,
+    DEVICE_RING_PER_READER,
+    DEFAULT_DEVICE_RING_SLOTS,
+    MAX_DEVICE_RING_SLOTS,
+    RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME,
+    device_ring_target,
     device_slot_size,
     RUNAI_STREAMER_DEVICE_MEMORY_LIMIT_ENV_VAR_NAME,
     RUNAI_STREAMER_DEVICE_MEMORY_FRACTION_ENV_VAR_NAME,
@@ -38,6 +43,7 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     host_ring_sizing,
 )
 from runai_model_streamer.file_streamer.yield_order import YieldOrder
+from runai_model_streamer.file_streamer.file_streamer import reads_object_storage
 
 
 class TestRingSizing(unittest.TestCase):
@@ -994,11 +1000,98 @@ class TestDeviceRingShape(unittest.TestCase):
         self.assertEqual(size, 3 * GiB)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_small_ranges_get_the_minimum_slot_rather_than_a_tiny_one(self):
-        """THE REGIME NO BENCHMARK COVERS. Without this floor a model of 8 KiB tensors would get a
-        slot of 8 KiB and one collective per slot."""
-        size = device_slot_size(self.files([8 << 10] * 100000))
-        self.assertEqual(size, DEVICE_RING_MIN_SLOT)
+    def test_small_ranges_get_a_share_of_the_minimum_total_rather_than_a_tiny_slot(self):
+        """Without this floor a model of 1 MiB tensors would get a slot of 1 MiB. The floor is a
+        TOTAL, so what a slot gets is that total divided by the depth."""
+        # 97.6 GiB of 1 MiB ranges: far above the floor, so the stream cap cannot bind instead.
+        size = device_slot_size(self.files([1 << 20] * 100000))
+        self.assertEqual(size, 2 * GiB)
+        self.assertEqual(size * DEFAULT_DEVICE_RING_SLOTS, DEFAULT_DEVICE_RING_MIN_TOTAL_GIB * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_total_grows_with_the_readers_that_fill_it(self):
+        """More readers reach a higher rate, and a higher rate empties the ring sooner."""
+        self.assertEqual(device_ring_target(1), 8 * GiB)
+        # the minimum outranks the per-reader term until there are more readers than gibibytes in it
+        self.assertEqual(device_ring_target(8), 8 * GiB)
+        self.assertEqual(device_ring_target(32), 32 * GiB)
+
+        small = self.files([1 << 20] * 100000)
+        self.assertEqual(device_slot_size(small, 1), 2 * GiB)
+        self.assertEqual(device_slot_size(small, 32), 8 * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_reader_count_below_one_is_read_as_one(self):
+        """Zero readers is not a ring of nothing: the library answers at least one, and this is the
+        same answer for a caller that passed nothing."""
+        self.assertEqual(device_ring_target(0), DEFAULT_DEVICE_RING_MIN_TOTAL_GIB * GiB)
+        self.assertEqual(device_ring_target(-3), DEFAULT_DEVICE_RING_MIN_TOTAL_GIB * GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME: "32"}, clear=True)
+    def test_the_minimum_total_can_be_raised_from_the_environment(self):
+        """The limit and the fraction beside it only ever LOWER the ring. How much a ring must hold
+        depends on the storage behind it, which this layer cannot see, so this one raises it."""
+        self.assertEqual(device_ring_target(1), 32 * GiB)
+        # ...and it is a MINIMUM, so the per-reader term still wins where it is larger
+        self.assertEqual(device_ring_target(64), 64 * GiB)
+        self.assertEqual(device_slot_size(self.files([1 << 20] * 100000), 1), 8 * GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME: "0"}, clear=True)
+    def test_a_minimum_total_of_zero_is_rejected_by_name(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_target(1)
+        self.assertIn(RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME: "sixteen"}, clear=True)
+    def test_a_minimum_total_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_ring_target(1)
+        self.assertIn(RUNAI_STREAMER_DEVICE_RING_MIN_TOTAL_GIB_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "8"}, clear=True)
+    def test_the_slot_count_can_be_raised_from_the_environment(self):
+        """The total is split between the slots, so more slots means smaller ones."""
+        shape = device_ring_sizing(1 << 40, self.files([1 << 20] * 100000))
+        self.assertEqual(shape, (DEFAULT_DEVICE_RING_MIN_TOTAL_GIB * GiB // 8, 8))
+        self.assertEqual(device_slot_size(self.files([1 << 20] * 100000)), GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "8"}, clear=True)
+    def test_the_largest_range_still_outranks_a_raised_slot_count(self):
+        """A range carries one destination address and cannot span two slots, however many there are."""
+        self.assertEqual(device_slot_size(self.files([3 * GiB] + [1 << 20] * 100000)), 3 * GiB)
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "10000000"}, clear=True)
+    def test_an_absurd_slot_count_is_capped_rather_than_refused(self):
+        """A number this far out is a typo, not a request worth failing a load over. Uncapped, the
+        depth walk and the allocation that follows it both run once per slot."""
+        with self.assertLogs(level="WARNING") as logs:
+            size, slots = device_ring_sizing(1 << 40, self.files([1 << 20] * 100000))
+        self.assertEqual(slots, MAX_DEVICE_RING_SLOTS)
+        self.assertIn(RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME, "".join(logs.output))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "0"}, clear=True)
+    def test_a_slot_count_below_one_is_rejected_by_name(self):
+        with self.assertRaises(ValueError) as raised:
+            device_slot_size(self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "two"}, clear=True)
+    def test_a_slot_count_that_is_not_a_number_names_the_variable(self):
+        with self.assertRaises(ValueError) as raised:
+            device_slot_size(self.files([GiB]))
+        self.assertIn(RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME, str(raised.exception))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_readers_never_lower_the_largest_range(self):
+        """The hard floor outranks the share: one reader asks for 2 GiB a slot, and a 3 GiB range
+        still cannot span two slots."""
+        self.assertEqual(device_slot_size(self.files([3 * GiB, GiB]), 1), 3 * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_readers_do_not_lift_a_slot_past_the_whole_stream(self):
+        """A 64 MiB model gets its share of the depth, not what the readers asked for - slots that
+        can overlap, rather than one slot holding everything."""
+        self.assertEqual(device_slot_size(self.files([1 << 20] * 64), 8), 16 << 20)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_a_slot_is_never_bigger_than_the_whole_stream(self):
@@ -1007,31 +1100,60 @@ class TestDeviceRingShape(unittest.TestCase):
         self.assertEqual(device_slot_size(self.files([4096])), 4096)
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_a_target_that_does_not_fit_shrinks_rather_than_refusing(self):
+        """The readers ask for more than the device has, and the answer is a SMALLER device ring -
+        not the host one. The refusal gate is the overlap floor, which this does not reach."""
+        small = self.files([1 << 20] * 100000)
+
+        # The ring asks for its minimum; half of 6 GiB free is 3 GiB, so the slot gives way first.
+        shape = device_ring_sizing(6 * GiB, small, readers=8)
+        self.assertIsNotNone(shape)
+        buffer_size, num_buffers = shape
+        self.assertEqual(num_buffers, DEFAULT_DEVICE_RING_SLOTS)
+        self.assertEqual(buffer_size, 768 * (1 << 20))
+        self.assertEqual(buffer_size * num_buffers, 3 * GiB)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_readers_cannot_push_a_device_off_the_device_ring(self):
+        """A bigger ASK must not make the fallback more likely: the gate is two of the largest
+        range, which the reader count does not touch."""
+        small = self.files([1 << 20] * 100000)
+
+        # Half of 8 MiB is 4 MiB - four of the largest range, so a ring still fits.
+        for readers in (1, 8):
+            shape = device_ring_sizing(8 << 20, small, readers=readers)
+            self.assertIsNotNone(shape, f"{readers} reader(s) refused a ring that fits")
+            self.assertEqual(shape, (1 << 20, DEFAULT_DEVICE_RING_SLOTS))
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_nothing_to_read_asks_for_nothing(self):
         self.assertEqual(device_slot_size([]), 0)
         self.assertEqual(device_slot_size(self.files([])), 0)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_the_depth_is_the_overlap_floor_and_the_memory_follows(self):
-        """Two slots, because one never overlaps anything - and the ring asks for exactly that,
-        not for whatever a configured budget would have paid for."""
+        """The depth the ring asks for, and no more - not whatever a configured budget would have
+        paid for. One slot never overlaps anything, so the depth is where the overlap lives."""
         size, slots = device_ring_sizing(100 * GiB, self.files([3 * GiB] * 8))
-        self.assertEqual((size, slots), (3 * GiB, DEVICE_RING_SLOTS))
+        self.assertEqual((size, slots), (3 * GiB, DEFAULT_DEVICE_RING_SLOTS))
 
     @patch.dict(os.environ, {}, clear=True)
     def test_what_the_caller_will_allocate_beside_the_ring_is_counted_here(self):
         """One solver. A reservation taken afterwards would shrink a shape this already chose."""
         size, slots = device_ring_sizing(30 * GiB, self.files([3 * GiB] * 8), extra_slots=2)
         self.assertLessEqual((slots + 2) * size, int(30 * GiB * 0.5))
-        self.assertEqual(slots, DEVICE_RING_SLOTS, "the overlap must survive the reservation")
+        self.assertEqual(slots, 3, "the depth gave one slot to the reservation and kept the overlap")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_the_slot_gives_way_before_the_depth_does(self):
         """Dropping to one slot is the one cliff both models measure. A slot somewhat below what
         the data asked for is flat over a wide range, so that is what gives."""
+        # Half of 5 GiB cannot pay for the depth at any slot size, so both have to give - and the
+        # order is what this pins: the slot reaches the largest range FIRST, and only then does the
+        # depth come down to what that size fits.
         size, slots = device_ring_sizing(5 * GiB, self.files([GiB] * 8))
-        self.assertEqual(slots, DEVICE_RING_SLOTS)
-        self.assertGreaterEqual(size, GiB, "never below the largest range")
+        self.assertEqual(size, GiB, "the slot gave way to the largest range before the depth moved")
+        self.assertEqual(slots, 2, "and the depth stopped at the overlap floor, not below it")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_two_slots_beat_one_that_cannot_span_the_stream(self):
@@ -1043,29 +1165,37 @@ class TestDeviceRingShape(unittest.TestCase):
         stream = self.files([10 * MiB] * 20)                 # 200 MiB in 10 MiB ranges
         size, slots = device_ring_sizing(600 * MiB, stream, extra_slots=2)
 
-        self.assertEqual(slots, 2, "one slot here cannot span the stream, so it must not be chosen")
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS,
+                         "one slot here cannot span the stream, so it must not be chosen")
         self.assertLess(size, 200 * MiB, "and the fixture really does not fit in one slot")
         self.assertLessEqual((slots + 2) * size, 300 * MiB, "within the allowance")
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_a_cap_that_splits_the_stream_keeps_the_second_slot(self):
-        """Bytes are not the only thing that ends a slot.
-
-        A slot can hold every byte of the stream and still not hold every RANGE, because the cap
-        ends it on its row count. The second request then waits for the first slot to come back,
-        which is the overlap this depth exists for. The shortcut used to compare byte totals by
-        hand and would pin the depth at one here."""
+    def test_a_range_cap_does_not_change_the_shape(self):
+        """A slot is capped at the stream's share of the depth, so a stream of SEVERAL ranges keeps
+        its slots whether or not a cap also ends them early. The cap is the caller's business; it
+        must not reach the sizing."""
         MiB = 1 << 20
-        stream = self.files([MiB] * 4)                       # 4 MiB, which one slot holds
-        bounds = SlotBounds(max_ranges=2)                    # but only two ranges at a time
+        stream = self.files([MiB] * 4)                       # 4 MiB over four ranges
+        bounds = SlotBounds(max_ranges=2)                    # only two ranges at a time
 
         size, slots = device_ring_sizing(64 * MiB, stream, bounds)
 
-        self.assertGreaterEqual(size, 4 * MiB, "the bytes do fit in one slot")
-        self.assertEqual(slots, 2, "the cap still needs a second request, so keep the overlap")
+        self.assertEqual(size, MiB, "the stream's share of the depth, so the rest has slots to go in")
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS, "every slot, so reading and handing over overlap")
+        self.assertEqual(device_ring_sizing(64 * MiB, stream), (size, slots),
+                         "the cap changed nothing: the slot size alone decided the shape")
+
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_alignment_that_splits_the_stream_keeps_the_second_slot(self):
+    def test_one_range_that_is_the_whole_stream_takes_one_slot(self):
+        """The one case a single slot is right: there is no second range to overlap with, and a
+        second slot could never be filled."""
+        MiB = 1 << 20
+        self.assertEqual(device_ring_sizing(64 * MiB, self.files([4 * MiB])), (4 * MiB, 1))
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_alignment_that_pads_the_stream_keeps_every_slot(self):
         """The same for padding: each range is rounded up, so the packed stream outgrows a slot
         that its raw bytes fit inside."""
         stream = self.files([8] * 4)                         # 32 bytes raw
@@ -1073,7 +1203,7 @@ class TestDeviceRingShape(unittest.TestCase):
 
         size, slots = device_ring_sizing(64 << 20, stream, bounds)
 
-        self.assertEqual(slots, 2, "padded, this stream does not fit in one slot")
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS, "padded, this stream still fills every slot")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_one_slot_is_still_right_when_it_does_span(self):
@@ -1097,10 +1227,13 @@ class TestDeviceRingSizing(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_an_empty_device_does_not_make_the_ring_bigger(self):
         """THE POINT OF THE RULE. 100 GiB free would allow 50, and the ring still takes two slots
-        of what the data needs. The old rule turned free memory into a budget and the budget into a
-        slot size, so a model got a bigger slot for being loaded on an emptier device."""
-        buffer_size, num_buffers = device_ring_sizing(100 * GiB, self.files([GiB] * 8))
-        self.assertEqual((buffer_size, num_buffers), (GiB, DEVICE_RING_SLOTS))
+        of what the target asks for. The old rule turned free memory into a budget and the budget
+        into a slot size, so a model got a bigger slot for being loaded on an emptier device."""
+        # The SAME answer on a nearly empty device and on a far fuller one, which is the rule.
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 8)),
+                         (2 * GiB, DEFAULT_DEVICE_RING_SLOTS))
+        self.assertEqual(device_ring_sizing(20 * GiB, self.files([GiB] * 8)),
+                         (2 * GiB, DEFAULT_DEVICE_RING_SLOTS))
 
     @patch.dict(os.environ, {"RUNAI_STREAMER_DEVICE_MEMORY_LIMIT": str(3 * GiB)}, clear=True)
     def test_a_limit_that_is_set_is_a_hard_cap(self):
@@ -1112,7 +1245,7 @@ class TestDeviceRingSizing(unittest.TestCase):
     def test_an_unset_limit_caps_nothing(self):
         """Pins that the test above measures the setting. The same call without it is not capped."""
         self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 8)),
-                         (GiB, DEVICE_RING_SLOTS))
+                         (2 * GiB, DEFAULT_DEVICE_RING_SLOTS))
 
     @patch.dict(os.environ, {}, clear=True)
     def test_the_fraction_binds_when_little_is_free(self):
@@ -1130,7 +1263,7 @@ class TestDeviceRingSizing(unittest.TestCase):
                 with patch.dict(os.environ,
                                 {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: value}, clear=True):
                     self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 8)), plain)
-        self.assertEqual(plain[1], DEVICE_RING_SLOTS)
+        self.assertEqual(plain[1], DEFAULT_DEVICE_RING_SLOTS)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_below_two_largest_ranges_it_falls_back(self):
@@ -1654,3 +1787,60 @@ class TestTheLayoutWalk(unittest.TestCase):
         self.assertEqual(iterator.cursor_after, 0, "nothing handed out yet")
         iterator.next_chunks(10, 64, 1)
         self.assertEqual(iterator.cursor_after, 64, "a range that did not fit moved the cursor")
+
+
+class TestTheRingNeverOutgrowsItsStream(unittest.TestCase):
+    """A slot the data cannot reach is device memory taken and never written.
+
+    The largest range outranks the share a slot is sized from, so a slot can be bigger than the
+    stream divided by the depth. The depth then has to follow what the stream fills."""
+
+    def files(self, sizes):
+        return [FileChunks.contiguous(0, "f.bin", 0, sizes)]
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_the_depth_follows_the_stream_when_one_range_outgrows_the_share(self):
+        """An 8 GiB range beside 2 GiB of small ones: the slot is 8 GiB, which two slots already
+        span, so the other two could never be filled."""
+        stream = self.files([8 * GiB] + [100 << 20] * 20)
+        size, slots = device_ring_sizing(100 * GiB, stream)
+        self.assertEqual(size, 8 * GiB)
+        self.assertEqual(slots, 2)
+        self.assertLessEqual(size * slots, 2 * sum(stream[0].sizes))
+
+    @patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "8"}, clear=True)
+    def test_a_raised_slot_count_cannot_outgrow_the_stream_either(self):
+        self.assertEqual(device_ring_sizing(100 * GiB, self.files([GiB] * 3))[1], 3)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_stream_that_fills_every_slot_keeps_every_slot(self):
+        """The cap must not shorten a ring the data does fill: 64 GiB of 1 MiB ranges at a 4 GiB
+        slot is sixteen slot-fulls, far more than the depth."""
+        size, slots = device_ring_sizing(100 * GiB, self.files([1 << 20] * 65536))
+        self.assertEqual(slots, DEFAULT_DEVICE_RING_SLOTS)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_a_slot_sized_range_gets_a_slot_each_and_no_more(self):
+        """Three ranges, each the whole slot: three slots fill and the fourth cannot, so the depth
+        comes down to three rather than reserving a slot nothing can reach."""
+        size, slots = device_ring_sizing(64 << 20, self.files([6 << 20] * 3))
+        self.assertEqual((size, slots), (6 << 20, 3))
+
+
+class TestTheReaderCountOnlyGrowsAFileSystemRing(unittest.TestCase):
+    """The per-reader growth is for the readers that FILL the ring.
+
+    Object storage is served by its own pool, sized by RUNAI_STREAMER_OBJ_CONCURRENCY. A file
+    system reader count there grows the ring for threads nothing builds."""
+
+    def test_an_object_storage_path_is_recognised(self):
+        for path in ("s3://bucket/model/f.safetensors",
+                     "gs://bucket/model/f.safetensors",
+                     "az://account/model/f.safetensors"):
+            with self.subTest(path=path):
+                self.assertTrue(reads_object_storage(path))
+
+    def test_a_file_system_path_is_not(self):
+        for path in ("/mnt/models/f.safetensors", "relative/f.safetensors", "/s3/not-a-uri"):
+            with self.subTest(path=path):
+                self.assertFalse(reads_object_storage(path))

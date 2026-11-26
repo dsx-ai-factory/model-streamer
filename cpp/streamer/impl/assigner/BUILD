@@ -21,6 +21,7 @@ runai_cc_test(
     deps = [
         ":assigner",
         "//utils/random",
+        "//utils/temp/env",
         "//common/response_code",
         "//common/exception",
         "//utils/logging",

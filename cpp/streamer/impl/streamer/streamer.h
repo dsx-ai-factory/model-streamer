@@ -98,6 +98,23 @@ struct Streamer
     // How many async engines exist
     unsigned async_engines() const;
 
+    // How many asynchronous readers this process builds for `paths`. The count the pool will
+    // build, not the count that was asked for: a caller sizes a ring from it, so a number larger
+    // than the readers reserves memory for readers that never exist, and a smaller one leaves the
+    // readers that do exist waiting on the ring.
+    //
+    // PATH AWARE, like the direct-I/O block, because the queue depth is resolved per file system
+    // type and the count follows from it. Answering from the default depth instead would disagree
+    // with the pool on every mount whose type carries its own.
+    //
+    // SUMMED over the mounts a request spans: each builds its own engine, and all of their readers
+    // want their own share of the same ring.
+    //
+    // 1 where the files are served by the synchronous reader - sync_buffered, a memory-backed mount,
+    // or a mount whose engine died - because no reader is built per mount there at all. Paths that
+    // name no mount, including none at all, fall back to the default depth.
+    unsigned fs_readers_per_mount(const std::vector<std::string> & paths);
+
     const AsyncIoStats & stats() const;
 
     // What the async workers have done, summed over all of them and over the streamer's whole life.

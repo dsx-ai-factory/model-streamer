@@ -13,8 +13,15 @@ from runai_model_streamer.file_streamer.requests_iterator import (
     device_ring_budget,
     device_ring_sizing,
     FileChunks,
+    RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME,
     RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME,
 )
+
+# The depth FLOOR: two slots, where overlap becomes possible at all. What the receive buffers cost
+# beside the ring is arithmetic about that floor, so the tests below pin the count rather than read
+# the shipped default - a fixture tuned to the floor stops meaning anything once the default moves
+# above it.
+AT_THE_DEPTH_FLOOR = {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: "2"}
 
 FREE = 1 << 30
 
@@ -33,6 +40,9 @@ class TestAgreedSlotShape(unittest.TestCase):
     def share_of(self, whole, rank, ranks=2):
         return [file_chunks for file_chunks, _ in partition_for_rank(whole, ranks, rank).partition]
 
+    # At other slot counts this fixture stops separating the ranks: the agreed shape comes out
+    # equal to one rank's own answer, and the last assertion below has nothing left to say.
+    @patch.dict(os.environ, AT_THE_DEPTH_FLOOR)
     def test_two_ranks_agree_only_when_both_inputs_are_the_agreed_ones(self):
         """The property the whole thing rests on, with the ranks made different.
 
@@ -102,15 +112,26 @@ class TestAgreedSlotShape(unittest.TestCase):
     def test_no_room_answers_none(self):
         self.assertIsNone(agreed_slot_shape(1, files([[1 << 20]])))
 
-    def test_no_setting_can_change_the_depth(self):
-        """The device ring's depth is derived and nothing outside can name it. The variable still
-        governs the HOST ring, so setting it must land nowhere here - a rank given a different one
-        would otherwise agree a different shape and read its peers at the wrong offsets."""
+    def test_the_host_ring_setting_lands_nowhere_here(self):
+        """RUNAI_STREAMER_RING_BUFFERS governs the HOST ring. A rank that read it here would agree a
+        different shape from a peer that did not, and read that peer at the wrong offsets."""
         plain = agreed_slot_shape(FREE, files([[1000] * 16]))
         for value in ("1", "4", "9", "99"):
             with self.subTest(setting=value):
                 with patch.dict(os.environ, {RUNAI_STREAMER_RING_BUFFERS_ENV_VAR_NAME: value}):
                     self.assertEqual(agreed_slot_shape(FREE, files([[1000] * 16])), plain)
+
+    def test_the_device_slot_count_moves_the_size_the_ranks_must_agree(self):
+        """Which is why that one has to match across the group. The total is split by the count, so
+        a rank given a different count agrees a different buffer size - what peers broadcast in."""
+        stream = files([[1 << 30] * 64])
+        sizes = {}
+        for value in ("2", "4", "8"):
+            with patch.dict(os.environ, {RUNAI_STREAMER_DEVICE_RING_SLOTS_ENV_VAR_NAME: value}):
+                agreed = agreed_slot_shape(200 << 30, stream)
+                sizes[value] = (agreed.shape[0], agreed.shape[1])
+
+        self.assertEqual(sizes, {"2": (4 << 30, 2), "4": (2 << 30, 4), "8": (1 << 30, 8)})
 
     def test_free_memory_changes_the_shape(self):
         """It is sized from the agreed figure, so a different one must land somewhere - otherwise
@@ -124,6 +145,7 @@ class TestAgreedSlotShape(unittest.TestCase):
 
 
 
+@patch.dict(os.environ, AT_THE_DEPTH_FLOOR)
 class TheReceiveBufferIsReservedOutOfTheBudget(unittest.TestCase):
     """A rank that sends its slots also receives its peers', into a buffer of the same size.
 

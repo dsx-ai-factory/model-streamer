@@ -282,12 +282,7 @@ bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device,
         }
     }
 
-    const auto support = _environment.direct ? _environment.direct(device, file.path)
-                                             : _mounts.direct_support(device, file.path);
-
-    // Unknown counts as yes: it means the probe could not open the file at all, which the read is
-    // about to report properly, and refusing the mount would move every file beside it too.
-    if (support == posix_io::DirectSupport::No)
+    if (!serves_direct(device, file.path))
     {
         LOG(DEBUG) << "Reading " << file.path << " with the synchronous reader: its mount cannot"
                    << " serve O_DIRECT, and libaio without O_DIRECT reads one file at a time";
@@ -295,6 +290,90 @@ bool FsAsyncRouter::reads_directly(const FileRanges & file, dev_t device,
     }
 
     return true;
+}
+
+bool FsAsyncRouter::serves_direct(dev_t device, const std::string & path)
+{
+    const auto support = _environment.direct ? _environment.direct(device, path)
+                                             : _mounts.direct_support(device, path);
+
+    // Unknown counts as yes, as it does in reads_directly: the probe could not open the file, which
+    // the read is about to report properly, and refusing the mount would move every file beside it.
+    return support != posix_io::DirectSupport::No;
+}
+
+bool FsAsyncRouter::may_be_async() const
+{
+    return _strategy_resolver->may_be_async();
+}
+
+FsAsyncRouter::MountDepths FsAsyncRouter::depths_for(const std::vector<std::string> & paths,
+                                                     const FsQueueDepth & depth)
+{
+    MountDepths out;
+    std::set<dev_t> seen;
+
+    // Directories already answered. MountCapabilities caches by st_dev, which saves the statfs but
+    // NOT the stat that finds st_dev - so without this a 200-shard model stats its directory 200
+    // times, and an unreadable one logs 200 errors for a condition swallowed below. The same map
+    // groups() keeps, and for the same reason.
+    std::set<std::string> directories;
+
+    for (const auto & path : paths)
+    {
+        try
+        {
+            const auto directory = directory_of(path);
+            if (!directories.insert(directory).second)
+            {
+                continue;
+            }
+
+            const auto capability = _environment.mount ? _environment.mount(directory)
+                                                       : _mounts.of_path(directory);
+
+            if (!seen.insert(capability.dev).second)
+            {
+                continue;
+            }
+
+            // The other two exclusions groups() makes, in its order: a mount whose engine died is
+            // dropped to the synchronous reader for good, and a memory-backed one never had an
+            // engine. Either way it builds no reader, so it has no depth to report - but it was
+            // read, which is not the same as a path that told us nothing.
+            if (_dead_mounts->contains(capability.dev) || capability.memory_backed)
+            {
+                out.served_by_the_sync_reader = true;
+                continue;
+            }
+
+            // LIBAIO HAS NO ASYNCHRONOUS BUFFERED MODE, so under it a mount that cannot serve
+            // O_DIRECT has its files routed to the synchronous reader and builds no reader either.
+            // The mount-level half of the test groups() makes per file; the other half, congruence,
+            // is a question about offsets and destinations that do not exist yet when a ring is
+            // being sized - and it is not asked at all for a device destination, which stages.
+            //
+            // Only once the strategy is RESOLVED, which the first submission does. Before that
+            // nobody knows whether libaio will win, and assuming it would cost readers a mount is
+            // going to build.
+            if (_strategy_resolver->is_resolved() &&
+                _strategy_resolver->resolved() == posix_io::Strategy::LibaioDirect &&
+                !serves_direct(capability.dev, path))
+            {
+                out.served_by_the_sync_reader = true;
+                continue;
+            }
+
+            out.depths.push_back(depth.for_type(capability.fs_type));
+        }
+        catch (const common::Exception &)
+        {
+            // An unstattable directory names no mount; another path may still answer.
+            continue;
+        }
+    }
+
+    return out;
 }
 
 common::ResponseCode FsAsyncRouter::direct_block_for(const std::vector<std::string> & paths,

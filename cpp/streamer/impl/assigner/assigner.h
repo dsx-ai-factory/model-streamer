@@ -85,12 +85,13 @@ struct Assigner
     // A submission may now be heterogeneous, which it never was before: object storage and filesystem
     // still cannot mix (Streamer::lock_object_plugin rejects that), but the filesystem side can split
     // between the synchronous pool and the async one. Files are therefore GROUPED by that split and
-    // each group divided for the pool that will serve it - one workload for the async pool, which has
-    // one worker, and `concurrency` for the synchronous one.
+    // each group divided for the pool that will serve it - one workload per READER on that mount for
+    // the async pool, and `concurrency` for the synchronous one.
     //
-    // Dividing a group for the wrong pool is not a correctness bug, only a meaningless one: the async
-    // window spans workloads, so 16 slices arriving at one worker still fill it. But the slices do not
-    // align to chunk boundaries, so each one leaves a partial chunk at its edges.
+    // A mount gets one workload per reader, up to one per async chunk of work: the pool builds that
+    // many threads, and a reader holding less than a chunk has nothing to read. The slices do not
+    // align to chunk boundaries, so each one leaves a partial chunk at its edges - the async worker
+    // bounces those through its scratch pool, and the parallelism is worth more than the ragged ends.
     Assigner(const std::vector<FileRanges> & request,
              std::shared_ptr<const Config> config,
              std::vector<int> group_by_file = {});
@@ -101,8 +102,8 @@ struct Assigner
     const std::vector<ContiguousTransfer> & transfers() const;
 
     // The worker count for the SYNCHRONOUS group (or for object storage): concurrency, or
-    // s3_concurrency. NOT a submission-wide figure - the async group always uses one, because its
-    // pool has one worker.
+    // s3_concurrency. NOT a submission-wide figure - an async group uses one workload per reader on
+    // its mount, which is RUNAI_STREAMER_FS_WORKERS_PER_MOUNT.
     unsigned get_num_workers() const;
 
     unsigned num_workloads() const;
@@ -123,7 +124,9 @@ struct Assigner
  private:
     // Bytes per workload for one group, and how many workloads it needs. Deliberately pure: writing
     // _num_workloads as a side effect cannot work once there is more than one group.
-    size_t bytes_per_worker_for(size_t group_bytes, unsigned max_workers,
+    //
+    // `block_bytesize` is given, not derived here: the caller knows which pool serves the group.
+    size_t bytes_per_worker_for(size_t group_bytes, unsigned max_workers, size_t block_bytesize,
                                 size_t & remainder_bytesize, unsigned & workloads);
     bool check_object_storage(const std::vector<FileRanges> & request) const;
 
@@ -142,12 +145,14 @@ struct Assigner
 
     // One group's share of step 2. `indices` are positions in _transfers; `workers` is how many
     // workloads this group may use; `first_workload` is where its workload numbering starts; `group`
-    // is what group_of_workload() will report for them. Returns how many workloads it used.
+    // is what group_of_workload() will report for them; `block_bytesize` is the read granularity of
+    // the pool that will serve it. Returns how many workloads it used.
     unsigned assign_group(const std::vector<size_t> & indices,
                           unsigned workers,
                           unsigned first_workload,
                           size_t group_bytes,
-                          int group);
+                          int group,
+                          size_t block_bytesize);
 
     // This file's group: -1 when group_by_file is empty, which is every caller but the streamer.
     int group_of_file(unsigned file_index) const;
