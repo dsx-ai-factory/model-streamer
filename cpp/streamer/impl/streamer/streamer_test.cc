@@ -122,6 +122,10 @@ Streamer::Environment without(posix_io::Strategy unavailable)
 // pool never builds - and a ring is sized from this number.
 TEST(ReadersPerMount, FollowsTheDepthOfTheMountTheseFilesAreOn)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
 
@@ -154,6 +158,10 @@ TEST(ReadersPerMount, FollowsTheDepthOfTheMountTheseFilesAreOn)
 // first has an answer, which is one, and the second has to fall back.
 TEST(ReadersPerMount, AMountServedByTheSynchronousReaderBuildsNone)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
 
@@ -180,6 +188,10 @@ TEST(ReadersPerMount, AMountServedByTheSynchronousReaderBuildsNone)
 // two directories on one mount still describe one set of readers.
 TEST(ReadersPerMount, OneMountCountsOnceHoweverManyFilesAreOnIt)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
     utils::temp::Env configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("64,nfs=12"));
@@ -216,6 +228,10 @@ TEST(ReadersPerMount, OneMountCountsOnceHoweverManyFilesAreOnIt)
 // ring the caller sizes from this number. The busiest mount alone would under-report it.
 TEST(ReadersPerMount, TwoMountsReportBothSetsOfReaders)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
     utils::temp::Env configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"), std::string("64,nfs=12"));

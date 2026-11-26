@@ -829,6 +829,10 @@ TEST(ProbeDirectBlockSize, Every_Exit_Leaves_A_Usable_Block)
 // The reader count a caller reads back is the one THIS PROCESS runs with - node wide, divided.
 TEST(ReadersPerMount, Reports_The_Resolved_Count)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     const int invalid = static_cast<int>(common::ResponseCode::InvalidParameterError);
 
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
@@ -861,6 +865,10 @@ TEST(ReadersPerMount, Reports_The_Resolved_Count)
 // loop that dropped them would answer identically and prove nothing.
 TEST(ReadersPerMount, The_Paths_Reach_The_Library)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 8UL);
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
     utils::temp::UnsetEnv configured(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
@@ -891,6 +899,10 @@ TEST(ReadersPerMount, The_Paths_Reach_The_Library)
 // reporting the count that was asked for would reserve memory for readers that never exist.
 TEST(ReadersPerMount, Reports_What_The_Budget_Feeds)
 {
+    // The strategy sweep runs this suite once per RUNAI_STREAMER_FS_STRATEGY, and under
+    // sync_buffered no asynchronous reader is built at all - the case below it. Unset, so the
+    // default candidate list applies and an asynchronous reader is possible.
+    utils::temp::UnsetEnv strategy(std::string("RUNAI_STREAMER_FS_STRATEGY"));
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 64UL);
     utils::temp::UnsetEnv depth(std::string("RUNAI_STREAMER_FS_QUEUE_DEPTH"));
     utils::temp::UnsetEnv processes(std::string("RUNAI_STREAMER_PROCESS_GROUP_SIZE"));
