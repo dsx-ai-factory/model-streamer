@@ -365,7 +365,7 @@ int runai_file_streamer_fs_readers_per_mount(void * streamer, unsigned * out_rea
 
     try
     {
-        if (static_cast<impl::Streamer *>(streamer) == nullptr)
+        if (streamer == nullptr)
         {
             return static_cast<int>(common::ResponseCode::InvalidParameterError);
         }

@@ -146,8 +146,7 @@ TEST_F(AssignerTest, Async_Files_Get_One_Workload)
 }
 
 // SEVERAL READERS ON ONE MOUNT NEED SEVERAL WORKLOADS. The pools build this many threads for the
-// mount; cutting its work into one piece leaves the rest with nothing to pull, which is how the
-// setting came to do nothing at all.
+// mount; cutting its work into one piece leaves the rest with nothing to pull.
 TEST_F(AssignerTest, Async_Files_Split_Across_The_Mounts_Readers)
 {
     config->concurrency = 16;
@@ -182,9 +181,9 @@ TEST_F(AssignerTest, One_Reader_Still_Gets_One_Workload)
     EXPECT_EQ(assigner.num_workloads(), 1u);
 }
 
-// THE ASYNC GROUP IS CUT BY THE ASYNC CHUNK, which is what its readers read at. It used to be cut by
-// the synchronous block - the same setting that sizes an object storage chunk - so raising that for
-// object storage took readers away from a mount that never uses it.
+// THE ASYNC GROUP IS CUT BY THE ASYNC CHUNK, which is what its readers read at. The synchronous
+// block is a different setting - it also sizes an object storage chunk - so cutting by it would tie
+// a mount's reader count to a number that has nothing to do with the mount.
 TEST_F(AssignerTest, Async_Workloads_Ignore_The_Synchronous_Block)
 {
     config->concurrency = 16;

@@ -112,8 +112,7 @@ TEST(BackendPools, WorkersPerMountBuildsThatManyWorkersForOneMount)
 
 // THE DEPTH IS A BUDGET FOR THE MOUNT, SHARED BETWEEN ITS READERS. Handing each the full number
 // would multiply the node's in-flight requests by the reader count, which is the one thing the
-// node-wide promise rules out - and measured on a VAST mount, four shallow rings beat one deep one
-// AND beat four deep ones.
+// node-wide promise rules out.
 TEST(BackendPools, TheMountsDepthIsSharedBetweenItsReaders)
 {
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);
@@ -138,7 +137,7 @@ TEST(BackendPools, TheMountsDepthIsSharedBetweenItsReaders)
 }
 
 // A GROUP IS NOT A RING. The cap counts groups, and a group now runs one reader per setting - each
-// with its own ring and thread. Counting groups as engines reported one where four were built.
+// with its own ring and thread, so the number of engines is the groups times their readers.
 TEST(BackendPools, ReadersAreCountedSeparatelyFromEngineGroups)
 {
     utils::temp::Env workers(std::string("RUNAI_STREAMER_FS_WORKERS_PER_MOUNT"), 4UL);

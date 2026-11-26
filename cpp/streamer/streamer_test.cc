@@ -155,9 +155,9 @@ TEST_F(StreamerTest, Creation)
     EXPECT_NO_THROW(runai_file_streamer_end(streamer));
 }
 
-// A MALFORMED READER COUNT IS REJECTED AT START, like every other malformed variable. It used to be
-// read first on the request path, where a parse failure is not a common::Exception and so becomes
-// UnknownError - the code that tells a caller to abandon the streamer rather than fix its input.
+// A MALFORMED READER COUNT IS REJECTED AT START, like every other malformed variable. Read first on
+// the request path instead, a parse failure is not a common::Exception and so becomes UnknownError -
+// the code that tells a caller to abandon the streamer rather than fix its input.
 TEST_F(StreamerTest, MalformedWorkersPerMountIsRejectedAtStart)
 {
     for (const auto & written : { std::string("-1"), std::string("abc"), std::string("4 ") })
@@ -845,7 +845,8 @@ TEST(ReadersPerMount, Reports_The_Resolved_Count)
     // A null streamer. Rejected, and the count must still be usable.
     readers = 0;
     EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(nullptr, &readers), invalid);
-    EXPECT_EQ(readers, 1u) << "an error exit left the out-parameter untouched, so the caller reads 0";
+    EXPECT_EQ(readers, 1u) << "the count is written before the handle is checked, so an error exit "
+                              "still leaves a usable one";
 
     // Nowhere to write, so this only reports.
     EXPECT_EQ(runai_file_streamer_fs_readers_per_mount(streamer, nullptr), invalid);
