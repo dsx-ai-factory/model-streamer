@@ -180,8 +180,14 @@ S3Client::S3Client(const common::backend_api::ObjectClientConfig_t & config) :
     S3ClientBase(config),
     _stop(false),
     _application_retries_enabled(utils::getenv<unsigned long>("RUNAI_STREAMER_S3_TIMEOUT", 0UL) > 0),
+    _zero_copy(utils::getenv<bool>("RUNAI_STREAMER_S3_ZERO_COPY", false)),
     _responder(nullptr)
 {
+    if (_zero_copy)
+    {
+        LOG(INFO) << "S3 zero-copy downloads enabled (RUNAI_STREAMER_S3_ZERO_COPY)";
+    }
+
     if (_endpoint.has_value()) // endpoint passed as parameter by user application (in credentials)
     {
         // Strip the scheme from the endpoint and set it separately.
@@ -254,6 +260,11 @@ S3Client::S3Client(const common::backend_api::ObjectClientConfig_t & config) :
         _client = std::make_unique<Aws::S3Crt::S3CrtClient>(*_client_credentials, _client_config.config);
     }
 
+    // Benchmark aid: record which response-checksum mode both zero-copy and copy runs use, so an A/B
+    // difference cannot hide a difference in validation work (the CRT hashes the bytes either way).
+    LOG(INFO) << "S3 response checksum validation mode: "
+              << static_cast<int>(_client_config.config.checksumConfig.responseChecksumValidation);
+
     // Compute the in-flight window from the already-configured chunk size
     // (default_storage_chunk_size, stored as _chunk_bytesize) and the effective
     // throughputTargetGbps - no env re-reading of the chunk size.
@@ -313,16 +324,27 @@ common::backend_api::ResponseCode_t S3Client::async_read(const char* path,
     std::string range_str = "bytes=" + std::to_string(range.offset) + "-" + std::to_string(range.offset + bytesize - 1);
     request->SetRange(range_str.c_str());
 
-    request->SetResponseStreamFactory(
-        [buffer, bytesize]()
-        {
-            std::unique_ptr<Aws::StringStream>
-                    stream(Aws::New<Aws::StringStream>("RunaiBuffer"));
+    if (_zero_copy)
+    {
+        // The CRT writes each part straight into destination_buffer (aws-c-s3 recv_buffer), with no copy
+        // through the SDK response stream. Needs the patched SDK (see .devcontainer/scripts/patches).
+        // The buffer must stay valid until the completion below; the S3CrtClient d'tor waits for it.
+        // After a failure its content is undefined: a retry re-reads the whole chunk into it.
+        request->SetRecvBuffer(buffer, bytesize);
+    }
+    else
+    {
+        request->SetResponseStreamFactory(
+            [buffer, bytesize]()
+            {
+                std::unique_ptr<Aws::StringStream>
+                        stream(Aws::New<Aws::StringStream>("RunaiBuffer"));
 
-            stream->rdbuf()->pubsetbuf(buffer, bytesize);
+                stream->rdbuf()->pubsetbuf(buffer, bytesize);
 
-            return stream.release();
-        });
+                return stream.release();
+            });
+    }
 
     _client->GetObjectAsync(*request, [request, responder = _responder, request_id, bytesize,
                                       application_retries_enabled = _application_retries_enabled](const Aws::S3Crt::S3CrtClient*, const Aws::S3Crt::Model::GetObjectRequest&,

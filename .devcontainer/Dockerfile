@@ -81,6 +81,7 @@ RUN bash /tmp/build-basic-libs.sh "$TARGETARCH"
 # Keep AWS in the final image's layer chain so CI can reuse its build layer
 # through the published image cache when later dependencies change.
 COPY .devcontainer/scripts/build-aws-sdk.sh /tmp/build-aws-sdk.sh
+COPY .devcontainer/scripts/patches/aws-sdk-cpp-1.11.929-s3crt-recv-buffer.patch /tmp/patches/aws-sdk-cpp-1.11.929-s3crt-recv-buffer.patch
 RUN bash /tmp/build-aws-sdk.sh "$TARGETARCH"
 
 # Build Azure SDK for C++ (optimized with shared CMake options)

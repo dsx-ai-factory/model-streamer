@@ -18,8 +18,20 @@ case "$1" in
         ;;
 esac
 
-git clone --recurse-submodules --depth 1 --branch "1.11.584" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp
+# 1.11.929 bundles aws-crt-cpp v0.44.4 -> aws-c-s3 v1.5.2, the first line with the recv_buffer option.
+SDK_TAG="1.11.929"
+
+# Zero-copy S3 downloads: S3CrtClient does not expose aws-c-s3's recv_buffer, so apply our patch
+# (GetObjectRequest::SetRecvBuffer). It is written against SDK_TAG; regenerate it after a bump.
+# The Dockerfile copies it to /tmp/patches next to this script.
+SDK_PATCH="$(dirname "${BASH_SOURCE[0]}")/patches/aws-sdk-cpp-${SDK_TAG}-s3crt-recv-buffer.patch"
+
+git clone --recurse-submodules --depth 1 --branch "${SDK_TAG}" https://github.com/aws/aws-sdk-cpp /opt/aws-sdk-cpp
 cd /opt/aws-sdk-cpp
+
+# Fail the build rather than produce an SDK without the option.
+git apply --check "${SDK_PATCH}"
+git apply "${SDK_PATCH}"
 
 cmake -DBUILD_ONLY="s3-crt" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON \

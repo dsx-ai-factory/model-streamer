@@ -1,0 +1,63 @@
+diff --git a/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/S3CrtClient.h b/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/S3CrtClient.h
+index 06bb115..65f35c9 100644
+--- a/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/S3CrtClient.h
++++ b/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/S3CrtClient.h
+@@ -8744,6 +8744,8 @@ class AWS_S3CRT_API S3CrtClient : public Aws::Client::AWSXMLClient,
+     std::shared_ptr<Aws::Http::HttpResponse> response;
+     std::shared_ptr<Aws::Crt::Http::HttpRequest> crtHttpRequest;
+     Aws::UniquePtr<struct aws_s3_checksum_config> checksumConfig;
++    // Modified by NVIDIA: destination of a zero-copy GetObject (recv_buffer). Must outlive the meta request.
++    Aws::UniquePtr<struct aws_byte_buf> recvBuffer;
+   };
+ 
+   Aws::Client::XmlOutcome GenerateXmlOutcome(const std::shared_ptr<Http::HttpResponse>& response) const;
+diff --git a/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/model/GetObjectRequest.h b/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/model/GetObjectRequest.h
+index 2e83b82..56e432f 100644
+--- a/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/model/GetObjectRequest.h
++++ b/generated/src/aws-cpp-sdk-s3-crt/include/aws/s3-crt/model/GetObjectRequest.h
+@@ -569,7 +569,24 @@ class GetObjectRequest : public S3CrtRequest {
+     return *this;
+   }
+   ///@}
++
++  // Modified by NVIDIA: zero-copy download into a caller-owned buffer (aws-c-s3 recv_buffer).
++  // When set, S3CrtClient::GetObjectAsync hands [data, data + capacity) to the CRT, which writes the
++  // downloaded range straight into it. The response body stream stays empty, and DataReceivedEventHandler
++  // and ContinueRequestHandler are not called. The memory must stay valid, and must not be shared with
++  // another request in flight, until the outcome handler is called. After a failed outcome its content
++  // is undefined. The capacity must hold the whole requested range.
++  inline void SetRecvBuffer(void* data, size_t capacity) {
++    m_recvBuffer = data;
++    m_recvBufferCapacity = capacity;
++  }
++  inline void* GetRecvBuffer() const { return m_recvBuffer; }
++  inline size_t GetRecvBufferCapacity() const { return m_recvBufferCapacity; }
++
+  private:
++  void* m_recvBuffer = nullptr;
++  size_t m_recvBufferCapacity = 0;
++
+   Aws::String m_bucket;
+ 
+   Aws::String m_ifMatch;
+diff --git a/generated/src/aws-cpp-sdk-s3-crt/source/S3CrtClient.cpp b/generated/src/aws-cpp-sdk-s3-crt/source/S3CrtClient.cpp
+index 376db91..b336a45 100644
+--- a/generated/src/aws-cpp-sdk-s3-crt/source/S3CrtClient.cpp
++++ b/generated/src/aws-cpp-sdk-s3-crt/source/S3CrtClient.cpp
+@@ -1324,6 +1324,16 @@ void S3CrtClient::GetObjectAsync(const GetObjectRequest& request, const GetObjec
+   }
+   options.shutdown_callback = GetObjectRequestShutdownCallback;
+   options.type = AWS_S3_META_REQUEST_TYPE_GET_OBJECT;
++
++  // Modified by NVIDIA: zero-copy download. aws-c-s3 rejects recv_buffer combined with body_callback,
++  // so the body callback InitCommonCrtRequestOption set is cleared. The CRT writes each part into the
++  // caller's memory and sets recvBuffer->len on success. object_size_hint must stay unset.
++  if (request.GetRecvBuffer() != nullptr) {
++    userData->recvBuffer = Aws::UniquePtr<struct aws_byte_buf>(Aws::New<struct aws_byte_buf>(ALLOCATION_TAG));
++    *userData->recvBuffer = aws_byte_buf_from_empty_array(request.GetRecvBuffer(), request.GetRecvBufferCapacity());
++    options.body_callback = nullptr;
++    options.recv_buffer = userData->recvBuffer.get();
++  }
+   struct aws_signing_config_aws signing_config_override = m_s3CrtSigningConfig;
+   if (endpointResolutionOutcome.GetResult().GetAttributes() &&
+       endpointResolutionOutcome.GetResult().GetAttributes()->authScheme.GetSigningRegion()) {

@@ -91,6 +91,7 @@ struct S3Client : S3ClientBase
  private:
     std::atomic<bool> _stop;
     const bool _application_retries_enabled;   // RUNAI_STREAMER_S3_TIMEOUT > 0, cached at client creation
+    const bool _zero_copy;                     // RUNAI_STREAMER_S3_ZERO_COPY, cached at client creation
     ClientConfiguration _client_config;
     std::unique_ptr<Aws::S3Crt::S3CrtClient> _client;
     size_t _max_inflight_bytes = 0;
