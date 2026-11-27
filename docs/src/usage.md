@@ -439,6 +439,27 @@ Setting the environment variable `AWS_ENDPOINT_URL` is mandatory. Alternatively 
 
 Setting the environment variable `AWS_EC2_METADATA_DISABLED` is needed in order to avoid a delay of few seconds, which happens only when the aws s3 sdk is used for compatible storage as explained [here](https://github.com/aws/aws-sdk-cpp/issues/1410)   
 
+Credentials are resolved as described in [S3 authentication](#s3-authentication), so the store's access key and secret key go in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. The same `s3://` paths then work against any service that implements the S3 API, such as Amazon S3, Backblaze B2, Cloudflare R2, or MinIO. For example, with a placeholder endpoint:
+
+```bash
+export AWS_ACCESS_KEY_ID="<access-key-id>"
+export AWS_SECRET_ACCESS_KEY="<secret-access-key>"
+export AWS_ENDPOINT_URL="https://s3.example-region.example.com"
+export AWS_EC2_METADATA_DISABLED=true
+export RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0
+```
+
+```python
+from runai_model_streamer import SafetensorsStreamer
+
+with SafetensorsStreamer() as streamer:
+    streamer.stream_file("s3://my-bucket/my-model/model.safetensors")
+    for name, tensor in streamer.get_tensors():
+        ...
+```
+
+`RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0` selects path-style requests (`https://<endpoint>/<bucket>/<key>`), which S3-compatible stores generally accept. Stores that also serve virtual-hosted requests (`https://<bucket>.<endpoint>/<key>`) work with the default of `1`.
+
 ####  Troubleshooting
 
 For the object storage SDK trace logs pass the environment variable `RUNAI_STREAMER_S3_TRACE=1` - this will create a log file in the location of the application
