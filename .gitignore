@@ -2,3 +2,11 @@
 __pycache__/
 test-results/
 .gpu-fixtures/
+
+# benchmarks/bench.py and calibrate.py output
+bench_results.json
+bench_results.md
+bench_report.md
+bench_suite/
+bench_scratch/
+machine_profile.json

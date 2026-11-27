@@ -83,6 +83,19 @@ with SafetensorsStreamer() as streamer:
         gpu_tensor = tensor.to(f'{device}:0')
 ```
 
+## Benchmarking
+
+[`benchmarks/bench.py`](benchmarks/bench.py) measures how fast the streamer loads
+a model on your machine, as a share of what the hardware can do. It can measure
+`safetensors` and InstantTensor the same way, and the same loads inside vLLM:
+
+```bash
+python3 benchmarks/bench.py /mnt/models/Qwen3-8B
+```
+
+See the [benchmarks README](benchmarks/README.md) for the requirements, the
+tests, the distributed and S3 modes, and the results it writes.
+
 ## Contributing and support
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution steps, the Developer
